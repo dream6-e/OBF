@@ -31,6 +31,26 @@ local a, b, c = multi(1, nil, 3)
 assert(a == 1 and b == nil and c == 3)
 assert(tail(function(x) return x * 2 end, 9) == 18)
 
+local function operators(left, right)
+    return left / right, left % right, left ^ right, not left, left and right, left or right
+end
+local divided, modulo, powered, negated, selectedAnd, selectedOr = operators(8, 3)
+assert(divided == 8 / 3 and modulo == 2 and powered == 512)
+assert(negated == false and selectedAnd == 3 and selectedOr == 8)
+
+local escaped
+local truthProbe = true
+do
+    local held = 5
+    escaped = function()
+        return held
+    end
+    if truthProbe then
+        truthProbe = escaped() == 5
+    end
+end
+assert(truthProbe and escaped() == 5)
+
 local arithmetic = ((7 + 5) * 3 - 4) / 2
 assert(arithmetic == 16)
 assert(17 % 5 == 2 and 2 ^ 5 == 32)

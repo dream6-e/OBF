@@ -23,11 +23,6 @@ enum Constant {
 #[derive(Clone, Debug)]
 struct Instruction {
     opcode: usize,
-    a: u32,
-    b: u32,
-    c: u32,
-    d: i32,
-    e: i32,
     raw: u32,
 }
 
@@ -54,14 +49,26 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
 
     let mut prng = Prng::new(seed ^ 0x6c75_6175_0000_0735);
     let opcode_ids = prng.unique_opcodes(OPCODE_COUNT + 1);
-    let mut branch_order: Vec<_> = (0..OPCODE_COUNT).collect();
+    let mut present = [false; OPCODE_COUNT];
+    for instruction in chunk
+        .prototypes
+        .iter()
+        .flat_map(|prototype| &prototype.code)
+    {
+        if instruction.opcode < OPCODE_COUNT {
+            present[instruction.opcode] = true;
+        }
+    }
+    let mut branch_order: Vec<_> = (0..OPCODE_COUNT)
+        .filter(|opcode| present[*opcode])
+        .collect();
     prng.shuffle(&mut branch_order);
 
     let bytecode = encode_private_bytecode(&chunk.prototypes, chunk.main, &opcode_ids)?;
     let mut source = String::new();
     source.push_str("local Z=function(...)return{n=select('#',...),...}end;");
     source.push_str(
-        "local U=(table and table.unpack)or unpack;local G=(getfenv and getfenv(0))or _G;",
+        "local U=(table and table.unpack)or unpack;local G=(getfenv and getfenv(0))or _G;local E=error;",
     );
     emit_private_decoder(
         &mut source,
@@ -90,7 +97,7 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
     );
     source.push_str("local mk=function(id,cu)local f=function(...)return H(id,Z(...),cu,env)end;FM[f]=id;return f end;");
     source.push_str("local call=function(a,b,c)local n=b==0 and(top-a)or(b-1);local q={n=n};for j=1,n do q[j]=rv(a+j)end;local z=Z(rv(a)(U(q,1,n)));if c==0 then for j=1,z.n do sv(a+j-1,z[j])end;top=a+z.n-1 else for j=1,c-1 do sv(a+j-1,z[j])end end end;");
-    source.push_str("while true do local i=C[pc];if not i then error('invalid private pc '..pc,0)end;pc=pc+1;local o=i[1];");
+    source.push_str("while true do local i=C[pc];if not i then E()end;pc=pc+1;local o=i[1];");
 
     for (position, opcode) in branch_order.iter().copied().enumerate() {
         source.push_str(if position == 0 { "if " } else { "elseif " });
@@ -98,7 +105,7 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
         source.push_str(" then ");
         source.push_str(handler(opcode));
     }
-    source.push_str("else error('invalid private opcode '..tostring(o),0)end end end;");
+    source.push_str("else E()end end end;");
     source.push_str("return H(M,Z(...),{},G)");
 
     crate::minify(&source, Target::Luau)
@@ -193,11 +200,6 @@ fn encode_private_bytecode(
                 .get(instruction.opcode)
                 .ok_or_else(|| Diagnostic::new("invalid internal Luau opcode"))?;
             output.u16(private);
-            output.u32(instruction.a);
-            output.u32(instruction.b);
-            output.u32(instruction.c);
-            output.i32(instruction.d);
-            output.i32(instruction.e);
             output.u32(instruction.raw);
         }
     }
@@ -215,26 +217,26 @@ fn emit_private_decoder(
     prng: &mut Prng,
     capture_opcode: u16,
 ) {
-    output.push_str("local CAP_OP=");
+    output.push_str("local OC=");
     output.push_str(&prng.integer_literal(u64::from(capture_opcode), true));
     output.push_str(";local B=");
     super::lua51::emit_byte_string(output, bytecode);
     output.push_str(
-        ";local bp=1;local b8=function()local v=string.byte(B,bp);if not v then error('truncated private bytecode',0)end;bp=bp+1;return v end;\
+        ";local bp=1;local b8=function()local v=string.byte(B,bp);if not v then E()end;bp=bp+1;return v end;\
          local b16=function()local a,b=b8(),b8();return a+b*256 end;\
          local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;\
-         local bi32=function()local v=b32();if v>=2147483648 then return v-4294967296 else return v end end;local bc=function()local v=b32();if v>1000000 then error('private count limit exceeded',0)end;return v end;\
-         local bs=function()local n=b32();if bp+n-1>#B then error('truncated private bytes',0)end;local v=string.sub(B,bp,bp+n-1);bp=bp+n;return v end;\
-         local bn=function()local t=b8();if t==0 then local v=tonumber(bs());if not v then error('invalid private number',0)end;return v elseif t==1 then return 0/0 elseif t==2 then return 1/0 elseif t==3 then return -1/0 else error('invalid private number tag',0)end end;\
-         if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=1 or b8()~=117 then error('invalid Luau private bytecode',0)end;\
-         local bl=b32();local ck=b32();local ps=bp;if #B-ps+1~=bl then error('invalid private bytecode length',0)end;local s1,s2=1,0;for j=ps,#B do s1=(s1+string.byte(B,j))%65521;s2=(s2+s1)%65521 end;if s1+s2*65536~=ck then error('private bytecode checksum failed',0)end;\
+         local bc=function()local v=b32();if v>1000000 then E()end;return v end;\
+         local bs=function()local n=b32();if bp+n-1>#B then E()end;local v=string.sub(B,bp,bp+n-1);bp=bp+n;return v end;\
+         local bn=function()local t=b8();if t==0 then local v=tonumber(bs());if not v then E()end;return v elseif t==1 then return 0/0 elseif t==2 then return 1/0 elseif t==3 then return -1/0 else E()end end;\
+         if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=1 or b8()~=117 then E()end;\
+         local bl=b32();local ck=b32();local ps=bp;if #B-ps+1~=bl then E()end;local s1,s2=1,0;for j=ps,#B do s1=(s1+string.byte(B,j))%65521;s2=(s2+s1)%65521 end;if s1+s2*65536~=ck then E()end;\
          local M=b32();local np=bc();local P={};for id=0,np-1 do local F={d={},q={},c={},n={}};F.m=b8();F.p=b8();F.u=b8();F.v=b8();F.f=b8();F.z=bc();\
          for j=0,F.z-1 do local t=b8();if t==0 then F.d[j]={0}elseif t==1 then F.d[j]={1,b8()~=0}elseif t==2 then F.d[j]={2,bn()}elseif t==3 then F.d[j]={3,bs()}elseif t==4 then F.d[j]={4,b32()}\
          elseif t==5 then local e={5};local n=bc();for x=1,n do e[#e+1]={b32(),b32()}end;F.d[j]=e elseif t==6 then F.d[j]={6,b32()}\
-         elseif t==7 then F.d[j]={7,bn(),bn(),bn(),bn()}elseif t==8 then local s=b8();local v=tonumber(bs());if not v then error('invalid private integer',0)end;if s~=0 then v=-v end;F.d[j]={8,v}\
-         elseif t==10 then local e={10};local n=bc();for x=1,n do e[#e+1]=b32()end;F.d[j]=e else error('invalid private constant',0)end end;\
-         local nq=bc();for j=0,nq-1 do F.q[j]=b32()end;local nc=bc();for j=1,nc do F.c[j]={b16(),b32(),b32(),b32(),bi32(),bi32(),b32()}end;P[id]=F end;\
-         if bp~=#B+1 then error('trailing private bytecode',0)end;B=nil;",
+         elseif t==7 then F.d[j]={7,bn(),bn(),bn(),bn()}elseif t==8 then local s=b8();local v=tonumber(bs());if not v then E()end;if s~=0 then v=-v end;F.d[j]={8,v}\
+         elseif t==10 then local e={10};local n=bc();for x=1,n do e[#e+1]=b32()end;F.d[j]=e else E()end end;\
+         local nq=bc();for j=0,nq-1 do F.q[j]=b32()end;local nc=bc();for j=1,nc do local o=b16();local w=b32();local d=math.floor(w/65536);local e=math.floor(w/256)%16777216;if d>=32768 then d=d-65536 end;if e>=8388608 then e=e-16777216 end;F.c[j]={o,math.floor(w/256)%256,math.floor(w/65536)%256,math.floor(w/16777216)%256,d,e,w}end;P[id]=F end;\
+         if bp~=#B+1 then E()end;B=nil;",
     );
     output.push_str("local W={};");
     for (id, prototype) in prototypes.iter().enumerate() {
@@ -390,11 +392,6 @@ fn read_prototype(
                 .ok_or_else(|| reader.error("instruction is missing AUX word"))?;
             code.push(Instruction {
                 opcode: PRIVATE_DATA_OPCODE,
-                a: 0,
-                b: 0,
-                c: 0,
-                d: 0,
-                e: 0,
                 raw,
             });
             cursor += 1;
@@ -533,22 +530,7 @@ fn read_prototype(
 }
 
 fn decode_instruction(opcode: usize, word: u32) -> Instruction {
-    let d = ((word >> 16) as u16 as i16) as i32;
-    let raw_e = (word >> 8) & 0x00ff_ffff;
-    let e = if raw_e & 0x0080_0000 != 0 {
-        (raw_e | 0xff00_0000) as i32
-    } else {
-        raw_e as i32
-    };
-    Instruction {
-        opcode,
-        a: (word >> 8) & 0xff,
-        b: (word >> 16) & 0xff,
-        c: (word >> 24) & 0xff,
-        d,
-        e,
-        raw: word,
-    }
+    Instruction { opcode, raw: word }
 }
 
 fn has_aux(opcode: usize) -> bool {

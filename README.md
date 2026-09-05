@@ -26,7 +26,9 @@ target/debug/obf inspect-bytecode --target lua51 script.luac
 
 `--seed` 接受十进制或 `0x` 十六进制 `u64`。相同输入、目标和 seed 会生成逐字节相同的结果；不同 seed 会重新分配私有 opcode、重排 dispatcher，并改变安全的比较分支和数字写法。Lua 5.1 输出只使用其支持的十进制/十六进制数字；Luau 输出还可以使用二进制与数字分隔符。两个目标的最终结果都没有物理换行。
 
-所有 VM 指令都平铺在唯一的 `src/vm/opcode/` 文件夹内：Lua 5.1 共 38 个 `lua51_*.rs` 文件，Luau 0.735 共 91 个 `luau_*.rs` 文件。每个文件只负责一条指令，并通过固定的 `code() -> &'static str` 返回该指令的解释器代码；`src/vm/opcode/mod.rs` 仅负责注册和按 opcode 取用。
+所有 VM 指令都平铺在唯一的 `src/vm/opcode/` 文件夹内：Lua 5.1 共 38 个 `lua51_*.rs` 文件，Luau 0.735 共 91 个 `luau_*.rs` 文件。每个文件只负责一条指令，并通过固定的 `code() -> &'static str` 返回该指令的解释器代码；`src/vm/opcode/mod.rs` 仅负责注册和按 opcode 取用。生成时只装入当前 chunk 实际使用的 handler，不再输出无用 dispatcher 分支。
+
+私有 instruction record 已压缩为 `u16 private-opcode + u32 native-word`。A/B/C/Bx/sBx/D/E 在目标端从原始 32-bit word 恢复，不再重复存储六份字段。生成器自身的错误提示字符串也已删除，所有内部失败路径统一使用短 `E()` 调用。
 
 编译器查找顺序为 `OBF_LUAC51` / `OBF_LUAU_COMPILE` 环境变量、仓库 `toolchains/bin`，然后是 `PATH`。
 
@@ -63,8 +65,9 @@ target/debug/obf inspect-bytecode --target lua51 script.luac
 4. 对两个目标各生成三份 VM 输出，验证同 seed 可复现、异 seed 布局不同；
 5. 验证输出包含版本化私有 byte string，且不再出现旧的 prototype/instruction table 字面量；
 6. 验证单一 `src/vm/opcode/` 文件夹中恰好注册 Lua 5.1 的 38 个和 Luau 的 91 个独立指令文件；
-7. 用 `luac5.1` / `luau-compile` 检查 VM 输出，并与原 fixture 做运行输出逐字节比较；
-8. 确认 VM 输出为单物理行且不包含 `loadstring` 委托。
+7. 验证 Lua 5.1 fixture 实际覆盖 38/38 opcode，Luau fixture 覆盖至少 60 条可由固定编译器产生的核心 opcode；
+8. 用 `luac5.1` / `luau-compile` 检查 VM 输出，并与原 fixture 做运行输出逐字节比较；
+9. 确认 VM 输出为单物理行、不包含生成器错误消息且不委托 `loadstring`。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 

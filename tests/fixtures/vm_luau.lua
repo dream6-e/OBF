@@ -48,6 +48,26 @@ local floorBoxMt = {
     end,
 }
 assert(setmetatable({value = 17}, floorBoxMt) // setmetatable({value = 5}, floorBoxMt) == 3)
+
+local function dynamicOps(left, right)
+    local keyed = {}
+    keyed[left] = right
+    local list = {left, right}
+    return left + right, left - right, left * right, left / right, left % right,
+        left ^ right, left // right, not left, -left, #list,
+        tostring(left) .. tostring(right), left and right, left or right, keyed[left]
+end
+local o1, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14 = dynamicOps(8, 3)
+assert(o1 == 11 and o2 == 5 and o3 == 24 and o4 == 8 / 3 and o5 == 2)
+assert(o6 == 512 and o7 == 2 and o8 == false and o9 == -8 and o10 == 2)
+assert(o11 == "83" and o12 == 3 and o13 == 8 and o14 == 3)
+
+local function comparisons(left, right)
+    return left == right, left <= right, left < right, left ~= right, left > right, left >= right
+end
+local q1, q2, q3, q4, q5, q6 = comparisons(2, 3)
+assert(not q1 and q2 and q3 and q4 and not q5 and not q6)
+
 assert(false or nil == nil)
 assert(nil or false == false)
 assert(true and 9 == 9)
@@ -78,6 +98,11 @@ for _, value in direct do
     directSum += value
 end
 assert(directSum == 10)
+local pairSum = 0
+for _, value in pairs(direct) do
+    pairSum += value
+end
+assert(pairSum == 10)
 
 for i = 1, 5 do
     sum += i

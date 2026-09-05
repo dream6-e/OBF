@@ -36,10 +36,6 @@ impl Writer {
         self.data.extend_from_slice(&value.to_le_bytes());
     }
 
-    pub fn i32(&mut self, value: i32) {
-        self.data.extend_from_slice(&value.to_le_bytes());
-    }
-
     pub fn bytes(&mut self, value: &[u8]) -> Result<(), Diagnostic> {
         let length = u32::try_from(value.len())
             .map_err(|_| Diagnostic::new("private bytecode byte string exceeds u32"))?;

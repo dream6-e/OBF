@@ -111,6 +111,12 @@ if cmp -s "$tmp/vm51.lua" "$tmp/vm51.other.lua"; then
     exit 1
 fi
 "$LUAC" -p "$tmp/vm51.lua"
+"$LUAC" -l -p tests/fixtures/vm_lua51.lua >"$tmp/vm51.opcodes"
+lua51_opcode_count=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+\[/ {print $3}' "$tmp/vm51.opcodes" | sort -u | wc -l)
+if [[ $lua51_opcode_count -ne 38 ]]; then
+    echo "error: Lua 5.1 VM fixture covers $lua51_opcode_count of 38 opcodes" >&2
+    exit 1
+fi
 "$LUA" "$tmp/vm51.lua" >"$tmp/vm51.virtual.out"
 cmp "$tmp/vm51.original.out" "$tmp/vm51.virtual.out"
 
@@ -125,6 +131,12 @@ if cmp -s "$tmp/vmluau.lua" "$tmp/vmluau.other.lua"; then
     exit 1
 fi
 "$LUAUC" "$tmp/vmluau.lua" >/dev/null
+"$LUAUC" --text -O1 -g0 tests/fixtures/vm_luau.lua >"$tmp/vmluau.opcodes"
+luau_opcode_count=$(awk '{line=$0; sub(/^L[0-9]+: /,"",line); if(line ~ /^[A-Z][A-Z0-9_]+([[:space:]]|$)/){split(line,a,/ /); if(a[1]!="REMARK") print a[1]}}' "$tmp/vmluau.opcodes" | sort -u | wc -l)
+if [[ $luau_opcode_count -lt 60 ]]; then
+    echo "error: Luau VM fixture only covers $luau_opcode_count core opcodes" >&2
+    exit 1
+fi
 "$LUAU" "$tmp/vmluau.lua" >"$tmp/vmluau.virtual.out"
 cmp "$tmp/vmluau.original.out" "$tmp/vmluau.virtual.out"
 
@@ -135,6 +147,10 @@ for vm in "$tmp/vm51.lua" "$tmp/vmluau.lua"; do
     fi
     if grep -q 'loadstring' "$vm"; then
         echo "error: VM output $vm unexpectedly delegates to loadstring" >&2
+        exit 1
+    fi
+    if grep -Eq "error\\(['\"]" "$vm"; then
+        echo "error: VM output $vm contains a generated error message" >&2
         exit 1
     fi
 done
@@ -172,6 +188,8 @@ printf '[matrix] Lua 5.1 output: '; tr '\n' '|' <"$tmp/lua51.original.out"; echo
 printf '[matrix] Luau output: '; tr '\n' '|' <"$tmp/luau.original.out"; echo
 printf '[matrix] Lua 5.1 VM output: '; tr '\n' '|' <"$tmp/vm51.virtual.out"; echo
 printf '[matrix] Luau VM output: '; tr '\n' '|' <"$tmp/vmluau.virtual.out"; echo
+printf '[matrix] VM opcode coverage: Lua 5.1=%s/38, Luau core=%s/91\n' \
+    "$lua51_opcode_count" "$luau_opcode_count"
 printf '[matrix] VM sizes: Lua 5.1=%s bytes, Luau=%s bytes\n' \
     "$(wc -c <"$tmp/vm51.lua")" "$(wc -c <"$tmp/vmluau.lua")"
 printf '%s\n' '[matrix] PASS'
