@@ -10,3 +10,5 @@
 *.luac
 *.luauc
 *.out.lua
+!/vm_lua51.out.lua
+!/vm_luau.out.lua

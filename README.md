@@ -30,6 +30,11 @@ target/debug/obf inspect-bytecode --target lua51 script.luac
 
 编译器查找顺序为 `OBF_LUAC51` / `OBF_LUAU_COMPILE` 环境变量、仓库 `toolchains/bin`，然后是 `PATH`。
 
+仓库根目录同时提交两份可直接检查和运行的生成结果：
+
+- `vm_lua51.out.lua`：由 `tests/fixtures/vm_lua51.lua` 生成的 Lua 5.1 私有字节码 VM；
+- `vm_luau.out.lua`：由 `tests/fixtures/vm_luau.lua` 生成的 Luau 私有字节码 VM。
+
 ## 固定环境
 
 仓库包含：
