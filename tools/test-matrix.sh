@@ -82,6 +82,21 @@ if "$OBF" inspect-bytecode --target luau "$tmp/luau.truncated" >/dev/null 2>&1; 
     exit 1
 fi
 
+printf '%s\n' '[matrix] AST corpora: parse, minify, compile, execute'
+run_target lua51 tests/fixtures/ast_lua51.lua "$tmp/ast_lua51.min.lua"
+"$LUAC" -p tests/fixtures/ast_lua51.lua
+"$LUAC" -p "$tmp/ast_lua51.min.lua"
+"$LUA" tests/fixtures/ast_lua51.lua >"$tmp/ast_lua51.original.out"
+"$LUA" "$tmp/ast_lua51.min.lua" >"$tmp/ast_lua51.minified.out"
+cmp "$tmp/ast_lua51.original.out" "$tmp/ast_lua51.minified.out"
+
+run_target luau tests/fixtures/ast_luau.lua "$tmp/ast_luau.min.lua"
+"$LUAUC" tests/fixtures/ast_luau.lua >/dev/null
+"$LUAUC" "$tmp/ast_luau.min.lua" >/dev/null
+"$LUAU" tests/fixtures/ast_luau.lua >"$tmp/ast_luau.original.out"
+"$LUAU" "$tmp/ast_luau.min.lua" >"$tmp/ast_luau.minified.out"
+cmp "$tmp/ast_luau.original.out" "$tmp/ast_luau.minified.out"
+
 # Probe the custom runner environment required by the project: loadstring,
 # filesystem require, and the sandbox are all installed by setupState.
 cat >"$tmp/module.luau" <<'LUAU'

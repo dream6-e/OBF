@@ -1,6 +1,10 @@
 use crate::{Diagnostic, Target};
 use std::ops::Range;
 
+pub(crate) const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_TOKENS: usize = 1_000_000;
+const MAX_INTERPOLATION_NESTING: usize = 64;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenKind {
     Identifier,
@@ -26,7 +30,87 @@ impl Token {
 }
 
 pub fn lex(source: &str, target: Target) -> Result<Vec<Token>, Diagnostic> {
-    Lexer::new(source, target).run()
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(Diagnostic::new("source exceeds lexer safety limit"));
+    }
+    Lexer::new(source, target, true).run()
+}
+
+/// Lex a range while retaining byte spans and source positions from the
+/// containing source. This is used for expressions inside interpolated
+/// strings; unlike a chunk, a fragment never recognizes a shebang.
+pub(crate) fn lex_fragment(
+    source: &str,
+    range: Range<usize>,
+    target: Target,
+) -> Result<Vec<Token>, Diagnostic> {
+    if range.start > range.end
+        || range.end > source.len()
+        || !source.is_char_boundary(range.start)
+        || !source.is_char_boundary(range.end)
+    {
+        return Err(Diagnostic::new("invalid source fragment span"));
+    }
+    let fragment = &source[range.clone()];
+    let (base_line, base_column) = location_at(source, range.start);
+    let mut tokens = Lexer::new(fragment, target, false).run()?;
+    for token in &mut tokens {
+        token.span.start += range.start;
+        token.span.end += range.start;
+        if token.line == 1 {
+            token.column += base_column - 1;
+        }
+        token.line += base_line - 1;
+    }
+    Ok(tokens)
+}
+
+/// Return the half-open expression ranges embedded in an interpolated string.
+pub(crate) fn interpolated_expression_ranges(
+    source: &str,
+    span: Range<usize>,
+    target: Target,
+) -> Result<Vec<Range<usize>>, Diagnostic> {
+    if !target.is_luau()
+        || span.start >= span.end
+        || span.end > source.len()
+        || !source.is_char_boundary(span.start)
+        || !source.is_char_boundary(span.end)
+        || source.as_bytes().get(span.start) != Some(&b'`')
+    {
+        return Err(Diagnostic::new("invalid interpolated string span"));
+    }
+    let mut lexer = Lexer::new(source, target, false);
+    lexer.offset = span.start;
+    (lexer.line, lexer.column) = location_at(source, span.start);
+    let ranges = lexer.interpolated_string()?;
+    if lexer.offset != span.end {
+        return Err(lexer.error("interpolated string span ends at the wrong delimiter"));
+    }
+    Ok(ranges)
+}
+
+fn location_at(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < offset {
+        let byte = bytes[cursor];
+        cursor += 1;
+        if byte == b'\n' {
+            line += 1;
+            column = 1;
+        } else if byte == b'\r' {
+            if bytes.get(cursor) != Some(&b'\n') {
+                line += 1;
+                column = 1;
+            }
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 struct Lexer<'a> {
@@ -36,10 +120,12 @@ struct Lexer<'a> {
     offset: usize,
     line: usize,
     column: usize,
+    interpolation_depth: usize,
+    allow_shebang: bool,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str, target: Target) -> Self {
+    fn new(source: &'a str, target: Target, allow_shebang: bool) -> Self {
         Self {
             source,
             bytes: source.as_bytes(),
@@ -47,26 +133,26 @@ impl<'a> Lexer<'a> {
             offset: 0,
             line: 1,
             column: 1,
+            interpolation_depth: 0,
+            allow_shebang,
         }
     }
 
     fn run(mut self) -> Result<Vec<Token>, Diagnostic> {
         let mut tokens = Vec::new();
 
-        if self.bytes.starts_with(b"\xef\xbb\xbf") {
-            self.offset = 3;
-            self.column = 2;
-        }
-
         // Both reference command-line programs accept a Unix shebang at the
         // beginning of a file even though '#' is not part of either grammar.
-        if self.offset == 0 && self.bytes.first() == Some(&b'#') {
+        if self.allow_shebang && self.offset == 0 && self.bytes.first() == Some(&b'#') {
             self.skip_line();
         }
 
         loop {
             self.skip_trivia()?;
             if self.offset == self.bytes.len() {
+                if tokens.len() >= MAX_TOKENS {
+                    return Err(self.error("token count exceeds lexer safety limit"));
+                }
                 tokens.push(Token {
                     kind: TokenKind::Eof,
                     span: self.offset..self.offset,
@@ -117,6 +203,9 @@ impl<'a> Lexer<'a> {
                 TokenKind::Symbol
             };
 
+            if tokens.len() + 1 >= MAX_TOKENS {
+                return Err(self.error("token count exceeds lexer safety limit"));
+            }
             tokens.push(Token {
                 kind,
                 span: start..self.offset,
@@ -245,12 +334,17 @@ impl<'a> Lexer<'a> {
                 }
             }
             b'0'..=b'9' => {
+                let mut value = 0u16;
                 for _ in 0..3 {
-                    if self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                    if let Some(byte) = self.peek().filter(|byte| byte.is_ascii_digit()) {
+                        value = value * 10 + u16::from(byte - b'0');
                         self.bump();
                     } else {
                         break;
                     }
+                }
+                if value > 255 {
+                    return Err(self.error("decimal escape sequence is greater than 255"));
                 }
             }
             b'x' if self.target.is_luau() => {
@@ -268,7 +362,12 @@ impl<'a> Lexer<'a> {
                 while self.peek().is_some_and(|b| b.is_ascii_hexdigit()) {
                     self.bump();
                 }
-                if self.offset == start || self.peek() != Some(b'}') {
+                let digits = &self.source[start..self.offset];
+                let scalar = u32::from_str_radix(digits, 16).ok();
+                if digits.is_empty()
+                    || self.peek() != Some(b'}')
+                    || scalar.is_none_or(|value| value > 0x10ffff)
+                {
                     return Err(self.error("invalid Unicode escape"));
                 }
                 self.bump();
@@ -279,33 +378,58 @@ impl<'a> Lexer<'a> {
                     self.bump();
                 }
             }
+            // Both Lua 5.1 and Luau accept a backslash before an otherwise
+            // unrecognized character and retain the character itself.
             _ => {
-                return Err(self.error(format!(
-                    "unsupported escape sequence \\{} for {}",
-                    byte as char, self.target
-                )));
+                self.bump();
             }
         }
         Ok(())
     }
 
-    fn interpolated_string(&mut self) -> Result<(), Diagnostic> {
-        // Interpolated strings are retained as one token in the first parser
-        // stage. Their nested expressions are validated by the pinned Luau
-        // compiler in the compatibility matrix.
+    fn interpolated_string(&mut self) -> Result<Vec<Range<usize>>, Diagnostic> {
+        if self.interpolation_depth >= MAX_INTERPOLATION_NESTING {
+            return Err(self.error("interpolated string nesting exceeds safety limit"));
+        }
+        self.interpolation_depth += 1;
+        let result = self.interpolated_string_inner();
+        self.interpolation_depth -= 1;
+        result
+    }
+
+    fn interpolated_string_inner(&mut self) -> Result<Vec<Range<usize>>, Diagnostic> {
+        debug_assert_eq!(self.peek(), Some(b'`'));
         self.bump();
+        let mut expressions = Vec::new();
         loop {
             match self.peek() {
                 None => return Err(self.error("unfinished interpolated string")),
                 Some(b'`') => {
                     self.bump();
-                    return Ok(());
+                    return Ok(expressions);
+                }
+                Some(b'\n' | b'\r') => {
+                    return Err(self.error("unescaped newline in interpolated string"));
                 }
                 Some(b'\\') => {
                     self.bump();
-                    if self.peek().is_none() {
-                        return Err(self.error("unfinished interpolated string escape"));
+                    self.escape_sequence()?;
+                }
+                Some(b'{') => {
+                    if self.bytes.get(self.offset + 1) == Some(&b'{') {
+                        return Err(self.error("double '{{' is invalid in an interpolated string"));
                     }
+                    if expressions.len() >= MAX_TOKENS {
+                        return Err(
+                            self.error("interpolated expression count exceeds safety limit")
+                        );
+                    }
+                    self.bump();
+                    expressions.push(self.interpolated_expression()?);
+                }
+                // A lone closing brace is ordinary text in Luau; only an
+                // opening brace begins an embedded expression.
+                Some(b'}') => {
                     self.bump();
                 }
                 Some(_) => {
@@ -315,73 +439,106 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn number(&mut self) -> Result<(), Diagnostic> {
-        if self.rest().starts_with(b"0x") || self.rest().starts_with(b"0X") {
-            self.bump();
-            self.bump();
-            self.digits(16, self.target.is_luau(), "hexadecimal literal")?;
-        } else if self.rest().starts_with(b"0b") || self.rest().starts_with(b"0B") {
-            if !self.target.is_luau() {
-                return Err(self.error("binary numeric literals are not valid in Lua 5.1"));
-            }
-            self.bump();
-            self.bump();
-            self.digits(2, true, "binary literal")?;
-        } else {
-            if self.peek() == Some(b'.') {
-                self.bump();
-                self.digits(10, self.target.is_luau(), "fraction")?;
-            } else {
-                self.digits(10, self.target.is_luau(), "decimal literal")?;
-                if self.peek() == Some(b'.') && self.bytes.get(self.offset + 1) != Some(&b'.') {
+    fn interpolated_expression(&mut self) -> Result<Range<usize>, Diagnostic> {
+        let start = self.offset;
+        let mut brace_depth = 0usize;
+        let mut saw_token = false;
+        loop {
+            self.skip_trivia()?;
+            match self.peek() {
+                None => return Err(self.error("unfinished interpolated expression")),
+                Some(b'}') if brace_depth == 0 => {
+                    if !saw_token {
+                        return Err(self.error("interpolated expression cannot be empty"));
+                    }
+                    let end = self.offset;
                     self.bump();
-                    if self.peek().is_some_and(|b| digit_value(b, 10).is_some()) {
-                        self.digits(10, self.target.is_luau(), "fraction")?;
+                    return Ok(start..end);
+                }
+                Some(b'`') => {
+                    saw_token = true;
+                    self.interpolated_string()?;
+                }
+                Some(b'\'' | b'\"') => {
+                    saw_token = true;
+                    let quote = self.peek().unwrap_or_default();
+                    self.quoted_string(quote)?;
+                }
+                Some(b'[') if self.long_bracket_level(self.offset).is_some() => {
+                    saw_token = true;
+                    self.long_string()?;
+                }
+                Some(byte) if is_ident_start(byte) => {
+                    saw_token = true;
+                    self.bump();
+                    while self.peek().is_some_and(is_ident_continue) {
+                        self.bump();
                     }
                 }
-            }
-
-            if matches!(self.peek(), Some(b'e' | b'E')) {
-                self.bump();
-                if matches!(self.peek(), Some(b'+' | b'-')) {
+                Some(byte)
+                    if byte.is_ascii_digit()
+                        || (byte == b'.'
+                            && self
+                                .bytes
+                                .get(self.offset + 1)
+                                .is_some_and(|byte| byte.is_ascii_digit())) =>
+                {
+                    saw_token = true;
+                    self.number()?;
+                }
+                Some(b'{') => {
+                    saw_token = true;
+                    brace_depth += 1;
                     self.bump();
                 }
-                self.digits(10, self.target.is_luau(), "exponent")?;
+                Some(b'}') => {
+                    saw_token = true;
+                    brace_depth -= 1;
+                    self.bump();
+                }
+                Some(_) => {
+                    saw_token = true;
+                    self.symbol()?;
+                }
             }
         }
-
-        if self.peek().is_some_and(is_ident_start) {
-            return Err(self.error("malformed numeric literal"));
-        }
-        Ok(())
     }
 
-    fn digits(
-        &mut self,
-        radix: u8,
-        underscores: bool,
-        description: &str,
-    ) -> Result<(), Diagnostic> {
-        let mut count = 0usize;
-        let mut previous_underscore = false;
-        loop {
-            match self.peek() {
-                Some(byte) if digit_value(byte, radix).is_some() => {
-                    count += 1;
-                    previous_underscore = false;
-                    self.bump();
-                }
-                Some(b'_') if underscores && count > 0 && !previous_underscore => {
-                    previous_underscore = true;
-                    self.bump();
-                }
-                _ => break,
+    fn number(&mut self) -> Result<(), Diagnostic> {
+        let start = self.offset;
+
+        // Match the reference lexers first, including their deliberately broad
+        // number-like token. Validation happens after the complete candidate
+        // has been consumed, preventing `1..2` from becoming three valid
+        // tokens when both reference parsers report a malformed number.
+        if self.peek() == Some(b'.') {
+            self.bump();
+        }
+        while self
+            .peek()
+            .is_some_and(|byte| byte.is_ascii_digit() || byte == b'.' || byte == b'_')
+        {
+            self.bump();
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.bump();
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.bump();
             }
         }
-        if count == 0 || previous_underscore {
-            return Err(self.error(format!("invalid {description}")));
+        while self
+            .peek()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            self.bump();
         }
-        Ok(())
+
+        let raw = &self.source[start..self.offset];
+        if valid_numeric_literal(raw, self.target) {
+            Ok(())
+        } else {
+            Err(self.error("malformed numeric literal"))
+        }
     }
 
     fn require_hex_digit(&mut self, description: &str) -> Result<(), Diagnostic> {
@@ -416,7 +573,7 @@ impl<'a> Lexer<'a> {
 
         let byte = self.peek().expect("symbol called before eof");
         let allowed = b"+-*/%^#=<>;:,(){}[].";
-        let luau_extra = b"&|?~";
+        let luau_extra = b"&|?~@";
         if allowed.contains(&byte) || (self.target.is_luau() && luau_extra.contains(&byte)) {
             self.bump();
             Ok(())
@@ -473,14 +630,86 @@ fn is_ident_continue(byte: u8) -> bool {
     is_ident_start(byte) || byte.is_ascii_digit()
 }
 
-fn digit_value(byte: u8, radix: u8) -> Option<u8> {
-    let value = match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
-        _ => return None,
+fn valid_numeric_literal(raw: &str, target: Target) -> bool {
+    if raw.is_empty() || (!target.is_luau() && raw.contains('_')) {
+        return false;
+    }
+    let normalized = if target.is_luau() {
+        raw.replace('_', "")
+    } else {
+        raw.to_owned()
     };
-    (value < radix).then_some(value)
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let (number, integer) = if target.is_luau() {
+        normalized
+            .strip_suffix('i')
+            .map_or((normalized.as_str(), false), |value| (value, true))
+    } else {
+        (normalized.as_str(), false)
+    };
+
+    if let Some(digits) = number
+        .strip_prefix("0x")
+        .or_else(|| number.strip_prefix("0X"))
+    {
+        if integer {
+            return !digits.is_empty() && u64::from_str_radix(digits, 16).is_ok();
+        }
+        if target.is_luau() {
+            return !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
+        }
+        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return true;
+        }
+        // Lua 5.1 delegates conversion to the host C library after scanning;
+        // glibc accepts hexadecimal floats whose exponent has no sign here.
+        return digits
+            .split_once(['p', 'P'])
+            .is_some_and(|(mantissa, exponent)| {
+                !mantissa.is_empty()
+                    && mantissa.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && !exponent.is_empty()
+                    && exponent.bytes().all(|byte| byte.is_ascii_digit())
+            });
+    }
+    if let Some(digits) = number
+        .strip_prefix("0b")
+        .or_else(|| number.strip_prefix("0B"))
+    {
+        return target.is_luau()
+            && !digits.is_empty()
+            && if integer {
+                u64::from_str_radix(digits, 2).is_ok()
+            } else {
+                digits.bytes().all(|byte| matches!(byte, b'0' | b'1'))
+            };
+    }
+    if integer {
+        return number.parse::<i64>().is_ok();
+    }
+    valid_decimal_literal(number)
+}
+
+fn valid_decimal_literal(value: &str) -> bool {
+    let (mantissa, exponent) = match value.find(['e', 'E']) {
+        Some(index) => (&value[..index], Some(&value[index + 1..])),
+        None => (value, None),
+    };
+    if mantissa.matches('.').count() > 1
+        || !mantissa
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        || !mantissa.bytes().any(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    exponent.is_none_or(|exponent| {
+        let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn is_keyword(value: &str, target: Target) -> bool {
@@ -513,8 +742,11 @@ mod tests {
     fn target_specific_numbers() {
         assert!(lex("return 0b1010_0011", Target::Luau).is_ok());
         assert!(lex("return 0b10", Target::Lua51).is_err());
-        assert!(lex("return 1..2", Target::Lua51).is_ok());
+        assert!(lex("return 1..2", Target::Lua51).is_err());
         assert!(lex("return 1e+", Target::Lua51).is_err());
+        assert!(lex("return 0x1p2", Target::Lua51).is_ok());
+        assert!(lex("return 1__0 + 0x_FF + 1i", Target::Luau).is_ok());
+        assert!(lex("return 0b2", Target::Luau).is_err());
     }
 
     #[test]
