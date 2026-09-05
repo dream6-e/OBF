@@ -1,0 +1,22 @@
+[package]
+name = "obf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "A std-only Lua 5.1 and Luau transformation toolchain"
+license = "Proprietary"
+publish = false
+
+[lib]
+name = "obf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "obf"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
