@@ -1,0 +1,12 @@
+/target/
+/.toolchains/
+/vendor/luau-0.735/build/
+/vendor/luau-0.735/luau
+/vendor/luau-0.735/luau-compile
+/vendor/lua-5.1.5/src/*.o
+/vendor/lua-5.1.5/src/*.a
+/vendor/lua-5.1.5/src/lua
+/vendor/lua-5.1.5/src/luac
+*.luac
+*.luauc
+*.out.lua
