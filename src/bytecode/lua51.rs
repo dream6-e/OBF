@@ -160,12 +160,22 @@ fn read_prototype(
         .instructions
         .checked_add(code_count)
         .ok_or_else(|| reader.error("instruction count overflow"))?;
+    let mut expects_setlist_data = false;
     for _ in 0..code_count {
         let word = reader.uint(4, header.little_endian, "instruction")? as u32;
+        if expects_setlist_data {
+            expects_setlist_data = false;
+            continue;
+        }
         let opcode = (word & 0x3f) as usize;
         if opcode >= OPCODES.len() {
             return Err(reader.error(format!("invalid Lua 5.1 opcode {opcode}")));
         }
+        let c = (word >> 14) & 0x1ff;
+        expects_setlist_data = opcode == 34 && c == 0;
+    }
+    if expects_setlist_data {
+        return Err(reader.error("SETLIST is missing its trailing data word"));
     }
 
     let constant_count = reader.count(header, "constant count", 1)?;

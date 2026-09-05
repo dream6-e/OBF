@@ -10,6 +10,7 @@ pub mod lexer;
 pub mod minify;
 pub mod parser;
 pub mod target;
+pub mod vm;
 
 pub use diagnostic::Diagnostic;
 pub use target::Target;

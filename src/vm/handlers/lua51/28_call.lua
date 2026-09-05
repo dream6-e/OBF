@@ -1,0 +1,1 @@
+local n=i[3]==0 and(top-i[2])or(i[3]-1);local a={n=n};for j=1,n do a[j]=rv(i[2]+j)end;local z=Z(rv(i[2])(U(a,1,n)));if i[4]==0 then for j=1,z.n do sv(i[2]+j-1,z[j])end;top=i[2]+z.n-1 else for j=1,i[4]-1 do sv(i[2]+j-1,z[j])end end;

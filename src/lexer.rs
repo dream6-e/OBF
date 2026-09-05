@@ -488,7 +488,9 @@ fn is_keyword(value: &str, target: Target) -> bool {
         "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
         "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
     ];
-    LUA51.contains(&value) || (target.is_luau() && matches!(value, "continue" | "export" | "type"))
+    // `type` and `export` are contextual in Luau and must remain usable as
+    // ordinary identifiers (notably the built-in `type` function).
+    LUA51.contains(&value) || (target.is_luau() && value == "continue")
 }
 
 #[cfg(test)]

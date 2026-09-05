@@ -100,9 +100,60 @@ LUAU
 "$LUAU" "$tmp/environment.luau" >"$tmp/environment.out"
 grep -qx 'runner-environment:ok' "$tmp/environment.out"
 
+printf '%s\n' '[matrix] Lua 5.1 VM: private lowering, deterministic seed, compile, execute'
+"$LUA" tests/fixtures/vm_lua51.lua >"$tmp/vm51.original.out"
+"$OBF" virtualize --target lua51 --seed 7001 -o "$tmp/vm51.lua" tests/fixtures/vm_lua51.lua
+"$OBF" virtualize --target lua51 --seed 7001 -o "$tmp/vm51.same.lua" tests/fixtures/vm_lua51.lua
+"$OBF" virtualize --target lua51 --seed 7002 -o "$tmp/vm51.other.lua" tests/fixtures/vm_lua51.lua
+cmp "$tmp/vm51.lua" "$tmp/vm51.same.lua"
+if cmp -s "$tmp/vm51.lua" "$tmp/vm51.other.lua"; then
+    echo 'error: Lua 5.1 VM layout did not change with seed' >&2
+    exit 1
+fi
+"$LUAC" -p "$tmp/vm51.lua"
+"$LUA" "$tmp/vm51.lua" >"$tmp/vm51.virtual.out"
+cmp "$tmp/vm51.original.out" "$tmp/vm51.virtual.out"
+
+printf '%s\n' '[matrix] Luau VM: private lowering, deterministic seed, compile, execute'
+"$LUAU" tests/fixtures/vm_luau.lua >"$tmp/vmluau.original.out"
+"$OBF" virtualize --target luau --seed 7351 -o "$tmp/vmluau.lua" tests/fixtures/vm_luau.lua
+"$OBF" virtualize --target luau --seed 7351 -o "$tmp/vmluau.same.lua" tests/fixtures/vm_luau.lua
+"$OBF" virtualize --target luau --seed 7352 -o "$tmp/vmluau.other.lua" tests/fixtures/vm_luau.lua
+cmp "$tmp/vmluau.lua" "$tmp/vmluau.same.lua"
+if cmp -s "$tmp/vmluau.lua" "$tmp/vmluau.other.lua"; then
+    echo 'error: Luau VM layout did not change with seed' >&2
+    exit 1
+fi
+"$LUAUC" "$tmp/vmluau.lua" >/dev/null
+"$LUAU" "$tmp/vmluau.lua" >"$tmp/vmluau.virtual.out"
+cmp "$tmp/vmluau.original.out" "$tmp/vmluau.virtual.out"
+
+for vm in "$tmp/vm51.lua" "$tmp/vmluau.lua"; do
+    if [[ $(wc -l <"$vm") -ne 0 ]]; then
+        echo "error: VM output $vm contains a physical newline" >&2
+        exit 1
+    fi
+    if grep -q 'loadstring' "$vm"; then
+        echo "error: VM output $vm unexpectedly delegates to loadstring" >&2
+        exit 1
+    fi
+done
+if grep -Eq '0[bB][01_]' "$tmp/vm51.lua"; then
+    echo 'error: Lua 5.1 VM output contains a Luau binary literal' >&2
+    exit 1
+fi
+if ! grep -Eq '0[bB][01_]' "$tmp/vmluau.lua"; then
+    echo 'error: seeded Luau VM output did not exercise binary numeric spelling' >&2
+    exit 1
+fi
+
 printf '%s\n' '[matrix] reports'
 cat "$tmp/lua51.inspect"
 cat "$tmp/luau.inspect"
 printf '[matrix] Lua 5.1 output: '; tr '\n' '|' <"$tmp/lua51.original.out"; echo
 printf '[matrix] Luau output: '; tr '\n' '|' <"$tmp/luau.original.out"; echo
+printf '[matrix] Lua 5.1 VM output: '; tr '\n' '|' <"$tmp/vm51.virtual.out"; echo
+printf '[matrix] Luau VM output: '; tr '\n' '|' <"$tmp/vmluau.virtual.out"; echo
+printf '[matrix] VM sizes: Lua 5.1=%s bytes, Luau=%s bytes\n' \
+    "$(wc -c <"$tmp/vm51.lua")" "$(wc -c <"$tmp/vmluau.lua")"
 printf '%s\n' '[matrix] PASS'

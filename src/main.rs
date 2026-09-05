@@ -1,4 +1,4 @@
-use obf::bytecode;
+use obf::{bytecode, vm};
 use obf::{Diagnostic, Target};
 use std::env;
 use std::fs;
@@ -31,13 +31,18 @@ fn run() -> Result<(), Diagnostic> {
         println!("obf {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if !matches!(command.as_str(), "check" | "minify" | "inspect-bytecode") {
+    if !matches!(
+        command.as_str(),
+        "check" | "minify" | "virtualize" | "inspect-bytecode"
+    ) {
         return Err(Diagnostic::new(format!("unknown command '{command}'")));
     }
 
     let mut target = None;
     let mut output = None;
     let mut input = None;
+    let mut seed = vm::Options::default().seed;
+    let mut seed_was_set = false;
     let mut rest = arguments.peekable();
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -53,8 +58,19 @@ fn run() -> Result<(), Diagnostic> {
                     .ok_or_else(|| Diagnostic::new("missing value after --output"))?;
                 output = Some(PathBuf::from(value));
             }
+            "--seed" => {
+                let value = rest
+                    .next()
+                    .ok_or_else(|| Diagnostic::new("missing value after --seed"))?;
+                seed = parse_seed(&value)?;
+                seed_was_set = true;
+            }
             _ if argument.starts_with("--target=") => {
                 target = Some(parse_target(&argument[9..])?);
+            }
+            _ if argument.starts_with("--seed=") => {
+                seed = parse_seed(&argument[7..])?;
+                seed_was_set = true;
             }
             _ if argument.starts_with('-') && argument != "-" => {
                 return Err(Diagnostic::new(format!("unknown option '{argument}'")));
@@ -72,6 +88,12 @@ fn run() -> Result<(), Diagnostic> {
         input.ok_or_else(|| Diagnostic::new("input file is required (use '-' for stdin)"))?;
     let data = read_input(&input)?;
 
+    if seed_was_set && command != "virtualize" {
+        return Err(Diagnostic::new(
+            "--seed is only valid for the 'virtualize' command",
+        ));
+    }
+
     match command.as_str() {
         "check" => {
             if output.is_some() {
@@ -83,6 +105,11 @@ fn run() -> Result<(), Diagnostic> {
         "minify" => {
             let source = decode_source(&data)?;
             let result = obf::minify(source, target)?;
+            write_output(output, result.as_bytes())
+        }
+        "virtualize" => {
+            decode_source(&data)?;
+            let result = vm::virtualize(&data, target, vm::Options { seed })?;
             write_output(output, result.as_bytes())
         }
         "inspect-bytecode" => {
@@ -110,6 +137,18 @@ fn run() -> Result<(), Diagnostic> {
 
 fn parse_target(value: &str) -> Result<Target, Diagnostic> {
     Target::from_str(value).map_err(Diagnostic::new)
+}
+
+fn parse_seed(value: &str) -> Result<u64, Diagnostic> {
+    let result = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16)
+    } else {
+        value.parse()
+    };
+    result.map_err(|_| Diagnostic::new(format!("invalid 64-bit seed '{value}'")))
 }
 
 fn read_input(path: &PathBuf) -> Result<Vec<u8>, Diagnostic> {
@@ -152,8 +191,9 @@ fn print_help() {
         "OBF - std-only Lua 5.1 and Luau toolchain\n\n\
 Usage:\n  obf check --target <lua51|luau> <input|->\n  \
 obf minify --target <lua51|luau> [-o FILE] <input|->\n  \
+obf virtualize --target <lua51|luau> [--seed N] [-o FILE] <input|->\n  \
 obf inspect-bytecode --target <lua51|luau> <input>\n\n\
-The current milestone validates source, emits one-line lexical minification,\n\
-and safely inspects Lua 5.1/Luau 0.735 bytecode. VM protection stages follow."
+The virtualize command compiles source into a randomized private instruction\n\
+format and emits a single-line target-language interpreter."
     );
 }

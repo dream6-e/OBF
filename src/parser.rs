@@ -87,7 +87,10 @@ impl<'a> Parser<'a> {
             self.consume(";");
             return Ok(());
         }
-        if self.at("type") || self.at("export") {
+        let starts_type_declaration = self.target.is_luau()
+            && ((self.at("type") && self.peek_kind(1) == Some(TokenKind::Identifier))
+                || (self.at("export") && self.peek_text(1) == "type"));
+        if starts_type_declaration {
             return self.type_declaration();
         }
 
@@ -645,6 +648,12 @@ impl<'a> Parser<'a> {
             .unwrap_or("")
     }
 
+    fn peek_kind(&self, distance: usize) -> Option<TokenKind> {
+        self.tokens
+            .get(self.cursor + distance)
+            .map(|token| token.kind)
+    }
+
     fn error_current(&self, message: impl Into<String>) -> Diagnostic {
         let token = self.current();
         Diagnostic::at(message, token.span.start, token.line, token.column)
@@ -709,6 +718,11 @@ mod tests {
             print(pick({left=n, right=0}, true))
         "#;
         assert!(parses(source, Target::Luau));
+        assert!(parses(
+            "type(1);type=type;export=2;print(type)",
+            Target::Luau
+        ));
+        assert!(parses("type=type;print(type)", Target::Lua51));
     }
 
     #[test]
