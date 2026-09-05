@@ -2,6 +2,8 @@
 
 面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox** 的 std-only Rust 工具链。当前版本包含带 byte span 的 owned AST 源码前端、保语义单行压缩、防御式字节码解析，以及可执行的随机私有寄存器 VM。`virtualize` 会先调用固定目标编译器，再把原生指令、常量、prototype、闭包与 AUX/data word 序列化为真正的版本化二进制私有字节码。输出脚本只嵌入一个带目标标记、payload 长度和 Adler-32 完整性字段的 byte string，由生成的 decoder 恢复 VM 状态并直接解释，**不会用 Lua table 伪装字节码，也不会用 `load`/`loadstring` 重新加载原始源码**。
 
+新接手开发者请先阅读 [`项目交接总结.md`](项目交接总结.md)，其中集中记录架构、硬约束、测试门禁、常见陷阱和下一阶段优先级。
+
 ## 命令
 
 ```text
