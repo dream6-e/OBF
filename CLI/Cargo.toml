@@ -1,0 +1,8 @@
+[package]
+name = "kryvex_cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kryvex_ob = { path = ".." }
+crossterm = "0.27"
