@@ -6,3 +6,6 @@
 
 # Local process intermediates
 /process/
+
+# Offline Rust toolchain (npm @rustbin), gitignored
+/.tools/
