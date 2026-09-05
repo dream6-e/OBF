@@ -57,12 +57,19 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
     let mut branch_order: Vec<_> = (0..OPCODE_COUNT).collect();
     prng.shuffle(&mut branch_order);
 
+    let bytecode = encode_private_bytecode(&chunk.prototypes, chunk.main, &opcode_ids)?;
     let mut source = String::new();
     source.push_str("local Z=function(...)return{n=select('#',...),...}end;");
     source.push_str(
         "local U=(table and table.unpack)or unpack;local G=(getfenv and getfenv(0))or _G;",
     );
-    emit_prototypes(&mut source, &chunk.prototypes, &opcode_ids, &mut prng)?;
+    emit_private_decoder(
+        &mut source,
+        &bytecode,
+        &chunk.prototypes,
+        &mut prng,
+        opcode_ids[70],
+    );
     source.push_str(
         "local IK=function(F,env)if F.k then return F.k end;local k={};F.k=k;\
          for j=0,F.z-1 do local d=F.d[j];local t=d[1];\
@@ -92,70 +99,150 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
         source.push_str(handler(opcode));
     }
     source.push_str("else error('invalid private opcode '..tostring(o),0)end end end;");
-    write!(source, "return H({},Z(...),{{}},G)", chunk.main).unwrap();
+    source.push_str("return H(M,Z(...),{},G)");
 
     crate::minify(&source, Target::Luau)
         .map_err(|error| error.context("generated Luau VM failed internal validation"))
 }
 
 fn handler(opcode: usize) -> &'static str {
-    super::handlers::LUAU[opcode]
+    super::opcode::luau(opcode)
 }
 
-fn emit_prototypes(
-    output: &mut String,
+fn encode_private_bytecode(
     prototypes: &[Prototype],
+    main: usize,
     opcode_ids: &[u16],
-    prng: &mut Prng,
-) -> Result<(), Diagnostic> {
-    output.push_str("local CAP_OP=");
-    output.push_str(&prng.integer_literal(u64::from(opcode_ids[70]), true));
-    output.push_str(";local P={};");
-    for (id, prototype) in prototypes.iter().enumerate() {
-        write!(
-            output,
-            "P[{id}]={{m={},p={},u={},v={},f={},z={},d={{",
-            prototype.max_stack,
-            prototype.parameters,
-            prototype.upvalues,
-            prototype.vararg,
-            prototype.flags,
-            prototype.constants.len()
-        )
-        .unwrap();
-        for (index, constant) in prototype.constants.iter().enumerate() {
-            write!(output, "[{index}]=").unwrap();
-            emit_constant_descriptor(output, constant);
-            output.push(',');
+) -> Result<Vec<u8>, Diagnostic> {
+    let main = checked_u32(main, "main prototype")?;
+    let count = checked_u32(prototypes.len(), "prototype count")?;
+    let mut output = super::binary::Writer::new(0x75, main, count);
+
+    for prototype in prototypes {
+        output.u8(prototype.max_stack);
+        output.u8(prototype.parameters);
+        output.u8(prototype.upvalues);
+        output.u8(prototype.vararg);
+        output.u8(prototype.flags);
+        output.u32(checked_u32(prototype.constants.len(), "constant count")?);
+        for constant in &prototype.constants {
+            match constant {
+                Constant::Nil => output.u8(0),
+                Constant::Boolean(value) => {
+                    output.u8(1);
+                    output.u8(u8::from(*value));
+                }
+                Constant::Number(value) => {
+                    output.u8(2);
+                    output.number(*value)?;
+                }
+                Constant::String(value) => {
+                    output.u8(3);
+                    output.bytes(value)?;
+                }
+                Constant::Import(value) => {
+                    output.u8(4);
+                    output.u32(*value);
+                }
+                Constant::Table(entries) => {
+                    output.u8(5);
+                    output.u32(checked_u32(entries.len(), "table entry count")?);
+                    for (key, value) in entries {
+                        output.u32(checked_u32(*key, "table key constant")?);
+                        let encoded = value
+                            .filter(|index| *index >= 0)
+                            .and_then(|index| index.checked_add(1))
+                            .unwrap_or(0);
+                        output.u32(encoded as u32);
+                    }
+                }
+                Constant::Closure(id) => {
+                    output.u8(6);
+                    output.u32(checked_u32(*id, "closure prototype")?);
+                }
+                Constant::Vector(value) => {
+                    output.u8(7);
+                    for component in value {
+                        output.number(*component)?;
+                    }
+                }
+                Constant::Integer {
+                    negative,
+                    magnitude,
+                } => {
+                    output.u8(8);
+                    output.u8(u8::from(*negative));
+                    output.bytes(magnitude.to_string().as_bytes())?;
+                }
+                Constant::ClassShape(members) => {
+                    output.u8(10);
+                    output.u32(checked_u32(members.len(), "class member count")?);
+                    for member in members {
+                        output.u32(checked_u32(*member, "class member constant")?);
+                    }
+                }
+            }
         }
-        output.push_str("},q={");
-        for (index, child) in prototype.children.iter().enumerate() {
-            write!(output, "[{index}]={child},").unwrap();
+        output.u32(checked_u32(prototype.children.len(), "child count")?);
+        for child in &prototype.children {
+            output.u32(checked_u32(*child, "child prototype")?);
         }
-        output.push_str("},c={");
+        output.u32(checked_u32(prototype.code.len(), "instruction count")?);
         for instruction in &prototype.code {
-            let private = opcode_ids
+            let private = *opcode_ids
                 .get(instruction.opcode)
                 .ok_or_else(|| Diagnostic::new("invalid internal Luau opcode"))?;
-            output.push('{');
-            output.push_str(&prng.integer_literal(u64::from(*private), true));
-            write!(
-                output,
-                ",{},{},{},{},{},{}}},",
-                instruction.a,
-                instruction.b,
-                instruction.c,
-                instruction.d,
-                instruction.e,
-                instruction.raw
-            )
-            .unwrap();
+            output.u16(private);
+            output.u32(instruction.a);
+            output.u32(instruction.b);
+            output.u32(instruction.c);
+            output.i32(instruction.d);
+            output.i32(instruction.e);
+            output.u32(instruction.raw);
         }
-        output.push_str("},n={");
-        emit_namecall_wrappers(output, prototype);
-        output.push_str("}};");
     }
-    Ok(())
+    output.finish()
+}
+
+fn checked_u32(value: usize, label: &str) -> Result<u32, Diagnostic> {
+    u32::try_from(value).map_err(|_| Diagnostic::new(format!("{label} exceeds private format")))
+}
+
+fn emit_private_decoder(
+    output: &mut String,
+    bytecode: &[u8],
+    prototypes: &[Prototype],
+    prng: &mut Prng,
+    capture_opcode: u16,
+) {
+    output.push_str("local CAP_OP=");
+    output.push_str(&prng.integer_literal(u64::from(capture_opcode), true));
+    output.push_str(";local B=");
+    super::lua51::emit_byte_string(output, bytecode);
+    output.push_str(
+        ";local bp=1;local b8=function()local v=string.byte(B,bp);if not v then error('truncated private bytecode',0)end;bp=bp+1;return v end;\
+         local b16=function()local a,b=b8(),b8();return a+b*256 end;\
+         local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;\
+         local bi32=function()local v=b32();if v>=2147483648 then return v-4294967296 else return v end end;local bc=function()local v=b32();if v>1000000 then error('private count limit exceeded',0)end;return v end;\
+         local bs=function()local n=b32();if bp+n-1>#B then error('truncated private bytes',0)end;local v=string.sub(B,bp,bp+n-1);bp=bp+n;return v end;\
+         local bn=function()local t=b8();if t==0 then local v=tonumber(bs());if not v then error('invalid private number',0)end;return v elseif t==1 then return 0/0 elseif t==2 then return 1/0 elseif t==3 then return -1/0 else error('invalid private number tag',0)end end;\
+         if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=1 or b8()~=117 then error('invalid Luau private bytecode',0)end;\
+         local bl=b32();local ck=b32();local ps=bp;if #B-ps+1~=bl then error('invalid private bytecode length',0)end;local s1,s2=1,0;for j=ps,#B do s1=(s1+string.byte(B,j))%65521;s2=(s2+s1)%65521 end;if s1+s2*65536~=ck then error('private bytecode checksum failed',0)end;\
+         local M=b32();local np=bc();local P={};for id=0,np-1 do local F={d={},q={},c={},n={}};F.m=b8();F.p=b8();F.u=b8();F.v=b8();F.f=b8();F.z=bc();\
+         for j=0,F.z-1 do local t=b8();if t==0 then F.d[j]={0}elseif t==1 then F.d[j]={1,b8()~=0}elseif t==2 then F.d[j]={2,bn()}elseif t==3 then F.d[j]={3,bs()}elseif t==4 then F.d[j]={4,b32()}\
+         elseif t==5 then local e={5};local n=bc();for x=1,n do e[#e+1]={b32(),b32()}end;F.d[j]=e elseif t==6 then F.d[j]={6,b32()}\
+         elseif t==7 then F.d[j]={7,bn(),bn(),bn(),bn()}elseif t==8 then local s=b8();local v=tonumber(bs());if not v then error('invalid private integer',0)end;if s~=0 then v=-v end;F.d[j]={8,v}\
+         elseif t==10 then local e={10};local n=bc();for x=1,n do e[#e+1]=b32()end;F.d[j]=e else error('invalid private constant',0)end end;\
+         local nq=bc();for j=0,nq-1 do F.q[j]=b32()end;local nc=bc();for j=1,nc do F.c[j]={b16(),b32(),b32(),b32(),bi32(),bi32(),b32()}end;P[id]=F end;\
+         if bp~=#B+1 then error('trailing private bytecode',0)end;B=nil;",
+    );
+    output.push_str("local W={};");
+    for (id, prototype) in prototypes.iter().enumerate() {
+        write!(output, "W[{id}]={{").unwrap();
+        emit_namecall_wrappers(output, prototype);
+        output.push_str("};");
+    }
+    output.push_str("for id,w in pairs(W)do P[id].n=w end;W=nil;");
 }
 
 fn emit_namecall_wrappers(output: &mut String, prototype: &Prototype) {
@@ -216,70 +303,6 @@ fn is_luau_identifier(value: &str) -> bool {
                 | "until"
                 | "while"
         )
-}
-
-fn emit_constant_descriptor(output: &mut String, constant: &Constant) {
-    match constant {
-        Constant::Nil => output.push_str("{0}"),
-        Constant::Boolean(value) => write!(output, "{{1,{value}}}").unwrap(),
-        Constant::Number(value) => {
-            output.push_str("{2,");
-            emit_number(output, *value);
-            output.push('}');
-        }
-        Constant::String(value) => {
-            output.push_str("{3,");
-            super::lua51::emit_byte_string(output, value);
-            output.push('}');
-        }
-        Constant::Import(value) => write!(output, "{{4,{value}}}").unwrap(),
-        Constant::Table(entries) => {
-            output.push_str("{5");
-            for (key, value) in entries {
-                let encoded = value.map_or(0, |index| index + 1);
-                write!(output, ",{{{key},{encoded}}}").unwrap();
-            }
-            output.push('}');
-        }
-        Constant::Closure(id) => write!(output, "{{6,{id}}}").unwrap(),
-        Constant::Vector(value) => {
-            output.push_str("{7");
-            for component in value {
-                output.push(',');
-                emit_number(output, *component);
-            }
-            output.push('}');
-        }
-        Constant::Integer {
-            negative,
-            magnitude,
-        } => {
-            if *negative {
-                write!(output, "{{8,-{magnitude}}}").unwrap();
-            } else {
-                write!(output, "{{8,{magnitude}}}").unwrap();
-            }
-        }
-        Constant::ClassShape(members) => {
-            output.push_str("{10");
-            for member in members {
-                write!(output, ",{member}").unwrap();
-            }
-            output.push('}');
-        }
-    }
-}
-
-fn emit_number(output: &mut String, value: f64) {
-    if value.is_nan() {
-        output.push_str("(0/0)");
-    } else if value == f64::INFINITY {
-        output.push_str("(1/0)");
-    } else if value == f64::NEG_INFINITY {
-        output.push_str("(-1/0)");
-    } else {
-        write!(output, "{value:?}").unwrap();
-    }
 }
 
 fn decode(data: &[u8]) -> Result<Chunk, Diagnostic> {

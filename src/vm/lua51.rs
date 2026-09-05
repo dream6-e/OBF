@@ -67,10 +67,17 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
     let mut branch_order: Vec<_> = (0..OPCODE_COUNT).collect();
     prng.shuffle(&mut branch_order);
 
+    let bytecode = encode_private_bytecode(&flat, main_id, &opcode_ids)?;
     let mut source = String::new();
     source.push_str("local Z=function(...)return{n=select('#',...),...}end;");
     source.push_str("local U=unpack or table.unpack;local G=(getfenv and getfenv(0))or _G;");
-    emit_prototypes(&mut source, &flat, &opcode_ids, &mut prng)?;
+    emit_private_decoder(
+        &mut source,
+        &bytecode,
+        &mut prng,
+        opcode_ids[0],
+        opcode_ids[4],
+    );
     source.push_str("local H;H=function(fid,args,ups,env)local F=P[fid];local R={};");
     source.push_str("for j=0,F.m-1 do R[j]={}end;for j=0,F.p-1 do R[j][1]=args[j+1]end;");
     source.push_str("local va={n=math.max(0,args.n-F.p)};for j=1,va.n do va[j]=args[F.p+j]end;");
@@ -91,79 +98,100 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
         source.push_str(handler(opcode));
     }
     source.push_str("else error('invalid private opcode '..tostring(o),0)end end end;");
-    write!(source, "return H({main_id},Z(...),{{}},G)").unwrap();
+    source.push_str("return H(M,Z(...),{},G)");
 
     crate::minify(&source, Target::Lua51)
         .map_err(|error| error.context("generated Lua 5.1 VM failed internal validation"))
 }
 
 fn handler(opcode: usize) -> &'static str {
-    super::handlers::LUA51[opcode]
+    super::opcode::lua51(opcode)
 }
 
-fn emit_prototypes(
-    output: &mut String,
+fn encode_private_bytecode(
     prototypes: &[FlatPrototype],
+    main: usize,
     opcode_ids: &[u16],
-    prng: &mut Prng,
-) -> Result<(), Diagnostic> {
-    output.push_str("local MOVE_OP=");
-    output.push_str(&prng.integer_literal(u64::from(opcode_ids[0]), false));
-    output.push_str(";local GETUP_OP=");
-    output.push_str(&prng.integer_literal(u64::from(opcode_ids[4]), false));
-    output.push_str(";local P={};");
-    for (id, prototype) in prototypes.iter().enumerate() {
-        write!(
-            output,
-            "P[{id}]={{u={},p={},v={},m={},k={{",
-            prototype.upvalues, prototype.parameters, prototype.vararg, prototype.max_stack
-        )
-        .unwrap();
-        for (index, constant) in prototype.constants.iter().enumerate() {
-            if !matches!(constant, Constant::Nil) {
-                write!(output, "[{index}]=").unwrap();
-                emit_constant(output, constant);
-                output.push(',');
+) -> Result<Vec<u8>, Diagnostic> {
+    let main = checked_u32(main, "main prototype")?;
+    let count = checked_u32(prototypes.len(), "prototype count")?;
+    let mut output = super::binary::Writer::new(0x51, main, count);
+
+    for prototype in prototypes {
+        output.u8(prototype.upvalues);
+        output.u8(prototype.parameters);
+        output.u8(prototype.vararg);
+        output.u8(prototype.max_stack);
+        output.u32(checked_u32(prototype.constants.len(), "constant count")?);
+        for constant in &prototype.constants {
+            match constant {
+                Constant::Nil => output.u8(0),
+                Constant::Boolean(value) => {
+                    output.u8(1);
+                    output.u8(u8::from(*value));
+                }
+                Constant::Number(value) => {
+                    output.u8(2);
+                    output.number(*value)?;
+                }
+                Constant::String(value) => {
+                    output.u8(3);
+                    output.bytes(value)?;
+                }
             }
         }
-        output.push_str("},q={");
-        for (index, child) in prototype.children.iter().enumerate() {
-            write!(output, "[{index}]={child},").unwrap();
+        output.u32(checked_u32(prototype.children.len(), "child count")?);
+        for child in &prototype.children {
+            output.u32(checked_u32(*child, "child prototype")?);
         }
-        output.push_str("},c={");
+        output.u32(checked_u32(prototype.code.len(), "instruction count")?);
         for instruction in &prototype.code {
-            let private_opcode = opcode_ids
+            let private = *opcode_ids
                 .get(instruction.opcode)
                 .ok_or_else(|| Diagnostic::new("invalid internal Lua 5.1 opcode"))?;
-            output.push('{');
-            output.push_str(&prng.integer_literal(u64::from(*private_opcode), false));
-            write!(
-                output,
-                ",{},{},{},{},{},{}}},",
-                instruction.a,
-                instruction.b,
-                instruction.c,
-                instruction.bx,
-                instruction.sbx,
-                instruction.raw
-            )
-            .unwrap();
+            output.u16(private);
+            output.u32(instruction.a);
+            output.u32(instruction.b);
+            output.u32(instruction.c);
+            output.u32(instruction.bx);
+            output.i32(instruction.sbx);
+            output.u32(instruction.raw);
         }
-        output.push_str("}};");
     }
-    Ok(())
+    output.finish()
 }
 
-fn emit_constant(output: &mut String, constant: &Constant) {
-    match constant {
-        Constant::Nil => output.push_str("nil"),
-        Constant::Boolean(value) => output.push_str(if *value { "true" } else { "false" }),
-        Constant::Number(value) if value.is_nan() => output.push_str("(0/0)"),
-        Constant::Number(value) if *value == f64::INFINITY => output.push_str("(1/0)"),
-        Constant::Number(value) if *value == f64::NEG_INFINITY => output.push_str("(-1/0)"),
-        Constant::Number(value) => write!(output, "{value:?}").unwrap(),
-        Constant::String(value) => emit_byte_string(output, value),
-    }
+fn checked_u32(value: usize, label: &str) -> Result<u32, Diagnostic> {
+    u32::try_from(value).map_err(|_| Diagnostic::new(format!("{label} exceeds private format")))
+}
+
+fn emit_private_decoder(
+    output: &mut String,
+    bytecode: &[u8],
+    prng: &mut Prng,
+    move_opcode: u16,
+    getup_opcode: u16,
+) {
+    output.push_str("local MOVE_OP=");
+    output.push_str(&prng.integer_literal(u64::from(move_opcode), false));
+    output.push_str(";local GETUP_OP=");
+    output.push_str(&prng.integer_literal(u64::from(getup_opcode), false));
+    output.push_str(";local B=");
+    emit_byte_string(output, bytecode);
+    output.push_str(
+        ";local bp=1;local b8=function()local v=string.byte(B,bp);if not v then error('truncated private bytecode',0)end;bp=bp+1;return v end;\
+         local b16=function()local a,b=b8(),b8();return a+b*256 end;\
+         local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;\
+         local bi32=function()local v=b32();if v>=2147483648 then return v-4294967296 else return v end end;local bc=function()local v=b32();if v>1000000 then error('private count limit exceeded',0)end;return v end;\
+         local bs=function()local n=b32();if bp+n-1>#B then error('truncated private bytes',0)end;local v=string.sub(B,bp,bp+n-1);bp=bp+n;return v end;\
+         local bn=function()local t=b8();if t==0 then local v=tonumber(bs());if not v then error('invalid private number',0)end;return v elseif t==1 then return 0/0 elseif t==2 then return 1/0 elseif t==3 then return -1/0 else error('invalid private number tag',0)end end;\
+         if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=1 or b8()~=81 then error('invalid Lua 5.1 private bytecode',0)end;\
+         local bl=b32();local ck=b32();local ps=bp;if #B-ps+1~=bl then error('invalid private bytecode length',0)end;local s1,s2=1,0;for j=ps,#B do s1=(s1+string.byte(B,j))%65521;s2=(s2+s1)%65521 end;if s1+s2*65536~=ck then error('private bytecode checksum failed',0)end;\
+         local M=b32();local np=bc();local P={};for id=0,np-1 do local F={k={},q={},c={}};F.u=b8();F.p=b8();F.v=b8();F.m=b8();\
+         local nk=bc();for j=0,nk-1 do local t=b8();if t==0 then F.k[j]=nil elseif t==1 then F.k[j]=b8()~=0 elseif t==2 then F.k[j]=bn() elseif t==3 then F.k[j]=bs() else error('invalid private constant',0)end end;\
+         local nq=bc();for j=0,nq-1 do F.q[j]=b32()end;local nc=bc();for j=1,nc do F.c[j]={b16(),b32(),b32(),b32(),b32(),bi32(),b32()}end;P[id]=F end;\
+         if bp~=#B+1 then error('trailing private bytecode',0)end;B=nil;",
+    );
 }
 
 pub(super) fn emit_byte_string(output: &mut String, value: &[u8]) {

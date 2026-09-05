@@ -1,7 +1,8 @@
+mod binary;
 pub mod compiler;
-mod handlers;
 mod lua51;
 mod luau;
+mod opcode;
 mod prng;
 
 use crate::{Diagnostic, Target};

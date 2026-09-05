@@ -146,6 +146,24 @@ if ! grep -Eq '0[bB][01_]' "$tmp/vmluau.lua"; then
     echo 'error: seeded Luau VM output did not exercise binary numeric spelling' >&2
     exit 1
 fi
+for vm in "$tmp/vm51.lua" "$tmp/vmluau.lua"; do
+    if ! grep -q 'local B=' "$vm"; then
+        echo "error: VM output $vm is missing its private bytecode blob" >&2
+        exit 1
+    fi
+    if grep -Eq 'P\[[0-9]+\]=\{' "$vm"; then
+        echo "error: VM output $vm contains legacy inline instruction tables" >&2
+        exit 1
+    fi
+done
+if [[ $(find src/vm/opcode -maxdepth 1 -name 'lua51_*.rs' | wc -l) -ne 38 ]]; then
+    echo 'error: Lua 5.1 opcode folder does not contain 38 instruction files' >&2
+    exit 1
+fi
+if [[ $(find src/vm/opcode -maxdepth 1 -name 'luau_*.rs' | wc -l) -ne 91 ]]; then
+    echo 'error: Luau opcode folder does not contain 91 instruction files' >&2
+    exit 1
+fi
 
 printf '%s\n' '[matrix] reports'
 cat "$tmp/lua51.inspect"
