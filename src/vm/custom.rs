@@ -98,15 +98,70 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     let mut payload = bytecode.to_vec();
     apply_constant_cipher(&mut payload, &keys, program.target)?;
     let encrypted = lehmer_cipher(&payload, &shares);
+    // Transport layer: the doubly encrypted image is base86-encoded (all
+    // printable alphabet characters, ~1.25 chars per byte instead of 4-char
+    // decimal escapes) and split into three segments placed in seed-shuffled
+    // payload-table functions. Each segment function re-runs the audited
+    // native-loadstring probe and decodes only its own slice, so payload
+    // recovery is itself split across several [n]=function pieces.
+    let encoded = base86_encode(&encrypted);
+    let groups = encrypted.len() / 4;
+    let tail = encrypted.len() % 4;
+    let base = groups / 3;
+    let extra = groups % 3;
+    let mut counts = [
+        base + usize::from(extra > 0),
+        base + usize::from(extra > 1),
+        0,
+    ];
+    counts[2] = groups - counts[0] - counts[1];
+    // Which of the three segment keys holds which stream part is shuffled.
+    let mut hold = [0usize, 1, 2];
+    crate::random::Prng::new(seed ^ 0x7365_676d_3373_6866).shuffle(&mut hold);
+    let mut at = 0usize;
+    let mut segments = String::new();
+    for part in 0..3 {
+        let mut chars = counts[part] * 5;
+        if part == 2 {
+            chars += if tail > 0 { tail + 1 } else { 0 };
+        }
+        let text = &encoded[at..at + chars];
+        at += chars;
+        let (probe, gate) = if program.target.is_luau() {
+            ("debug.info(loadstring,\"s\")", "if A~=\"[C]\" then E()end;")
+        } else {
+            (
+                "debug.getinfo(loadstring,\"S\")",
+                "if not(A and A.what==\"C\")then E()end;",
+            )
+        };
+        write!(
+            segments,
+            "[{key}]=function(E,SB,NCH,TC)local A=debug and {probe};{gate}\
+local S=\"{text}\";local o={{}};for i=1,#S-#S%5,5 do local v=0;local m=1;\
+for j=0,4 do local b=SB(S,i+j);if b==92 or b<35 or b>121 then E()end;\
+if b>92 then b=b-36 else b=b-35 end;v=v+b*m;m=m*86 end;\
+if v>4294967295 then E()end;o[#o+1]=NCH(v%256);v=(v-v%256)/256;\
+o[#o+1]=NCH(v%256);v=(v-v%256)/256;o[#o+1]=NCH(v%256);v=(v-v%256)/256;\
+o[#o+1]=NCH(v)end;local r2=#S%5;if r2==1 then E()end;\
+if r2>0 then local v=0;local m=1;for j=0,r2-1 do local b=SB(S,#S-r2+1+j);\
+if b==92 or b<35 or b>121 then E()end;\
+if b>92 then b=b-36 else b=b-35 end;v=v+b*m;m=m*86 end;\
+if v>256^(r2-1)-1 then E()end;\
+for j=1,r2-1 do o[#o+1]=NCH(v%256);v=(v-v%256)/256 end end;return TC(o);end,",
+            key = keys[8 + hold[part]],
+            probe = probe,
+            gate = gate,
+            text = text,
+        )
+        .unwrap();
+    }
     write!(
         s,
-        "[{}]=function(s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF,ca,cb)\n",
+        "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF,ca,cb)\n",
         keys[1]
     )
     .unwrap();
-    s.push_str("local B=");
-    super::lua51::emit_byte_string(&mut s, &encrypted);
-    s.push(';');
     s.push_str(
         "local st=1+(s1+s2+s3+31*#B)%2147483646;local XB={};for i=1,#B do \
 st=48271*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
@@ -309,7 +364,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     // parameters of target-specific sections accept nil the same way.
     write!(
         s,
-        "\nreturn CV,SV,Lookup\nend,{probes}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal P,np,entry=VMS[{}](c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        "\nreturn CV,SV,Lookup\nend,{probes}{segments}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);\nlocal P,np,entry=VMS[{}](Y1..Y2..Y3,c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
         keys[0],
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
@@ -320,6 +375,9 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         keys[5 + probe_order[2]],
         probe_inputs[probe_order[2]].0,
         probe_inputs[probe_order[2]].1,
+        keys[8 + hold[0]],
+        keys[8 + hold[1]],
+        keys[8 + hold[2]],
         keys[1],
         keys[4],
         keys[7],
@@ -396,14 +454,15 @@ fn wrapper_method(target: Target, seed: u64) -> String {
     name
 }
 
-/// Eight distinct random numeric keys for the section functions of the
-/// payload table. Separate seeded stream; same reproducibility guarantees as
-/// the method name.
+/// Eleven distinct random numeric keys for the section functions of the
+/// payload table (five sections, three key-share probes, three base86
+/// payload segments). Separate seeded stream; same reproducibility
+/// guarantees as the method name.
 fn wrapper_keys(seed: u64) -> Vec<u64> {
     let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
     let mut used = std::collections::BTreeSet::new();
     let mut keys = Vec::new();
-    while keys.len() < 8 {
+    while keys.len() < 11 {
         let key = 100 + random.next_u64() % 9900;
         if used.insert(key) {
             keys.push(key);
@@ -575,22 +634,165 @@ fn apply_constant_cipher(bytes: &mut [u8], keys: &[u64], target: Target) -> Resu
     Ok(())
 }
 
-/// Extract the embedded payload image of a generated VM script with the
-/// outer blob cipher removed: framing intact, constant pool still encrypted.
-pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
-    let mut best: Option<&str> = None;
-    for token in crate::lexer::lex(source, target)? {
-        if token.kind == crate::lexer::TokenKind::String {
-            let text = token.text(source);
-            if best.is_none_or(|current| current.len() < text.len()) {
-                best = Some(text);
+/// Base86 alphabet: printable ASCII 35..=121 excluding backslash (92) --
+/// 86 characters, all safe inside double-quoted Lua string literals.
+fn base86_alphabet() -> Vec<u8> {
+    (35u8..=121).filter(|&byte| byte != 92).collect()
+}
+
+/// Encode bytes as base86 text: every 4-byte little-endian group becomes 5
+/// alphabet characters (least significant digit first); a 1..3-byte tail
+/// becomes 2..4 characters. All arithmetic stays below 2^53 so the emitted
+/// target decoder reproduces the decode in plain doubles.
+fn base86_encode(bytes: &[u8]) -> String {
+    let alphabet = base86_alphabet();
+    debug_assert_eq!(alphabet.len(), 86);
+    let mut out = String::new();
+    for chunk in bytes.chunks(4) {
+        let mut value = 0u64;
+        for (index, &byte) in chunk.iter().enumerate() {
+            value |= u64::from(byte) << (8 * index);
+        }
+        let digits = if chunk.len() == 4 { 5 } else { chunk.len() + 1 };
+        for _ in 0..digits {
+            out.push(alphabet[(value % 86) as usize] as char);
+            value /= 86;
+        }
+    }
+    out
+}
+
+/// Decode base86 text produced by `base86_encode`, mirroring the validation
+/// of the emitted segment decoders exactly: alphabet range, tail length,
+/// 32-bit group bound and tail width bound are all checked.
+fn base86_decode(text: &str) -> Result<Vec<u8>, Diagnostic> {
+    let bad = |message: &str| Diagnostic::new(format!("base86: {message}"));
+    let value_of = |byte: u8| -> Result<u64, Diagnostic> {
+        if byte == 92 || !(35..=121).contains(&byte) {
+            return Err(bad("character outside the alphabet"));
+        }
+        Ok(u64::from(if byte > 92 { byte - 36 } else { byte - 35 }))
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() % 5 == 1 {
+        return Err(bad("dangling single character"));
+    }
+    let mut out = Vec::new();
+    for group in bytes.chunks(5) {
+        let mut value = 0u64;
+        let mut multiplier = 1u64;
+        for &byte in group {
+            value += value_of(byte)? * multiplier;
+            multiplier *= 86;
+        }
+        if group.len() == 5 {
+            if value > u64::from(u32::MAX) {
+                return Err(bad("group value overflows 32 bits"));
+            }
+            for _ in 0..4 {
+                out.push((value % 256) as u8);
+                value /= 256;
+            }
+        } else {
+            let width = group.len() - 1;
+            if value > (1u64 << (8 * width)) - 1 {
+                return Err(bad("tail value overflows its byte width"));
+            }
+            for _ in 0..width {
+                out.push((value % 256) as u8);
+                value /= 256;
             }
         }
     }
-    let raw = best.ok_or_else(|| Diagnostic::new("generated VM is missing its payload blob"))?;
-    let bytes = crate::minify::literal_bytes(raw, target)
-        .map_err(|error| Diagnostic::new(format!("generated VM blob: {error}")))?;
-    Ok(lehmer_cipher(&bytes, &cipher_shares(&wrapper_keys(seed))))
+    Ok(out)
+}
+
+/// The three base86 segment literals of a generated VM script: the longest
+/// alphabet-only string literals (short literals such as format strings or
+/// probe tags never pass the length and alphabet filters).
+fn segment_literals(source: &str, target: Target) -> Result<Vec<Vec<u8>>, Diagnostic> {
+    let mut candidates = Vec::new();
+    for token in crate::lexer::lex(source, target)? {
+        if token.kind != crate::lexer::TokenKind::String {
+            continue;
+        }
+        let value = crate::minify::literal_bytes(token.text(source), target)
+            .map_err(|error| Diagnostic::new(format!("generated VM blob: {error}")))?;
+        if value.len() >= 12
+            && value.len() % 5 != 1
+            && value
+                .iter()
+                .all(|&byte| (35..=121).contains(&byte) && byte != 92)
+        {
+            candidates.push(value);
+        }
+    }
+    if candidates.len() < 3 {
+        return Err(Diagnostic::new(
+            "generated VM is missing its three payload segments",
+        ));
+    }
+    candidates.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
+    candidates.truncate(3);
+    Ok(candidates)
+}
+
+/// Reassemble the outer ciphertext of a generated VM script: try the six
+/// segment orders, base86-decode and outer-decrypt each, and accept the
+/// unique order whose plaintext image carries the magic and target byte.
+/// The order itself is derived nowhere -- it is validated, not stored.
+fn embedded_outer_ciphertext(
+    source: &str,
+    target: Target,
+    seed: u64,
+) -> Result<Vec<u8>, Diagnostic> {
+    let segments = segment_literals(source, target)?;
+    let shares = cipher_shares(&wrapper_keys(seed));
+    let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
+    let permutations = [
+        [0usize, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut winners = Vec::new();
+    for permutation in permutations {
+        let mut text = Vec::new();
+        for index in permutation {
+            text.extend_from_slice(&segments[index]);
+        }
+        let Ok(cipher) = base86_decode(&String::from_utf8_lossy(&text)) else {
+            continue;
+        };
+        let plain = lehmer_cipher(&cipher, &shares);
+        // Magic + target byte alone cannot discriminate orders that share
+        // the same first segment; the header Adler-32 over the whole image
+        // is order-sensitive end to end, so a winner is a fully valid frame.
+        let recorded = plain
+            .get(28..32)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
+        if plain.starts_with(b"OBF\x02")
+            && plain[4] == expected
+            && recorded == Some(custom::checksum(&plain[32..]))
+        {
+            winners.push(cipher);
+        }
+    }
+    if winners.len() != 1 {
+        return Err(Diagnostic::new(
+            "generated VM payload segments do not resolve to a unique order",
+        ));
+    }
+    Ok(winners.pop().unwrap())
+}
+
+/// Extract the embedded payload image of a generated VM script with the
+/// outer blob cipher removed: framing intact, constant pool still encrypted.
+pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
+    let cipher = embedded_outer_ciphertext(source, target, seed)?;
+    Ok(lehmer_cipher(&cipher, &cipher_shares(&wrapper_keys(seed))))
 }
 
 /// Verification helper: extract the encrypted payload blob (by construction
@@ -957,13 +1159,14 @@ mod tests {
                     ExpressionKind::Name(reference) => assert_eq!(reference.value, wrapper_name),
                     _ => panic!("{target}: {output}"),
                 }
-                // payload table: eight numeric-keyed functions (five sections
-                // plus three probe/share functions) and exactly one
-                // string-keyed entry function (the called method)
+                // payload table: eleven numeric-keyed functions (five
+                // sections, three probe/share functions, three base86
+                // payload-segment decoders) and exactly one string-keyed
+                // entry function (the called method)
                 let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
                     panic!("{target}: {output}");
                 };
-                assert_eq!(fields.len(), 9, "{target}: {output}");
+                assert_eq!(fields.len(), 12, "{target}: {output}");
                 let mut numeric_keys = std::collections::BTreeSet::new();
                 let mut entries = 0;
                 for field in fields {
@@ -992,7 +1195,7 @@ mod tests {
                     }
                 }
                 assert_eq!(entries, 1);
-                assert_eq!(numeric_keys.len(), 8);
+                assert_eq!(numeric_keys.len(), 11);
                 // The wrapper is not just structural: it runs the program.
                 let workspace = native::Workspace::new();
                 let path = workspace.0.join("wrapped.lua");
@@ -1125,6 +1328,35 @@ mod tests {
     }
 
     #[test]
+    fn base86_codec_roundtrips_and_rejects_invalid_text() {
+        for length in 0..40usize {
+            let bytes: Vec<u8> = (0..length)
+                .map(|index| ((index * 31 + length * 7) % 256) as u8)
+                .collect();
+            let text = base86_encode(&bytes);
+            assert!(text
+                .bytes()
+                .all(|byte| (35..=121).contains(&byte) && byte != 92));
+            assert_eq!(base86_decode(&text).unwrap(), bytes);
+        }
+        let big: Vec<u8> = (0..5000u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let text = base86_encode(&big);
+        assert_eq!(base86_decode(&text).unwrap(), big);
+        // dangling single character (tail length 1)
+        assert!(base86_decode("9").is_err());
+        // characters outside the alphabet: quote, backslash, space, 7-bit edge
+        for bad in ["\"9", "\\9", " 9", "\u{7f}9"] {
+            assert!(base86_decode(bad).is_err(), "{bad:?}");
+        }
+        // five max-digit characters exceed 32 bits
+        assert!(base86_decode("xxxxx").is_err());
+        // a 4-character tail encoding more than 3 bytes
+        assert!(base86_decode("zzzz").is_err());
+    }
+
+    #[test]
     fn embedded_payload_is_high_entropy_ciphertext_and_seed_dependent() {
         fn entropy(bytes: &[u8]) -> f64 {
             let mut counts = [0u64; 256];
@@ -1142,19 +1374,9 @@ mod tests {
                 .sum()
         }
         let ciphertext = |source: &str, target: Target| {
-            let mut best: Option<String> = None;
-            for token in crate::lexer::lex(source, target).unwrap() {
-                if token.kind == crate::lexer::TokenKind::String {
-                    let text = token.text(source).to_owned();
-                    if best
-                        .as_ref()
-                        .is_none_or(|current| current.len() < text.len())
-                    {
-                        best = Some(text);
-                    }
-                }
-            }
-            crate::minify::literal_bytes(&best.unwrap(), target).unwrap()
+            // Reassemble the outer ciphertext from the three base86 segment
+            // literals (order resolved and validated, not stored).
+            embedded_outer_ciphertext(source, target, 735).unwrap()
         };
         for (target, fixture) in [
             (
