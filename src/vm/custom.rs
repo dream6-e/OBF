@@ -56,6 +56,7 @@ pub(crate) fn generate(
     // local is the plain empty table required by the format.
     let method = wrapper_method(program.target, seed);
     let keys = wrapper_keys(seed);
+    let params = cipher_params(seed);
     // M7 structural randomization stream: per-handler dispatch comparison
     // variants (one of four equivalent forms, seeded), integer bound-check
     // variants in the decoder/validator, and metamethod dispatch branch
@@ -122,10 +123,9 @@ pub(crate) fn generate(
             "end;".to_owned(),
         )
     };
-    let mut s = format!(
-        "local x={{}};return setmetatable({{[{}]=function()\n",
-        keys[0]
-    );
+    let mut s = String::from("local x={};return setmetatable({");
+    let header_end = s.len();
+    write!(s, "[{}]=function()\n", keys[0]).unwrap();
     s.push_str(
         r#"
 local SC=select;local Z=function(...)return{n=SC('#',...),...}end;
@@ -153,7 +153,7 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     // record payload with the SECOND, independent keystream while parsing.
     // Lehmer 48271 mod 2147483647 keeps every intermediate below 2^53, so the
     // Lua-side double arithmetic reproduces both Rust streams bit-for-bit.
-    let shares = cipher_shares(&keys);
+    let shares = cipher_shares(&keys, &params);
     // Second, independent cipher layer over the constant pool: every
     // constant-record payload inside the embedded image (boolean value byte,
     // number/integer 8 bytes, string length + content) is XORed with its own
@@ -162,8 +162,8 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     // outer layer. The Adler-32 is patched over the constant-encrypted
     // image; the canonical `.obf` on disk stays plaintext and unchanged.
     let mut payload = bytecode.to_vec();
-    apply_constant_cipher(&mut payload, &keys, program.target)?;
-    let encrypted = lehmer_cipher(&payload, &shares);
+    apply_constant_cipher(&mut payload, &keys, program.target, &params)?;
+    let encrypted = lehmer_cipher(&payload, &shares, params.outer, params.mix);
     // Transport layer: the doubly encrypted image is base86-encoded (all
     // printable alphabet characters, ~1.25 chars per byte instead of 4-char
     // decimal escapes) and split into three segments placed in seed-shuffled
@@ -195,7 +195,7 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     let mut hold = [0usize, 1, 2];
     crate::random::Prng::new(seed ^ 0x7365_676d_3373_6866).shuffle(&mut hold);
     let mut at = 0usize;
-    let mut segments = String::new();
+    let mut segment_fields = Vec::new();
     for part in 0..3 {
         let mut chars = counts[part] * 5;
         if part == 2 {
@@ -211,8 +211,9 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
                 "if not(A and A.what==\"C\")then E()end;",
             )
         };
+        let mut chunk = String::new();
         write!(
-            segments,
+            chunk,
             "[{key}]=function(E,SB,NCH,TC)local A=debug and {probe};{gate}\
 local S=\"{text}\";local o={{}};for i=1,#S-#S%5,5 do local v=0;local m=1;\
 for j=0,4 do local b=SB(S,i+j);if b==92 or b<35 or b>121 then E()end;\
@@ -231,31 +232,39 @@ for j=1,r2-1 do o[#o+1]=NCH(v%256);v=(v-v%256)/256 end end;return TC(o);end,",
             text = text,
         )
         .unwrap();
+        segment_fields.push(chunk);
     }
     // The split watermark check: W1 is a plain 4-byte packer, W2 compares
     // against the opaque expected value. Hidden in plain sight among the
     // other numeric-keyed payload functions.
-    let mut watermark = String::new();
-    write!(
-        watermark,
-        "[{}]=function(S,E,SB)local a,b,c,d=SB(S,1),SB(S,2),SB(S,3),SB(S,4);\
-if not d then E()end;return((a*256+b)*256+c)*256+d;end,[{}]=function(v,E)if v~={expected_watermark} then E()end;end,",
-        keys[11],
-        keys[12],
-    )
-    .unwrap();
+    let watermark_fields = vec![
+        format!(
+            "[{}]=function(S,E,SB)local a,b,c,d=SB(S,1),SB(S,2),SB(S,3),SB(S,4);\
+if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
+            keys[11]
+        ),
+        format!(
+            "[{}]=function(v,E)if v~={expected_watermark} then E()end;end,",
+            keys[12]
+        ),
+    ];
+    let f2_start = s.len();
     write!(
         s,
         "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF,ca,cb)\n",
         keys[1]
     )
     .unwrap();
-    s.push_str(
-        "local st=1+(s1+s2+s3+31*#B)%2147483646;local XB={};for i=1,#B do \
-st=48271*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
+    write!(
+        s,
+        "local st=1+(s1+s2+s3+{mix}*#B)%2147483646;local XB={{}};for i=1,#B do \
+st={outer}*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
 for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
 XB[i]=NCH(r)end;B=TC(XB);XB=nil;",
-    );
+        mix = params.mix,
+        outer = params.outer
+    )
+    .unwrap();
     s.push_str(
         r#"
 if #B>16777216 then E()end;
@@ -265,9 +274,26 @@ local b16=function()local a,b=b8(),b8();return a+b*256 end;
 local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;
 local take=function(n)if n>#B-bp+1 then E()end;local v=SS(B,bp,bp+n-1);bp=bp+n;return v end;
 local str=function()return take(b32())end;
+"#,
+    );
+    s.push_str(
+        r#"
 local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;
-local ku=(ca*31+cb)%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;
-local ks=1+(ku+31*#B)%2147483646;local KA=function()ks=48271*ks%2147483647;return ks%256 end;
+"#,
+    );
+    let mut ku_steps = String::new();
+    for _ in 0..params.constant_rounds {
+        ku_steps.push_str(&format!("ku={}*ku%2147483647;", params.constant));
+    }
+    write!(
+        s,
+        "local ku=(ca*{mix}+cb)%2147483647;{ku_steps}\nlocal ks=1+(ku+{mix}*#B)%2147483646;local KA=function()ks={mult}*ks%2147483647;return ks%256 end;\n",
+        mix = params.mix,
+        mult = params.constant
+    )
+    .unwrap();
+    s.push_str(
+        r#"
 local DX=function(u)local y=KA();local r=0;local w=1;for j=1,8 do local q=(u%2+y%2)%2;if q==1 then r=r+w end;u=(u-u%2)/2;y=(y-y%2)/2;w=w*2 end;return r end;
 local db8=function()return DX(b8())end;
 local db32=function()local p,q,r,t=db8(),db8(),db8(),db8();return p+q*256+r*65536+t*16777216 end;
@@ -328,6 +354,7 @@ for id=0,np-1 do
         "else E()end end;F.__obf_proto_code=take(VMCS);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;",
     );
     s.push_str("\nreturn P,np,entry\nend,");
+    let f3_start = s.len();
     write!(s, "[{}]=function(P,np,SB,E,NCH,TC)\n", keys[2]).unwrap();
     // Both Rust and target decoders validate operands before any execution.
     // The 7-bit varint stream is decoded here and expanded back into the
@@ -361,17 +388,22 @@ local k=b+c*256;local j=a+k*256;local ok=false;"
         )
         .as_str(),
     );
-    for (index, op) in program.opcodes().iter().enumerate() {
-        write!(
-            s,
-            "{} {} then ok={};",
-            if index == 0 { "if" } else { "elseif" },
-            structure.dispatch_condition(u64::from(*op as u8) as u16, program.target.is_luau()),
-            validation(*op)
-        )
-        .unwrap();
+    let mut f3_arms: Vec<String> = program
+        .opcodes()
+        .iter()
+        .map(|op| {
+            format!(
+                "{} then ok={};",
+                structure.dispatch_condition(u64::from(*op as u8) as u16, program.target.is_luau()),
+                validation(*op)
+            )
+        })
+        .collect();
+    f3_arms.extend(f3_decoys);
+    structure.shuffle(&mut f3_arms);
+    for (index, arm) in f3_arms.iter().enumerate() {
+        write!(s, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
     }
-    s.push_str(&f3_decoys);
     s.push_str("else E()end;if not ok then E()end;XB[at+1]=NCH(o,a,b,c);end;if p~=#CD+1 then E()end;F.__obf_proto_code=TC(XB);local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);");
     write!(
         s,
@@ -381,7 +413,9 @@ local k=b+c*256;local j=a+k*256;local ok=false;"
         Opcode::TailCall as u8
     )
     .unwrap();
-    write!(s, "\nend,[{}]=function(TY,E)\n", keys[3]).unwrap();
+    s.push_str("\nend,");
+    let f4_start = s.len();
+    write!(s, "[{}]=function(TY,E)\n", keys[3]).unwrap();
     s.push_str(
         r#"
 local CV=function(cell)if cell[2]then return cell[2][cell[3]]else return cell[1]end end;
@@ -428,39 +462,41 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     // state -- is ever stored in the script: each probe computes its share
     // at run time, after its environment check, in plain double arithmetic.
     let probe_inputs = cipher_probe_inputs(&keys);
-    let mut probes = String::new();
+    let mut probe_fields = Vec::new();
     for (index, _) in shares.iter().enumerate() {
         let mut steps = String::new();
-        for _ in 0..3 + 2 * index {
-            steps.push_str("x=48271*x%2147483647;");
+        for _ in 0..params.probe_rounds[index] {
+            steps.push_str(&format!("x={}*x%2147483647;", params.outer));
         }
-        write!(
-            probes,
-            "[{}]=function(E,a,b)local A=debug and ",
-            keys[5 + index]
-        )
-        .unwrap();
+        let mut field = format!("[{}]=function(E,a,b)local A=debug and ", keys[5 + index]);
         if program.target.is_luau() {
-            write!(
-                probes,
-                "debug.info(loadstring,\"s\");if A~=\"[C]\" then E()end;"
-            )
-            .unwrap();
+            field.push_str("debug.info(loadstring,\"s\");if A~=\"[C]\" then E()end;");
         } else {
-            write!(
-                probes,
-                "debug.getinfo(loadstring,\"S\");if not(A and A.what==\"C\")then E()end;"
-            )
-            .unwrap();
+            field.push_str(
+                "debug.getinfo(loadstring,\"S\");if not(A and A.what==\"C\")then E()end;",
+            );
         }
-        write!(probes, "local x=(a*31+b)%2147483647;{steps}return x;end,").unwrap();
+        let _ = write!(
+            field,
+            "local x=(a*{}+b)%2147483647;{steps}return x;end,",
+            params.mix
+        );
+        probe_fields.push(field);
     }
     // Entry method: chains the section functions in order, then runs the
     // program. IF/Freeze bind to nil on Lua 5.1 (20 prelude results); unused
     // parameters of target-specific sections accept nil the same way.
+    s.push_str("\nreturn CV,SV,Lookup\nend,");
     write!(
         s,
-        "\nreturn CV,SV,Lookup\nend,{probes}{segments}{watermark}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);\nlocal mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);\nlocal P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        "[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();
+local c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});
+local Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);
+local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);
+local CV,SV,Lookup=VMS[{}](TY,E);
+local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);
+local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[0],
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
@@ -481,7 +517,12 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         keys[7],
         keys[2],
         keys[3],
-        keys[4],
+        keys[4]
+    )
+    .unwrap();
+    write!(
+        s,
+        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
         keys[4]
     )
     .unwrap();
@@ -492,8 +533,8 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         let head_anchor = format!("[\"{method}\"]=function(VMS,...)\n");
         let head_wrapped = format!("[\"{method}\"]=function(VMS,...){entry_head}\n");
         s = s.replacen(&head_anchor, &head_wrapped, 1).replace(
-            "return U(result,1,result.n)\nend,[",
-            &format!("return U(result,1,result.n)\n{entry_tail}\nend,["),
+            "return U(result,1,result.n)\nend,",
+            &format!("return U(result,1,result.n)\n{entry_tail}\nend,"),
         );
     }
     s.push_str(
@@ -524,19 +565,21 @@ H=function(fid,args,ups)
    local o,a,b,c=SB(code,pc,pc+3);if c==nil then E()end;pc=pc+4;
    local k=b+c*256;local j=a+k*256;
 "#);
-    for (index, op) in program.opcodes().iter().enumerate() {
-        let code = super::opcode::custom(program.target, *op)
+    let mut f5_arms: Vec<String> = Vec::new();
+    for op in program.opcodes() {
+        let code = super::opcode::custom(program.target, op)
             .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
-        write!(
-            s,
-            "{} {} then {}",
-            if index == 0 { "if" } else { "elseif" },
-            structure.dispatch_condition(u64::from(*op as u8) as u16, program.target.is_luau()),
+        f5_arms.push(format!(
+            "{} then {}",
+            structure.dispatch_condition(u64::from(op as u8) as u16, program.target.is_luau()),
             code
-        )
-        .unwrap();
+        ));
     }
-    s.push_str(&f5_decoys);
+    f5_arms.extend(f5_decoys);
+    structure.shuffle(&mut f5_arms);
+    for (index, arm) in f5_arms.iter().enumerate() {
+        write!(s, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
+    }
     s.push_str("else E()end;end;end;end;return H");
     let forwards_varargs = program.prototypes[program.entry]
         .code
@@ -548,6 +591,31 @@ H=function(fid,args,ups)
         if forwards_varargs { "..." } else { "" }
     )
     .unwrap();
+    // Full code randomization: every payload field except the (entry +
+    // interpreter) anchor chunk is emitted in a seeded shuffled textual
+    // order. Field semantics are numeric-key based, so layout order is
+    // free; the decryption/probe/segment functions now also land at random
+    // positions in the file, and the interpreter's dispatch arms were
+    // shuffled above.
+    let entry_start = s
+        .rfind(&format!("[\"{method}\"]=function(VMS,...)"))
+        .expect("entry field anchor");
+    let mut fields: Vec<String> = vec![
+        s[header_end..f2_start].to_owned(),
+        s[f2_start..f3_start].to_owned(),
+        s[f3_start..f4_start].to_owned(),
+        s[f4_start..entry_start].to_owned(),
+    ];
+    fields.extend(probe_fields);
+    fields.extend(segment_fields);
+    fields.extend(watermark_fields);
+    structure.shuffle(&mut fields);
+    let mut out = s[..header_end].to_owned();
+    for field in &fields {
+        out.push_str(field);
+    }
+    out.push_str(&s[entry_start..]);
+    s = out;
     if s.len() > crate::lexer::MAX_SOURCE_BYTES {
         return Err(Diagnostic::new(
             "generated custom VM exceeds source safety limit",
@@ -611,15 +679,15 @@ fn decoy_arms(
     count: usize,
     luau: bool,
     bodies: &[&str],
-) -> String {
+) -> Vec<String> {
     let mut used = std::collections::BTreeSet::new();
-    let mut out = String::new();
+    let mut out = Vec::new();
     while used.len() < count {
         let opcode = 200 + structure.next_u64() % 55;
         if used.insert(opcode) {
             let body = bodies[(structure.next_u64() % bodies.len() as u64) as usize];
             let condition = structure.dispatch_condition(opcode as u16, luau);
-            write!(out, "elseif {condition} then {body}").unwrap();
+            out.push(format!("{condition} then {body}"));
         }
     }
     out
@@ -638,6 +706,41 @@ fn gt(structure: &mut crate::random::Prng, value: &str, bound: &str) -> String {
     }
 }
 
+/// Per-generation cipher parameters ("the cipher algorithm varies every
+/// build"): Lehmer multiplier drawn from three full-period primitives mod
+/// 2^31-1 (independently for the outer blob cipher and the constant-pool
+/// layer), the structural mixing constant, the per-probe derivation round
+/// counts and the constant-layer round count. All drawn from a dedicated
+/// seeded stream; the generated Lua side emits the identical values, and
+/// every product stays below 2^53 (65539 * (2^31-2) < 2^47).
+struct CipherParams {
+    outer: u64,
+    constant: u64,
+    mix: u64,
+    probe_rounds: [u32; 3],
+    constant_rounds: u32,
+}
+
+fn cipher_params(seed: u64) -> CipherParams {
+    const MULTIPLIERS: [u64; 3] = [16_807, 48_271, 65_539];
+    const MIXES: [u64; 4] = [31, 33, 37, 41];
+    let mut random = crate::random::Prng::new(seed ^ 0x616c_676f_7661_7237);
+    let pick = |random: &mut crate::random::Prng, table: &[u64]| {
+        table[(random.next_u64() % table.len() as u64) as usize]
+    };
+    CipherParams {
+        outer: pick(&mut random, &MULTIPLIERS),
+        constant: pick(&mut random, &MULTIPLIERS),
+        mix: pick(&mut random, &MIXES),
+        probe_rounds: [
+            3 + (random.next_u64() % 7) as u32,
+            3 + (random.next_u64() % 7) as u32,
+            3 + (random.next_u64() % 7) as u32,
+        ],
+        constant_rounds: 9 + (random.next_u64() % 5) as u32,
+    }
+}
+
 /// Structural inputs each audited probe function receives from the entry:
 /// pairs of payload-table numeric keys (prelude/interpreter, validator/
 /// helpers, and the first two probe keys). The same pairs feed the Rust-side
@@ -652,14 +755,14 @@ fn cipher_probe_inputs(keys: &[u64]) -> [(u64, u64); 3] {
 /// then 3/5/7 Lehmer rounds (one more pair of rounds per probe). No share
 /// literal exists anywhere in the generated script; the Rust cipher runs the
 /// identical derivation.
-fn cipher_shares(keys: &[u64]) -> [u64; 3] {
+fn cipher_shares(keys: &[u64], params: &CipherParams) -> [u64; 3] {
     let inputs = cipher_probe_inputs(keys);
     let mut shares = [0u64; 3];
     for (index, share) in shares.iter_mut().enumerate() {
         let (a, b) = inputs[index];
-        let mut state = (a * 31 + b) % 2_147_483_647;
-        for _ in 0..3 + 2 * index {
-            state = 48271 * state % 2_147_483_647;
+        let mut state = (a * params.mix + b) % 2_147_483_647;
+        for _ in 0..params.probe_rounds[index] {
+            state = params.outer * state % 2_147_483_647;
         }
         *share = state;
     }
@@ -669,8 +772,8 @@ fn cipher_shares(keys: &[u64]) -> [u64; 3] {
 /// Combined keystream seed: the three dynamically computed shares plus the
 /// ciphertext length (31*#B on the Lua side). Every operand stays below 2^53,
 /// so the generated decoder reproduces this value exactly.
-fn cipher_state(shares: &[u64; 3], length: usize) -> u64 {
-    1 + (shares[0] + shares[1] + shares[2] + 31 * length as u64) % 2_147_483_646
+fn cipher_state(shares: &[u64; 3], length: usize, mix: u64) -> u64 {
+    1 + (shares[0] + shares[1] + shares[2] + mix * length as u64) % 2_147_483_646
 }
 
 /// Symmetric byte cipher over a Lehmer keystream (48271 mod 2147483647; the
@@ -678,12 +781,12 @@ fn cipher_state(shares: &[u64; 3], length: usize) -> u64 {
 /// stays below 2^53, so the Lua-side double arithmetic in the generated
 /// decoder reproduces this stream bit-for-bit. This raises the embedded
 /// blob's entropy; it is obfuscation, NOT a cryptographic primitive.
-fn lehmer_cipher(bytes: &[u8], shares: &[u64; 3]) -> Vec<u8> {
-    let mut state = cipher_state(shares, bytes.len());
+fn lehmer_cipher(bytes: &[u8], shares: &[u64; 3], multiplier: u64, mix: u64) -> Vec<u8> {
+    let mut state = cipher_state(shares, bytes.len(), mix);
     bytes
         .iter()
         .map(|&byte| {
-            state = 48271 * state % 2_147_483_647;
+            state = multiplier * state % 2_147_483_647;
             byte ^ (state % 256) as u8
         })
         .collect()
@@ -775,24 +878,29 @@ fn constant_ranges(
 /// cipher shares, advanced by 11 Lehmer rounds and mixed with the image
 /// length. Never stored in the script; the target parser derives the same
 /// value from the two structural keys the entry passes in.
-fn constant_cipher_state(keys: &[u64], length: usize) -> u64 {
-    let mut state = (keys[4] * 31 + keys[7]) % 2_147_483_647;
-    for _ in 0..11 {
-        state = 48271 * state % 2_147_483_647;
+fn constant_cipher_state(keys: &[u64], length: usize, params: &CipherParams) -> u64 {
+    let mut state = (keys[4] * params.mix + keys[7]) % 2_147_483_647;
+    for _ in 0..params.constant_rounds {
+        state = params.constant * state % 2_147_483_647;
     }
-    1 + (state + 31 * length as u64) % 2_147_483_646
+    1 + (state + params.mix * length as u64) % 2_147_483_646
 }
 
 /// Symmetric constant-pool cipher: XOR every constant payload byte with the
 /// Lehmer keystream (continuing across records in file order) and patch the
 /// header Adler-32 over the transformed image. Applying it twice restores
 /// the canonical bytes; the generated decoder runs the identical stream.
-fn apply_constant_cipher(bytes: &mut [u8], keys: &[u64], target: Target) -> Result<(), Diagnostic> {
+fn apply_constant_cipher(
+    bytes: &mut [u8],
+    keys: &[u64],
+    target: Target,
+    params: &CipherParams,
+) -> Result<(), Diagnostic> {
     let ranges = constant_ranges(bytes, target)?;
-    let mut state = constant_cipher_state(keys, bytes.len());
+    let mut state = constant_cipher_state(keys, bytes.len(), params);
     for range in ranges {
         for byte in &mut bytes[range] {
-            state = 48271 * state % 2_147_483_647;
+            state = params.constant * state % 2_147_483_647;
             *byte ^= (state % 256) as u8;
         }
     }
@@ -914,7 +1022,8 @@ fn embedded_outer_ciphertext(
     seed: u64,
 ) -> Result<Vec<u8>, Diagnostic> {
     let segments = segment_literals(source, target)?;
-    let shares = cipher_shares(&wrapper_keys(seed));
+    let params = cipher_params(seed);
+    let shares = cipher_shares(&wrapper_keys(seed), &params);
     let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
     let permutations = [
         [0usize, 1, 2],
@@ -941,7 +1050,7 @@ fn embedded_outer_ciphertext(
             continue;
         }
         let cipher = &stream[4..];
-        let plain = lehmer_cipher(cipher, &shares);
+        let plain = lehmer_cipher(cipher, &shares, params.outer, params.mix);
         // Magic + target byte alone cannot discriminate orders that share
         // the same first segment; the header Adler-32 over the whole image
         // is order-sensitive end to end, so a winner is a fully valid frame.
@@ -967,7 +1076,13 @@ fn embedded_outer_ciphertext(
 /// outer blob cipher removed: framing intact, constant pool still encrypted.
 pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let cipher = embedded_outer_ciphertext(source, target, seed)?;
-    Ok(lehmer_cipher(&cipher, &cipher_shares(&wrapper_keys(seed))))
+    let params = cipher_params(seed);
+    Ok(lehmer_cipher(
+        &cipher,
+        &cipher_shares(&wrapper_keys(seed), &params),
+        params.outer,
+        params.mix,
+    ))
 }
 
 /// Verification helper: extract the encrypted payload blob (by construction
@@ -975,7 +1090,12 @@ pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
 /// cipher layers. The result equals the original canonical `.obf` bytes.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let mut payload = extract_embedded(source, target, seed)?;
-    apply_constant_cipher(&mut payload, &wrapper_keys(seed), target)?;
+    apply_constant_cipher(
+        &mut payload,
+        &wrapper_keys(seed),
+        target,
+        &cipher_params(seed),
+    )?;
     Ok(payload)
 }
 
@@ -1046,7 +1166,13 @@ mod tests {
                 assert_eq!(blob(&raw, target, 735), data);
                 assert_eq!(blob(&output, target, seed), data);
                 assert!(!output.contains(['\r', '\n']));
-                let after = crate::scope::analyze(&output, target).unwrap();
+                // Field shuffling reorders the payload table per seed, so the
+                // per-position local comparison runs against the same-seed
+                // finalizer output (identical layout, renamed locals) while
+                // the distinct-layout check below uses the emitted script.
+                let renamed = finalize(&raw, target, seed).unwrap();
+                let after = crate::scope::analyze(&renamed, target).unwrap();
+                let layout_after = crate::scope::analyze(&output, target).unwrap();
                 assert_eq!(before.globals, after.globals);
                 let mut groups = BTreeSet::new();
                 let mut spellings = BTreeSet::new();
@@ -1066,7 +1192,7 @@ mod tests {
                 assert!(groups.len() > 100);
                 assert!(spellings.len() < groups.len());
                 assert!(layouts.insert(
-                    after
+                    layout_after
                         .bindings
                         .iter()
                         .map(|b| b.name.clone())
@@ -1402,14 +1528,15 @@ mod tests {
                 let data = compile(fixture, target).unwrap();
                 let output = emit(&data, target, seed).unwrap();
                 let keys = wrapper_keys(seed);
-                let shares = cipher_shares(&keys);
-                let state = cipher_state(&shares, data.len());
+                let params = cipher_params(seed);
+                let shares = cipher_shares(&keys, &params);
+                let state = cipher_state(&shares, data.len(), params.mix);
                 let secrets = [
                     shares[0].to_string(),
                     shares[1].to_string(),
                     shares[2].to_string(),
                     state.to_string(),
-                    constant_cipher_state(&keys, data.len()).to_string(),
+                    constant_cipher_state(&keys, data.len(), &params).to_string(),
                 ];
                 for secret in &secrets {
                     assert!(
@@ -1637,6 +1764,70 @@ mod tests {
             userdata_seen == [true, true],
             "userdata guard orders: {userdata_seen:?}"
         );
+    }
+
+    #[test]
+    fn full_code_randomization_layout_and_cipher_vary_per_seed() {
+        // Full code randomization: payload fields (including every
+        // decryption/probe/segment function) are emitted in a seeded
+        // shuffled textual order, and the cipher parameters (Lehmer
+        // multiplier, mixing constant) are drawn per seed. Across seeds the
+        // layouts and parameters must differ; per seed everything must stay
+        // byte-reproducible.
+        let mut layouts = std::collections::BTreeSet::new();
+        let mut multipliers = std::collections::BTreeSet::new();
+        let mut mixes = std::collections::BTreeSet::new();
+        for (target, fixture) in [
+            (
+                Target::Lua51,
+                include_str!("../../tests/fixtures/vm_lua51.lua"),
+            ),
+            (
+                Target::Luau,
+                include_str!("../../tests/fixtures/vm_luau.lua"),
+            ),
+        ] {
+            let data = compile(fixture, target).unwrap();
+            for seed in 0..=11u64 {
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(emit(&data, target, seed).unwrap(), output);
+                // Textual order of the numeric-keyed payload fields.
+                let tokens = crate::lexer::lex(&output, target).unwrap();
+                let mut order = Vec::new();
+                for index in 0..tokens.len().saturating_sub(4) {
+                    if tokens[index].text(&output) == "["
+                        && tokens[index + 1].kind == crate::lexer::TokenKind::Number
+                        && tokens[index + 2].text(&output) == "]"
+                        && tokens[index + 3].text(&output) == "="
+                        && tokens[index + 4].text(&output) == "function"
+                    {
+                        order.push(tokens[index + 1].text(&output).to_owned());
+                    }
+                }
+                assert_eq!(order.len(), 13, "{target} seed {seed}");
+                layouts.insert((format!("{target:?}"), order));
+                for multiplier in [16_807u64, 48_271, 65_539] {
+                    if output.contains(&format!("={multiplier}*"))
+                        || output.contains(&format!("*{multiplier}*"))
+                    {
+                        multipliers.insert(multiplier);
+                    }
+                }
+                for mix in [31u64, 33, 37, 41] {
+                    if output.contains(&format!("{mix}*#")) {
+                        mixes.insert(mix);
+                    }
+                }
+            }
+        }
+        // 24 outputs (12 seeds x 2 targets) must not share layouts.
+        assert!(
+            layouts.len() >= 20,
+            "only {} distinct layouts across 24 outputs",
+            layouts.len()
+        );
+        assert_eq!(multipliers.len(), 3, "multiplier variety: {multipliers:?}");
+        assert!(mixes.len() >= 3, "mixing constant variety: {mixes:?}");
     }
 
     #[test]
