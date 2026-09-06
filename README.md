@@ -41,7 +41,7 @@ target/debug/obf virtualize --backend native --target lua51 --seed 123 -o script
 
 `--seed` 对 `minify`、`virtualize`、`wrap-bytecode` 有效，接受十进制或 `0x` 十六进制 `u64`。省略时每次生成新 seed，仅在 **stderr** 输出 `seed: N`，stdout 保持纯脚本；同源、同目标、同配置、同 seed 可逐字节复现。`compile` 输出 binary，`dump-ir` 输出可读 IR，二者不接受 seed；`--no-rename` 只用于 minify，`--backend` 只用于 virtualize。
 
-默认 AST/v2 路径的 seed **仅影响最终 local 名称与私有 prototype 字段名**，bytecode 与布局不随机化；不做 bytecode 加密、压缩或随机 section。显式 `--backend native` 才保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
+默认 AST/v2 路径的 seed **仅影响最终 local 名称、私有 prototype 字段名与包装方法名**，bytecode 与布局不随机化；不做 bytecode 加密、压缩或随机 section。显式 `--backend native` 才保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
 
 ## AST 源码前端
 
@@ -107,6 +107,7 @@ source → 现有 AST / BindingId → typed register IR / basic blocks
 - 显式 pack.n 处理多返回值、尾部 nil、vararg、调用/返回；VM→VM 尾调用替换 frame。支持宿主函数、元方法、回调及 coroutine。
 - 两端分别处理赋值/方法求值顺序、numeric-for、表构造器刷新和 Lua51 隐式 `arg`；Luau 另有 `//`、插值、泛型擦除、`__iter`、userdata NAMECALL、精确 i64 及冻结导出表。
 - Rust reader 与生成的 decoder 都做范围/格式验证；指令流为 byte string，每步直接 fetch 4 bytes，不是源码 table 中的伪字节码。
+- **整体输出包装**：整个 VM（decoder、runtime、全部 handler 与执行尾部）位于唯一入口函数内，即 `local x={__index={[m]=function(s,k,...) ... end}}` 的 `__index` 分发表中随机单字母键 `m` 处；chunk 本身只有 `return setmetatable({},x):m()` 一条方法调用。`(s,k,...)` 吸收方法调用的 `(self, 方法名)` 前两个实参，chunk 真正读取 `...` 时调用写为 `:m(...)` 转发 varargs，否则为 `:m()`。方法名来自独立 seeded 随机流；不改 bytecode、最终 local 或私有字段名。
 
 ### 运行语义兼容性增量
 
@@ -134,8 +135,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,832 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,257 B | 33,582 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,911 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,257 B | 33,661 B |
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
@@ -178,6 +179,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 `tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
 2026-09-06 VM 私有字段压缩后的完整矩阵 **PASS 149**（40 单元 + 109 集成）：此前 140 项全部保留，新增 4 项内部和 5 项集成测试。原生/VM 输出、debug/release、两套后端及 46/49 实际执行覆盖均通过。两份示例分别减少 **164 / 159 B**，除私有字段外所有 token（含原 seed 的 local 名称和字面量）完全一致，内嵌与独立 bytecode 逐字节不变；seed 现在控制最终 local 与私有字段名，不控制 v2 binary。
+
+2026-09-06 输出整体包装为单一 `setmetatable` 方法调用后的完整矩阵 **PASS 150**（41 单元 + 109 集成）：此前 149 项全部保留，新增 1 项形状/差分单元测试。默认后端与 `wrap-bytecode` 的输出均为 `local x={__index={["m"]=function(s,k,...)...end}};return setmetatable({},x):m()`；环境捕获审计下降到包装函数体内执行，根表检查允许该 `__index` 分发表。两份示例各增加 **79 B**，`.obf` 二进制与 SHA-256 逐字节不变；seed 额外控制包装方法名 `m`。旧 `--backend native` 输出保持原状。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 

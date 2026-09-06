@@ -19,7 +19,7 @@ pub fn virtualize(source: &str, target: Target, seed: u64) -> Result<String, Dia
 /// Validate externally supplied custom bytecode before generating a runtime.
 pub fn emit(bytecode: &[u8], target: Target, seed: u64) -> Result<String, Diagnostic> {
     let program = custom::decode(bytecode, target)?;
-    let raw = generate(bytecode, &program)?;
+    let raw = generate(bytecode, &program, seed)?;
     finalize(&raw, target, seed)
 }
 
@@ -30,9 +30,23 @@ fn finalize(source: &str, target: Target, seed: u64) -> Result<String, Diagnosti
     crate::minify::finalize_vm(&source, target, seed)
 }
 
-pub(crate) fn generate(bytecode: &[u8], program: &Program) -> Result<String, Diagnostic> {
+pub(crate) fn generate(
+    bytecode: &[u8],
+    program: &Program,
+    seed: u64,
+) -> Result<String, Diagnostic> {
     custom::validate(program)?;
-    let mut s = String::from(
+    // Whole-output wrapper: every statement lives inside the single function
+    // stored at a random one/two-letter key of the metatable's `__index`
+    // dispatch table: `local VM={__index={[M]=function(VMS,VMK,...)...end}}`.
+    // The chunk itself only returns `setmetatable({},VM):M(...)`. The method
+    // call resolves through that dispatch table and enters the VM with
+    // (self, method-name) as its first two arguments; VMS/VMK absorb them so
+    // the chunk varargs still reach the entry prototype untouched. Only a
+    // chunk that actually reads `...` forwards it after the method name.
+    let method = wrapper_method(program.target, seed);
+    let mut s = format!("local VM={{__index={{[\"{method}\"]=function(VMS,VMK,...)\n");
+    s.push_str(
         r#"
 local SC=select;local Z=function(...)return{n=SC('#',...),...}end;
 local U=unpack or table.unpack;local G=(getfenv and getfenv(0))or _G;local E=error;
@@ -199,12 +213,35 @@ H=function(fid,args,ups)
     s.push_str(
         "else E()end;end;end;end;local result=H(entry,Z(...),{});return U(result,1,result.n)",
     );
+    let forwards_varargs = program.prototypes[program.entry]
+        .code
+        .iter()
+        .any(|word| matches!(word.opcode(), Ok(Opcode::Varargs)));
+    write!(
+        s,
+        "\nend}}}};return setmetatable({{}},VM):{method}({})",
+        if forwards_varargs { "..." } else { "" }
+    )
+    .unwrap();
     if s.len() > crate::lexer::MAX_SOURCE_BYTES {
         return Err(Diagnostic::new(
             "generated custom VM exceeds source safety limit",
         ));
     }
     Ok(s)
+}
+
+/// Random non-keyword single-letter name for the wrapper's entry method. No
+/// Lua 5.1 or Luau keyword is a single letter. Drawn from a dedicated seeded
+/// stream: the same seed reproduces the whole script while bytecode, final
+/// local names and private fields stay on their own existing streams.
+fn wrapper_method(target: Target, seed: u64) -> String {
+    let mut random = crate::random::Prng::new(seed ^ 0x6d65_7468_6f64_3276);
+    let mut pool: Vec<char> = (b'a'..=b'z').map(char::from).collect();
+    random.shuffle(&mut pool);
+    let name = pool[0].to_string();
+    debug_assert!(!crate::lexer::is_keyword(&name, target));
+    name
 }
 
 fn validation(op: Opcode) -> &'static str {
@@ -277,7 +314,7 @@ mod tests {
             )
             .unwrap();
             let program = custom::decode(&data, target).unwrap();
-            let raw = generate(&data, &program).unwrap();
+            let raw = generate(&data, &program, 735).unwrap();
             let before = crate::scope::analyze(&raw, target).unwrap();
             let mut layouts = BTreeSet::new();
             for seed in [0, 1, 735, u64::MAX] {
@@ -318,7 +355,7 @@ mod tests {
 
     fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
         let program = custom::decode(data, target).unwrap();
-        let raw = generate(data, &program).unwrap();
+        let raw = generate(data, &program, 735).unwrap();
         // Instrument the real fetch loop BEFORE the same final whole-output
         // naming/audit pass. This measures executed handlers, not just words
         // present in dead branches or uncalled prototypes.
@@ -420,7 +457,7 @@ mod tests {
                 assert!(custom::decode(&bad, target).is_err());
                 // Bypass only Rust's input gate inside this unit test to
                 // independently exercise the emitted target-language gate.
-                let raw = generate(&bad, &program).unwrap();
+                let raw = generate(&bad, &program, 735).unwrap();
                 let output = finalize(&raw, target, 735).unwrap();
                 let work = native::Workspace::new();
                 let path = work.0.join("invalid.lua");
@@ -468,7 +505,7 @@ mod tests {
             let checksum = custom::checksum(&bad[32..]);
             bad[28..32].copy_from_slice(&checksum.to_le_bytes());
             assert!(custom::decode(&bad, Target::Luau).is_err());
-            let raw = generate(&bad, &program).unwrap();
+            let raw = generate(&bad, &program, 735).unwrap();
             let output = finalize(&raw, Target::Luau, 735).unwrap();
             let work = native::Workspace::new();
             let path = work.0.join("invalid.luau");
@@ -480,6 +517,122 @@ mod tests {
                 .unwrap();
             assert!(!result.status.success());
             assert!(result.stdout.is_empty());
+        }
+    }
+
+    #[test]
+    fn whole_output_is_one_setmetatable_method_call_into_a_single_function() {
+        use crate::ast::{ExpressionKind, StatementKind, TableField};
+        for target in [Target::Lua51, Target::Luau] {
+            // `forwards` is true exactly when the chunk itself reads `...`;
+            // only then does the wrapper method call forward varargs.
+            for (source, forwards) in [
+                ("local a=2 print(a*21)", false),
+                ("local a,b=... print((a or 0)+(b or 0))", true),
+            ] {
+                let data = compile(source, target).unwrap();
+                let output = emit(&data, target, 735).unwrap();
+                assert_eq!(emit(&data, target, 735).unwrap(), output);
+                let chunk = crate::parser::parse_source(&output, target).unwrap();
+                let statements = &chunk.block.statements;
+                assert_eq!(statements.len(), 2, "{target}: {output}");
+                // local <short>={__index=function(<short>,<short>,...) ... end}
+                let StatementKind::Local {
+                    bindings, values, ..
+                } = &statements[0].kind
+                else {
+                    panic!("{target}: {output}");
+                };
+                assert_eq!(bindings.len(), 1);
+                let wrapper_name = bindings[0].name.value.clone();
+                assert!((1..=2).contains(&wrapper_name.len()));
+                assert!(wrapper_name.bytes().all(|byte| byte.is_ascii_lowercase()));
+                let ExpressionKind::Table(fields) = &values[0].kind else {
+                    panic!("{target}: {output}");
+                };
+                assert_eq!(fields.len(), 1);
+                let TableField::Record { name, value, .. } = &fields[0] else {
+                    panic!("{target}: {output}");
+                };
+                assert_eq!(name.value, "__index");
+                let ExpressionKind::Table(dispatch) = &value.kind else {
+                    panic!("{target}: {output}");
+                };
+                assert_eq!(dispatch.len(), 1);
+                let TableField::Computed { key, value, .. } = &dispatch[0] else {
+                    panic!("{target}: {output}");
+                };
+                let ExpressionKind::Function(body) = &value.kind else {
+                    panic!("{target}: {output}");
+                };
+                assert!(body.has_vararg);
+                assert_eq!(body.parameters.len(), 2);
+                for parameter in &body.parameters {
+                    assert!((1..=2).contains(&parameter.name.value.len()));
+                    assert!(parameter
+                        .name
+                        .value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase()));
+                }
+                // return setmetatable({},<wrapper local>):<random letters>(...)
+                let StatementKind::Return(returned) = &statements[1].kind else {
+                    panic!("{target}: {output}");
+                };
+                assert_eq!(returned.len(), 1);
+                let ExpressionKind::Call {
+                    function,
+                    method,
+                    type_arguments,
+                    arguments,
+                } = &returned[0].kind
+                else {
+                    panic!("{target}: {output}");
+                };
+                assert!(type_arguments.is_empty());
+                let Some(method) = method else {
+                    panic!("{target}: {output}");
+                };
+                assert!((1..=2).contains(&method.value.len()));
+                assert!(method.value.bytes().all(|byte| byte.is_ascii_lowercase()));
+                assert!(!crate::lexer::is_keyword(&method.value, target));
+                // the dispatch-table key spells exactly the called method
+                let ExpressionKind::String(raw_key) = &key.kind else {
+                    panic!("{target}: {output}");
+                };
+                assert_eq!(
+                    crate::minify::literal_bytes(raw_key, target).unwrap(),
+                    method.value.as_bytes()
+                );
+                assert_eq!(arguments.len(), usize::from(forwards));
+                if forwards {
+                    assert!(matches!(arguments[0].kind, ExpressionKind::Vararg));
+                }
+                let ExpressionKind::Call {
+                    function: entry,
+                    method: None,
+                    type_arguments: entry_types,
+                    arguments: entry_arguments,
+                } = &function.kind
+                else {
+                    panic!("{target}: {output}");
+                };
+                assert!(entry_types.is_empty());
+                assert!(matches!(entry.kind, ExpressionKind::Name(_)));
+                assert_eq!(entry_arguments.len(), 2);
+                assert!(matches!(entry_arguments[0].kind, ExpressionKind::Table(_)));
+                match &entry_arguments[1].kind {
+                    ExpressionKind::Name(reference) => assert_eq!(reference.value, wrapper_name),
+                    _ => panic!("{target}: {output}"),
+                }
+                // The wrapper is not just structural: it runs the program.
+                let workspace = native::Workspace::new();
+                let path = workspace.0.join("wrapped.lua");
+                fs::write(&path, source).unwrap();
+                let expected = native::compile_and_run(target, &path);
+                fs::write(&path, &output).unwrap();
+                assert_eq!(expected, native::compile_and_run(target, &path));
+            }
         }
     }
 }

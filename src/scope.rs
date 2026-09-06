@@ -851,7 +851,52 @@ impl Analysis {
         chunk: &Chunk,
         seed: u64,
     ) -> Result<RenamePlan, Diagnostic> {
-        let mut captures = chunk.block.statements.iter().filter_map(|statement| {
+        // The default AST backend wraps the whole VM inside the function at
+        // `local VM={__index={[M]=function(VMS,VMK,...)...end}}`, so the
+        // audited environment capture is a statement of THAT function body.
+        // Explicit native-backend VMs keep the capture at the chunk top level.
+        // Collect both locations; the single-capture rule below is unchanged.
+        let mut statements: Vec<&Statement> = chunk.block.statements.iter().collect();
+        for statement in &chunk.block.statements {
+            let StatementKind::Local {
+                bindings,
+                values,
+                exported: false,
+                is_const: false,
+            } = &statement.kind
+            else {
+                continue;
+            };
+            if bindings.len() != 1 || values.len() != 1 {
+                continue;
+            }
+            let ExpressionKind::Table(fields) = &values[0].kind else {
+                continue;
+            };
+            if fields.len() != 1 {
+                continue;
+            }
+            let TableField::Record { name, value, .. } = &fields[0] else {
+                continue;
+            };
+            if name.value != "__index" {
+                continue;
+            }
+            let ExpressionKind::Table(dispatch) = &value.kind else {
+                continue;
+            };
+            if dispatch.len() != 1 {
+                continue;
+            }
+            let TableField::Computed { value, .. } = &dispatch[0] else {
+                continue;
+            };
+            let ExpressionKind::Function(body) = &value.kind else {
+                continue;
+            };
+            statements.extend(body.body.statements.iter());
+        }
+        let mut captures = statements.iter().filter_map(|statement| {
             let StatementKind::Local {
                 bindings,
                 values,

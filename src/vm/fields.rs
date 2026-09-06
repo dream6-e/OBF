@@ -229,8 +229,8 @@ mod tests {
         ] {
             let data = crate::vm::custom::compile(source, target).unwrap();
             let program = crate::bytecode::custom::decode(&data, target).unwrap();
-            let raw = crate::vm::custom::generate(&data, &program).unwrap();
             for seed in [0, 1, 735, u64::MAX] {
+                let raw = crate::vm::custom::generate(&data, &program, seed).unwrap();
                 let mapping = names(PROTOTYPE_FIELDS, target, seed).unwrap();
                 let original = crate::minify::finalize_vm(&raw, target, seed).unwrap();
                 let output = crate::vm::custom::emit(&data, target, seed).unwrap();
