@@ -81,15 +81,26 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     });
     // The decoder section receives the three audited probe shares (each probe
     // function already verified the environment and was called by the entry
-    // in seeded shuffled order), combines them into the keystream seed and
-    // byte-decrypts the embedded blob before parsing. Lehmer 48271 mod
-    // 2147483647 keeps every intermediate below 2^53, so the Lua-side double
-    // arithmetic reproduces the Rust stream bit-for-bit.
+    // in seeded shuffled order), the two structural constant-cipher keys and
+    // the shared helpers. It combines the shares into the outer keystream
+    // seed, byte-decrypts the embedded blob, then decrypts every constant
+    // record payload with the SECOND, independent keystream while parsing.
+    // Lehmer 48271 mod 2147483647 keeps every intermediate below 2^53, so the
+    // Lua-side double arithmetic reproduces both Rust streams bit-for-bit.
     let shares = cipher_shares(&keys);
-    let encrypted = lehmer_cipher(bytecode, &shares);
+    // Second, independent cipher layer over the constant pool: every
+    // constant-record payload inside the embedded image (boolean value byte,
+    // number/integer 8 bytes, string length + content) is XORed with its own
+    // structurally derived keystream before the whole image enters the outer
+    // cipher, so constants stay encrypted even for an analyst who strips the
+    // outer layer. The Adler-32 is patched over the constant-encrypted
+    // image; the canonical `.obf` on disk stays plaintext and unchanged.
+    let mut payload = bytecode.to_vec();
+    apply_constant_cipher(&mut payload, &keys, program.target)?;
+    let encrypted = lehmer_cipher(&payload, &shares);
     write!(
         s,
-        "[{}]=function(s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)\n",
+        "[{}]=function(s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF,ca,cb)\n",
         keys[1]
     )
     .unwrap();
@@ -111,13 +122,15 @@ local b16=function()local a,b=b8(),b8();return a+b*256 end;
 local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;
 local take=function(n)if n>#B-bp+1 then E()end;local v=SS(B,bp,bp+n-1);bp=bp+n;return v end;
 local str=function()return take(b32())end;
-local num=function()
- local lo,hi=b32(),b32();local sg=hi>=2147483648 and -1 or 1;
- local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;
- if ex==2047 then if fr==0 then return sg/0 else return 0/0 end
- elseif ex==0 then return sg*(fr*2^-1074)
- else return sg*((1+fr/4503599627370496)*2^(ex-1023))end
-end;
+local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;
+local ku=(ca*31+cb)%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;ku=48271*ku%2147483647;
+local ks=1+(ku+31*#B)%2147483646;local KA=function()ks=48271*ks%2147483647;return ks%256 end;
+local DX=function(u)local y=KA();local r=0;local w=1;for j=1,8 do local q=(u%2+y%2)%2;if q==1 then r=r+w end;u=(u-u%2)/2;y=(y-y%2)/2;w=w*2 end;return r end;
+local db8=function()return DX(b8())end;
+local db32=function()local p,q,r,t=db8(),db8(),db8(),db8();return p+q*256+r*65536+t*16777216 end;
+local dstr=function()local v=take(b32());local o={}for i=1,#v do o[i]=NCH(DX(SB(v,i)))end;return TC(o)end;
+local num=function()return fin(b32(),b32())end;
+local dnum=function()return fin(db32(),db32())end;
 if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=2 then E()end;
 "#,
     );
@@ -160,13 +173,13 @@ for id=0,np-1 do
  end;
  for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;
   if tag==0 then F.__obf_proto_k[j]=nil
-  elseif tag==1 then local v=b8();if v>1 then E()end;F.__obf_proto_k[j]=v==1
-  elseif tag==2 then F.__obf_proto_k[j]=num()
-  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=str()
+  elseif tag==1 then local v=db8();if v>1 then E()end;F.__obf_proto_k[j]=v==1
+  elseif tag==2 then F.__obf_proto_k[j]=dnum()
+  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=dstr()
 "#,
     );
     if program.target.is_luau() {
-        s.push_str(r#"elseif tag==4 then local lo,hi=b32(),b32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
+        s.push_str(r#"elseif tag==4 then local lo,hi=db32(),db32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
     }
     s.push_str(
         "else E()end end;F.__obf_proto_code=take(VMCS);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;",
@@ -296,7 +309,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     // parameters of target-specific sections accept nil the same way.
     write!(
         s,
-        "\nreturn CV,SV,Lookup\nend,{probes}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal P,np,entry=VMS[{}](c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF);\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        "\nreturn CV,SV,Lookup\nend,{probes}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal P,np,entry=VMS[{}](c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
         keys[0],
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
@@ -308,6 +321,8 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         probe_inputs[probe_order[2]].0,
         probe_inputs[probe_order[2]].1,
         keys[1],
+        keys[4],
+        keys[7],
         keys[2],
         keys[3],
         keys[4],
@@ -448,10 +463,121 @@ fn lehmer_cipher(bytes: &[u8], shares: &[u64; 3]) -> Vec<u8> {
         .collect()
 }
 
-/// Verification helper: extract the encrypted payload blob (by construction
-/// the longest string literal of a generated VM script) and decrypt it with
-/// the seed-derived shares. The result equals the original `.obf` bytes.
-pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
+/// Byte ranges of every constant-record payload (all bytes after the type
+/// tag: boolean value byte, number/integer 8 bytes, string content -- the
+/// u32 string length stays plaintext as frame metadata) inside a canonical
+/// `.obf` image, in file order. Bounded parsing: any truncation, bad count
+/// or unknown tag is a diagnostic, never a panic. The framing (tags and
+/// string lengths) is readable on both plaintext and encrypted images, so
+/// the same scan locates the ranges for encryption and decryption.
+fn constant_ranges(
+    bytes: &[u8],
+    target: Target,
+) -> Result<Vec<std::ops::Range<usize>>, Diagnostic> {
+    let bad = |message: &str| Diagnostic::new(format!("constant scan: {message}"));
+    let u16at = |off: usize| u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap());
+    let u32at = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+    if bytes.len() < 32 || &bytes[..4] != b"OBF\x02" {
+        return Err(bad("bad magic"));
+    }
+    let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
+    if bytes[4] != expected {
+        return Err(bad("target mismatch"));
+    }
+    let np = u32at(16) as usize;
+    if np == 0 || np > 65536 {
+        return Err(bad("prototype count out of range"));
+    }
+    let mut position = 32usize;
+    let mut ranges = Vec::new();
+    let room = |position: usize, extra: usize| -> Result<(), Diagnostic> {
+        position
+            .checked_add(extra)
+            .filter(|end| *end <= bytes.len())
+            .map(|_| ())
+            .ok_or_else(|| bad("truncated image"))
+    };
+    for _ in 0..np {
+        room(position, 24)?;
+        let upvalues = u16at(position + 8) as usize;
+        let constants = u32at(position + 12) as usize;
+        let code = u32at(position + 20) as usize;
+        if upvalues > 256 || constants > 65536 {
+            return Err(bad("prototype counts out of range"));
+        }
+        position += 24 + upvalues * 2;
+        for _ in 0..constants {
+            room(position, 1)?;
+            let tag = bytes[position];
+            position += 1;
+            match tag {
+                0 => {}
+                1 => {
+                    room(position, 1)?;
+                    ranges.push(position..position + 1);
+                    position += 1;
+                }
+                2 | 4 => {
+                    room(position, 8)?;
+                    ranges.push(position..position + 8);
+                    position += 8;
+                }
+                3 | 5 => {
+                    // The u32 length stays plaintext so the frame itself is
+                    // scannable on both plaintext and ciphertext images
+                    // (symmetric apply); only the content is encrypted.
+                    room(position, 4)?;
+                    let length = u32at(position) as usize;
+                    room(position, 4 + length)?;
+                    ranges.push(position + 4..position + 4 + length);
+                    position += 4 + length;
+                }
+                _ => return Err(bad("unknown constant tag")),
+            }
+        }
+        room(position, code)?;
+        position += code;
+    }
+    if position != bytes.len() {
+        return Err(bad("trailing bytes"));
+    }
+    Ok(ranges)
+}
+
+/// Keystream seed of the independent constant-pool cipher, derived from a
+/// DIFFERENT structural key pair (wrapper keys 4/7) than the outer blob
+/// cipher shares, advanced by 11 Lehmer rounds and mixed with the image
+/// length. Never stored in the script; the target parser derives the same
+/// value from the two structural keys the entry passes in.
+fn constant_cipher_state(keys: &[u64], length: usize) -> u64 {
+    let mut state = (keys[4] * 31 + keys[7]) % 2_147_483_647;
+    for _ in 0..11 {
+        state = 48271 * state % 2_147_483_647;
+    }
+    1 + (state + 31 * length as u64) % 2_147_483_646
+}
+
+/// Symmetric constant-pool cipher: XOR every constant payload byte with the
+/// Lehmer keystream (continuing across records in file order) and patch the
+/// header Adler-32 over the transformed image. Applying it twice restores
+/// the canonical bytes; the generated decoder runs the identical stream.
+fn apply_constant_cipher(bytes: &mut [u8], keys: &[u64], target: Target) -> Result<(), Diagnostic> {
+    let ranges = constant_ranges(bytes, target)?;
+    let mut state = constant_cipher_state(keys, bytes.len());
+    for range in ranges {
+        for byte in &mut bytes[range] {
+            state = 48271 * state % 2_147_483_647;
+            *byte ^= (state % 256) as u8;
+        }
+    }
+    let sum = custom::checksum(&bytes[32..]);
+    bytes[28..32].copy_from_slice(&sum.to_le_bytes());
+    Ok(())
+}
+
+/// Extract the embedded payload image of a generated VM script with the
+/// outer blob cipher removed: framing intact, constant pool still encrypted.
+pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let mut best: Option<&str> = None;
     for token in crate::lexer::lex(source, target)? {
         if token.kind == crate::lexer::TokenKind::String {
@@ -465,6 +591,15 @@ pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
     let bytes = crate::minify::literal_bytes(raw, target)
         .map_err(|error| Diagnostic::new(format!("generated VM blob: {error}")))?;
     Ok(lehmer_cipher(&bytes, &cipher_shares(&wrapper_keys(seed))))
+}
+
+/// Verification helper: extract the encrypted payload blob (by construction
+/// the longest string literal of a generated VM script) and remove BOTH
+/// cipher layers. The result equals the original canonical `.obf` bytes.
+pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
+    let mut payload = extract_embedded(source, target, seed)?;
+    apply_constant_cipher(&mut payload, &wrapper_keys(seed), target)?;
+    Ok(payload)
 }
 
 fn validation(op: Opcode) -> &'static str {
@@ -669,19 +804,31 @@ mod tests {
                 assert!(custom::decode(&bad, target).is_err());
                 // Bypass only Rust's input gate inside this unit test to
                 // independently exercise the emitted target-language gate.
-                let raw = generate(&bad, &program, 735).unwrap();
-                let output = finalize(&raw, target, 735).unwrap();
-                let work = native::Workspace::new();
-                let path = work.0.join("invalid.lua");
-                fs::write(&path, output).unwrap();
-                assert!(native::compile(target, &path).status.success());
-                let runner = if target.is_luau() { "luau" } else { "lua5.1" };
-                let result = Command::new(native::root().join("toolchains/bin").join(runner))
-                    .arg(&path)
-                    .output()
-                    .unwrap();
-                assert!(!result.status.success());
-                assert!(result.stdout.is_empty());
+                // Since the constant-pool cipher scans the payload frame,
+                // corruption that breaks the frame itself (kind 4's
+                // impossible code byte count) is rejected by the generator;
+                // every other kind still reaches the target decoder and is
+                // rejected there. Either way no user code ever runs.
+                let output = match generate(&bad, &program, 735) {
+                    Ok(raw) => Some(finalize(&raw, target, 735).unwrap()),
+                    Err(_) => {
+                        assert_eq!(kind, 4, "{target}: unexpected generator rejection");
+                        None
+                    }
+                };
+                if let Some(output) = output {
+                    let work = native::Workspace::new();
+                    let path = work.0.join("invalid.lua");
+                    fs::write(&path, output).unwrap();
+                    assert!(native::compile(target, &path).status.success());
+                    let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+                    let result = Command::new(native::root().join("toolchains/bin").join(runner))
+                        .arg(&path)
+                        .output()
+                        .unwrap();
+                    assert!(!result.status.success());
+                    assert!(result.stdout.is_empty());
+                }
             }
         }
     }
@@ -883,6 +1030,7 @@ mod tests {
                     shares[1].to_string(),
                     shares[2].to_string(),
                     state.to_string(),
+                    constant_cipher_state(&keys, data.len()).to_string(),
                 ];
                 for secret in &secrets {
                     assert!(
@@ -906,6 +1054,73 @@ mod tests {
                 assert_eq!(emit(&data, target, seed).unwrap(), output);
                 assert_eq!(decrypt_embedded(&output, target, seed).unwrap(), data);
             }
+        }
+    }
+
+    #[test]
+    fn constant_pool_cipher_is_an_independent_second_layer() {
+        let source = "local s='OBF_UNIQUE_SECRET_7351' local n=3.25 print(s,n)";
+        for target in [Target::Lua51, Target::Luau] {
+            let data = compile(source, target).unwrap();
+            let output = emit(&data, target, 735).unwrap();
+            let payload = extract_embedded(&output, target, 735).unwrap();
+            // Framing stays intact, but the image is no longer canonical:
+            // its constant pool is ciphertext and the Adler is patched.
+            assert_eq!(&payload[..4], b"OBF\x02");
+            assert_ne!(payload, data);
+            // With only the outer blob cipher removed, neither the string
+            // constant nor the number constant is visible anywhere.
+            let secret = b"OBF_UNIQUE_SECRET_7351";
+            assert!(!payload.windows(secret.len()).any(|w| w == secret));
+            let number = 3.25f64.to_le_bytes();
+            assert!(!payload.windows(8).any(|w| w == number));
+            // Different seeds derive different constant keystreams.
+            let other = emit(&data, target, 736).unwrap();
+            let other = extract_embedded(&other, target, 736).unwrap();
+            assert_ne!(payload, other);
+            // Removing both layers restores the canonical bytes exactly.
+            assert_eq!(decrypt_embedded(&output, target, 735).unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn constant_cipher_scan_rejects_malformed_images() {
+        let data = compile("local a='const' return a", Target::Lua51).unwrap();
+        let ranges = constant_ranges(&data, Target::Lua51).unwrap();
+        assert!(!ranges.is_empty());
+        assert!(ranges.iter().all(|range| range.end <= data.len()));
+        let corrupted_magic = {
+            let mut bytes = data.clone();
+            bytes[0] = b'X';
+            bytes
+        };
+        let zeroed_prototypes = {
+            let mut bytes = data.clone();
+            bytes[16..20].copy_from_slice(&0u32.to_le_bytes());
+            bytes
+        };
+        let unknown_tag = {
+            // Proto header at 32: force nu=0/nk=1 so the first constant
+            // tag lands at 56, then make it an unknown tag.
+            let mut bytes = data.clone();
+            bytes[40..42].copy_from_slice(&0u16.to_le_bytes());
+            bytes[44..48].copy_from_slice(&1u32.to_le_bytes());
+            bytes[56] = 9;
+            bytes
+        };
+        let mut trailing = data.clone();
+        trailing.push(0);
+        for bytes in [
+            Vec::new(),
+            b"OBF".to_vec(),
+            corrupted_magic,
+            zeroed_prototypes,
+            unknown_tag,
+            trailing,
+            data[..data.len() - 1].to_vec(),
+            data[..32].to_vec(),
+        ] {
+            assert!(constant_ranges(&bytes, Target::Lua51).is_err());
         }
     }
 
