@@ -33,7 +33,13 @@ fn run() -> Result<(), Diagnostic> {
     }
     if !matches!(
         command.as_str(),
-        "check" | "minify" | "virtualize" | "inspect-bytecode"
+        "check"
+            | "minify"
+            | "virtualize"
+            | "inspect-bytecode"
+            | "compile"
+            | "dump-ir"
+            | "wrap-bytecode"
     ) {
         return Err(Diagnostic::new(format!("unknown command '{command}'")));
     }
@@ -44,6 +50,7 @@ fn run() -> Result<(), Diagnostic> {
     let mut seed = 0;
     let mut seed_was_set = false;
     let mut no_rename = false;
+    let mut native_backend = None;
     let mut rest = arguments.peekable();
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -60,6 +67,15 @@ fn run() -> Result<(), Diagnostic> {
                 output = Some(PathBuf::from(value));
             }
             "--no-rename" => no_rename = true,
+            "--backend" => {
+                let value = rest
+                    .next()
+                    .ok_or_else(|| Diagnostic::new("missing value after --backend"))?;
+                native_backend = Some(parse_backend(&value)?);
+            }
+            _ if argument.starts_with("--backend=") => {
+                native_backend = Some(parse_backend(&argument[10..])?);
+            }
             "--seed" => {
                 let value = rest
                     .next()
@@ -90,9 +106,9 @@ fn run() -> Result<(), Diagnostic> {
         input.ok_or_else(|| Diagnostic::new("input file is required (use '-' for stdin)"))?;
     let data = read_input(&input)?;
 
-    if seed_was_set && !matches!(command.as_str(), "minify" | "virtualize") {
+    if seed_was_set && !matches!(command.as_str(), "minify" | "virtualize" | "wrap-bytecode") {
         return Err(Diagnostic::new(
-            "--seed is only valid for the 'minify' or 'virtualize' command",
+            "--seed is only valid for 'minify', 'virtualize' or 'wrap-bytecode'",
         ));
     }
     if seed_was_set && no_rename {
@@ -101,13 +117,19 @@ fn run() -> Result<(), Diagnostic> {
         ));
     }
 
+    if native_backend.is_some() && command != "virtualize" {
+        return Err(Diagnostic::new("--backend is only valid for 'virtualize'"));
+    }
     if no_rename && command != "minify" {
         return Err(Diagnostic::new(
             "--no-rename is only valid for the 'minify' command",
         ));
     }
 
-    if !seed_was_set && !no_rename && matches!(command.as_str(), "minify" | "virtualize") {
+    if !seed_was_set
+        && !no_rename
+        && matches!(command.as_str(), "minify" | "virtualize" | "wrap-bytecode")
+    {
         seed = vm::Options::default().seed;
         // Keep stdout a pure single-line script, while making default random
         // generations reproducible with a reported --seed value.
@@ -136,8 +158,24 @@ fn run() -> Result<(), Diagnostic> {
         }
         "virtualize" => {
             decode_source(&data)?;
-            let result = vm::virtualize(&data, target, vm::Options { seed })?;
+            let result = if native_backend == Some(true) {
+                vm::virtualize_native(&data, target, vm::Options { seed })?
+            } else {
+                vm::virtualize(&data, target, vm::Options { seed })?
+            };
             write_output(output, result.as_bytes())
+        }
+        "compile" => {
+            let bytes = vm::custom::compile(decode_source(&data)?, target)?;
+            write_output(output, &bytes)
+        }
+        "dump-ir" => {
+            let ir = obf::ir::compile(decode_source(&data)?, target)?;
+            write_output(output, format!("{ir:#?}\n").as_bytes())
+        }
+        "wrap-bytecode" => {
+            let source = vm::custom::emit(&data, target, seed)?;
+            write_output(output, source.as_bytes())
         }
         "inspect-bytecode" => {
             if output.is_some() {
@@ -145,7 +183,31 @@ fn run() -> Result<(), Diagnostic> {
                     "--output is not valid for 'inspect-bytecode'",
                 ));
             }
-            let report = bytecode::inspect(&data, target)?;
+            let custom_program = if data.starts_with(b"OBF") {
+                Some(bytecode::custom::decode(&data, target)?)
+            } else {
+                None
+            };
+            let report = if let Some(program) = &custom_program {
+                program.report()
+            } else {
+                bytecode::inspect(&data, target)?
+            };
+            if let Some(program) = &custom_program {
+                println!("format: OBF v2");
+                println!("header-size: {}", bytecode::custom::HEADER_SIZE);
+                println!("instruction-size: {}", bytecode::custom::INSTRUCTION_SIZE);
+                println!("isa-version: {}", bytecode::custom::ISA_VERSION);
+                println!(
+                    "opcodes: {}",
+                    program
+                        .opcodes()
+                        .iter()
+                        .map(|op| format!("{}:{}", *op as u8, op.name()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             println!("target: {}", report.target);
             println!("bytecode-version: {}", report.version);
             if let Some(version) = report.type_version {
@@ -159,6 +221,16 @@ fn run() -> Result<(), Diagnostic> {
             Ok(())
         }
         _ => unreachable!(),
+    }
+}
+
+fn parse_backend(value: &str) -> Result<bool, Diagnostic> {
+    match value {
+        "ast" => Ok(false),
+        "native" => Ok(true),
+        _ => Err(Diagnostic::new(format!(
+            "unknown VM backend '{value}' (expected ast or native)"
+        ))),
     }
 }
 
@@ -218,12 +290,19 @@ fn print_help() {
         "OBF - std-only Lua 5.1 and Luau toolchain\n\n\
 Usage:\n  obf check --target <lua51|luau> <input|->\n  \
 obf minify --target <lua51|luau> [--seed N | --no-rename] [-o FILE] <input|->\n  \
-obf virtualize --target <lua51|luau> [--seed N] [-o FILE] <input|->\n  \
-obf inspect-bytecode --target <lua51|luau> <input>\n\n\
-Final output uses randomized 1-2 letter locals; --no-rename keeps source names.\n\
+obf virtualize --target <lua51|luau> [--backend ast|native] [--seed N] [-o FILE] <input|->\n  \
+obf dump-ir --target <lua51|luau> [-o FILE] <input|->\n  \
+obf compile --target <lua51|luau> [-o FILE] <input|->\n  \
+obf wrap-bytecode --target <lua51|luau> [--seed N] [-o FILE] <input.obf|->\n  \
+obf inspect-bytecode --target <lua51|luau> <input|->\n\n\
+Default virtualize: AST -> IR -> OBF v2 (32-byte header, 4-byte instructions).\n\
+No external compiler, encryption, compression or randomized bytecode layout.\n\
+compile emits binary bytecode; dump-ir emits typed register IR.\n\
+wrap-bytecode validates OBF v2 and emits its single-line register VM.\n\
+inspect-bytecode accepts OBF v2 and native target bytecode.\n\
+--backend native explicitly selects the legacy external-compiler OBF v1 path.\n\
+Generated scripts receive randomized 1-2 letter locals only after assembly.\n\
 Use --seed for reproducibility; omitted seeds are fresh and printed to stderr.\n\
-Known reflection/environment access in user source disables local renaming.\n\
-The virtualize command compiles source into a randomized private instruction\n\
-format and emits a single-line target-language interpreter."
+Known reflection disables minify renaming; the AST VM rejects known unsupported reflection."
     );
 }

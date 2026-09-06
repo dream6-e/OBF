@@ -12,3 +12,6 @@
 *.out.lua
 !/vm_lua51.out.lua
 !/vm_luau.out.lua
+
+# Generated custom bytecode; keep checked-in tests source-driven.
+*.obf

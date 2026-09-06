@@ -167,14 +167,14 @@ LUAU
 "$LUAU" "$tmp/environment.luau" >"$tmp/environment.out"
 grep -qx 'runner-environment:ok' "$tmp/environment.out"
 
-printf '%s\n' '[matrix] Lua 5.1 VM: private lowering, deterministic seed, compile, execute'
+printf '%s\n' '[matrix] Lua 5.1 VM: AST -> IR -> OBF v2, seeded final names, compile, execute'
 "$LUA" tests/fixtures/vm_lua51.lua >"$tmp/vm51.original.out"
 "$OBF" virtualize --target lua51 --seed 7001 -o "$tmp/vm51.lua" tests/fixtures/vm_lua51.lua
 "$OBF" virtualize --target lua51 --seed 7001 -o "$tmp/vm51.same.lua" tests/fixtures/vm_lua51.lua
 "$OBF" virtualize --target lua51 --seed 7002 -o "$tmp/vm51.other.lua" tests/fixtures/vm_lua51.lua
 cmp "$tmp/vm51.lua" "$tmp/vm51.same.lua"
 if cmp -s "$tmp/vm51.lua" "$tmp/vm51.other.lua"; then
-    echo 'error: Lua 5.1 VM layout did not change with seed' >&2
+    echo 'error: Lua 5.1 VM final names did not change with seed' >&2
     exit 1
 fi
 "$LUAC" -l -p tests/fixtures/vm_lua51.lua >"$tmp/vm51.opcodes"
@@ -191,14 +191,14 @@ for variant in "$tmp/vm51.lua" "$tmp/vm51.same.lua" "$tmp/vm51.other.lua"; do
 done
 cmp "$tmp/vm51.lua" "$ROOT/vm_lua51.out.lua"
 
-printf '%s\n' '[matrix] Luau VM: private lowering, deterministic seed, compile, execute'
+printf '%s\n' '[matrix] Luau VM: AST -> IR -> OBF v2, seeded final names, compile, execute'
 "$LUAU" tests/fixtures/vm_luau.lua >"$tmp/vmluau.original.out"
 "$OBF" virtualize --target luau --seed 7351 -o "$tmp/vmluau.lua" tests/fixtures/vm_luau.lua
 "$OBF" virtualize --target luau --seed 7351 -o "$tmp/vmluau.same.lua" tests/fixtures/vm_luau.lua
 "$OBF" virtualize --target luau --seed 7352 -o "$tmp/vmluau.other.lua" tests/fixtures/vm_luau.lua
 cmp "$tmp/vmluau.lua" "$tmp/vmluau.same.lua"
 if cmp -s "$tmp/vmluau.lua" "$tmp/vmluau.other.lua"; then
-    echo 'error: Luau VM layout did not change with seed' >&2
+    echo 'error: Luau VM final names did not change with seed' >&2
     exit 1
 fi
 "$LUAUC" --text -O1 -g0 tests/fixtures/vm_luau.lua >"$tmp/vmluau.opcodes"
@@ -215,7 +215,66 @@ for variant in "$tmp/vmluau.lua" "$tmp/vmluau.same.lua" "$tmp/vmluau.other.lua";
 done
 cmp "$tmp/vmluau.lua" "$ROOT/vm_luau.out.lua"
 
-for vm in "$tmp"/vm51*.lua "$tmp"/vmluau*.lua; do
+printf '%s\n' '[matrix] Independent OBF v2 compile/inspect/wrap, missing compilers, debug/release equality'
+for target in lua51 luau; do
+    if [[ $target == lua51 ]]; then
+        prefix=vm51; seed=7001; runner=$LUA
+    else
+        prefix=vmluau; seed=7351; runner=$LUAU
+    fi
+    source="tests/fixtures/vm_${target}.lua"
+    env OBF_LUAC51="$tmp/missing-compiler" OBF_LUAU_COMPILE="$tmp/missing-compiler" \
+        "$OBF" compile --target "$target" -o "$tmp/$target.obf" "$source"
+    "$OBF" dump-ir --target "$target" -o "$tmp/$target.ir" "$source"
+    grep -q 'Branch' "$tmp/$target.ir"
+    "$OBF" inspect-bytecode --target "$target" "$tmp/$target.obf" >"$tmp/$target.custom.inspect"
+    grep -qx 'format: OBF v2' "$tmp/$target.custom.inspect"
+    grep -qx 'instruction-size: 4' "$tmp/$target.custom.inspect"
+    grep -qx 'header-size: 32' "$tmp/$target.custom.inspect"
+    "$OBF" wrap-bytecode --target "$target" --seed "$seed" -o "$tmp/$prefix.wrapped.lua" "$tmp/$target.obf"
+    cmp "$tmp/$prefix.lua" "$tmp/$prefix.wrapped.lua"
+    env OBF_LUAC51="$tmp/missing-compiler" OBF_LUAU_COMPILE="$tmp/missing-compiler" \
+        "$OBF" virtualize --target "$target" --seed "$seed" -o "$tmp/$prefix.independent.lua" "$source"
+    cmp "$tmp/$prefix.lua" "$tmp/$prefix.independent.lua"
+    "$ROOT/target/release/obf" compile --target "$target" -o "$tmp/$target.release.obf" "$source"
+    cmp "$tmp/$target.obf" "$tmp/$target.release.obf"
+    "$ROOT/target/release/obf" virtualize --target "$target" --seed "$seed" -o "$tmp/$prefix.release.lua" "$source"
+    cmp "$tmp/$prefix.lua" "$tmp/$prefix.release.lua"
+    for variant in "$tmp/$prefix.wrapped.lua" "$tmp/$prefix.independent.lua" "$tmp/$prefix.release.lua"; do
+        if [[ $target == lua51 ]]; then "$LUAC" -p "$variant"; else "$LUAUC" "$variant" >/dev/null; fi
+        "$runner" "$variant" >"$tmp/$prefix.extra.out"
+        cmp "$tmp/$prefix.original.out" "$tmp/$prefix.extra.out"
+    done
+    head -c -1 "$tmp/$target.obf" >"$tmp/$target.bad.obf"
+    if "$OBF" wrap-bytecode --target "$target" --seed 1 "$tmp/$target.bad.obf" >"$tmp/rejected.out" 2>/dev/null; then
+        echo 'error: custom bytecode wrapper accepted truncation' >&2; exit 1
+    fi
+    [[ ! -s "$tmp/rejected.out" ]]
+done
+
+printf '%s\n' '[matrix] Explicit legacy backend: all existing native VM fixtures and seed variants'
+for target in lua51 luau; do
+    if [[ $target == lua51 ]]; then prefix=vm51; seed=7001; runner=$LUA; else prefix=vmluau; seed=7351; runner=$LUAU; fi
+    for variant in first same other; do
+        active_seed=$seed
+        if [[ $variant == other ]]; then active_seed=$((seed+1)); fi
+        output="$tmp/legacy-$target-$variant.lua"
+        "$OBF" virtualize --backend native --target "$target" --seed "$active_seed" -o "$output" "tests/fixtures/vm_${target}.lua"
+        "$OBF" check --target "$target" "$output"
+        if [[ $target == luau ]] && ! grep -Eq '0[bB][01_]' "$output"; then
+            echo 'error: legacy Luau VM did not exercise binary numeric spelling' >&2; exit 1
+        fi
+        if [[ $target == lua51 ]]; then "$LUAC" -p "$output"; else "$LUAUC" "$output" >/dev/null; fi
+        "$runner" "$output" >"$tmp/legacy.out"
+        cmp "$tmp/$prefix.original.out" "$tmp/legacy.out"
+    done
+    cmp "$tmp/legacy-$target-first.lua" "$tmp/legacy-$target-same.lua"
+    if cmp -s "$tmp/legacy-$target-first.lua" "$tmp/legacy-$target-other.lua"; then
+        echo 'error: legacy seeded layout did not change' >&2; exit 1
+    fi
+done
+
+for vm in "$tmp"/vm51*.lua "$tmp"/vmluau*.lua "$tmp"/legacy-*.lua; do
     if [[ $(wc -l <"$vm") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$vm"; then
         echo "error: VM output $vm contains a physical newline" >&2
         exit 1
@@ -228,14 +287,11 @@ for vm in "$tmp"/vm51*.lua "$tmp"/vmluau*.lua; do
         echo "error: VM output $vm contains a generated error message" >&2
         exit 1
     fi
-    if [[ $vm == "$tmp"/vm51* ]] && grep -Eq '0[bB][01_]' "$vm"; then
+    if [[ $vm == "$tmp"/vm51* || $vm == "$tmp"/legacy-lua51-* ]] && grep -Eq '0[bB][01_]' "$vm"; then
         echo 'error: Lua 5.1 VM output contains a Luau binary literal' >&2
         exit 1
     fi
-    if [[ $vm == "$tmp"/vmluau* ]] && ! grep -Eq '0[bB][01_]' "$vm"; then
-        echo 'error: seeded Luau VM output did not exercise binary numeric spelling' >&2
-        exit 1
-    fi
+
     # Do not depend on the blob/prototype variables' old B/P spellings.
     # Rust VM tests also decode and verify magic/version/target/length/Adler
     # and assert byte-for-byte preservation across the final naming pass.
@@ -255,14 +311,22 @@ if [[ $(find src/vm/opcode -maxdepth 1 -name 'luau_*.rs' | wc -l) -ne 91 ]]; the
     exit 1
 fi
 
+if [[ $(find src/vm/opcode/lua51 -maxdepth 1 -name 'c*.rs' | wc -l) -ne 46 ]] \
+    || [[ $(find src/vm/opcode/luau -maxdepth 1 -name 'c*.rs' | wc -l) -ne 49 ]]; then
+    echo 'error: custom ISA folders do not match 46 Lua51 / 49 Luau handlers' >&2; exit 1
+fi
+printf '%s\n' '[matrix] Custom ISA executed coverage: Lua 5.1=46/46, Luau=49/49 (fetch-loop unit gate)'
+
 printf '%s\n' '[matrix] reports'
+cat "$tmp/lua51.custom.inspect"
+cat "$tmp/luau.custom.inspect"
 cat "$tmp/lua51.inspect"
 cat "$tmp/luau.inspect"
 printf '[matrix] Lua 5.1 output: '; tr '\n' '|' <"$tmp/lua51.original.out"; echo
 printf '[matrix] Luau output: '; tr '\n' '|' <"$tmp/luau.original.out"; echo
 printf '[matrix] Lua 5.1 VM output: '; tr '\n' '|' <"$tmp/vm51.virtual.out"; echo
 printf '[matrix] Luau VM output: '; tr '\n' '|' <"$tmp/vmluau.virtual.out"; echo
-printf '[matrix] VM opcode coverage: Lua 5.1=%s/38, Luau core=%s/91\n' \
+printf '[matrix] Legacy/reference opcode coverage: Lua 5.1=%s/38, Luau core=%s/91\n' \
     "$lua51_opcode_count" "$luau_opcode_count"
 printf '[matrix] VM sizes: Lua 5.1=%s bytes, Luau=%s bytes\n' \
     "$(wc -c <"$tmp/vm51.lua")" "$(wc -c <"$tmp/vmluau.lua")"

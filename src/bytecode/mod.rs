@@ -17,6 +17,9 @@ pub struct BytecodeReport {
 }
 
 pub fn inspect(data: &[u8], target: Target) -> Result<BytecodeReport, Diagnostic> {
+    if data.starts_with(b"OBF") {
+        return custom::decode(data, target).map(|program| program.report());
+    }
     match target {
         Target::Lua51 => lua51::inspect(data),
         Target::Luau => luau::inspect(data),

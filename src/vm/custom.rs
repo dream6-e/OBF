@@ -41,6 +41,7 @@ local MF,TN,TY,TS,NX,MT,SM=math.floor,tonumber,type,tostring,next,getmetatable,s
     s.push(';');
     s.push_str(
         r#"
+if #B>16777216 then E()end;
 local bp=1;
 local b8=function()local v=SB(B,bp);if v==nil then E()end;bp=bp+1;return v end;
 local b16=function()local a,b=b8(),b8();return a+b*256 end;
@@ -141,7 +142,13 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         }
         s.push_str("else E()end;end;return object[key]end;");
     } else {
-        s.push_str("local Lookup=function(object,key)return object[key]end;");
+        if program.target.is_luau() {
+            // Without a static method identifier we cannot synthesize a
+            // faithful userdata NAMECALL; never silently use indexing instead.
+            s.push_str("local Lookup=function(object,key)if TY(object)=='userdata'then E()end;return object[key]end;");
+        } else {
+            s.push_str("local Lookup=function(object,key)return object[key]end;");
+        }
     }
     s.push_str(r#"
 local W=SM({},{__mode='kv'});local H;local Make;
@@ -221,6 +228,8 @@ mod tests {
     }
 
     fn blob(source: &str, target: Target) -> Vec<u8> {
+        let chunk = crate::parse(source, target).unwrap();
+        assert!(crate::vm::tests::no_inline_metadata(&chunk));
         let tokens = crate::lexer::lex(source, target).unwrap();
         let found: Vec<_> = tokens
             .iter()

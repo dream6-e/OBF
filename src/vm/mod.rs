@@ -20,9 +20,23 @@ impl Default for Options {
     }
 }
 
-/// Compile source through the pinned target compiler and lower it into a
-/// randomized private instruction format interpreted by generated source.
+/// Default pipeline: owned AST -> typed register IR -> fixed 4-byte OBF v2
+/// instructions -> generated VM. Never invokes or falls back to native tools.
 pub fn virtualize(source: &[u8], target: Target, options: Options) -> Result<String, Diagnostic> {
+    let source = std::str::from_utf8(source).map_err(|e| {
+        Diagnostic::byte(format!("source is not valid UTF-8: {e}"), e.valid_up_to())
+    })?;
+    custom::virtualize(source, target, options.seed)
+        .map_err(|error| error.context(format!("AST {target} VM")))
+}
+
+/// Explicit compatibility backend: pinned native compiler -> legacy OBF v1.
+/// Kept separately so the new AST path never conceals a native fallback.
+pub fn virtualize_native(
+    source: &[u8],
+    target: Target,
+    options: Options,
+) -> Result<String, Diagnostic> {
     let bytecode = compiler::compile(source, target)?;
     let source = match target {
         Target::Lua51 => lua51::generate(&bytecode, options.seed),
@@ -42,7 +56,7 @@ mod tests {
     // NAMECALL function wrappers. Prototype/instruction data must come from
     // the binary decoder, not inline table literals. Never key this test to
     // the old P/W variable spellings, nor reject legitimate wrapper tables.
-    fn no_inline_metadata(chunk: &Chunk) -> bool {
+    pub(super) fn no_inline_metadata(chunk: &Chunk) -> bool {
         chunk.block.statements.iter().all(|statement| {
             let (StatementKind::Local { values, .. } | StatementKind::Assignment { values, .. }) =
                 &statement.kind

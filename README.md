@@ -1,22 +1,19 @@
 # OBF
 
-面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox** 的 std-only Rust 工具链。当前版本包含带 byte span 的 owned AST 源码前端、支持跨作用域复用的安全随机短名、单行压缩、防御式字节码解析，以及可执行的随机私有寄存器 VM。`virtualize` 会先调用固定目标编译器，再把原生指令、常量、prototype、闭包与 AUX/data word 序列化为真正的版本化二进制私有字节码。输出脚本只嵌入一个带目标标记、payload 长度和 Adler-32 完整性字段的 byte string，由生成的 decoder 恢复 VM 状态并直接解释，**不会用 Lua table 伪装字节码，也不会用 `load`/`loadstring` 重新加载原始源码**。
+面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox 方向** 的 std-only Rust 工具链。默认 `virtualize` 已实现真正的 **AST → IR → 自定义 Bytecode → 寄存器 VM**：固定 **32-byte Header**、**4 bytes/instruction**、独立常量/捕获/prototype。生成器不依赖原生 compiler，不用 `load/loadstring` 委托执行；原生后端只通过 `--backend native` 显式选择。当前不做加密、压缩、随机 section 或随机 opcode；所有脚本生成完后才统一随机一/两字母 local 并输出为单行。
 
 新接手开发者请先阅读 [`项目交接总结.md`](项目交接总结.md)，其中集中记录架构、硬约束、测试门禁、常见陷阱和下一阶段优先级。
-
-## AST 自定义后端（新增核心，CLI 接入另批测试）
-
-现已增加真正的 `AST → ir::Module → OBF v2 → register VM`，不依赖原生编译器。固定 32-byte Header，每条指令 4 bytes；Lua51 46 条、Luau 49 条 handler 均有实际执行覆盖。详见 [`自定义字节码.md`](自定义字节码.md) 的完整 Header、prototype、ISA、资源门限和已知边界。
-
-新 Rust 入口为 `ir::compile`、`bytecode::custom::{encode,decode,serialize}`、`vm::custom::{compile,emit,virtualize}`。本核心批次保留现有 CLI 默认行为/示例；随后在独立测试批次切换默认链路。旧 opcode 保留原处，新指令按用户许可放入 `src/vm/opcode/{lua51,luau}/`，不再要求新指令平铺根目录。
 
 ## 命令
 
 ```text
 obf check --target <lua51|luau> <input|->
 obf minify --target <lua51|luau> [--seed N | --no-rename] [-o FILE] <input|->
-obf virtualize --target <lua51|luau> [--seed N] [-o FILE] <input|->
-obf inspect-bytecode --target <lua51|luau> <input>
+obf virtualize --target <lua51|luau> [--backend ast|native] [--seed N] [-o FILE] <input|->
+obf dump-ir --target <lua51|luau> [-o FILE] <input|->
+obf compile --target <lua51|luau> [-o FILE] <input|->
+obf wrap-bytecode --target <lua51|luau> [--seed N] [-o FILE] <input.obf|->
+obf inspect-bytecode --target <lua51|luau> <input|->
 ```
 
 示例：
@@ -34,12 +31,17 @@ target/debug/obf minify --target lua51 --seed 123 -o script.min.lua script.lua
 target/debug/obf minify --target luau --no-rename -o script.lexical.luau script.luau
 target/debug/obf virtualize --target lua51 --seed 123 -o script.vm.lua script.lua
 target/debug/obf virtualize --target luau --seed 0x735 -o script.vm.luau script.luau
-target/debug/obf inspect-bytecode --target lua51 script.luac
+target/debug/obf dump-ir --target lua51 -o target/script.ir script.lua
+target/debug/obf compile --target lua51 -o target/script.obf script.lua
+target/debug/obf inspect-bytecode --target lua51 target/script.obf
+target/debug/obf wrap-bytecode --target lua51 --seed 123 -o script.from-bytecode.lua target/script.obf
+# 可选旧后端，不是默认 fallback
+target/debug/obf virtualize --backend native --target lua51 --seed 123 -o script.legacy.lua script.lua
 ```
 
-`--seed` 对 `minify` 和 `virtualize` 都有效，接受十进制或 `0x` 十六进制 `u64`。省略时每次生成选取新 seed，并仅在 **stderr** 输出 `seed: N`，stdout 仍是纯脚本。相同输入、目标、配置和 seed 可逐字节复现；`--seed` 不能与 `--no-rename` 合用，也不接受在 `check` / `inspect-bytecode` 上使用。
+`--seed` 对 `minify`、`virtualize`、`wrap-bytecode` 有效，接受十进制或 `0x` 十六进制 `u64`。省略时每次生成新 seed，仅在 **stderr** 输出 `seed: N`，stdout 保持纯脚本；同源、同目标、同配置、同 seed 可逐字节复现。`compile` 输出 binary，`dump-ir` 输出可读 IR，二者不接受 seed；`--no-rename` 只用于 minify，`--backend` 只用于 virtualize。
 
-seed 控制最终变量随机短名；对 VM 还控制私有 opcode、dispatcher 顺序、比较分支和数字写法。命名与 VM 布局使用独立随机流，避免前序随机调用消耗命名状态。Lua 5.1 只使用十进制/十六进制数字；Luau 还可使用二进制与数字分隔符。两个目标的最终结果都没有物理换行。随机化不是加密；名称池有限、没有可改名 local 或触发保留策略时，不承诺任意两个 seed 的输出一定不同。
+默认 AST/v2 路径的 seed **仅影响最终变量名**，bytecode 与布局不随机化；不做加密、压缩或随机 section。显式 `--backend native` 才保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
 
 ## AST 源码前端
 
@@ -83,24 +85,40 @@ target/debug/obf minify --target lua51 --no-rename -o script.min.lua script.lua
 
 公共接口为 `obf::scope::analyze(source, target)`、默认使用新 seed 的 `obf::minify(...)`，以及 `obf::minify_with_options(..., MinifyOptions::seeded(123))` / `MinifyOptions::lexical()`。`MinifyOptions` 现在含 `rename_locals` 和 `seed`；推荐使用上述构造方法。原有低层 `obf::minify::minify(source, tokens, target)` 仍为词法模式，并验证外部 token stream。作用域分析使用显式工作栈，scope/binding/reference 各限 1,000,000 项，工作项限 8,000,000。名称复用另有 8,000,000 次工作预算及 1,000,000 条跨域干涉边上限，同域不构造平方规模的两两边。
 
-## 私有字节码与 VM
+## 自定义字节码与寄存器 VM（默认 AST 后端）
 
-所有 VM 指令都平铺在唯一的 `src/vm/opcode/` 文件夹内：Lua 5.1 共 38 个 `lua51_*.rs` 文件，Luau 0.735 共 91 个 `luau_*.rs` 文件。每个文件只负责一条指令，并通过固定的 `code() -> &'static str` 返回该指令的解释器代码；`src/vm/opcode/mod.rs` 仅负责注册和按 opcode 取用。生成时只装入当前 chunk 实际使用的 handler，不再输出无用 dispatcher 分支。
+```text
+source → 现有 AST / BindingId → typed register IR / basic blocks
+       → 自定义指令选择 / 标签回填 → OBF v2
+       → 校验 / decoder / register VM → 完整生成后随机短名 / 单行化
+```
 
-decoder、runtime、dispatcher、全部已用 handler 和执行尾部**全部组装完成后**，`vm::virtualize` 仅调用一次内部 `minify::finalize_vm`，随后不再追加代码。该阶段统一随机命名所有显式 local、局部函数、参数与循环变量，并在最终单行输出中再次核对绑定图、同域唯一性、名称长度与确实已换名；隐式 Lua 5.1 `arg` 不属于源码中的显式声明。
+这条链路**不调用原生 compiler，不存 native word，也不默默 fallback**。新 `ir::Module` 包含函数、常量、cell/upvalue 捕获和带符号后继的基本块；IR 的 branch 生成 `Test + Jump + Jump`，每条均为 4 bytes。Header 固定 **32 bytes**，含版本、目标、端序、宽度、文件长度、prototype 数量、入口、ISA 版本和 Adler-32。完整逐字段规范与 **49 条 ISA** 见 [`自定义字节码.md`](自定义字节码.md)。
 
-生成器只有一个严格审计的环境捕获例外：`local G=(getfenv and getfenv(0))or _G`。仅内部生成路径可使用，额外检测到的反射/环境访问（barrier）或受保护显式绑定会导致生成失败。普通 `minify` 对同样的源码仍执行保守保留策略，没有公开的“强制忽略反射”选项。全局、字段、方法和私有 bytecode/string 内容不会随局部变量改名；这也不承诺模拟任意宿主反射、调试栈或原始调试名称。
+- Lua 5.1：46 个 `src/vm/opcode/lua51/c*.rs`；Luau：49 个 `src/vm/opcode/luau/c*.rs`。每条有效 opcode 有一份独立固定 handler，不以 NOP 代替未实现语义。
+- 每 frame 为寄存器文件；local 使用 heap cell，临时值为普通寄存器，闭包引用 cell。循环的新一轮/复用寄存器不会破坏逃逸闭包。
+- 显式 pack.n 处理多返回值、尾部 nil、vararg、调用/返回；VM→VM 尾调用替换 frame。支持宿主函数、元方法、回调及 coroutine。
+- 两端分别处理赋值/方法求值顺序、numeric-for、表构造器刷新和 Lua51 隐式 `arg`；Luau 另有 `//`、插值、泛型擦除、`__iter`、userdata NAMECALL、精确 i64 及冻结导出表。
+- Rust reader 与生成的 decoder 都做范围/格式验证；指令流为 byte string，每步直接 fetch 4 bytes，不是源码 table 中的伪字节码。
 
-私有 instruction record 已压缩为 `u16 private-opcode + u32 native-word`。A/B/C/Bx/sBx/D/E 在目标端从原始 32-bit word 恢复，不再重复存储六份字段。生成器自身的错误提示字符串也已删除，所有内部失败路径统一调用局部错误函数（模板中的 `E` 也参与最终随机改名）。
+Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`、`vm::custom::{compile,emit}`，以及默认 `vm::virtualize`。`inspect-bytecode` 自动区分 OBF v2 与原生 chunk；`wrap-bytecode` 可把已保存的 `.obf` 独立包装为 VM。
 
-编译器查找顺序为 `OBF_LUAC51` / `OBF_LUAU_COMPILE` 环境变量、仓库 `toolchains/bin`，然后是 `PATH`。
+所有 decoder、runtime、dispatcher、字节码中出现的 handler 和执行尾部组装完后，只调用一次私有 `minify::finalize_vm`；之后不追加代码。该阶段统一随机一/两字母名，重解析复核绑定图、同域唯一性、名称长度、确实换名和 bytecode 字节不变。唯一生成器环境例外仍是严格审计的 `local G=(getfenv and getfenv(0))or _G`，没有公开忽略反射的开关。
 
-仓库根目录同时提交两份可直接检查和运行的生成结果：
+### 显式兼容后端
 
-- `vm_lua51.out.lua`：`tests/fixtures/vm_lua51.lua`，seed **7001**，**16,212 B**；
-- `vm_luau.out.lua`：`tests/fixtures/vm_luau.lua`，seed **7351**，**23,986 B**。
+`virtualize --backend native` / `vm::virtualize_native` 保留原来的 `compiler → native reader → OBF v1`。旧根目录 `lua51_*.rs`（38）与 `luau_*.rs`（91）不移动、仍单独测试。只有这个后端使用旧 13-byte Header、6-byte `u16 private-opcode + u32 native-word` 及随机布局。
 
-生成器或命名策略变更后需同步再生成这两份文件；测试矩阵会与固定 seed 新生成结果逐字节比较。
+旧 backend 的 compiler 查找依次为 `OBF_LUAC51` / `OBF_LUAU_COMPILE`、仓库 `toolchains/bin`、`PATH`。默认 AST 后端在这些变量指向不存在文件时仍可正常编译/生成；原生工具仍用于门禁的语法/运行对照。
+
+### 已提交示例
+
+| 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
+|---|---|---:|---:|---:|
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,524 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,489 B | 33,980 B |
+
+生成器或命名策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
 ## 固定环境
 
@@ -124,30 +142,29 @@ decoder、runtime、dispatcher、全部已用 handler 和执行尾部**全部组
 
 矩阵会：
 
-1. 运行 Rust 全目标测试及 debug/release 构建；
-2. 在 Lua 5.1 与 Luau 中检查、编译并执行原始/单行压缩 fixture，并额外运行两套 focused AST corpus；
-3. 生成真实原生字节码并交给内部解析器验证，同时检查截断拒绝；
-4. 对两个目标各生成三份 VM 输出，验证同 seed 可复现、异 seed 布局不同；
-5. 按 AST/字节内容验证私有 blob 的 magic、版本、目标、长度、Adler-32 和改名前后字节一致；与变量拼写无关地检查旧 inline metadata，允许正常 Luau NAMECALL 函数包装表；
-6. 验证单一 `src/vm/opcode/` 文件夹中恰好注册 Lua 5.1 的 38 个和 Luau 的 91 个独立指令文件；
-7. 验证 Lua 5.1 fixture 实际覆盖 38/38 opcode，Luau fixture 覆盖至少 60 条可由固定编译器产生的核心 opcode；
-8. 用 `luac5.1` / `luau-compile` 检查所有 VM seed 变体并逐份执行，与原 fixture 逐字节比较；根目录示例也必须与固定 seed 生成结果一致；
-9. 确认 VM 输出为单物理行、不包含生成器错误消息且不委托 `loadstring`；
-10. 对 `scope_lua51.lua` / `scope_luau.lua` 比较原始、仅词法、seed 735/736 安全压缩的编译和运行结果，验证固定 seed 确定性、异 seed 换名及这些 fixture 的实际缩短；
-11. 对 `reflection_lua51.lua` / `reflection_luau.lua` 验证反射可观察名称不变，自动保留输出与 `--no-rename` 逐字节一致。
+1. 运行 Rust 全目标测试、rustfmt 与 debug/release 构建；
+2. 对原有 basic/AST/scope/reflection 语料保持双端源码/压缩的语法、运行、seed、反射保留和短名安全门禁；
+3. 检查原生 chunk，同时验证 OBF v2 Header、4-byte 大小、截断、字节损坏、恶意结构、round-trip 与资源上限；
+4. 对 v2 执行逐 opcode fetch-loop 覆盖：**Lua51 46/46，Luau 49/49**；不是只数未执行的指令；
+5. 编译/执行每份 VM seed 变体，确认单行、不委托 loadstring、没有生成器错误消息、所有显式 local 最后才改名且 payload 字节不变；
+6. 检查新目标目录的 46/49 个 handler 和旧兼容目录的 38/91 个 handler；
+7. 独立执行 `dump-ir → compile → inspect → wrap`，证明缺少原生 compiler 也能生成默认 VM；
+8. 比较 debug/release 的 binary 和 VM、默认虚拟化与独立 wrap、根目录 golden；
+9. 显式执行旧 `--backend native` 的完整语料、多 seed、语法/运行回归，保留其原生 opcode coverage（Lua51 38/38、Luau ≥60）；
+10. 额外覆盖多返回值/nil、变量求值时机、闭包、循环、20k 尾调用、coroutine/回调、i64、导出模块、userdata NAMECALL、GC 及 CLI 失败不覆盖文件。
 
 `tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
-2026-09-06 完整矩阵通过，Rust 单元/集成测试合计 **84 项**（29 单元 + 55 集成，其中 11 项 parser audit、7 项 scope reuse），debug/release 构建通过。
+2026-09-06 默认 AST 后端接入后的完整矩阵 **PASS 114**（32 单元 + 82 集成）：在原 84 项基础上新增 30 项 IR/bytecode/VM/CLI 回归，debug/release 构建、binary/脚本一致性及两套后端均通过。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 
 ## 当前边界与后续工作
 
-当前 owned AST、lexical scope、local/upvalue 绑定解析、保守安全改名、跨作用域名字复用和完整 VM 生成后的随机一/两字母命名已完成本轮增量；常量折叠/死代码删除及更全面的宿主反射模型尚未实现。VM 已具备可执行的二进制私有 register bytecode，instruction/prototype 状态表由 bytecode decoder 动态构造，不再作为编译结果中的伪字节码字面量。VM wrapper 已经通过私有审计路径统一随机命名，但 binary blob 仍是可逆明文容器；分阶段字节加密、拆分隐藏密钥、进一步的安全压缩优化、更多 handler 等价模板与 Roblox-only bit32 后端仍按 [`总路线.md`](总路线.md) 后续里程碑推进。
+默认 AST/IR/v2 register VM、独立 reader/encoder、完整 ISA 与最终随机短名已可运行。后续优先扩展语义/压力差分、寄存器/pack 的体积和运行开销、IR 数据流验证及宿主接口边界；按本次要求，暂不推进复杂加密、压缩、随机 section 或多模板随机化。
+
+当前限制必须保留：不模拟原始 debug/环境反射与错误位置；`repeat/continue` 跳过条件所用 local 初始化时保守拒绝；不可见/被隐藏元表的 generalized iterator 不属于已支持保证，Roblox executor 尚未实机验证。结构验证不是沙箱或任意输入的语义等价证明。详细限制及 16 MiB/256 registers 等门限见 [`自定义字节码.md`](自定义字节码.md)。
 
 ## Anti 状态
 
 按当前要求，`src/anti/` 暂时留空，等待用户提供具体 Anti 实现。
-
-核心批次最终门禁：`./tools/test-matrix.sh` **PASS 110**（32 单元 + 78 集成）；其中新增 26 项 AST/IR/v2 VM 回归，含两端逐 opcode 实际执行覆盖。debug/release 与原有门禁均通过。
