@@ -282,7 +282,10 @@ mod tests {
                     "fromstring",
                     "freeze",
                     "char",
-                    "concat"
+                    "concat",
+                    "info",
+                    "getinfo",
+                    "what"
                 ])));
             }
         }

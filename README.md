@@ -1,6 +1,6 @@
 # OBF
 
-面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox 方向** 的 std-only Rust 工具链。默认 `virtualize` 已实现真正的 **AST → IR → 自定义 Bytecode → 寄存器 VM**：固定 **32-byte Header**、指令操作数以 **7-bit varint** 序列化（小数值 1 byte，较大值 2~N bytes），独立常量/捕获/prototype。生成器不依赖原生 compiler，不用 `load/loadstring` 委托执行；原生后端只通过 `--backend native` 显式选择。当前不做加密、压缩、随机 section 或随机 opcode；所有脚本生成完后才统一随机一/两字母 local 并输出为单行。
+面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox 方向** 的 std-only Rust 工具链。默认 `virtualize` 已实现真正的 **AST → IR → 自定义 Bytecode → 寄存器 VM**：固定 **32-byte Header**、指令操作数以 **7-bit varint** 序列化（小数值 1 byte，较大值 2~N bytes），独立常量/捕获/prototype。生成器不依赖原生 compiler，不用 `load/loadstring` 委托执行；原生后端只通过 `--backend native` 显式选择。`.obf` 文件保持明文 canonical 格式；生成脚本内嵌的 payload blob 则按已授权的 M6 方案做**字节级传输加密**（seed 派生 Lehmer 密钥流 XOR，提高熵值），运行时由**三个各自验证环境的探针函数**（如 `debug.info(loadstring,"s")`）按 seed 洗牌的顺序交回密钥份额并结合解密。不做压缩容器、随机 section 或随机 opcode；所有脚本生成完后才统一随机一/两字母 local 并输出为单行。
 
 新接手开发者请先阅读 [`项目交接总结.md`](项目交接总结.md)，其中集中记录架构、硬约束、测试门禁、常见陷阱和下一阶段优先级。
 
@@ -41,7 +41,7 @@ target/debug/obf virtualize --backend native --target lua51 --seed 123 -o script
 
 `--seed` 对 `minify`、`virtualize`、`wrap-bytecode` 有效，接受十进制或 `0x` 十六进制 `u64`。省略时每次生成新 seed，仅在 **stderr** 输出 `seed: N`，stdout 保持纯脚本；同源、同目标、同配置、同 seed 可逐字节复现。`compile` 输出 binary，`dump-ir` 输出可读 IR，二者不接受 seed；`--no-rename` 只用于 minify，`--backend` 只用于 virtualize。
 
-默认 AST/v2 路径的 seed **仅影响最终 local 名称、私有 prototype 字段名与包装方法名/数字键**，bytecode 与布局不随机化；不做 bytecode 加密、压缩或随机 section。显式 `--backend native` 才保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
+默认 AST/v2 路径的 seed **影响最终 local 名称、私有 prototype 字段名、包装方法名/数字键、密钥份额与探针调用顺序及嵌入密文**；解密后的 payload 与 `.obf` 文件本身与 seed 无关、逐字节确定。不做压缩容器或随机 section。显式 `--backend native` 才保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
 
 ## AST 源码前端
 
@@ -119,7 +119,14 @@ source → 现有 AST / BindingId → typed register IR / basic blocks
 
 Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`、`vm::custom::{compile,emit}`，以及默认 `vm::virtualize`。`inspect-bytecode` 自动区分 OBF v2 与原生 chunk；`wrap-bytecode` 可把已保存的 `.obf` 独立包装为 VM。
 
-所有 decoder、runtime、dispatcher、handler、静态方法适配器和执行尾部组装完后，自定义 VM 先缩短私有字段，再调用一次私有 `minify::finalize_vm` 统一随机 local、分号分隔和单行化；之后不追加代码。重解析复核绑定图、同域唯一性、名称长度、确实换名和 bytecode 字节不变。唯一生成器环境例外仍是严格审计的 `local G=(getfenv and getfenv(0))or _G`，没有公开忽略反射的开关。
+所有 decoder、runtime、dispatcher、handler、静态方法适配器和执行尾部组装完后，自定义 VM 先缩短私有字段，再调用一次私有 `minify::finalize_vm` 统一随机 local、分号分隔和单行化；之后不追加代码。重解析复核绑定图、同域唯一性、名称长度、确实换名和解密后 bytecode 字节不变。生成器环境例外仍严格审计：`local G=(getfenv and getfenv(0))or _G`，加上三个 payload 密钥函数内**形状完全固定**的环境探针（Luau `debug and debug.info(loadstring,"s")` 结果须为 `"[C]"`；Lua 5.1 `debug and debug.getinfo(loadstring,"S")` 须 `what=="C"`）。探针不通过则静默中止、无任何输出；没有公开忽略反射的开关。
+
+### 嵌入 payload 传输加密（M6 已授权部分）
+
+- 生成时用 seed 派生的 **Lehmer 密钥流（48271 mod 2147483647）** 对内嵌 blob 逐字节 XOR，密文字节分布均匀（Shannon 熵 > 7.5 bits/byte，测试断言高于明文）；所有中间量 < 2^53，Lua 双精度与 Rust 逐位一致。
+- 密钥拆成 **三个份额**（各为 1..2147483645 的十进制字面量），分别存放在三个 payload 函数中；每个函数先做上述环境探针，通过才 `return` 份额。
+- 入口按 **seed 洗牌的顺序**调用三个函数，decoder 段以 `1+(s1+s2+s3)%2147483646` 重建密钥流解出明文 payload，再做原有的 magic/Adler/结构校验。`.obf` 文件与 `compile` 输出保持明文 canonical、与 seed 无关；`vm::custom::decrypt_embedded` 提供验证助手。
+- 这是提高静态分析成本的混淆层，**不是密码学加密**；密钥派生自 seed，不能抵御持有脚本的攻击者。
 
 **VM 私有字段也压缩为一/两字母**：`code`、`tags`、`parent`、`flags`、`shared`、`self`、`cached` 及原有短字段共 14 个，当前全部可分配为互不冲突的随机单字母。decoder、校验器、运行时、缓存和 opcode handler 的构造/读/写共用同一映射；同 seed 复现，使用独立随机流，不改变既有 local 名称或 bytecode。
 
@@ -135,8 +142,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 29,356 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 28,729 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 26,080 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 29,569 B |
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
@@ -181,6 +188,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 2026-09-06 VM 私有字段压缩后的完整矩阵 **PASS 149**（40 单元 + 109 集成）：此前 140 项全部保留，新增 4 项内部和 5 项集成测试。原生/VM 输出、debug/release、两套后端及 46/49 实际执行覆盖均通过。两份示例分别减少 **164 / 159 B**，除私有字段外所有 token（含原 seed 的 local 名称和字面量）完全一致，内嵌与独立 bytecode 逐字节不变；seed 现在控制最终 local 与私有字段名，不控制 v2 binary。
 
 2026-09-06 输出整体改为 `local x={};return setmetatable({...},x):m()` 的分函数载荷形式后的完整矩阵 **PASS 150**（41 单元 + 109 集成）：此前 149 项全部保留，形状/差分单元测试改为断言新结构。默认后端与 `wrap-bytecode` 的全部代码位于载荷表的 5 个随机数字键 section 函数与 1 个随机字母键入口函数中；环境捕获审计下降到各 section 函数体内执行，根表检查允许数字/字符串键函数字段。两份示例相对私有字段批次各增加 **484 B**；seed 额外控制包装方法名与数字键。旧 `--backend native` 输出保持原状。
+
+2026-09-06 嵌入 payload 字节级加密 + 三探针密钥拆分后的完整矩阵 **PASS 153**（42 单元 + 111 集成）：此前 151 项全部保留，新增 1 项密文熵值/解密等价单元测试与 1 项环境篡改 fail-closed 集成测试（Lua51 替换 `loadstring`、Luau 经 `setfenv` 注入，脚本必须无输出中止）。内嵌 blob 为 seed 派生 Lehmer 密钥流密文（熵 > 7.5 bits/byte），三个 payload 函数各先验证环境再交回密钥份额，调用顺序 seed 洗牌，decoder 结合解密后走原有校验；`.obf` 文件与解密后 payload 逐字节不变。golden 为 **26,080 / 29,569 B**（密文中可打印比例高于原 `\000` 密集的明文，Lua51 反而缩小 3.3 KB）。生成器环境审计扩展为“1 个 getfenv 捕获 + 恰好 3 个固定形状探针”；矩阵的 loadstring 检查改为只匹配调用、blob 检查改为包装形状，Luau 二进制字面量检查收窄到 legacy（语法由 `luac5.1 -p` 全量保证）。
 
 2026-09-06 指令序列化改为 7-bit varint 后的完整矩阵 **PASS 151**（41 单元 + 110 集成）：此前 150 项全部保留，`custom_bytecode` 新增 1 项 varint codec 回归（canonical/非最小编码、字段上限、带外 code 字节数、尾随字节、varint 截断与逐 Word 语义拒绝）。文件内指令按 Form 列写成 `[opcode][字段 varint]`（2~7 bytes），prototype header 追加 `code_byte_count`（20→24 bytes），Header 宽度码改为 `0`；目标 decoder 校验后展开回定长 4-byte 指令串，fetch-loop/handler/ISA 编号完全不变。两份示例 bytecode 缩小 **19.7% / 20.4%**（6,879→5,525 / 8,257→6,575 B），脚本 33,316→29,356 / 34,066→28,729 B；ISA 修订 1/2 语义、46/49 执行覆盖、debug/release 一致性不变。
 

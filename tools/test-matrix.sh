@@ -303,7 +303,9 @@ for vm in "$tmp"/vm51*.lua "$tmp"/vmluau*.lua "$tmp"/legacy-*.lua; do
         echo "error: VM output $vm contains a physical newline" >&2
         exit 1
     fi
-    if grep -q 'loadstring' "$vm"; then
+    # Probes reference loadstring as a value without calling it; only an
+    # actual call would mean the VM delegates execution to the host loader.
+    if grep -q 'loadstring(' "$vm"; then
         echo "error: VM output $vm unexpectedly delegates to loadstring" >&2
         exit 1
     fi
@@ -311,20 +313,33 @@ for vm in "$tmp"/vm51*.lua "$tmp"/vmluau*.lua "$tmp"/legacy-*.lua; do
         echo "error: VM output $vm contains a generated error message" >&2
         exit 1
     fi
-    if [[ $vm == "$tmp"/vm51* || $vm == "$tmp"/legacy-lua51-* ]] && grep -Eq '0[bB][01_]' "$vm"; then
+    # Custom VMs embed encrypted payload strings whose printable bytes can
+    # coincidentally contain 0b/0B patterns; their Lua 5.1 syntax legality
+    # is already fully enforced by the luac5.1 -p gate over every variant.
+    if [[ $vm == "$tmp"/legacy-lua51-* ]] && grep -Eq '0[bB][01_]' "$vm"; then
         echo 'error: Lua 5.1 VM output contains a Luau binary literal' >&2
         exit 1
     fi
 
-    # Do not depend on the blob/prototype variables' old B/P spellings.
-    # Rust VM tests also decode and verify magic/version/target/length/Adler
-    # and assert byte-for-byte preservation across the final naming pass.
-    # An AST check rejects inline metadata while allowing Luau NAMECALL
-    # wrapper tables (a broad identifier[n]={...} grep would reject those).
-    if ! grep -Eq "local [a-z]{1,2}=['\"]OBF" "$vm"; then
-        echo "error: VM output $vm is missing its private bytecode blob" >&2
-        exit 1
-    fi
+    # Custom VMs encrypt the embedded blob (it no longer starts with the
+    # magic); assert the wrapper shape here instead. Rust tests decrypt the
+    # blob and verify magic/version/target/length/Adler plus byte-for-byte
+    # preservation across the final naming pass. Legacy VMs keep a plaintext
+    # OBF container, so they retain the original check.
+    case "$vm" in
+        "$tmp"/legacy-*)
+            if ! grep -Eq "local [a-z]{1,2}=['\"]OBF" "$vm"; then
+                echo "error: legacy VM output $vm is missing its private bytecode blob" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            if ! grep -Eq 'local [a-z]{1,2}=\{\};return setmetatable\(' "$vm"; then
+                echo "error: VM output $vm is missing its wrapped payload table" >&2
+                exit 1
+            fi
+            ;;
+    esac
 done
 if [[ $(find src/vm/opcode -maxdepth 1 -name 'lua51_*.rs' | wc -l) -ne 38 ]]; then
     echo 'error: Lua 5.1 opcode folder does not contain 38 instruction files' >&2

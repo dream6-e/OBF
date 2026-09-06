@@ -358,3 +358,60 @@ fn obvious_reflection_is_a_diagnostic_not_silent_native_fallback() {
         }
     }
 }
+
+#[test]
+fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
+    use std::process::Command;
+    for target in [Target::Lua51, Target::Luau] {
+        let bytes = obf::bytecode::custom::encode(
+            &obf::ir::compile("print('MUST_NOT_RUN')", target).unwrap(),
+        )
+        .unwrap();
+        let generated = vm::custom::emit(&bytes, target, 735).unwrap();
+        let workspace = Workspace::new();
+        let vm_path = workspace.0.join("guarded.lua");
+        fs::write(&vm_path, &generated).unwrap();
+        let runner = support::root()
+            .join("toolchains/bin")
+            .join(if target.is_luau() { "luau" } else { "lua5.1" });
+        // Tamper with the host so `loadstring` is no longer the native C
+        // function the audited probes require; the VM must abort with no
+        // output before decrypting or running anything.
+        let (tampered, control) = if target.is_luau() {
+            let mut level = 1;
+            while generated.contains(&format!("]{}]", "=".repeat(level))) {
+                level += 1;
+            }
+            let fence = "=".repeat(level);
+            let inline = format!("[{fence}[{generated}]{fence}]");
+            (
+                format!(
+                    "local e=setmetatable({{}},{{__index=_G}}) e.loadstring=function()end \
+                     local f=assert(loadstring({inline})) setfenv(f,e) f() print('SHOULD_NOT_RUN')"
+                ),
+                format!("local f=assert(loadstring({inline})) f()"),
+            )
+        } else {
+            let path = vm_path.to_str().unwrap();
+            (
+                format!(
+                    "loadstring=function()end local f=assert(loadfile('{path}')) f() print('SHOULD_NOT_RUN')"
+                ),
+                format!("local f=assert(loadfile('{path}')) f()"),
+            )
+        };
+        for (name, source, expect_success) in
+            [("control", control, true), ("tampered", tampered, false)]
+        {
+            let path = workspace.0.join(format!("{name}.lua"));
+            fs::write(&path, source).unwrap();
+            let output = Command::new(&runner).arg(&path).output().unwrap();
+            assert_eq!(output.status.success(), expect_success, "{target} {name}");
+            if expect_success {
+                assert_eq!(output.stdout, b"MUST_NOT_RUN\n");
+            } else {
+                assert!(output.stdout.is_empty(), "{target} {name}");
+            }
+        }
+    }
+}

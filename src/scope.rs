@@ -926,18 +926,72 @@ impl Analysis {
         let capture = captures.next().ok_or_else(|| {
             Diagnostic::new("generated VM is missing its audited environment capture")
         })?;
+        // The custom backend additionally carries exactly three audited
+        // environment probes (one per key-share function); the explicit
+        // native backend carries none. Anything in between is unaudited.
+        let probes: Vec<Span> = statements
+            .iter()
+            .filter_map(|statement| {
+                let StatementKind::Local {
+                    bindings,
+                    values,
+                    exported: false,
+                    is_const: false,
+                } = &statement.kind
+                else {
+                    return None;
+                };
+                (bindings.len() == 1
+                    && bindings[0].annotation.is_none()
+                    && values.len() == 1
+                    && is_vm_probe(&values[0], chunk.target))
+                .then(|| values[0].span)
+            })
+            .collect();
+        let probed = probes.len() == 3;
+        if !probed && !probes.is_empty() {
+            return Err(Diagnostic::new(
+                "generated VM must carry exactly three audited environment probes or none",
+            ));
+        }
+        // Barrier accounting: three getfenv/_G occurrences inside the capture
+        // span, plus (when probed) three debug/loadstring occurrences inside
+        // each probe span. Every other barrier location is unaudited.
+        let outside: Vec<Span> = self
+            .barrier_locations
+            .iter()
+            .copied()
+            .filter(|span| span.start < capture.start || span.end > capture.end)
+            .collect();
+        // Each audited probe contributes three barrier occurrences on Luau
+        // (debug x2, loadstring) and four on Lua 5.1, where the `getinfo`
+        // FIELD NAME is itself a listed executor-reflection barrier.
+        let per_probe = if chunk.target.is_luau() { 3 } else { 4 };
         if captures.next().is_some()
-            || self.barrier_locations.len() != 3
-            || self
-                .barrier_locations
-                .iter()
-                .any(|span| span.start < capture.start || span.end > capture.end)
-            || self
-                .rename_barriers
-                .iter()
-                .any(|name| !matches!(name.as_str(), "getfenv" | "_G"))
+            || self.barrier_locations.len() != 3 + per_probe * probes.len()
+            || outside.len() != per_probe * probes.len()
+            || outside.iter().any(|span| {
+                !probes
+                    .iter()
+                    .any(|probe| span.start >= probe.start && span.end <= probe.end)
+            })
+            || self.rename_barriers.iter().any(|name| {
+                let allowed = match name.as_str() {
+                    "getfenv" | "_G" => true,
+                    "debug" | "loadstring" => probed,
+                    // Lua 5.1 probes spell the debug field `getinfo`, a
+                    // listed executor-reflection barrier name in its own
+                    // right; allow it only inside the audited probes.
+                    "getinfo" => probed && !chunk.target.is_luau(),
+                    _ => false,
+                };
+                !allowed
+            })
             || self.references.iter().any(|reference| {
-                matches!(reference.name.as_str(), "getfenv" | "_G") && reference.binding.is_some()
+                matches!(
+                    reference.name.as_str(),
+                    "getfenv" | "_G" | "debug" | "loadstring"
+                ) && reference.binding.is_some()
             })
         {
             return Err(Diagnostic::new(
@@ -1075,6 +1129,52 @@ impl RenamePlan {
 
 // Match only `(getfenv and getfenv(0)) or _G`, not an arbitrary environment
 // alias, call, field access, dynamically assembled key, or method invocation.
+/// Audited environment probe used by the custom backend's three key-share
+/// functions: exactly `debug and debug.<info|getinfo>(loadstring, <"s"|"S">)`
+/// (Luau: debug.info; Lua 5.1: debug.getinfo). Any other spelling, target
+/// mismatch, extra argument or bound local is unaudited and rejected.
+fn is_vm_probe(expression: &Expression, target: Target) -> bool {
+    let ExpressionKind::Binary {
+        operator: BinaryOperator::And,
+        left,
+        right,
+    } = &expression.kind
+    else {
+        return false;
+    };
+    if !is_name(left, "debug") {
+        return false;
+    }
+    let ExpressionKind::Call {
+        function,
+        method: None,
+        type_arguments,
+        arguments,
+    } = &right.kind
+    else {
+        return false;
+    };
+    if !type_arguments.is_empty() || arguments.len() != 2 {
+        return false;
+    }
+    let ExpressionKind::Field { table, field } = &function.kind else {
+        return false;
+    };
+    if !is_name(table, "debug") {
+        return false;
+    }
+    let (name, tag) = if target.is_luau() {
+        ("info", "s")
+    } else {
+        ("getinfo", "S")
+    };
+    if field.value != name || !is_name(&arguments[0], "loadstring") {
+        return false;
+    }
+    matches!(&arguments[1].kind, ExpressionKind::String(raw)
+        if crate::minify::literal_bytes(raw, target).ok().as_deref() == Some(tag.as_bytes()))
+}
+
 fn is_vm_environment(expression: &Expression) -> bool {
     let ExpressionKind::Binary {
         operator: BinaryOperator::Or,

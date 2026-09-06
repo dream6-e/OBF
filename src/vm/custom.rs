@@ -43,12 +43,17 @@ pub(crate) fn generate(
     //   local x={};return setmetatable({...},x):<random letter>()
     // The payload table carries ALL code in function form, split into section
     // functions under random numeric keys: [n1] host-capture prelude, [n2]
-    // bytecode decoder, [n3] operand validation, [n4] runtime helpers, [n5]
-    // interpreter cluster, plus the entry method at a random letter key. The
-    // method call resolves the entry directly as an own key of the payload
-    // table, receives (self) — or (self,...) when the chunk reads `...` —
-    // chains the sections in order and returns the program result. The
-    // metatable local is the plain empty table required by the format.
+    // bytecode decoder (decrypts the embedded blob), [n3] operand validation,
+    // [n4] runtime helpers, [n5..n7] environment-probing key-share functions,
+    // [n8] interpreter cluster, plus the entry method at a random letter key.
+    // The embedded payload is byte-encrypted at generation time with a
+    // seed-derived Lehmer keystream; the key is split into three shares, one
+    // per probe function, and the entry calls them in seeded shuffled order
+    // before combining the shares and decrypting at runtime. The method call
+    // resolves the entry directly as an own key of the payload table,
+    // receives (self) — or (self,...) when the chunk reads `...` — chains
+    // the sections in order and returns the program result. The metatable
+    // local is the plain empty table required by the format.
     let method = wrapper_method(program.target, seed);
     let keys = wrapper_keys(seed);
     let mut s = format!(
@@ -74,10 +79,29 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     } else {
         "\nreturn SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze\nend,"
     });
-    write!(s, "[{}]=function(E,SB,SS,SF,MF,IF)\n", keys[1]).unwrap();
+    // The decoder section receives the three audited probe shares (each probe
+    // function already verified the environment and was called by the entry
+    // in seeded shuffled order), combines them into the keystream seed and
+    // byte-decrypts the embedded blob before parsing. Lehmer 48271 mod
+    // 2147483647 keeps every intermediate below 2^53, so the Lua-side double
+    // arithmetic reproduces the Rust stream bit-for-bit.
+    let shares = cipher_shares(seed);
+    let encrypted = lehmer_cipher(bytecode, &shares);
+    write!(
+        s,
+        "[{}]=function(s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)\n",
+        keys[1]
+    )
+    .unwrap();
     s.push_str("local B=");
-    super::lua51::emit_byte_string(&mut s, bytecode);
+    super::lua51::emit_byte_string(&mut s, &encrypted);
     s.push(';');
+    s.push_str(
+        "local st=1+(s1+s2+s3)%2147483646;local XB={};for i=1,#B do \
+st=48271*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
+for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
+XB[i]=NCH(r)end;B=TC(XB);XB=nil;",
+    );
     s.push_str(
         r#"
 if #B>16777216 then E()end;
@@ -225,13 +249,51 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
             s.push_str("local Lookup=function(object,key)return object[key]end;");
         }
     }
+    // Three audited probe functions: each verifies a distinct environment
+    // invariant of its host (native `loadstring` visible through the debug
+    // library) BEFORE contributing its key share; a failed probe aborts with
+    // no output. The entry calls the three functions in seeded shuffled
+    // order; the decoder section combines the shares into the keystream.
+    let mut probe_order = [5usize, 6, 7];
+    crate::random::Prng::new(seed ^ 0x6f72_6433_6873_7663).shuffle(&mut probe_order);
+    let mut probes = String::new();
+    for (index, share) in shares.iter().enumerate() {
+        write!(
+            probes,
+            "[{}]=function(E)local A=debug and ",
+            keys[5 + index]
+        )
+        .unwrap();
+        if program.target.is_luau() {
+            write!(
+                probes,
+                "debug.info(loadstring,\"s\");if A~=\"[C]\" then E()end;"
+            )
+            .unwrap();
+        } else {
+            write!(
+                probes,
+                "debug.getinfo(loadstring,\"S\");if not(A and A.what==\"C\")then E()end;"
+            )
+            .unwrap();
+        }
+        write!(probes, "return {share};end,").unwrap();
+    }
     // Entry method: chains the section functions in order, then runs the
     // program. IF/Freeze bind to nil on Lua 5.1 (20 prelude results); unused
     // parameters of target-specific sections accept nil the same way.
     write!(
         s,
-        "\nreturn CV,SV,Lookup\nend,[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal P,np,entry=VMS[{}](E,SB,SS,SF,MF,IF);\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
-        keys[0], keys[1], keys[2], keys[3], keys[4], keys[4]
+        "\nreturn CV,SV,Lookup\nend,{probes}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E);local c2=VMS[{}](E);local c3=VMS[{}](E);\nlocal P,np,entry=VMS[{}](c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF);\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        keys[0],
+        keys[probe_order[0]],
+        keys[probe_order[1]],
+        keys[probe_order[2]],
+        keys[1],
+        keys[2],
+        keys[3],
+        keys[4],
+        keys[4]
     )
     .unwrap();
     s.push_str(r#"
@@ -301,20 +363,66 @@ fn wrapper_method(target: Target, seed: u64) -> String {
     name
 }
 
-/// Five distinct random numeric keys for the section functions of the payload
-/// table. Separate seeded stream; same reproducibility guarantees as the
-/// method name.
+/// Eight distinct random numeric keys for the section functions of the
+/// payload table. Separate seeded stream; same reproducibility guarantees as
+/// the method name.
 fn wrapper_keys(seed: u64) -> Vec<u64> {
     let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
     let mut used = std::collections::BTreeSet::new();
     let mut keys = Vec::new();
-    while keys.len() < 5 {
+    while keys.len() < 8 {
         let key = 100 + random.next_u64() % 9900;
         if used.insert(key) {
             keys.push(key);
         }
     }
     keys
+}
+
+/// Three key shares for the payload cipher, each held by one audited probe
+/// function. Separate seeded stream; the same seed reproduces the cipher.
+fn cipher_shares(seed: u64) -> [u64; 3] {
+    let mut random = crate::random::Prng::new(seed ^ 0x6374_7269_7068_6572);
+    let mut shares = [0u64; 3];
+    for share in &mut shares {
+        *share = 1 + random.next_u64() % 2_147_483_646;
+    }
+    shares
+}
+
+/// Symmetric byte cipher over a Lehmer keystream (48271 mod 2147483647; the
+/// combined seed is 1 + (s1+s2+s3) mod 2147483646). Every intermediate stays
+/// below 2^53, so the Lua-side double arithmetic in the generated decoder
+/// reproduces this stream bit-for-bit. This raises the embedded blob's
+/// entropy; it is obfuscation, NOT a cryptographic primitive.
+fn lehmer_cipher(bytes: &[u8], shares: &[u64; 3]) -> Vec<u8> {
+    let mut state = 1 + (shares[0] + shares[1] + shares[2]) % 2_147_483_646;
+    bytes
+        .iter()
+        .map(|&byte| {
+            state = 48271 * state % 2_147_483_647;
+            byte ^ (state % 256) as u8
+        })
+        .collect()
+}
+
+/// Verification helper: extract the encrypted payload blob (by construction
+/// the longest string literal of a generated VM script) and decrypt it with
+/// the seed-derived shares. The result equals the original `.obf` bytes.
+pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
+    let mut best: Option<&str> = None;
+    for token in crate::lexer::lex(source, target)? {
+        if token.kind == crate::lexer::TokenKind::String {
+            let text = token.text(source);
+            if best.is_none_or(|current| current.len() < text.len()) {
+                best = Some(text);
+            }
+        }
+    }
+    let raw = best.ok_or_else(|| Diagnostic::new("generated VM is missing its payload blob"))?;
+    let bytes = crate::minify::literal_bytes(raw, target)
+        .map_err(|error| Diagnostic::new(format!("generated VM blob: {error}")))?;
+    Ok(lehmer_cipher(&bytes, &cipher_shares(seed)))
 }
 
 fn validation(op: Opcode) -> &'static str {
@@ -358,24 +466,12 @@ mod tests {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
     }
 
-    fn blob(source: &str, target: Target) -> Vec<u8> {
+    fn blob(source: &str, target: Target, seed: u64) -> Vec<u8> {
         let chunk = crate::parse(source, target).unwrap();
         assert!(crate::vm::tests::no_inline_metadata(&chunk));
-        let tokens = crate::lexer::lex(source, target).unwrap();
-        let found: Vec<_> = tokens
-            .iter()
-            .filter_map(|token| {
-                if token.kind != crate::lexer::TokenKind::String {
-                    return None;
-                }
-                let value =
-                    crate::minify::literal_bytes(&source[token.span.start..token.span.end], target)
-                        .unwrap();
-                value.starts_with(b"OBF\x02").then_some(value)
-            })
-            .collect();
-        assert_eq!(found.len(), 1);
-        found.into_iter().next().unwrap()
+        // The embedded payload is encrypted; decrypt it with the seed that
+        // produced this script and compare against the canonical bytecode.
+        decrypt_embedded(source, target, seed).unwrap()
     }
 
     #[test]
@@ -393,8 +489,8 @@ mod tests {
             for seed in [0, 1, 735, u64::MAX] {
                 let output = emit(&data, target, seed).unwrap();
                 assert_eq!(emit(&data, target, seed).unwrap(), output);
-                assert_eq!(blob(&raw, target), data);
-                assert_eq!(blob(&output, target), data);
+                assert_eq!(blob(&raw, target, 735), data);
+                assert_eq!(blob(&output, target, seed), data);
                 assert!(!output.contains(['\r', '\n']));
                 let after = crate::scope::analyze(&output, target).unwrap();
                 assert_eq!(before.globals, after.globals);
@@ -672,12 +768,13 @@ mod tests {
                     ExpressionKind::Name(reference) => assert_eq!(reference.value, wrapper_name),
                     _ => panic!("{target}: {output}"),
                 }
-                // payload table: five numeric-keyed section functions plus
-                // exactly one string-keyed entry function (the called method)
+                // payload table: eight numeric-keyed functions (five sections
+                // plus three probe/share functions) and exactly one
+                // string-keyed entry function (the called method)
                 let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
                     panic!("{target}: {output}");
                 };
-                assert_eq!(fields.len(), 6, "{target}: {output}");
+                assert_eq!(fields.len(), 9, "{target}: {output}");
                 let mut numeric_keys = std::collections::BTreeSet::new();
                 let mut entries = 0;
                 for field in fields {
@@ -706,7 +803,7 @@ mod tests {
                     }
                 }
                 assert_eq!(entries, 1);
-                assert_eq!(numeric_keys.len(), 5);
+                assert_eq!(numeric_keys.len(), 8);
                 // The wrapper is not just structural: it runs the program.
                 let workspace = native::Workspace::new();
                 let path = workspace.0.join("wrapped.lua");
@@ -715,6 +812,60 @@ mod tests {
                 fs::write(&path, &output).unwrap();
                 assert_eq!(expected, native::compile_and_run(target, &path));
             }
+        }
+    }
+
+    #[test]
+    fn embedded_payload_is_high_entropy_ciphertext_and_seed_dependent() {
+        fn entropy(bytes: &[u8]) -> f64 {
+            let mut counts = [0u64; 256];
+            for &byte in bytes {
+                counts[usize::from(byte)] += 1;
+            }
+            let total = f64::from(bytes.len() as u32);
+            counts
+                .iter()
+                .filter(|&&count| count > 0)
+                .map(|&count| {
+                    let probability = count as f64 / total;
+                    -probability * probability.log2()
+                })
+                .sum()
+        }
+        let ciphertext = |source: &str, target: Target| {
+            let mut best: Option<String> = None;
+            for token in crate::lexer::lex(source, target).unwrap() {
+                if token.kind == crate::lexer::TokenKind::String {
+                    let text = token.text(source).to_owned();
+                    if best
+                        .as_ref()
+                        .is_none_or(|current| current.len() < text.len())
+                    {
+                        best = Some(text);
+                    }
+                }
+            }
+            crate::minify::literal_bytes(&best.unwrap(), target).unwrap()
+        };
+        for (target, fixture) in [
+            (
+                Target::Lua51,
+                include_str!("../../tests/fixtures/vm_lua51.lua"),
+            ),
+            (
+                Target::Luau,
+                include_str!("../../tests/fixtures/vm_luau.lua"),
+            ),
+        ] {
+            let data = compile(fixture, target).unwrap();
+            let output = emit(&data, target, 735).unwrap();
+            assert_eq!(decrypt_embedded(&output, target, 735).unwrap(), data);
+            assert_ne!(emit(&data, target, 736).unwrap(), output);
+            let encrypted = ciphertext(&output, target);
+            assert_ne!(&encrypted[..4], b"OBF\x02");
+            let (plain, cipher) = (entropy(&data), entropy(&encrypted));
+            assert!(cipher > plain, "{target}: {cipher} <= {plain}");
+            assert!(cipher > 7.5, "{target}: entropy {cipher}");
         }
     }
 }

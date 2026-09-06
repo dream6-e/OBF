@@ -9,33 +9,10 @@ const LONG_FIELDS: &[&str] = &[
     "code", "tags", "parent", "flags", "shared", "self", "cached",
 ];
 
-fn embedded(source: &str, target: Target) -> Vec<u8> {
-    let mut found = Vec::new();
-    for token in lexer::lex(source, target).unwrap() {
-        if token.kind == lexer::TokenKind::String {
-            // Decode the quoted literal via the public AST/IR API without
-            // evaluating any generated VM or widening private library APIs.
-            let literal =
-                obf::ir::compile(&format!("return {}", token.text(source)), target).unwrap();
-            let bytes = literal
-                .functions
-                .into_iter()
-                .next()
-                .unwrap()
-                .constants
-                .into_iter()
-                .find_map(|c| match c {
-                    obf::ir::Constant::String(bytes) => Some(bytes),
-                    _ => None,
-                })
-                .unwrap();
-            if bytes.starts_with(b"OBF\x02") {
-                found.push(bytes);
-            }
-        }
-    }
-    assert_eq!(found.len(), 1);
-    found.pop().unwrap()
+fn embedded(source: &str, target: Target, seed: u64) -> Vec<u8> {
+    // The payload blob is encrypted at generation time; decrypt it with the
+    // seed that produced this script and compare against the canonical bytes.
+    vm::custom::decrypt_embedded(source, target, seed).unwrap()
 }
 
 fn assert_private_names_hidden(output: &str, target: Target) {
@@ -82,7 +59,7 @@ fn prototype_field_shortening_preserves_bytecode_public_keys_and_runtime_output(
             let output = vm::custom::emit(&bytes, target, seed).unwrap();
             assert_eq!(output, vm::custom::emit(&bytes, target, seed).unwrap());
             assert_private_names_hidden(&output, target);
-            assert_eq!(embedded(&output, target), bytes);
+            assert_eq!(embedded(&output, target, seed), bytes);
             let decoded = bc::decode(&bytes, target).unwrap();
             assert_eq!(bc::serialize(&decoded).unwrap(), bytes);
             fs::write(&path, output).unwrap();
@@ -199,7 +176,7 @@ fn cli_virtualize_compile_wrap_and_isa1_all_use_the_short_field_pipeline() {
         assert_eq!(output, wrapped);
         assert_private_names_hidden(std::str::from_utf8(&output).unwrap(), target);
         assert_eq!(
-            embedded(std::str::from_utf8(&output).unwrap(), target),
+            embedded(std::str::from_utf8(&output).unwrap(), target, 735),
             compiled
         );
         let mut old = bc::decode(&compiled, target).unwrap();
@@ -217,7 +194,7 @@ fn cli_virtualize_compile_wrap_and_isa1_all_use_the_short_field_pipeline() {
         .stdout;
         let wrapped = String::from_utf8(wrapped).unwrap();
         assert_private_names_hidden(&wrapped, target);
-        assert_eq!(embedded(&wrapped, target), legacy);
+        assert_eq!(embedded(&wrapped, target, 735), legacy);
         let script = work.0.join("old.lua");
         fs::write(&script, wrapped).unwrap();
         assert_eq!(compile_and_run(target, &script), b"3\n");
