@@ -41,7 +41,7 @@ target/debug/obf virtualize --backend native --target lua51 --seed 123 -o script
 
 `--seed` 对 `minify`、`virtualize`、`wrap-bytecode` 有效，接受十进制或 `0x` 十六进制 `u64`。省略时每次生成新 seed，仅在 **stderr** 输出 `seed: N`，stdout 保持纯脚本；同源、同目标、同配置、同 seed 可逐字节复现。`compile` 输出 binary，`dump-ir` 输出可读 IR，二者不接受 seed；`--no-rename` 只用于 minify，`--backend` 只用于 virtualize。
 
-默认 AST/v2 路径的 seed **仅影响最终变量名**，bytecode 与布局不随机化；不做加密、压缩或随机 section。显式 `--backend native` 才保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
+默认 AST/v2 路径的 seed **仅影响最终 local 名称与私有 prototype 字段名**，bytecode 与布局不随机化；不做 bytecode 加密、压缩或随机 section。显式 `--backend native` 才保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
 
 ## AST 源码前端
 
