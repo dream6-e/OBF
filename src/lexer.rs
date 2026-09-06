@@ -712,7 +712,7 @@ fn valid_decimal_literal(value: &str) -> bool {
     })
 }
 
-fn is_keyword(value: &str, target: Target) -> bool {
+pub(crate) fn is_keyword(value: &str, target: Target) -> bool {
     const LUA51: &[&str] = &[
         "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
         "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",

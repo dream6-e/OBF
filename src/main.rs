@@ -43,6 +43,7 @@ fn run() -> Result<(), Diagnostic> {
     let mut input = None;
     let mut seed = vm::Options::default().seed;
     let mut seed_was_set = false;
+    let mut no_rename = false;
     let mut rest = arguments.peekable();
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -58,6 +59,7 @@ fn run() -> Result<(), Diagnostic> {
                     .ok_or_else(|| Diagnostic::new("missing value after --output"))?;
                 output = Some(PathBuf::from(value));
             }
+            "--no-rename" => no_rename = true,
             "--seed" => {
                 let value = rest
                     .next()
@@ -94,6 +96,12 @@ fn run() -> Result<(), Diagnostic> {
         ));
     }
 
+    if no_rename && command != "minify" {
+        return Err(Diagnostic::new(
+            "--no-rename is only valid for the 'minify' command",
+        ));
+    }
+
     match command.as_str() {
         "check" => {
             if output.is_some() {
@@ -104,7 +112,13 @@ fn run() -> Result<(), Diagnostic> {
         }
         "minify" => {
             let source = decode_source(&data)?;
-            let result = obf::minify(source, target)?;
+            let result = obf::minify_with_options(
+                source,
+                target,
+                obf::MinifyOptions {
+                    rename_locals: !no_rename,
+                },
+            )?;
             write_output(output, result.as_bytes())
         }
         "virtualize" => {
@@ -190,9 +204,11 @@ fn print_help() {
     println!(
         "OBF - std-only Lua 5.1 and Luau toolchain\n\n\
 Usage:\n  obf check --target <lua51|luau> <input|->\n  \
-obf minify --target <lua51|luau> [-o FILE] <input|->\n  \
+obf minify --target <lua51|luau> [--no-rename] [-o FILE] <input|->\n  \
 obf virtualize --target <lua51|luau> [--seed N] [-o FILE] <input|->\n  \
 obf inspect-bytecode --target <lua51|luau> <input>\n\n\
+Minify safely shortens local bindings; --no-rename keeps their spellings.\n\
+Known reflection/environment access automatically disables local renaming.\n\
 The virtualize command compiles source into a randomized private instruction\n\
 format and emits a single-line target-language interpreter."
     );

@@ -1,14 +1,84 @@
-use crate::lexer::{Token, TokenKind};
-use crate::{Diagnostic, Target};
+use crate::lexer::{self, Token, TokenKind};
+use crate::{parser, scope, Diagnostic, Target};
 
-/// Emit a comment-free, whitespace-minimal single-line chunk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Options {
+    /// Shorten only proven lexical bindings; known reflection/environment
+    /// access disables this automatically. Turn off for opaque host reflection.
+    pub rename_locals: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            rename_locals: true,
+        }
+    }
+}
+
+pub(crate) fn with_options(
+    source: &str,
+    target: Target,
+    options: Options,
+) -> Result<String, Diagnostic> {
+    let tokens = lexer::lex(source, target)?;
+    let chunk = parser::parse_lexed(source, &tokens, target)?;
+    let analysis = if options.rename_locals {
+        Some(scope::analyze_chunk(&chunk)?)
+    } else {
+        None
+    };
+    let plan = analysis
+        .as_ref()
+        .map(|analysis| analysis.rename_plan(target))
+        .transpose()?;
+    let renamed = match (&analysis, &plan) {
+        (Some(analysis), Some(plan)) => plan.apply(source, analysis)?,
+        _ => None,
+    };
+    let output = if let Some(renamed) = renamed {
+        let tokens = lexer::lex(&renamed, target)?;
+        emit_tokens(&renamed, &tokens, target, 0)?
+    } else {
+        emit_tokens(source, &tokens, target, 0)?
+    };
+    // Fail closed: reparse the final, normalized source and verify that every
+    // reference still resolves to exactly the same binding (or global).
+    let compact = parser::parse_source(&output, target)?;
+    if let (Some(analysis), Some(plan)) = (analysis, plan) {
+        analysis.verify_renamed(&scope::analyze_chunk(&compact)?, &plan)?;
+    }
+    Ok(output)
+}
+
+/// Lexical-only compatibility entry point for an externally supplied token
+/// array. For default safe local renaming, use `obf::minify` instead.
 pub fn minify(source: &str, tokens: &[Token], target: Target) -> Result<String, Diagnostic> {
-    let mut output = String::with_capacity(source.len());
+    parser::parse(source, tokens, target)?;
+    let output = emit_tokens(source, tokens, target, 0)?;
+    parser::parse_source(&output, target)?;
+    Ok(output)
+}
+
+fn emit_tokens(
+    source: &str,
+    tokens: &[Token],
+    target: Target,
+    depth: usize,
+) -> Result<String, Diagnostic> {
+    if depth > 64 {
+        return Err(Diagnostic::new(
+            "minifier interpolation nesting exceeds safety limit",
+        ));
+    }
+    let mut output = String::new();
     let mut previous: Option<(TokenKind, String)> = None;
 
     for token in tokens.iter().filter(|token| token.kind != TokenKind::Eof) {
         let raw = token.text(source);
-        let text = if token.kind == TokenKind::String {
+        let text = if token.kind == TokenKind::String && raw.starts_with('`') {
+            emit_interpolated(source, token, target, depth + 1)?
+        } else if token.kind == TokenKind::String {
             normalize_string(raw, target).map_err(|error| {
                 Diagnostic::at(error, token.span.start, token.line, token.column)
             })?
@@ -25,25 +95,72 @@ pub fn minify(source: &str, tokens: &[Token], target: Target) -> Result<String, 
         previous = Some((token.kind, text));
     }
 
-    debug_assert!(!output.contains('\n') && !output.contains('\r'));
+    if output.contains(['\n', '\r']) {
+        return Err(Diagnostic::new(
+            "minifier failed to produce a single physical line",
+        ));
+    }
     Ok(output)
 }
 
-fn normalize_string(raw: &str, target: Target) -> Result<String, String> {
-    let bytes = raw.as_bytes();
-    if bytes.first() == Some(&b'`') {
-        if raw.contains(['\n', '\r']) {
-            return Err("multiline interpolated strings cannot yet be emitted on one line".into());
+fn emit_interpolated(
+    source: &str,
+    token: &Token,
+    target: Target,
+    depth: usize,
+) -> Result<String, Diagnostic> {
+    let ranges = lexer::interpolated_expression_ranges(source, token.span.clone(), target)?;
+    let mut output = String::from("`");
+    let mut start = token.span.start + 1;
+    for range in ranges {
+        emit_segment(source, start, range.start - 1, target, &mut output)?;
+        output.push('{');
+        let tokens = lexer::lex_fragment(source, range.clone(), target)?;
+        let expression = emit_tokens(source, &tokens, target, depth)?;
+        // `{{` is not a valid interpolation opener in Luau. A table literal
+        // as the first expression token needs this otherwise-unnecessary gap.
+        if expression.starts_with('{') {
+            output.push(' ');
         }
-        return Ok(raw.to_owned());
+        output.push_str(&expression);
+        output.push('}');
+        start = range.end + 1;
     }
+    emit_segment(source, start, token.span.end - 1, target, &mut output)?;
+    output.push('`');
+    Ok(output)
+}
 
-    let decoded = if matches!(bytes.first(), Some(b'\'' | b'"')) {
-        decode_quoted(bytes, target)?
+fn emit_segment(
+    source: &str,
+    start: usize,
+    end: usize,
+    target: Target,
+    output: &mut String,
+) -> Result<(), Diagnostic> {
+    let raw = source
+        .get(start..end)
+        .ok_or_else(|| Diagnostic::byte("invalid interpolation segment", start))?;
+    let decoded = literal_bytes(&format!("`{raw}`"), target)
+        .map_err(|error| Diagnostic::byte(error, start))?;
+    encode_content(&decoded, b'`', true, output);
+    Ok(())
+}
+
+fn normalize_string(raw: &str, target: Target) -> Result<String, String> {
+    Ok(encode_quoted(&literal_bytes(raw, target)?))
+}
+
+/// Shared with scope analysis to recognize statically spelled reflective
+/// field keys, including escaped and long-quoted names. Backticks here are
+/// literal interpolation segments only, never unevaluated expressions.
+pub(crate) fn literal_bytes(raw: &str, target: Target) -> Result<Vec<u8>, String> {
+    let bytes = raw.as_bytes();
+    if matches!(bytes.first(), Some(b'\'' | b'"' | b'`')) {
+        decode_quoted(bytes, target)
     } else {
-        decode_long(bytes)?
-    };
-    Ok(encode_quoted(&decoded))
+        decode_long(bytes)
+    }
 }
 
 fn decode_long(raw: &[u8]) -> Result<Vec<u8>, String> {
@@ -182,7 +299,9 @@ fn decode_quoted(raw: &[u8], target: Target) -> Result<Vec<u8>, String> {
                     cursor += 1;
                 }
             }
-            _ => return Err(format!("invalid escape sequence \\{}", escaped as char)),
+            // Both pinned lexers retain the escaped byte for otherwise
+            // unknown escapes (`\q` -> `q`, including `\{` / `\`` in Luau).
+            _ => output.push(escaped),
         }
     }
     if raw[end] != quote {
@@ -194,9 +313,19 @@ fn decode_quoted(raw: &[u8], target: Target) -> Result<Vec<u8>, String> {
 fn encode_quoted(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() + 2);
     output.push('"');
+    encode_content(bytes, b'"', false, &mut output);
+    output.push('"');
+    output
+}
+
+fn encode_content(bytes: &[u8], quote: u8, interpolation: bool, output: &mut String) {
     for &byte in bytes {
+        if byte == quote || (interpolation && byte == b'{') {
+            output.push('\\');
+            output.push(byte as char);
+            continue;
+        }
         match byte {
-            b'"' => output.push_str("\\\""),
             b'\\' => output.push_str("\\\\"),
             b'\n' => output.push_str("\\n"),
             b'\r' => output.push_str("\\r"),
@@ -209,8 +338,6 @@ fn encode_quoted(bytes: &[u8]) -> String {
             _ => output.push_str(&format!("\\{byte:03}")),
         }
     }
-    output.push('"');
-    output
 }
 
 fn hex(byte: u8) -> Result<u8, String> {

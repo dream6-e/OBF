@@ -46,7 +46,7 @@ run_target() {
     local target=$1 source=$2 output=$3
     "$OBF" check --target "$target" "$source"
     "$OBF" minify --target "$target" --output "$output" "$source"
-    if [[ $(wc -l <"$output") -ne 0 ]]; then
+    if [[ $(wc -l <"$output") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$output"; then
         echo "error: $target output contains a physical newline" >&2
         exit 1
     fi
@@ -96,6 +96,52 @@ run_target luau tests/fixtures/ast_luau.lua "$tmp/ast_luau.min.lua"
 "$LUAU" tests/fixtures/ast_luau.lua >"$tmp/ast_luau.original.out"
 "$LUAU" "$tmp/ast_luau.min.lua" >"$tmp/ast_luau.minified.out"
 cmp "$tmp/ast_luau.original.out" "$tmp/ast_luau.minified.out"
+
+printf '%s\n' '[matrix] Safe minification: scopes, reflection, lexical opt-out, reproducibility'
+for target in lua51 luau; do
+    if [[ $target == lua51 ]]; then
+        runner=$LUA
+    else
+        runner=$LUAU
+    fi
+    for corpus in scope reflection; do
+        label="${corpus}_${target}"
+        original="tests/fixtures/$label.lua"
+        compact="$tmp/$label.min.lua"
+        lexical="$tmp/$label.lexical.lua"
+        run_target "$target" "$original" "$compact"
+        "$OBF" minify --target "$target" --no-rename -o "$lexical" "$original"
+        "$OBF" minify --target "$target" -o "$tmp/$label.same.lua" "$original"
+        cmp "$compact" "$tmp/$label.same.lua"
+        for source in "$original" "$compact" "$lexical"; do
+            if [[ $target == lua51 ]]; then
+                "$LUAC" -p "$source"
+            else
+                "$LUAUC" "$source" >/dev/null
+            fi
+        done
+        "$runner" "$original" >"$tmp/$label.original.out"
+        "$runner" "$compact" >"$tmp/$label.compact.out"
+        "$runner" "$lexical" >"$tmp/$label.lexical.out"
+        cmp "$tmp/$label.original.out" "$tmp/$label.compact.out"
+        cmp "$tmp/$label.original.out" "$tmp/$label.lexical.out"
+        if [[ $(wc -l <"$lexical") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$lexical"; then
+            echo "error: $label lexical-only output contains a physical newline" >&2
+            exit 1
+        fi
+        if [[ $corpus == scope ]]; then
+            if [[ $(wc -c <"$compact") -ge $(wc -c <"$lexical") ]] \
+                || grep -q 'local safeCompressionMarker' "$compact"; then
+                echo "error: $label did not exercise safe local renaming" >&2
+                exit 1
+            fi
+            printf '[matrix] %s safe minify: source=%s, lexical=%s, renamed=%s bytes\n' \
+                "$target" "$(wc -c <"$original")" "$(wc -c <"$lexical")" "$(wc -c <"$compact")"
+        else
+            cmp "$compact" "$lexical"
+        fi
+    done
+done
 
 # Probe the custom runner environment required by the project: loadstring,
 # filesystem require, and the sandbox are all installed by setupState.
@@ -156,7 +202,7 @@ fi
 cmp "$tmp/vmluau.original.out" "$tmp/vmluau.virtual.out"
 
 for vm in "$tmp/vm51.lua" "$tmp/vmluau.lua"; do
-    if [[ $(wc -l <"$vm") -ne 0 ]]; then
+    if [[ $(wc -l <"$vm") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$vm"; then
         echo "error: VM output $vm contains a physical newline" >&2
         exit 1
     fi

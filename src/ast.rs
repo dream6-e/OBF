@@ -141,6 +141,9 @@ pub struct FunctionBody {
     pub attributes: Vec<Attribute>,
     pub generics: Vec<GenericParameter>,
     pub parameters: Vec<Binding>,
+    /// Kept separately from the optional type annotation: untyped `...` is
+    /// still variadic (and introduces implicit `arg` in pinned Lua 5.1.5).
+    pub has_vararg: bool,
     pub vararg: Option<TypeExpression>,
     pub return_type: Option<TypeExpression>,
     pub body: Block,

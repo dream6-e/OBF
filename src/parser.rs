@@ -568,8 +568,10 @@ impl<'a> Parser<'a> {
             self.primary()?
         };
 
+        let mut chain = 0usize;
         loop {
             if self.target.is_luau() && self.consume("::") {
+                self.extend_chain(&mut chain, "expression")?;
                 let asserted = self.type_expression()?;
                 let start = expression.span.start;
                 expression = self.make_expression(
@@ -589,6 +591,7 @@ impl<'a> Parser<'a> {
             if left < minimum {
                 break;
             }
+            self.extend_chain(&mut chain, "expression")?;
             self.advance();
             let rhs = self.expression(right)?;
             let start = expression.span.start;
@@ -655,9 +658,11 @@ impl<'a> Parser<'a> {
     }
 
     fn suffixes(&mut self, mut expression: Expression) -> Result<Expression, Diagnostic> {
+        let mut chain = 0usize;
         loop {
             let start = expression.span.start;
             if self.target.is_luau() && self.at("<") && self.peek_text(1) == "<" {
+                self.extend_chain(&mut chain, "expression suffix")?;
                 self.advance();
                 self.advance();
                 let mut arguments = Vec::new();
@@ -682,6 +687,7 @@ impl<'a> Parser<'a> {
                     end,
                 )?;
             } else if self.consume(".") {
+                self.extend_chain(&mut chain, "expression suffix")?;
                 let field = self.name("expected field name after '.'")?;
                 let end = field.span.end;
                 expression = self.make_expression(
@@ -693,6 +699,7 @@ impl<'a> Parser<'a> {
                     end,
                 )?;
             } else if self.consume("[") {
+                self.extend_chain(&mut chain, "expression suffix")?;
                 let index = self.expression(0)?;
                 self.expect("]")?;
                 let end = self.previous_end();
@@ -705,6 +712,7 @@ impl<'a> Parser<'a> {
                     end,
                 )?;
             } else if self.consume(":") {
+                self.extend_chain(&mut chain, "expression suffix")?;
                 let method = self.name("expected method name after ':'")?;
                 let arguments = self.call_arguments()?;
                 let end = self.previous_end();
@@ -718,6 +726,7 @@ impl<'a> Parser<'a> {
                     end,
                 )?;
             } else if self.starts_call_arguments() {
+                self.extend_chain(&mut chain, "expression suffix")?;
                 let arguments = self.call_arguments()?;
                 let end = self.previous_end();
                 expression = self.make_expression(
@@ -1050,6 +1059,7 @@ impl<'a> Parser<'a> {
             attributes,
             generics,
             parameters,
+            has_vararg,
             vararg,
             return_type,
             body,
@@ -1262,7 +1272,9 @@ impl<'a> Parser<'a> {
 
     fn type_postfix(&mut self) -> Result<TypeExpression, Diagnostic> {
         let mut value = self.type_atom()?;
+        let mut chain = 0usize;
         while self.consume("?") {
+            self.extend_chain(&mut chain, "type suffix")?;
             if is_type_pack(&value) {
                 return Err(self.error_current("type packs cannot be optional"));
             }
@@ -1598,6 +1610,18 @@ impl<'a> Parser<'a> {
         } else {
             Ok(())
         }
+    }
+
+    // Iteratively parsed operator/suffix chains still produce recursively
+    // owned ASTs. Bound them before construction so dropping even a rejected
+    // source cannot overflow the native stack (recursion limits alone do not
+    // protect a 100,000-term left-associated expression).
+    fn extend_chain(&self, length: &mut usize, what: &str) -> Result<(), Diagnostic> {
+        if *length >= MAX_NESTING {
+            return Err(self.error_current(format!("{what} chain exceeds safety limit")));
+        }
+        *length += 1;
+        Ok(())
     }
 
     fn enter(&mut self, what: &str) -> Result<(), Diagnostic> {

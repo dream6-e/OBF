@@ -10,10 +10,12 @@ pub mod diagnostic;
 pub mod lexer;
 pub mod minify;
 pub mod parser;
+pub mod scope;
 pub mod target;
 pub mod vm;
 
 pub use diagnostic::Diagnostic;
+pub use minify::Options as MinifyOptions;
 pub use target::Target;
 
 /// Lex and parse a source chunk for the selected language into an owned AST.
@@ -26,9 +28,18 @@ pub fn check(source: &str, target: Target) -> Result<(), Diagnostic> {
     parse(source, target).map(|_| ())
 }
 
-/// Validate and minify a source chunk into a single physical line.
+/// Validate, safely shorten local bindings and emit a single physical line.
+/// Known reflection/environment access conservatively disables renaming.
 pub fn minify(source: &str, target: Target) -> Result<String, Diagnostic> {
-    let tokens = lexer::lex(source, target)?;
-    parser::parse_lexed(source, &tokens, target)?;
-    minify::minify(source, &tokens, target)
+    minify_with_options(source, target, MinifyOptions::default())
+}
+
+/// Use `rename_locals: false` for lexical-only compression, including when
+/// dynamically supplied host code can observe local/upvalue names.
+pub fn minify_with_options(
+    source: &str,
+    target: Target,
+    options: MinifyOptions,
+) -> Result<String, Diagnostic> {
+    minify::with_options(source, target, options)
 }
