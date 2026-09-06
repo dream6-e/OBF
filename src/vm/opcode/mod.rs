@@ -272,3 +272,19 @@ const LUAU: [fn() -> &'static str; 91] = [
 pub(super) fn luau(opcode: usize) -> &'static str {
     LUAU[opcode]()
 }
+
+#[path = "lua51/mod.rs"]
+mod custom_lua51;
+#[path = "luau/mod.rs"]
+mod custom_luau;
+
+pub(super) fn custom(
+    target: crate::Target,
+    op: crate::bytecode::custom::Opcode,
+) -> Option<&'static str> {
+    if target.is_luau() {
+        custom_luau::code(op)
+    } else {
+        custom_lua51::code(op)
+    }
+}

@@ -1,3 +1,4 @@
+pub mod custom;
 pub mod lua51;
 pub mod luau;
 

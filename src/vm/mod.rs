@@ -1,5 +1,6 @@
 mod binary;
 pub mod compiler;
+pub mod custom;
 mod lua51;
 mod luau;
 mod opcode;

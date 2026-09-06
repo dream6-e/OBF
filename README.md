@@ -4,6 +4,12 @@
 
 新接手开发者请先阅读 [`项目交接总结.md`](项目交接总结.md)，其中集中记录架构、硬约束、测试门禁、常见陷阱和下一阶段优先级。
 
+## AST 自定义后端（新增核心，CLI 接入另批测试）
+
+现已增加真正的 `AST → ir::Module → OBF v2 → register VM`，不依赖原生编译器。固定 32-byte Header，每条指令 4 bytes；Lua51 46 条、Luau 49 条 handler 均有实际执行覆盖。详见 [`自定义字节码.md`](自定义字节码.md) 的完整 Header、prototype、ISA、资源门限和已知边界。
+
+新 Rust 入口为 `ir::compile`、`bytecode::custom::{encode,decode,serialize}`、`vm::custom::{compile,emit,virtualize}`。本核心批次保留现有 CLI 默认行为/示例；随后在独立测试批次切换默认链路。旧 opcode 保留原处，新指令按用户许可放入 `src/vm/opcode/{lua51,luau}/`，不再要求新指令平铺根目录。
+
 ## 命令
 
 ```text
@@ -143,3 +149,5 @@ VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_lu
 ## Anti 状态
 
 按当前要求，`src/anti/` 暂时留空，等待用户提供具体 Anti 实现。
+
+核心批次最终门禁：`./tools/test-matrix.sh` **PASS 110**（32 单元 + 78 集成）；其中新增 26 项 AST/IR/v2 VM 回归，含两端逐 opcode 实际执行覆盖。debug/release 与原有门禁均通过。

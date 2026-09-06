@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod bytecode;
 pub mod diagnostic;
+pub mod ir;
 pub mod lexer;
 pub mod minify;
 pub mod parser;
