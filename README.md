@@ -124,8 +124,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 ### 嵌入 payload 传输加密（M6 已授权部分）
 
 - 生成时用 seed 派生的 **Lehmer 密钥流（48271 mod 2147483647）** 对内嵌 blob 逐字节 XOR，密文字节分布均匀（Shannon 熵 > 7.5 bits/byte，测试断言高于明文）；所有中间量 < 2^53，Lua 双精度与 Rust 逐位一致。
-- 密钥拆成 **三个份额**（各为 1..2147483645 的十进制字面量），分别存放在三个 payload 函数中；每个函数先做上述环境探针，通过才 `return` 份额。
-- 入口按 **seed 洗牌的顺序**调用三个函数，decoder 段以 `1+(s1+s2+s3)%2147483646` 重建密钥流解出明文 payload，再做原有的 magic/Adler/结构校验。`.obf` 文件与 `compile` 输出保持明文 canonical、与 seed 无关；`vm::custom::decrypt_embedded` 提供验证助手。
+- 密钥 **动态生成、零字面量**：三个份额不在脚本中存储，由每个探针函数在运行时从脚本自身结构（入口传入的 payload 表数字键对 `(a,b)`：`x=(a*31+b)%2147483647` 再叠 3/5/7 轮 `x=48271*x%2147483647` 步进）计算得出；探针通过后才计算并返回份额。
+- 入口按 **seed 洗牌的顺序**调用三个函数并传入各自的结构键对，decoder 段以 `1+(s1+s2+s3+31*#B)%2147483646`（混入密文长度）重建密钥流解出明文 payload，再做原有的 magic/Adler/结构校验；份额与密钥流初态的十进制串不出现在脚本任何位置（单元测试逐 seed 断言）。`.obf` 文件与 `compile` 输出保持明文 canonical、与 seed 无关；`vm::custom::decrypt_embedded` 提供验证助手。
 - 这是提高静态分析成本的混淆层，**不是密码学加密**；密钥派生自 seed，不能抵御持有脚本的攻击者。
 
 **VM 私有字段也压缩为一/两字母**：`code`、`tags`、`parent`、`flags`、`shared`、`self`、`cached` 及原有短字段共 14 个，当前全部可分配为互不冲突的随机单字母。decoder、校验器、运行时、缓存和 opcode handler 的构造/读/写共用同一映射；同 seed 复现，使用独立随机流，不改变既有 local 名称或 bytecode。
@@ -142,8 +142,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 26,080 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 29,569 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 26,322 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 29,999 B |
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
@@ -189,7 +189,7 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 2026-09-06 输出整体改为 `local x={};return setmetatable({...},x):m()` 的分函数载荷形式后的完整矩阵 **PASS 150**（41 单元 + 109 集成）：此前 149 项全部保留，形状/差分单元测试改为断言新结构。默认后端与 `wrap-bytecode` 的全部代码位于载荷表的 5 个随机数字键 section 函数与 1 个随机字母键入口函数中；环境捕获审计下降到各 section 函数体内执行，根表检查允许数字/字符串键函数字段。两份示例相对私有字段批次各增加 **484 B**；seed 额外控制包装方法名与数字键。旧 `--backend native` 输出保持原状。
 
-2026-09-06 嵌入 payload 字节级加密 + 三探针密钥拆分后的完整矩阵 **PASS 153**（42 单元 + 111 集成）：此前 151 项全部保留，新增 1 项密文熵值/解密等价单元测试与 1 项环境篡改 fail-closed 集成测试（Lua51 替换 `loadstring`、Luau 经 `setfenv` 注入，脚本必须无输出中止）。内嵌 blob 为 seed 派生 Lehmer 密钥流密文（熵 > 7.5 bits/byte），三个 payload 函数各先验证环境再交回密钥份额，调用顺序 seed 洗牌，decoder 结合解密后走原有校验；`.obf` 文件与解密后 payload 逐字节不变。golden 为 **26,080 / 29,569 B**（密文中可打印比例高于原 `\000` 密集的明文，Lua51 反而缩小 3.3 KB）。生成器环境审计扩展为“1 个 getfenv 捕获 + 恰好 3 个固定形状探针”；矩阵的 loadstring 检查改为只匹配调用、blob 检查改为包装形状，Luau 二进制字面量检查收窄到 legacy（语法由 `luac5.1 -p` 全量保证）。
+2026-09-06 嵌入 payload 字节级加密 + 三探针密钥拆分后的完整矩阵 **PASS 153**（42 单元 + 111 集成）：此前 151 项全部保留，新增 1 项密文熵值/解密等价单元测试与 1 项环境篡改 fail-closed 集成测试（Lua51 替换 `loadstring`、Luau 经 `setfenv` 注入，脚本必须无输出中止）。内嵌 blob 为 seed 派生 Lehmer 密钥流密文（熵 > 7.5 bits/byte），三个 payload 函数各先验证环境再交回密钥份额，调用顺序 seed 洗牌，decoder 结合解密后走原有校验；`.obf` 文件与解密后 payload 逐字节不变。golden 为 **26,322 / 29,999 B**。同日后续把密钥改为**结构动态推导**（份额由表键对+密文长度运行时计算，密钥零字面量，另增 1 项单元测试逐 seed 断言份额与初态的十进制串不出现在任何数字字面量中），门禁 **PASS 154**（43 单元 + 111 集成）。生成器环境审计扩展为“1 个 getfenv 捕获 + 恰好 3 个固定形状探针”；矩阵的 loadstring 检查改为只匹配调用、blob 检查改为包装形状，Luau 二进制字面量检查收窄到 legacy（语法由 `luac5.1 -p` 全量保证）。
 
 2026-09-06 指令序列化改为 7-bit varint 后的完整矩阵 **PASS 151**（41 单元 + 110 集成）：此前 150 项全部保留，`custom_bytecode` 新增 1 项 varint codec 回归（canonical/非最小编码、字段上限、带外 code 字节数、尾随字节、varint 截断与逐 Word 语义拒绝）。文件内指令按 Form 列写成 `[opcode][字段 varint]`（2~7 bytes），prototype header 追加 `code_byte_count`（20→24 bytes），Header 宽度码改为 `0`；目标 decoder 校验后展开回定长 4-byte 指令串，fetch-loop/handler/ISA 编号完全不变。两份示例 bytecode 缩小 **19.7% / 20.4%**（6,879→5,525 / 8,257→6,575 B），脚本 33,316→29,356 / 34,066→28,729 B；ISA 修订 1/2 语义、46/49 执行覆盖、debug/release 一致性不变。
 

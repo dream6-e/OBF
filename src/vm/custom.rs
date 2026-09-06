@@ -85,7 +85,7 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     // byte-decrypts the embedded blob before parsing. Lehmer 48271 mod
     // 2147483647 keeps every intermediate below 2^53, so the Lua-side double
     // arithmetic reproduces the Rust stream bit-for-bit.
-    let shares = cipher_shares(seed);
+    let shares = cipher_shares(&keys);
     let encrypted = lehmer_cipher(bytecode, &shares);
     write!(
         s,
@@ -97,7 +97,7 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     super::lua51::emit_byte_string(&mut s, &encrypted);
     s.push(';');
     s.push_str(
-        "local st=1+(s1+s2+s3)%2147483646;local XB={};for i=1,#B do \
+        "local st=1+(s1+s2+s3+31*#B)%2147483646;local XB={};for i=1,#B do \
 st=48271*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
 for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
 XB[i]=NCH(r)end;B=TC(XB);XB=nil;",
@@ -254,13 +254,25 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     // library) BEFORE contributing its key share; a failed probe aborts with
     // no output. The entry calls the three functions in seeded shuffled
     // order; the decoder section combines the shares into the keystream.
-    let mut probe_order = [5usize, 6, 7];
+    // Shuffled CALL order of the three probe functions (indices 0..=2 into
+    // keys[5..8] / probe_inputs / shares).
+    let mut probe_order = [0usize, 1, 2];
     crate::random::Prng::new(seed ^ 0x6f72_6433_6873_7663).shuffle(&mut probe_order);
+    // Structural inputs per probe: pairs of payload-table numeric keys the
+    // entry passes positionally. The Rust cipher derives the exact same
+    // shares from the exact same pairs, so no share -- and no keystream
+    // state -- is ever stored in the script: each probe computes its share
+    // at run time, after its environment check, in plain double arithmetic.
+    let probe_inputs = cipher_probe_inputs(&keys);
     let mut probes = String::new();
-    for (index, share) in shares.iter().enumerate() {
+    for (index, _) in shares.iter().enumerate() {
+        let mut steps = String::new();
+        for _ in 0..3 + 2 * index {
+            steps.push_str("x=48271*x%2147483647;");
+        }
         write!(
             probes,
-            "[{}]=function(E)local A=debug and ",
+            "[{}]=function(E,a,b)local A=debug and ",
             keys[5 + index]
         )
         .unwrap();
@@ -277,18 +289,24 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
             )
             .unwrap();
         }
-        write!(probes, "return {share};end,").unwrap();
+        write!(probes, "local x=(a*31+b)%2147483647;{steps}return x;end,").unwrap();
     }
     // Entry method: chains the section functions in order, then runs the
     // program. IF/Freeze bind to nil on Lua 5.1 (20 prelude results); unused
     // parameters of target-specific sections accept nil the same way.
     write!(
         s,
-        "\nreturn CV,SV,Lookup\nend,{probes}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E);local c2=VMS[{}](E);local c3=VMS[{}](E);\nlocal P,np,entry=VMS[{}](c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF);\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        "\nreturn CV,SV,Lookup\nend,{probes}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal P,np,entry=VMS[{}](c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF);\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
         keys[0],
-        keys[probe_order[0]],
-        keys[probe_order[1]],
-        keys[probe_order[2]],
+        keys[5 + probe_order[0]],
+        probe_inputs[probe_order[0]].0,
+        probe_inputs[probe_order[0]].1,
+        keys[5 + probe_order[1]],
+        probe_inputs[probe_order[1]].0,
+        probe_inputs[probe_order[1]].1,
+        keys[5 + probe_order[2]],
+        probe_inputs[probe_order[2]].0,
+        probe_inputs[probe_order[2]].1,
         keys[1],
         keys[2],
         keys[3],
@@ -379,24 +397,48 @@ fn wrapper_keys(seed: u64) -> Vec<u64> {
     keys
 }
 
-/// Three key shares for the payload cipher, each held by one audited probe
-/// function. Separate seeded stream; the same seed reproduces the cipher.
-fn cipher_shares(seed: u64) -> [u64; 3] {
-    let mut random = crate::random::Prng::new(seed ^ 0x6374_7269_7068_6572);
+/// Structural inputs each audited probe function receives from the entry:
+/// pairs of payload-table numeric keys (prelude/interpreter, validator/
+/// helpers, and the first two probe keys). The same pairs feed the Rust-side
+/// share derivation, keeping both ends bit-identical without ever storing a
+/// share in the script.
+fn cipher_probe_inputs(keys: &[u64]) -> [(u64, u64); 3] {
+    [(keys[0], keys[4]), (keys[2], keys[3]), (keys[5], keys[6])]
+}
+
+/// Three key shares for the payload cipher, each COMPUTED at run time inside
+/// one audited probe function from its structural input pair: mix 31*a+b,
+/// then 3/5/7 Lehmer rounds (one more pair of rounds per probe). No share
+/// literal exists anywhere in the generated script; the Rust cipher runs the
+/// identical derivation.
+fn cipher_shares(keys: &[u64]) -> [u64; 3] {
+    let inputs = cipher_probe_inputs(keys);
     let mut shares = [0u64; 3];
-    for share in &mut shares {
-        *share = 1 + random.next_u64() % 2_147_483_646;
+    for (index, share) in shares.iter_mut().enumerate() {
+        let (a, b) = inputs[index];
+        let mut state = (a * 31 + b) % 2_147_483_647;
+        for _ in 0..3 + 2 * index {
+            state = 48271 * state % 2_147_483_647;
+        }
+        *share = state;
     }
     shares
 }
 
+/// Combined keystream seed: the three dynamically computed shares plus the
+/// ciphertext length (31*#B on the Lua side). Every operand stays below 2^53,
+/// so the generated decoder reproduces this value exactly.
+fn cipher_state(shares: &[u64; 3], length: usize) -> u64 {
+    1 + (shares[0] + shares[1] + shares[2] + 31 * length as u64) % 2_147_483_646
+}
+
 /// Symmetric byte cipher over a Lehmer keystream (48271 mod 2147483647; the
-/// combined seed is 1 + (s1+s2+s3) mod 2147483646). Every intermediate stays
-/// below 2^53, so the Lua-side double arithmetic in the generated decoder
-/// reproduces this stream bit-for-bit. This raises the embedded blob's
-/// entropy; it is obfuscation, NOT a cryptographic primitive.
+/// combined seed is 1 + (s1+s2+s3+31*#B) mod 2147483646). Every intermediate
+/// stays below 2^53, so the Lua-side double arithmetic in the generated
+/// decoder reproduces this stream bit-for-bit. This raises the embedded
+/// blob's entropy; it is obfuscation, NOT a cryptographic primitive.
 fn lehmer_cipher(bytes: &[u8], shares: &[u64; 3]) -> Vec<u8> {
-    let mut state = 1 + (shares[0] + shares[1] + shares[2]) % 2_147_483_646;
+    let mut state = cipher_state(shares, bytes.len());
     bytes
         .iter()
         .map(|&byte| {
@@ -422,7 +464,7 @@ pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
     let raw = best.ok_or_else(|| Diagnostic::new("generated VM is missing its payload blob"))?;
     let bytes = crate::minify::literal_bytes(raw, target)
         .map_err(|error| Diagnostic::new(format!("generated VM blob: {error}")))?;
-    Ok(lehmer_cipher(&bytes, &cipher_shares(seed)))
+    Ok(lehmer_cipher(&bytes, &cipher_shares(&wrapper_keys(seed))))
 }
 
 fn validation(op: Opcode) -> &'static str {
@@ -811,6 +853,58 @@ mod tests {
                 let expected = native::compile_and_run(target, &path);
                 fs::write(&path, &output).unwrap();
                 assert_eq!(expected, native::compile_and_run(target, &path));
+            }
+        }
+    }
+
+    #[test]
+    fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
+        // The shares and the combined keystream seed are COMPUTED at run
+        // time from the script's own structure; none of them may appear as
+        // any numeric literal (or any digit run at all) in the output.
+        for (target, fixture) in [
+            (
+                Target::Lua51,
+                include_str!("../../tests/fixtures/vm_lua51.lua"),
+            ),
+            (
+                Target::Luau,
+                include_str!("../../tests/fixtures/vm_luau.lua"),
+            ),
+        ] {
+            for seed in [0u64, 1, 735, 7351, u64::MAX] {
+                let data = compile(fixture, target).unwrap();
+                let output = emit(&data, target, seed).unwrap();
+                let keys = wrapper_keys(seed);
+                let shares = cipher_shares(&keys);
+                let state = cipher_state(&shares, data.len());
+                let secrets = [
+                    shares[0].to_string(),
+                    shares[1].to_string(),
+                    shares[2].to_string(),
+                    state.to_string(),
+                ];
+                for secret in &secrets {
+                    assert!(
+                        !output.contains(secret.as_str()),
+                        "{target} seed {seed}: cipher key material {secret} leaked"
+                    );
+                }
+                for token in crate::lexer::lex(&output, target).unwrap() {
+                    if token.kind != crate::lexer::TokenKind::Number {
+                        continue;
+                    }
+                    let text = token.text(&output);
+                    assert!(
+                        secrets.iter().all(|secret| secret != text),
+                        "{target} seed {seed}: numeric literal {text} leaks key material"
+                    );
+                }
+                // The derivation is structural: the same seed must still
+                // reproduce the exact same script, and decrypt back to the
+                // canonical bytes.
+                assert_eq!(emit(&data, target, seed).unwrap(), output);
+                assert_eq!(decrypt_embedded(&output, target, seed).unwrap(), data);
             }
         }
     }
