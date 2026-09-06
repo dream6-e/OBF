@@ -56,6 +56,34 @@ pub(crate) fn generate(
     // local is the plain empty table required by the format.
     let method = wrapper_method(program.target, seed);
     let keys = wrapper_keys(seed);
+    // M7 structural randomization stream: per-handler dispatch comparison
+    // variants (one of four equivalent forms, seeded), integer bound-check
+    // variants in the decoder/validator, and metamethod dispatch branch
+    // variants in the runtime helpers. Reuses the audited native-backend
+    // variant machinery; handler order and semantics stay unchanged.
+    let mut structure = crate::random::Prng::new(seed ^ 0x6d37_7374_7275_6374);
+    // M7: integer bound-check variants (exact equivalence: the operands are
+    // always varint-decoded integers, so `x>K`, `K<x` and `not(x<=K)` are
+    // interchangeable; no NaN or metamethod semantics can apply).
+    let ax = gt(&mut structure, "a", "255");
+    let bx = gt(&mut structure, "b", "255");
+    let cx = gt(&mut structure, "c", "255");
+    let jx = gt(&mut structure, "j", "16777215");
+    let kx = gt(&mut structure, "k2", "65535");
+    // M7: metamethod-dispatch branch variants. The Call wrapper inverts its
+    // cache branch (pure control-flow inversion, no evaluation reorder); the
+    // userdata guard flips its (string-only, hence raw and commutative)
+    // equality order.
+    let call_body = if structure.next_u64() % 2 == 0 {
+        "local Call=function(fn,args)local d=W[fn];if d then return H(d[1],args,d[2])else return Z(fn(U(args,1,args.n)))end end;"
+    } else {
+        "local Call=function(fn,args)local d=W[fn];if not d then return Z(fn(U(args,1,args.n)))end;return H(d[1],args,d[2])end;"
+    };
+    let ud_check = if structure.next_u64() % 2 == 0 {
+        "TY(object)=='userdata'"
+    } else {
+        "'userdata'==TY(object)"
+    };
     let mut s = format!(
         "local x={{}};return setmetatable({{[{}]=function()\n",
         keys[0]
@@ -282,22 +310,25 @@ if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*2097152;if v<209
 if w>=128 then E()end;end;end;end;return v,p end;",
     );
     s.push_str(
-        "for id=0,np-1 do local F=P[id];local CD=F.__obf_proto_code;local p=1;local XB={};\
+        format!(
+            "for id=0,np-1 do local F=P[id];local CD=F.__obf_proto_code;local p=1;local XB={{}};\
 for at=0,F.__obf_proto_nc-1 do local o=SB(CD,p);if o==nil then E()end;p=p+1;local f=FM[o];\
 if f==nil then E()end;local a,b,c;\
-if f==1 then local j;j,p=Dv(CD,p);if j>16777215 then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
-elseif f==2 then a,p=Dv(CD,p);if a>255 then E()end;b=0;c=0;\
-elseif f==3 then a,p=Dv(CD,p);b,p=Dv(CD,p);if a>255 or b>255 then E()end;c=0;\
-elseif f==4 then a,p=Dv(CD,p);if a>255 then E()end;local k2;k2,p=Dv(CD,p);if k2>65535 then E()end;b=k2%256;c=(k2-k2%256)/256;\
-else a,p=Dv(CD,p);b,p=Dv(CD,p);c,p=Dv(CD,p);if a>255 or b>255 or c>255 then E()end end;\
-local k=b+c*256;local j=a+k*256;local ok=false;",
+if f==1 then local j;j,p=Dv(CD,p);if {jx} then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
+elseif f==2 then a,p=Dv(CD,p);if {ax} then E()end;b=0;c=0;\
+elseif f==3 then a,p=Dv(CD,p);b,p=Dv(CD,p);if {ax} or {bx} then E()end;c=0;\
+elseif f==4 then a,p=Dv(CD,p);if {ax} then E()end;local k2;k2,p=Dv(CD,p);if {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;\
+else a,p=Dv(CD,p);b,p=Dv(CD,p);c,p=Dv(CD,p);if {ax} or {bx} or {cx} then E()end end;\
+local k=b+c*256;local j=a+k*256;local ok=false;"
+        )
+        .as_str(),
     );
     for (index, op) in program.opcodes().iter().enumerate() {
         write!(
             s,
-            "{} o=={} then ok={};",
+            "{} {} then ok={};",
             if index == 0 { "if" } else { "elseif" },
-            *op as u8,
+            structure.dispatch_condition(u64::from(*op as u8) as u16, program.target.is_luau()),
             validation(*op)
         )
         .unwrap();
@@ -319,7 +350,9 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 "#,
     );
     if program.target.is_luau() && !program.methods().is_empty() {
-        s.push_str("local Lookup=function(object,key)if TY(object)=='userdata'then ");
+        s.push_str("local Lookup=function(object,key)if ");
+        s.push_str(ud_check);
+        s.push_str("then ");
         for (index, method) in program.methods().iter().enumerate() {
             write!(s, "{} key==", if index == 0 { "if" } else { "elseif" }).unwrap();
             super::lua51::emit_byte_string(&mut s, method.as_bytes());
@@ -334,7 +367,9 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         if program.target.is_luau() {
             // Without a static method identifier we cannot synthesize a
             // faithful userdata NAMECALL; never silently use indexing instead.
-            s.push_str("local Lookup=function(object,key)if TY(object)=='userdata'then E()end;return object[key]end;");
+            s.push_str("local Lookup=function(object,key)if ");
+            s.push_str(ud_check);
+            s.push_str("then E()end;return object[key]end;");
         } else {
             s.push_str("local Lookup=function(object,key)return object[key]end;");
         }
@@ -411,9 +446,14 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         keys[4]
     )
     .unwrap();
-    s.push_str(r#"
+    s.push_str(
+        r#"
 local W=SM({},{__mode='kv'});local H;local Make;
-local Call=function(fn,args)local d=W[fn];if d then return H(d[1],args,d[2])else return Z(fn(U(args,1,args.n)))end end;
+"#,
+    );
+    s.push_str(call_body);
+    s.push_str(
+        r#"
 Make=function(id,up)
  local F=P[id];local cached=F.__obf_proto_cached;
  if cached then local previous=W[cached][2];local same=true;
@@ -439,9 +479,9 @@ H=function(fid,args,ups)
             .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
         write!(
             s,
-            "{} o=={} then {}",
+            "{} {} then {}",
             if index == 0 { "if" } else { "elseif" },
-            *op as u8,
+            structure.dispatch_condition(u64::from(*op as u8) as u16, program.target.is_luau()),
             code
         )
         .unwrap();
@@ -493,6 +533,19 @@ fn wrapper_keys(seed: u64) -> Vec<u64> {
         }
     }
     keys
+}
+
+/// M7 structural variant: one of three exactly equivalent integer bound
+/// checks. The operands are always integers decoded from 7-bit varints, so
+/// `x>K`, `K<x` and `not(x<=K)` are interchangeable -- NaN cannot occur and
+/// raw numeric comparison has no metamethod dispatch. Only the spelling of
+/// the emitted check changes; behavior and rejection behavior are identical.
+fn gt(structure: &mut crate::random::Prng, value: &str, bound: &str) -> String {
+    match structure.next_u64() % 3 {
+        0 => format!("{value}>{bound}"),
+        1 => format!("{bound}<{value}"),
+        _ => format!("not({value}<={bound})"),
+    }
 }
 
 /// Structural inputs each audited probe function receives from the entry:
@@ -1357,6 +1410,172 @@ mod tests {
             data[..32].to_vec(),
         ] {
             assert!(constant_ranges(&bytes, Target::Lua51).is_err());
+        }
+    }
+
+    #[test]
+    fn m7_structural_variants_vary_across_seeds_and_stay_reproducible() {
+        // Token-level, name-agnostic detection works on the FINAL output
+        // (the finalizer renames every explicit local).
+        let forms = |output: &str, target: Target| -> (usize, usize, usize, usize) {
+            let tokens = crate::lexer::lex(output, target).unwrap();
+            let text = |index: usize| tokens[index].text(output);
+            let kind = |index: usize| tokens[index].kind;
+            let mut dispatch = [false; 4];
+            let mut bound = [false; 3];
+            let mut call = 0usize;
+            let mut userdata = [false; 2];
+            for index in 0..tokens.len() {
+                // name==number / number==name / not(name~=number) /
+                if index + 2 < tokens.len() {
+                    if kind(index) == crate::lexer::TokenKind::Identifier
+                        && text(index + 1) == "=="
+                        && kind(index + 2) == crate::lexer::TokenKind::Number
+                    {
+                        dispatch[0] = true;
+                    }
+                    if kind(index) == crate::lexer::TokenKind::Number
+                        && text(index + 1) == "=="
+                        && kind(index + 2) == crate::lexer::TokenKind::Identifier
+                    {
+                        dispatch[1] = true;
+                    }
+                }
+                if index + 4 < tokens.len()
+                    && text(index) == "not"
+                    && text(index + 1) == "("
+                    && kind(index + 2) == crate::lexer::TokenKind::Identifier
+                    && text(index + 3) == "~="
+                    && kind(index + 4) == crate::lexer::TokenKind::Number
+                {
+                    dispatch[2] = true;
+                }
+                if index + 4 < tokens.len()
+                    && kind(index) == crate::lexer::TokenKind::Identifier
+                    && text(index + 1) == "-"
+                    && kind(index + 2) == crate::lexer::TokenKind::Number
+                    && text(index + 3) == "=="
+                    && text(index + 4) == "0"
+                {
+                    dispatch[3] = true;
+                }
+                // Bound-check spellings over the operand bound.
+                if index + 2 < tokens.len() {
+                    if kind(index) == crate::lexer::TokenKind::Identifier
+                        && text(index + 1) == ">"
+                        && text(index + 2) == "255"
+                    {
+                        bound[0] = true;
+                    }
+                    if text(index) == "255"
+                        && text(index + 1) == "<"
+                        && kind(index + 2) == crate::lexer::TokenKind::Identifier
+                    {
+                        bound[1] = true;
+                    }
+                    if text(index) == "<=" && text(index + 1) == "255" {
+                        bound[2] = true;
+                    }
+                }
+                // Call-wrapper inversion: `if not <name> then return`.
+                if index + 4 < tokens.len()
+                    && text(index) == "if"
+                    && text(index + 1) == "not"
+                    && kind(index + 2) == crate::lexer::TokenKind::Identifier
+                    && text(index + 3) == "then"
+                    && text(index + 4) == "return"
+                {
+                    call = 1;
+                }
+                // Userdata guard equality order (substring forms are stable
+                // under the finalizer's quote normalization to `"..."`).
+                if output.contains("==\"userdata\"") {
+                    userdata[0] = true;
+                }
+                if output.contains("\"userdata\"==") {
+                    userdata[1] = true;
+                }
+            }
+            (
+                dispatch.iter().filter(|&&hit| hit).count(),
+                bound.iter().filter(|&&hit| hit).count(),
+                call,
+                userdata.iter().filter(|&&hit| hit).count(),
+            )
+        };
+        // UNION across seeds and targets: a family counts as observed if
+        // ANY output exhibits it (a single output may carry only one of the
+        // mutually exclusive spellings).
+        let mut dispatch_total = 0usize;
+        let mut bound_total = 0usize;
+        let mut call_total = 0usize;
+        let mut userdata_seen = [false; 2];
+        for (target, fixture) in [
+            (
+                Target::Lua51,
+                include_str!("../../tests/fixtures/vm_lua51.lua"),
+            ),
+            (
+                Target::Luau,
+                include_str!("../../tests/fixtures/vm_luau.lua"),
+            ),
+        ] {
+            let data = compile(fixture, target).unwrap();
+            for seed in 0..=15u64 {
+                let output = emit(&data, target, seed).unwrap();
+                // Reproducibility with structural variants enabled.
+                assert_eq!(emit(&data, target, seed).unwrap(), output);
+                let (dispatch, bound, call, userdata) = forms(&output, target);
+                dispatch_total |= dispatch;
+                bound_total |= bound;
+                call_total |= call;
+                if output.contains("==\"userdata\"") {
+                    userdata_seen[0] = true;
+                }
+                if output.contains("\"userdata\"==") {
+                    userdata_seen[1] = true;
+                }
+            }
+        }
+        assert!(
+            dispatch_total >= 3,
+            "dispatch variant families: {dispatch_total}"
+        );
+        assert_eq!(bound_total, 3, "bound variant families: {bound_total}");
+        assert_eq!(call_total, 1, "call-wrapper inversion never observed");
+        assert!(
+            userdata_seen == [true, true],
+            "userdata guard orders: {userdata_seen:?}"
+        );
+    }
+
+    #[test]
+    fn generation_respects_the_documented_size_budget() {
+        // M7 size budget: the structural variants must not inflate a
+        // generated script beyond the documented caps (~15% headroom over
+        // the current goldens; raise the caps deliberately, never silently).
+        for (target, fixture, budget) in [
+            (
+                Target::Lua51,
+                include_str!("../../tests/fixtures/vm_lua51.lua"),
+                24_000usize,
+            ),
+            (
+                Target::Luau,
+                include_str!("../../tests/fixtures/vm_luau.lua"),
+                26_000usize,
+            ),
+        ] {
+            let data = compile(fixture, target).unwrap();
+            for seed in [0u64, 735, 7001, 7351, u64::MAX] {
+                let output = emit(&data, target, seed).unwrap();
+                assert!(
+                    output.len() <= budget,
+                    "{target} seed {seed}: {} bytes exceeds the {} byte budget",
+                    output.len(),
+                    budget
+                );
+            }
         }
     }
 

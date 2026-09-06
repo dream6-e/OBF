@@ -369,4 +369,7 @@ printf '[matrix] Legacy/reference opcode coverage: Lua 5.1=%s/38, Luau core=%s/9
     "$lua51_opcode_count" "$luau_opcode_count"
 printf '[matrix] VM sizes: Lua 5.1=%s bytes, Luau=%s bytes\n' \
     "$(wc -c <"$tmp/vm51.lua")" "$(wc -c <"$tmp/vmluau.lua")"
+# M7: performance benchmark and size budget over the checked-in goldens
+# (the matrix regenerates byte-identical copies of them above).
+"$ROOT/tools/bench-vm.sh"
 printf '%s\n' '[matrix] PASS'
