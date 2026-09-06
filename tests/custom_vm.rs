@@ -415,3 +415,111 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
         }
     }
 }
+
+#[test]
+fn watermark_mismatch_aborts_silently_before_any_execution() {
+    use std::process::Command;
+    fn alphabet(byte: u8) -> bool {
+        (35..=121).contains(&byte) && byte != 92
+    }
+    // Minimal string-literal scanner: spans of double-quoted literals whose
+    // entire content is base86-alphabet text.
+    fn segment_spans(source: &str) -> Vec<(usize, usize)> {
+        let bytes = source.as_bytes();
+        let mut spans = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'"' {
+                let mut end = index + 1;
+                let mut clean = true;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    if bytes[end] == b'\\' {
+                        clean = false;
+                        end += 2;
+                        continue;
+                    }
+                    end += 1;
+                }
+                if clean
+                    && end < bytes.len()
+                    && end - index - 1 >= 12
+                    && bytes[index + 1..end].iter().all(|&byte| alphabet(byte))
+                {
+                    spans.push((index + 1, end));
+                }
+                index = end + 1;
+            } else {
+                index += 1;
+            }
+        }
+        spans
+    }
+    fn group_bytes(text: &str) -> [u8; 4] {
+        let mut value = 0u64;
+        for (index, byte) in text.as_bytes().iter().enumerate() {
+            let digit = u64::from(if *byte > 92 { byte - 36 } else { byte - 35 });
+            value += digit * 86u64.pow(index as u32);
+        }
+        let mut out = [0u8; 4];
+        for slot in &mut out {
+            *slot = (value % 256) as u8;
+            value /= 256;
+        }
+        out
+    }
+    for target in [Target::Lua51, Target::Luau] {
+        let bytes = obf::bytecode::custom::encode(
+            &obf::ir::compile("print('MUST_NOT_RUN')", target).unwrap(),
+        )
+        .unwrap();
+        let generated = vm::custom::emit(&bytes, target, 735).unwrap();
+        assert!(!generated.contains("XXS:"));
+        // Flip the FIRST character of the stream-first segment: base86
+        // groups are independent, so only the four watermark bytes change
+        // and the rest of the ciphertext stream stays byte-identical. Any
+        // abort therefore proves the watermark check itself fired.
+        let mut tampered = generated.clone();
+        let mut flipped = false;
+        for (start, end) in segment_spans(&generated) {
+            if group_bytes(&generated[start..start + 5]) == *b"XXS:" {
+                for replacement in [b'#', b'$', b'%'] {
+                    if replacement as u8 == generated.as_bytes()[start] {
+                        continue;
+                    }
+                    let mut probe = tampered.clone();
+                    probe.replace_range(start..start + 1, &(replacement as char).to_string());
+                    if group_bytes(&probe[start..start + 5]) != *b"XXS:" {
+                        probe.replace_range(start..start + 1, &(replacement as char).to_string());
+                        tampered = probe;
+                        flipped = true;
+                        break;
+                    }
+                }
+                assert!(flipped, "{target}: no replacement flipped the watermark");
+                break;
+            }
+        }
+        assert!(
+            flipped,
+            "{target}: stream-first watermark segment not found"
+        );
+        let workspace = Workspace::new();
+        let runner = support::root()
+            .join("toolchains/bin")
+            .join(if target.is_luau() { "luau" } else { "lua5.1" });
+        for (name, source, expect_success) in [
+            ("control", generated.as_str(), true),
+            ("watermark", tampered.as_str(), false),
+        ] {
+            let path = workspace.0.join(format!("wm-{name}.lua"));
+            fs::write(&path, source).unwrap();
+            let output = Command::new(&runner).arg(&path).output().unwrap();
+            assert_eq!(output.status.success(), expect_success, "{target} {name}");
+            if expect_success {
+                assert_eq!(output.stdout, b"MUST_NOT_RUN\n");
+            } else {
+                assert!(output.stdout.is_empty(), "{target} {name}");
+            }
+        }
+    }
+}

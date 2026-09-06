@@ -104,9 +104,19 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     // payload-table functions. Each segment function re-runs the audited
     // native-loadstring probe and decodes only its own slice, so payload
     // recovery is itself split across several [n]=function pieces.
-    let encoded = base86_encode(&encrypted);
-    let groups = encrypted.len() / 4;
-    let tail = encrypted.len() % 4;
+    // Fixed transport watermark: the decoded stream must begin with the
+    // literal bytes "XXS:". The check itself is split across two payload
+    // functions -- a generic big-endian packer over the first four bytes of
+    // the first stream segment, and a comparator against one opaque u32 --
+    // so neither function spells out the watermark and the string "XXS:"
+    // never appears in the script. A mismatch aborts silently via E().
+    let expected_watermark = u32::from_be_bytes(*b"XXS:");
+    let mut marked = Vec::with_capacity(encrypted.len() + 4);
+    marked.extend_from_slice(b"XXS:");
+    marked.extend_from_slice(&encrypted);
+    let encoded = base86_encode(&marked);
+    let groups = marked.len() / 4;
+    let tail = marked.len() % 4;
     let base = groups / 3;
     let extra = groups % 3;
     let mut counts = [
@@ -156,6 +166,18 @@ for j=1,r2-1 do o[#o+1]=NCH(v%256);v=(v-v%256)/256 end end;return TC(o);end,",
         )
         .unwrap();
     }
+    // The split watermark check: W1 is a plain 4-byte packer, W2 compares
+    // against the opaque expected value. Hidden in plain sight among the
+    // other numeric-keyed payload functions.
+    let mut watermark = String::new();
+    write!(
+        watermark,
+        "[{}]=function(S,E,SB)local a,b,c,d=SB(S,1),SB(S,2),SB(S,3),SB(S,4);\
+if not d then E()end;return((a*256+b)*256+c)*256+d;end,[{}]=function(v,E)if v~={expected_watermark} then E()end;end,",
+        keys[11],
+        keys[12],
+    )
+    .unwrap();
     write!(
         s,
         "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF,ca,cb)\n",
@@ -364,7 +386,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     // parameters of target-specific sections accept nil the same way.
     write!(
         s,
-        "\nreturn CV,SV,Lookup\nend,{probes}{segments}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);\nlocal P,np,entry=VMS[{}](Y1..Y2..Y3,c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        "\nreturn CV,SV,Lookup\nend,{probes}{segments}{watermark}[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});\nlocal Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);\nlocal mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);\nlocal P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
         keys[0],
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
@@ -378,6 +400,8 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         keys[8 + hold[0]],
         keys[8 + hold[1]],
         keys[8 + hold[2]],
+        keys[11],
+        keys[12],
         keys[1],
         keys[4],
         keys[7],
@@ -454,15 +478,15 @@ fn wrapper_method(target: Target, seed: u64) -> String {
     name
 }
 
-/// Eleven distinct random numeric keys for the section functions of the
+/// Thirteen distinct random numeric keys for the section functions of the
 /// payload table (five sections, three key-share probes, three base86
-/// payload segments). Separate seeded stream; same reproducibility
-/// guarantees as the method name.
+/// payload segments, two split watermark-check functions). Separate seeded
+/// stream; same reproducibility guarantees as the method name.
 fn wrapper_keys(seed: u64) -> Vec<u64> {
     let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
     let mut used = std::collections::BTreeSet::new();
     let mut keys = Vec::new();
-    while keys.len() < 11 {
+    while keys.len() < 13 {
         let key = 100 + random.next_u64() % 9900;
         if used.insert(key) {
             keys.push(key);
@@ -763,10 +787,18 @@ fn embedded_outer_ciphertext(
         for index in permutation {
             text.extend_from_slice(&segments[index]);
         }
-        let Ok(cipher) = base86_decode(&String::from_utf8_lossy(&text)) else {
+        let Ok(stream) = base86_decode(&String::from_utf8_lossy(&text)) else {
             continue;
         };
-        let plain = lehmer_cipher(&cipher, &shares);
+        // The decoded stream must open with the fixed transport watermark;
+        // everything after it is the outer ciphertext body. The watermark
+        // also pins which segment is stream-first, so it strengthens the
+        // order resolution on top of the full-image Adler gate.
+        if !stream.starts_with(b"XXS:") {
+            continue;
+        }
+        let cipher = &stream[4..];
+        let plain = lehmer_cipher(cipher, &shares);
         // Magic + target byte alone cannot discriminate orders that share
         // the same first segment; the header Adler-32 over the whole image
         // is order-sensitive end to end, so a winner is a fully valid frame.
@@ -777,7 +809,7 @@ fn embedded_outer_ciphertext(
             && plain[4] == expected
             && recorded == Some(custom::checksum(&plain[32..]))
         {
-            winners.push(cipher);
+            winners.push(cipher.to_vec());
         }
     }
     if winners.len() != 1 {
@@ -1159,14 +1191,15 @@ mod tests {
                     ExpressionKind::Name(reference) => assert_eq!(reference.value, wrapper_name),
                     _ => panic!("{target}: {output}"),
                 }
-                // payload table: eleven numeric-keyed functions (five
+                // payload table: thirteen numeric-keyed functions (five
                 // sections, three probe/share functions, three base86
-                // payload-segment decoders) and exactly one string-keyed
-                // entry function (the called method)
+                // payload-segment decoders, two split watermark-check
+                // functions) and exactly one string-keyed entry function
+                // (the called method)
                 let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
                     panic!("{target}: {output}");
                 };
-                assert_eq!(fields.len(), 12, "{target}: {output}");
+                assert_eq!(fields.len(), 14, "{target}: {output}");
                 let mut numeric_keys = std::collections::BTreeSet::new();
                 let mut entries = 0;
                 for field in fields {
@@ -1195,7 +1228,7 @@ mod tests {
                     }
                 }
                 assert_eq!(entries, 1);
-                assert_eq!(numeric_keys.len(), 11);
+                assert_eq!(numeric_keys.len(), 13);
                 // The wrapper is not just structural: it runs the program.
                 let workspace = native::Workspace::new();
                 let path = workspace.0.join("wrapped.lua");
@@ -1324,6 +1357,42 @@ mod tests {
             data[..32].to_vec(),
         ] {
             assert!(constant_ranges(&bytes, Target::Lua51).is_err());
+        }
+    }
+
+    #[test]
+    fn transport_watermark_is_present_checked_and_never_spelled_out() {
+        for (target, fixture) in [
+            (
+                Target::Lua51,
+                include_str!("../../tests/fixtures/vm_lua51.lua"),
+            ),
+            (
+                Target::Luau,
+                include_str!("../../tests/fixtures/vm_luau.lua"),
+            ),
+        ] {
+            let data = compile(fixture, target).unwrap();
+            let output = emit(&data, target, 735).unwrap();
+            // The hidden check must not leak the watermark text itself.
+            assert!(!output.contains("XXS:"));
+            // Exactly one segment is stream-first: its decode opens with
+            // the fixed watermark bytes.
+            let segments = segment_literals(&output, target).unwrap();
+            let stamped = segments
+                .iter()
+                .filter(|literal| {
+                    base86_decode(&String::from_utf8_lossy(literal))
+                        .is_ok_and(|bytes| bytes.starts_with(b"XXS:"))
+                })
+                .count();
+            assert_eq!(stamped, 1, "{target}");
+            // The split functions carry no watermark spelling: W1 is a
+            // byte packer, W2 holds only the packed u32 as a number.
+            let expected = u32::from_be_bytes(*b"XXS:").to_string();
+            assert!(output.contains(&expected));
+            // Extraction strips the watermark; full roundtrip still holds.
+            assert_eq!(decrypt_embedded(&output, target, 735).unwrap(), data);
         }
     }
 
