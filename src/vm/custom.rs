@@ -84,6 +84,44 @@ pub(crate) fn generate(
     } else {
         "'userdata'==TY(object)"
     };
+    // M7 opaque true/false branches with unreachable decoy instructions:
+    // the entry body is wrapped as `if <tautology> then <real> else <decoy>`
+    // (or the flipped `if <contradiction> then <decoy> else <real>`), and
+    // the F3/F5 dispatch chains gain dead elseif arms keyed on opcode
+    // numbers that can never occur. Both user-requested forms.
+    let (opaque_true, opaque_false) = opaque_pair(&mut structure);
+    let entry_flip = structure.next_u64() % 2 == 0;
+    let entry_decoy = format!(
+        "local d1=VMS[{}](E);local d2=VMS[{}](d1,E);if d2 then E()end;",
+        keys[0], keys[1]
+    );
+    let f3_decoys = decoy_arms(
+        &mut structure,
+        2,
+        program.target.is_luau(),
+        &["ok=j%2==0;", "ok=a+b<511;", "ok=c<256;"],
+    );
+    let f5_decoys = decoy_arms(
+        &mut structure,
+        2,
+        program.target.is_luau(),
+        &[
+            "R[a]={R[b]};pc=j;",
+            "R[a]=R[b][R[c]];pc=pc+4;",
+            "k=j;R[a]=k;pc=pc+4;",
+        ],
+    );
+    let (entry_head, entry_tail) = if entry_flip {
+        (
+            format!("if {opaque_true} then"),
+            format!("else {entry_decoy}end;"),
+        )
+    } else {
+        (
+            format!("if {opaque_false} then {entry_decoy}else"),
+            "end;".to_owned(),
+        )
+    };
     let mut s = format!(
         "local x={{}};return setmetatable({{[{}]=function()\n",
         keys[0]
@@ -333,6 +371,7 @@ local k=b+c*256;local j=a+k*256;local ok=false;"
         )
         .unwrap();
     }
+    s.push_str(&f3_decoys);
     s.push_str("else E()end;if not ok then E()end;XB[at+1]=NCH(o,a,b,c);end;if p~=#CD+1 then E()end;F.__obf_proto_code=TC(XB);local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);");
     write!(
         s,
@@ -446,6 +485,17 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         keys[4]
     )
     .unwrap();
+    // M7: wrap the just-emitted entry body in an opaque branch. The live
+    // side carries the real chain; the dead side carries real-looking,
+    // never-executing instructions behind a constant contradiction.
+    {
+        let head_anchor = format!("[\"{method}\"]=function(VMS,...)\n");
+        let head_wrapped = format!("[\"{method}\"]=function(VMS,...){entry_head}\n");
+        s = s.replacen(&head_anchor, &head_wrapped, 1).replace(
+            "return U(result,1,result.n)\nend,[",
+            &format!("return U(result,1,result.n)\n{entry_tail}\nend,["),
+        );
+    }
     s.push_str(
         r#"
 local W=SM({},{__mode='kv'});local H;local Make;
@@ -486,6 +536,7 @@ H=function(fid,args,ups)
         )
         .unwrap();
     }
+    s.push_str(&f5_decoys);
     s.push_str("else E()end;end;end;end;return H");
     let forwards_varargs = program.prototypes[program.entry]
         .code
@@ -533,6 +584,45 @@ fn wrapper_keys(seed: u64) -> Vec<u64> {
         }
     }
     keys
+}
+
+/// M7 opaque branch predicates: constant integer tautologies and their
+/// matched contradictions. Same shape, flipped truth value; no NaN, no
+/// metamethods, no floats -- the truth value is fixed at generation time.
+fn opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
+    const TAUTOLOGIES: [(&str, &str); 4] = [
+        ("48271%2==1", "48271%2==0"),
+        ("2147483647>2147483646", "2147483647>2147483647"),
+        ("65536%256==0", "65536%256==1"),
+        ("16777216%2==0", "16777216%2==1"),
+    ];
+    let index = (structure.next_u64() % TAUTOLOGIES.len() as u64) as usize;
+    let (truthy, falsy) = TAUTOLOGIES[index];
+    (truthy.to_owned(), falsy.to_owned())
+}
+
+/// M7 unreachable decoy arms for the F3/F5 dispatch chains: `elseif o==K`
+/// (in the chain's current comparison spelling) with opcode numbers in
+/// 200..=254. Real opcodes never exceed 63 and F3 rejects unknown opcodes
+/// through the FM table before dispatch, so these arms are dead by
+/// construction while carrying real, plausible instructions.
+fn decoy_arms(
+    structure: &mut crate::random::Prng,
+    count: usize,
+    luau: bool,
+    bodies: &[&str],
+) -> String {
+    let mut used = std::collections::BTreeSet::new();
+    let mut out = String::new();
+    while used.len() < count {
+        let opcode = 200 + structure.next_u64() % 55;
+        if used.insert(opcode) {
+            let body = bodies[(structure.next_u64() % bodies.len() as u64) as usize];
+            let condition = structure.dispatch_condition(opcode as u16, luau);
+            write!(out, "elseif {condition} then {body}").unwrap();
+        }
+    }
+    out
 }
 
 /// M7 structural variant: one of three exactly equivalent integer bound
@@ -1547,6 +1637,109 @@ mod tests {
             userdata_seen == [true, true],
             "userdata guard orders: {userdata_seen:?}"
         );
+    }
+
+    #[test]
+    fn opaque_true_false_branches_carry_real_but_unreachable_instructions() {
+        // Both user-requested forms, detected on the FINAL renamed output:
+        //  - the entry body wrapped as `if <tautology> then <real chain>
+        //    else <decoy>` (or the flipped `if <contradiction>` form);
+        //  - dead elseif arms in the F3/F5 dispatch chains keyed on opcode
+        //    numbers 200..=254, which can never occur (real opcodes stay
+        //    below 64 and F3 rejects unknown opcodes through the FM gate).
+        // The decoy branches carry real instructions; the native-parity
+        // differentials prove they never execute.
+        const TRUTHY: [&str; 4] = [
+            "48271%2==1",
+            "2147483647>2147483646",
+            "65536%256==0",
+            "16777216%2==0",
+        ];
+        const FALSY: [&str; 4] = [
+            "48271%2==0",
+            "2147483647>2147483647",
+            "65536%256==1",
+            "16777216%2==1",
+        ];
+        let mut truthy_wraps = 0usize;
+        let mut falsy_wraps = 0usize;
+        for (target, fixture) in [
+            (
+                Target::Lua51,
+                include_str!("../../tests/fixtures/vm_lua51.lua"),
+            ),
+            (
+                Target::Luau,
+                include_str!("../../tests/fixtures/vm_luau.lua"),
+            ),
+        ] {
+            let data = compile(fixture, target).unwrap();
+            for seed in 0..=7u64 {
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(emit(&data, target, seed).unwrap(), output);
+                // Dead dispatch arms: an identifier/number equality where
+                // the number sits in the impossible 200..=254 band.
+                let tokens = crate::lexer::lex(&output, target).unwrap();
+                let mut dead_arms = 0usize;
+                // Numeric literals appear in decimal, hex or digit-grouped
+                // binary spellings (integer_literal variants).
+                let numeric = |text: &str| -> Option<u32> {
+                    let (radix, digits) = if let Some(rest) = text.strip_prefix("0x") {
+                        (16, rest)
+                    } else if let Some(rest) = text.strip_prefix("0b") {
+                        (2, rest)
+                    } else {
+                        (10, text)
+                    };
+                    u32::from_str_radix(&digits.replace('_', ""), radix).ok()
+                };
+                for index in 0..tokens.len().saturating_sub(5) {
+                    let band = |token: usize| {
+                        tokens[token].kind == crate::lexer::TokenKind::Number
+                            && numeric(tokens[token].text(&output))
+                                .is_some_and(|value| (200..=254).contains(&value))
+                    };
+                    if tokens[index + 1].text(&output) == "=="
+                        && ((tokens[index].kind == crate::lexer::TokenKind::Identifier
+                            && band(index + 2))
+                            || (band(index)
+                                && tokens[index + 2].kind == crate::lexer::TokenKind::Identifier))
+                    {
+                        dead_arms += 1;
+                    }
+                    // not(A~=K) spelling.
+                    if tokens[index].text(&output) == "not"
+                        && tokens[index + 1].text(&output) == "("
+                        && tokens[index + 2].kind == crate::lexer::TokenKind::Identifier
+                        && tokens[index + 3].text(&output) == "~="
+                        && band(index + 4)
+                    {
+                        dead_arms += 1;
+                    }
+                    // A-K==0 spelling.
+                    if tokens[index].kind == crate::lexer::TokenKind::Identifier
+                        && tokens[index + 1].text(&output) == "-"
+                        && band(index + 2)
+                        && tokens[index + 3].text(&output) == "=="
+                        && tokens[index + 4].text(&output) == "0"
+                    {
+                        dead_arms += 1;
+                    }
+                }
+                assert!(
+                    dead_arms >= 2,
+                    "{target} seed {seed}: {dead_arms} dead arms"
+                );
+                // Entry opaque guard: exactly one pool predicate wraps the
+                // entry, in either the tautology or the contradiction form.
+                let truthy = TRUTHY.iter().filter(|p| output.contains(*p)).count();
+                let falsy = FALSY.iter().filter(|p| output.contains(*p)).count();
+                assert_eq!(truthy + falsy, 1, "{target} seed {seed}");
+                truthy_wraps += truthy;
+                falsy_wraps += falsy;
+            }
+        }
+        assert!(truthy_wraps > 0 && falsy_wraps > 0, "both forms must occur");
     }
 
     #[test]
