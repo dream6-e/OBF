@@ -851,50 +851,56 @@ impl Analysis {
         chunk: &Chunk,
         seed: u64,
     ) -> Result<RenamePlan, Diagnostic> {
-        // The default AST backend wraps the whole VM inside the function at
-        // `local VM={__index={[M]=function(VMS,VMK,...)...end}}`, so the
-        // audited environment capture is a statement of THAT function body.
-        // Explicit native-backend VMs keep the capture at the chunk top level.
-        // Collect both locations; the single-capture rule below is unchanged.
+        // The default AST backend stores the whole VM as section functions of
+        // the payload table in `local x={};return setmetatable({...},x):m()`,
+        // so the audited environment capture is a statement of one of THOSE
+        // function bodies. Explicit native-backend VMs keep the capture at the
+        // chunk top level. Collect all locations; the single-capture rule
+        // below is unchanged.
         let mut statements: Vec<&Statement> = chunk.block.statements.iter().collect();
         for statement in &chunk.block.statements {
-            let StatementKind::Local {
-                bindings,
-                values,
-                exported: false,
-                is_const: false,
-            } = &statement.kind
+            let StatementKind::Return(values) = &statement.kind else {
+                continue;
+            };
+            let Some(ExpressionKind::Call {
+                function: invoked,
+                method: Some(_),
+                ..
+            }) = values.first().map(|value| &value.kind)
             else {
                 continue;
             };
-            if bindings.len() != 1 || values.len() != 1 {
+            // `... :m()` resolves the entry function stored in the payload
+            // table; the invoked function is `setmetatable({...},x)`.
+            let ExpressionKind::Call {
+                function,
+                method: None,
+                type_arguments,
+                arguments,
+            } = &invoked.kind
+            else {
+                continue;
+            };
+            if !type_arguments.is_empty() {
                 continue;
             }
-            let ExpressionKind::Table(fields) = &values[0].kind else {
-                continue;
-            };
-            if fields.len() != 1 {
+            if !matches!(&function.kind, ExpressionKind::Name(name) if name.value == "setmetatable")
+            {
                 continue;
             }
-            let TableField::Record { name, value, .. } = &fields[0] else {
+            let Some(ExpressionKind::Table(fields)) = arguments.first().map(|value| &value.kind)
+            else {
                 continue;
             };
-            if name.value != "__index" {
-                continue;
+            for field in fields {
+                let value = match field {
+                    TableField::Computed { value, .. } | TableField::Record { value, .. } => value,
+                    TableField::List(_) => continue,
+                };
+                if let ExpressionKind::Function(body) = &value.kind {
+                    statements.extend(body.body.statements.iter());
+                }
             }
-            let ExpressionKind::Table(dispatch) = &value.kind else {
-                continue;
-            };
-            if dispatch.len() != 1 {
-                continue;
-            }
-            let TableField::Computed { value, .. } = &dispatch[0] else {
-                continue;
-            };
-            let ExpressionKind::Function(body) = &value.kind else {
-                continue;
-            };
-            statements.extend(body.body.statements.iter());
         }
         let mut captures = statements.iter().filter_map(|statement| {
             let StatementKind::Local {

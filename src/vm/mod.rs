@@ -53,9 +53,10 @@ mod tests {
     use super::*;
     use crate::ast::{Chunk, ExpressionKind, StatementKind, TableField};
 
-    // Root tables may only be empty registries, Luau numeric-keyed NAMECALL
-    // function wrappers, or the custom backend's audited `__index` dispatch
-    // wrapper. Prototype/instruction data must come from the binary decoder,
+    // Root tables may only be empty registries or function-valued maps:
+    // Luau numeric-keyed NAMECALL wrappers, plus the custom backend's
+    // numeric/string-keyed section and entry functions of the setmetatable
+    // payload. Prototype/instruction data must come from the binary decoder,
     // not inline table literals. Never key this test to the old P/W variable
     // spellings, nor reject legitimate wrapper tables.
     pub(super) fn no_inline_metadata(chunk: &Chunk) -> bool {
@@ -72,16 +73,8 @@ mod tests {
                 fields.iter().all(|field| {
                     matches!(field,
                         TableField::Computed { key, value, .. }
-                        if matches!(key.kind, ExpressionKind::Number(_))
+                        if matches!(key.kind, ExpressionKind::Number(_) | ExpressionKind::String(_))
                             && matches!(value.kind, ExpressionKind::Function(_))
-                    ) || matches!(field,
-                        TableField::Record { name, value, .. }
-                        if name.value == "__index"
-                            && matches!(&value.kind, ExpressionKind::Table(dispatch)
-                                if dispatch.len() == 1
-                                    && matches!(&dispatch[0],
-                                        TableField::Computed { value, .. }
-                                        if matches!(value.kind, ExpressionKind::Function(_))))
                     )
                 })
             })

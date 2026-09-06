@@ -36,16 +36,22 @@ pub(crate) fn generate(
     seed: u64,
 ) -> Result<String, Diagnostic> {
     custom::validate(program)?;
-    // Whole-output wrapper: every statement lives inside the single function
-    // stored at a random one/two-letter key of the metatable's `__index`
-    // dispatch table: `local VM={__index={[M]=function(VMS,VMK,...)...end}}`.
-    // The chunk itself only returns `setmetatable({},VM):M(...)`. The method
-    // call resolves through that dispatch table and enters the VM with
-    // (self, method-name) as its first two arguments; VMS/VMK absorb them so
-    // the chunk varargs still reach the entry prototype untouched. Only a
-    // chunk that actually reads `...` forwards it after the method name.
+    // Whole-output wrapper, strictly:
+    //   local x={};return setmetatable({...},x):<random letter>()
+    // The payload table carries ALL code in function form, split into section
+    // functions under random numeric keys: [n1] host-capture prelude, [n2]
+    // bytecode decoder, [n3] operand validation, [n4] runtime helpers, [n5]
+    // interpreter cluster, plus the entry method at a random letter key. The
+    // method call resolves the entry directly as an own key of the payload
+    // table, receives (self) — or (self,...) when the chunk reads `...` —
+    // chains the sections in order and returns the program result. The
+    // metatable local is the plain empty table required by the format.
     let method = wrapper_method(program.target, seed);
-    let mut s = format!("local VM={{__index={{[\"{method}\"]=function(VMS,VMK,...)\n");
+    let keys = wrapper_keys(seed);
+    let mut s = format!(
+        "local x={{}};return setmetatable({{[{}]=function()\n",
+        keys[0]
+    );
     s.push_str(
         r#"
 local SC=select;local Z=function(...)return{n=SC('#',...),...}end;
@@ -57,6 +63,14 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     if program.target.is_luau() {
         s.push_str("local IF=integer and integer.fromstring;local Freeze=table.freeze;");
     }
+    // Section functions thread state through parameters/returns; the mutually
+    // recursive Call/Make/H cluster stays together in one section function.
+    s.push_str(if program.target.is_luau() {
+        "\nreturn SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze\nend,"
+    } else {
+        "\nreturn SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE\nend,"
+    });
+    write!(s, "[{}]=function(E,SB,SS,SF,MF,IF)\n", keys[1]).unwrap();
     s.push_str("local B=");
     super::lua51::emit_byte_string(&mut s, bytecode);
     s.push(';');
@@ -127,6 +141,8 @@ for id=0,np-1 do
         s.push_str(r#"elseif tag==4 then local lo,hi=b32(),b32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
     }
     s.push_str("else E()end end;F.__obf_proto_code=take(F.__obf_proto_nc*4);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;");
+    s.push_str("\nreturn P,np,entry\nend,");
+    write!(s, "[{}]=function(P,np,SB,E)\n", keys[2]).unwrap();
     // Both Rust and target decoders validate operands before any execution.
     s.push_str("for id=0,np-1 do local F=P[id];for at=0,F.__obf_proto_nc-1 do local o,a,b,c=SB(F.__obf_proto_code,at*4+1,at*4+4);local k=b+c*256;local j=a+k*256;local ok=false;");
     for (index, op) in program.opcodes().iter().enumerate() {
@@ -148,6 +164,7 @@ for id=0,np-1 do
         Opcode::TailCall as u8
     )
     .unwrap();
+    write!(s, "\nend,[{}]=function(TY,E)\n", keys[3]).unwrap();
     s.push_str(
         r#"
 local CV=function(cell)if cell[2]then return cell[2][cell[3]]else return cell[1]end end;
@@ -175,6 +192,15 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
             s.push_str("local Lookup=function(object,key)return object[key]end;");
         }
     }
+    // Entry method: chains the section functions in order, then runs the
+    // program. IF/Freeze bind to nil on Lua 5.1 (18 prelude results); unused
+    // parameters of target-specific sections accept nil the same way.
+    write!(
+        s,
+        "\nreturn CV,SV,Lookup\nend,[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal P,np,entry=VMS[{}](E,SB,SS,SF,MF,IF);\nVMS[{}](P,np,SB,E);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        keys[0], keys[1], keys[2], keys[3], keys[4], keys[4]
+    )
+    .unwrap();
     s.push_str(r#"
 local W=SM({},{__mode='kv'});local H;local Make;
 local Call=function(fn,args)local d=W[fn];if d then return H(d[1],args,d[2])else return Z(fn(U(args,1,args.n)))end end;
@@ -210,16 +236,14 @@ H=function(fid,args,ups)
         )
         .unwrap();
     }
-    s.push_str(
-        "else E()end;end;end;end;local result=H(entry,Z(...),{});return U(result,1,result.n)",
-    );
+    s.push_str("else E()end;end;end;end;return H");
     let forwards_varargs = program.prototypes[program.entry]
         .code
         .iter()
         .any(|word| matches!(word.opcode(), Ok(Opcode::Varargs)));
     write!(
         s,
-        "\nend}}}};return setmetatable({{}},VM):{method}({})",
+        "\nend}},x):{method}({})",
         if forwards_varargs { "..." } else { "" }
     )
     .unwrap();
@@ -242,6 +266,22 @@ fn wrapper_method(target: Target, seed: u64) -> String {
     let name = pool[0].to_string();
     debug_assert!(!crate::lexer::is_keyword(&name, target));
     name
+}
+
+/// Five distinct random numeric keys for the section functions of the payload
+/// table. Separate seeded stream; same reproducibility guarantees as the
+/// method name.
+fn wrapper_keys(seed: u64) -> Vec<u64> {
+    let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
+    let mut used = std::collections::BTreeSet::new();
+    let mut keys = Vec::new();
+    while keys.len() < 5 {
+        let key = 100 + random.next_u64() % 9900;
+        if used.insert(key) {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 fn validation(op: Opcode) -> &'static str {
@@ -521,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_output_is_one_setmetatable_method_call_into_a_single_function() {
+    fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
         use crate::ast::{ExpressionKind, StatementKind, TableField};
         for target in [Target::Lua51, Target::Luau] {
             // `forwards` is true exactly when the chunk itself reads `...`;
@@ -536,7 +576,7 @@ mod tests {
                 let chunk = crate::parser::parse_source(&output, target).unwrap();
                 let statements = &chunk.block.statements;
                 assert_eq!(statements.len(), 2, "{target}: {output}");
-                // local <short>={__index=function(<short>,<short>,...) ... end}
+                // local <short>={}
                 let StatementKind::Local {
                     bindings, values, ..
                 } = &statements[0].kind
@@ -547,35 +587,10 @@ mod tests {
                 let wrapper_name = bindings[0].name.value.clone();
                 assert!((1..=2).contains(&wrapper_name.len()));
                 assert!(wrapper_name.bytes().all(|byte| byte.is_ascii_lowercase()));
-                let ExpressionKind::Table(fields) = &values[0].kind else {
-                    panic!("{target}: {output}");
-                };
-                assert_eq!(fields.len(), 1);
-                let TableField::Record { name, value, .. } = &fields[0] else {
-                    panic!("{target}: {output}");
-                };
-                assert_eq!(name.value, "__index");
-                let ExpressionKind::Table(dispatch) = &value.kind else {
-                    panic!("{target}: {output}");
-                };
-                assert_eq!(dispatch.len(), 1);
-                let TableField::Computed { key, value, .. } = &dispatch[0] else {
-                    panic!("{target}: {output}");
-                };
-                let ExpressionKind::Function(body) = &value.kind else {
-                    panic!("{target}: {output}");
-                };
-                assert!(body.has_vararg);
-                assert_eq!(body.parameters.len(), 2);
-                for parameter in &body.parameters {
-                    assert!((1..=2).contains(&parameter.name.value.len()));
-                    assert!(parameter
-                        .name
-                        .value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_lowercase()));
-                }
-                // return setmetatable({},<wrapper local>):<random letters>(...)
+                assert!(
+                    matches!(&values[0].kind, ExpressionKind::Table(fields) if fields.is_empty())
+                );
+                // return setmetatable({sections},<wrapper local>):<random letter>(...)
                 let StatementKind::Return(returned) = &statements[1].kind else {
                     panic!("{target}: {output}");
                 };
@@ -596,35 +611,64 @@ mod tests {
                 assert!((1..=2).contains(&method.value.len()));
                 assert!(method.value.bytes().all(|byte| byte.is_ascii_lowercase()));
                 assert!(!crate::lexer::is_keyword(&method.value, target));
-                // the dispatch-table key spells exactly the called method
-                let ExpressionKind::String(raw_key) = &key.kind else {
-                    panic!("{target}: {output}");
-                };
-                assert_eq!(
-                    crate::minify::literal_bytes(raw_key, target).unwrap(),
-                    method.value.as_bytes()
-                );
                 assert_eq!(arguments.len(), usize::from(forwards));
                 if forwards {
                     assert!(matches!(arguments[0].kind, ExpressionKind::Vararg));
                 }
                 let ExpressionKind::Call {
-                    function: entry,
+                    function: setmetatable,
                     method: None,
-                    type_arguments: entry_types,
-                    arguments: entry_arguments,
+                    type_arguments: setmetatable_types,
+                    arguments: setmetatable_arguments,
                 } = &function.kind
                 else {
                     panic!("{target}: {output}");
                 };
-                assert!(entry_types.is_empty());
-                assert!(matches!(entry.kind, ExpressionKind::Name(_)));
-                assert_eq!(entry_arguments.len(), 2);
-                assert!(matches!(entry_arguments[0].kind, ExpressionKind::Table(_)));
-                match &entry_arguments[1].kind {
+                assert!(setmetatable_types.is_empty());
+                assert!(matches!(
+                    &setmetatable.kind,
+                    ExpressionKind::Name(name) if name.value == "setmetatable"
+                ));
+                assert_eq!(setmetatable_arguments.len(), 2);
+                match &setmetatable_arguments[1].kind {
                     ExpressionKind::Name(reference) => assert_eq!(reference.value, wrapper_name),
                     _ => panic!("{target}: {output}"),
                 }
+                // payload table: five numeric-keyed section functions plus
+                // exactly one string-keyed entry function (the called method)
+                let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
+                    panic!("{target}: {output}");
+                };
+                assert_eq!(fields.len(), 6, "{target}: {output}");
+                let mut numeric_keys = std::collections::BTreeSet::new();
+                let mut entries = 0;
+                for field in fields {
+                    let TableField::Computed { key, value, .. } = field else {
+                        panic!("{target}: {output}");
+                    };
+                    let ExpressionKind::Function(body) = &value.kind else {
+                        panic!("{target}: {output}");
+                    };
+                    match &key.kind {
+                        ExpressionKind::Number(raw) => {
+                            assert!(numeric_keys.insert(raw.clone()), "{target}: {output}");
+                        }
+                        ExpressionKind::String(raw) => {
+                            entries += 1;
+                            assert_eq!(
+                                crate::minify::literal_bytes(raw, target).unwrap(),
+                                method.value.as_bytes(),
+                                "{target}: {output}"
+                            );
+                            // entry receives (self) plus the forwarded chunk varargs
+                            assert!(body.has_vararg);
+                            assert_eq!(body.parameters.len(), 1);
+                        }
+                        _ => panic!("{target}: {output}"),
+                    }
+                }
+                assert_eq!(entries, 1);
+                assert_eq!(numeric_keys.len(), 5);
                 // The wrapper is not just structural: it runs the program.
                 let workspace = native::Workspace::new();
                 let path = workspace.0.join("wrapped.lua");
