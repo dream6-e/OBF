@@ -13,13 +13,14 @@ fn recalc(bytes: &mut [u8]) {
 }
 
 #[test]
-fn header_is_fixed_32_bytes_and_all_instruction_records_are_four_bytes() {
+fn header_is_32_bytes_and_instructions_are_seven_bit_varints() {
     for target in [Target::Lua51, Target::Luau] {
         let bytes = bytes(target);
         let p = bc::decode(&bytes, target).unwrap();
         assert_eq!(&bytes[..4], b"OBF\x02");
         assert_eq!(bytes[4], if target.is_luau() { 0x75 } else { 0x51 });
-        assert_eq!(&bytes[5..8], &[1, 4, 0]);
+        // endianness 1, instruction width code 0 (varint), flags 0
+        assert_eq!(&bytes[5..8], &[1, 0, 0]);
         assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 32);
         assert_eq!(
             u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize,
@@ -29,9 +30,34 @@ fn header_is_fixed_32_bytes_and_all_instruction_records_are_four_bytes() {
             u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
             bc::ISA_VERSION
         );
+        // Logical VM instructions stay fixed (opcode, A, B, C) words; only
+        // the serialized operand stream uses 7-bit varints.
         assert_eq!(std::mem::size_of::<Word>(), 4);
-        // This fixture has one 20-byte prototype header and one tagged f64.
-        assert_eq!(bytes.len(), 32 + 20 + 9 + p.prototypes[0].code.len() * 4);
+        // One 24-byte prototype header, one tagged f64 constant, then the
+        // varint code stream: NewPack 2B, Constant 3B, Push 3B, Clear 3B,
+        // Return 2B -- 13 bytes instead of the old fixed 5x4.
+        let stream = bc::encode_code(&p.prototypes[0].code).unwrap();
+        assert_eq!(
+            stream,
+            vec![
+                Opcode::NewPack as u8,
+                0,
+                Opcode::Constant as u8,
+                1,
+                0,
+                Opcode::Push as u8,
+                0,
+                1,
+                Opcode::Clear as u8,
+                1,
+                1,
+                Opcode::Return as u8,
+                0,
+            ]
+        );
+        let cs = u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
+        assert_eq!(cs, stream.len());
+        assert_eq!(bytes.len(), 32 + 24 + 9 + cs);
         assert_eq!(bc::serialize(&p).unwrap(), bytes);
         assert!(bc::decode(
             &bytes,
@@ -43,6 +69,50 @@ fn header_is_fixed_32_bytes_and_all_instruction_records_are_four_bytes() {
         )
         .is_err());
     }
+}
+
+#[test]
+fn varint_stream_is_canonical_banded_and_fully_consumed() {
+    let target = Target::Lua51;
+    let base = bytes(target);
+    let code = 32 + 24 + 9;
+    let original = bc::encode_code(&bc::decode(&base, target).unwrap().prototypes[0].code).unwrap();
+    let rebuild = |stream: &[u8], damaged: &mut Vec<u8>| {
+        damaged.splice(code..code + original.len(), stream.iter().copied());
+        damaged[52..56].copy_from_slice(&(stream.len() as u32).to_le_bytes());
+        recalc(damaged);
+    };
+    // NewPack(a=0) opens the stream; corrupt its own operand, keep the rest.
+    let head_of = |prefix: &[u8]| -> Vec<u8> {
+        let mut stream = prefix.to_vec();
+        stream.extend_from_slice(&original[2..]);
+        stream
+    };
+    for prefix in [
+        // non-canonical two-byte encoding of a=0
+        &[Opcode::NewPack as u8, 0x80, 0x00][..],
+        // register operand overflows the 8-bit range (300)
+        &[Opcode::NewPack as u8, 0x80 | 44, 0x02],
+        // dangling continuation beyond the final stream byte
+        &[Opcode::NewPack as u8, 0x80],
+    ] {
+        let mut damaged = base.clone();
+        let stream = head_of(prefix);
+        rebuild(&stream, &mut damaged);
+        assert!(bc::decode(&damaged, target).is_err(), "{prefix:?}");
+    }
+    // a valid constant index (0) re-spelled as three non-canonical bytes
+    let mut damaged = base.clone();
+    let mut stream = original.clone();
+    stream.splice(2..5, [0x80, 0x80, 0x00]); // Constant's k=0 as 3 zero groups
+    rebuild(&stream, &mut damaged);
+    assert!(bc::decode(&damaged, target).is_err());
+    // a fully valid walk that leaves one unread byte in the code stream
+    let mut damaged = base.clone();
+    let mut stream = original.clone();
+    stream.push(0);
+    rebuild(&stream, &mut damaged);
+    assert!(bc::decode(&damaged, target).is_err());
 }
 
 #[test]
@@ -69,7 +139,7 @@ fn every_truncation_and_unrepaired_single_byte_corruption_is_rejected() {
 fn repaired_checksums_do_not_bypass_structural_validation() {
     let target = Target::Luau;
     let bytes = bytes(target);
-    let code = 32 + 20 + 9;
+    let code = 32 + 24 + 9;
     for (at, replacement) in [
         (32, vec![0, 0, 0, 0]), // entry cannot have a parent
         (36, vec![0, 0]),
@@ -78,22 +148,12 @@ fn repaired_checksums_do_not_bypass_structural_validation() {
         (39, vec![8]),
         (39, vec![7]),
         (40, vec![1, 1]),
-        (42, vec![1, 0]),               // captures/reserved
-        (44, vec![1, 0, 1, 0]),         // 65537 constants
-        (48, vec![255, 255, 255, 255]), // oversized instruction stream
-        (52, vec![255]),                // constant tag
-        (code, vec![255, 0, 0, 0]),
-        (code, vec![Opcode::Nil as u8, 255, 0, 0]),
-        (code, vec![Opcode::Jump as u8, 255, 255, 255]),
-        (code, vec![Opcode::Constant as u8, 0, 1, 0]),
-        (code, vec![Opcode::ReadGlobal as u8, 0, 0, 0]), // numeric global name
-        (code, vec![Opcode::Closure as u8, 0, 0, 0]),    // not a child
-        (code, vec![Opcode::ReadUpvalue as u8, 0, 0, 0]),
-        (code, vec![Opcode::Clear as u8, 1, 0, 0]),
-        (code, vec![Opcode::Extract as u8, 0, 0, 0]),
-        (code, vec![Opcode::NumberPrepare as u8, 0, 0, 0]),
-        (bytes.len() - 4, vec![Opcode::Move as u8, 0, 0, 0]),
-        (bytes.len() - 4, vec![Opcode::Test as u8, 0, 0, 0]),
+        (42, vec![1, 0]),                             // captures/reserved
+        (44, vec![1, 0, 1, 0]),                       // 65537 constants
+        (48, vec![255, 255, 255, 255]),               // oversized instruction count
+        (52, vec![255, 255, 255, 255]),               // code bytes outside 2..=7 per instruction
+        (56, vec![255]),                              // constant tag
+        (code, vec![255, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // unknown opcode
     ] {
         let mut damaged = bytes.clone();
         damaged[at..at + replacement.len()].copy_from_slice(&replacement);
@@ -102,6 +162,28 @@ fn repaired_checksums_do_not_bypass_structural_validation() {
             bc::decode(&damaged, target).is_err(),
             "offset {at}, {replacement:?}"
         );
+    }
+    // Operand semantics survive repaired checksums at the Word level: decode,
+    // corrupt one logical instruction, and the serializer's own validation
+    // must still refuse it (varint re-encoding cannot launder operands).
+    let mut program = bc::decode(&bytes, target).unwrap();
+    let last = program.prototypes[0].code.len() - 1;
+    for (at, word) in [
+        (0, Word([Opcode::Nil as u8, 255, 0, 0])), // register 255
+        (0, Word([Opcode::Constant as u8, 0, 1, 0])), // k == nk
+        (0, Word([Opcode::ReadGlobal as u8, 0, 1, 0])), // numeric global name
+        (0, Word([Opcode::Closure as u8, 0, 1, 0])), // not a child
+        (0, Word([Opcode::ReadUpvalue as u8, 0, 0, 0])), // no captures
+        (0, Word([Opcode::Clear as u8, 1, 0, 0])), // a > b
+        (0, Word([Opcode::Extract as u8, 0, 0, 0])), // c == 0
+        (0, Word([Opcode::NumberPrepare as u8, 0, 0, 0])), // a+2 >= registers
+        (0, Word([Opcode::Jump as u8, 255, 255, 127])), // jump overflow
+        (last, Word([Opcode::NewPack as u8, 1, 0, 0])), // falls off the end
+        (last, Word([Opcode::Test as u8, 0, 0, 0])), // pc+2 >= nc
+    ] {
+        let mut invalid = program.clone();
+        invalid.prototypes[0].code[at] = word;
+        assert!(bc::serialize(&invalid).is_err(), "{at}, {word:?}");
     }
 }
 
@@ -146,7 +228,7 @@ fn corrupt_counts_strings_captures_and_parent_graphs_fail_closed() {
         assert!(bc::serialize(&p).is_err());
         let b = vm::custom::compile("return 'abc'", target).unwrap();
         let mut b = b;
-        b[53..57].copy_from_slice(&u32::MAX.to_le_bytes());
+        b[57..61].copy_from_slice(&u32::MAX.to_le_bytes());
         recalc(&mut b);
         assert!(bc::decode(&b, target).is_err());
     }
@@ -206,7 +288,11 @@ fn ir_has_symbolic_control_flow_and_wide_absolute_jumps_without_aux_words() {
     let p = bc::decode(&encoded, Target::Lua51).unwrap();
     assert_eq!(p.prototypes[0].code[0].ax(), 70_002);
     assert_eq!(p.prototypes[0].code.len(), 70_004);
-    assert_eq!(encoded.len(), 32 + 20 + 70_004 * 4);
+    let stream = bc::encode_code(&p.prototypes[0].code).unwrap();
+    // Nil(0) costs two bytes, Jump(70_002) four: varints beat 4-per-word.
+    assert_eq!(stream.len(), 140_012);
+    assert!(stream.len() < p.prototypes[0].code.len() * 4);
+    assert_eq!(encoded.len(), 32 + 24 + stream.len());
 }
 
 #[test]

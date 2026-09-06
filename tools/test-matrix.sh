@@ -229,7 +229,7 @@ for target in lua51 luau; do
     grep -q 'Branch' "$tmp/$target.ir"
     "$OBF" inspect-bytecode --target "$target" "$tmp/$target.obf" >"$tmp/$target.custom.inspect"
     grep -qx 'format: OBF v2' "$tmp/$target.custom.inspect"
-    grep -qx 'instruction-size: 4' "$tmp/$target.custom.inspect"
+    grep -qx 'instruction-size: 0' "$tmp/$target.custom.inspect"
     grep -qx 'header-size: 32' "$tmp/$target.custom.inspect"
     grep -qx 'isa-version: 2' "$tmp/$target.custom.inspect"
     "$OBF" wrap-bytecode --target "$target" --seed "$seed" -o "$tmp/$prefix.wrapped.lua" "$tmp/$target.obf"

@@ -1,7 +1,10 @@
-//! Executable VM for AST-produced OBF v2 bytecode. Generated code fetches four
-//! bytes per instruction from each prototype's byte string. Only handlers in
-//! the program are emitted; all opcode definitions exist in the two target
-//! subfolders. `seed` affects final local/private-field names only, never bytecode.
+//! Executable VM for AST-produced OBF v2 bytecode. The file encodes every
+//! instruction as an opcode byte plus 7-bit varint operands; the generated
+//! decoder validates them and expands the stream back into the fixed
+//! 4-byte-per-instruction string that the fetch loop then executes. Only
+//! handlers in the program are emitted; all opcode definitions exist in the
+//! two target subfolders. `seed` affects final local/private-field names
+//! only, never bytecode.
 
 use crate::bytecode::custom::{self, Opcode, Program};
 use crate::{Diagnostic, Target};
@@ -57,6 +60,7 @@ pub(crate) fn generate(
 local SC=select;local Z=function(...)return{n=SC('#',...),...}end;
 local U=unpack or table.unpack;local G=(getfenv and getfenv(0))or _G;local E=error;
 local SB,SS,SF=string.byte,string.sub,string.format;
+local NCH,TC=string.char,table.concat;
 local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetatable,setmetatable,rawget,rawequal;
 "#,
     );
@@ -66,9 +70,9 @@ local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetat
     // Section functions thread state through parameters/returns; the mutually
     // recursive Call/Make/H cluster stays together in one section function.
     s.push_str(if program.target.is_luau() {
-        "\nreturn SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze\nend,"
+        "\nreturn SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze\nend,"
     } else {
-        "\nreturn SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE\nend,"
+        "\nreturn SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze\nend,"
     });
     write!(s, "[{}]=function(E,SB,SS,SF,MF,IF)\n", keys[1]).unwrap();
     s.push_str("local B=");
@@ -101,15 +105,15 @@ if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=2 then E()end;
     .unwrap();
     s.push_str(
         r#"
-if b8()~=1 or b8()~=4 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
+if b8()~=1 or b8()~=0 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
 local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa<1 or isa>2 then E()end;
 local check=b32();local sa,sb=1,0;for q=33,#B do sa=(sa+SB(B,q))%65521;sb=(sb+sa)%65521 end;
 if sa+sb*65536~=check then E()end;
 local P={};local work=0;
 for id=0,np-1 do
  local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();
- if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();
- if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 then E()end;
+ if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();
+ if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<F.__obf_proto_nc*2 or VMCS>F.__obf_proto_nc*7 then E()end;
  F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;
  if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end
  elseif F.__obf_proto_parent>=id then E()end;
@@ -140,11 +144,40 @@ for id=0,np-1 do
     if program.target.is_luau() {
         s.push_str(r#"elseif tag==4 then local lo,hi=b32(),b32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
     }
-    s.push_str("else E()end end;F.__obf_proto_code=take(F.__obf_proto_nc*4);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;");
+    s.push_str(
+        "else E()end end;F.__obf_proto_code=take(VMCS);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;",
+    );
     s.push_str("\nreturn P,np,entry\nend,");
-    write!(s, "[{}]=function(P,np,SB,E)\n", keys[2]).unwrap();
+    write!(s, "[{}]=function(P,np,SB,E,NCH,TC)\n", keys[2]).unwrap();
     // Both Rust and target decoders validate operands before any execution.
-    s.push_str("for id=0,np-1 do local F=P[id];for at=0,F.__obf_proto_nc-1 do local o,a,b,c=SB(F.__obf_proto_code,at*4+1,at*4+4);local k=b+c*256;local j=a+k*256;local ok=false;");
+    // The 7-bit varint stream is decoded here and expanded back into the
+    // fixed 4-byte-per-instruction string the interpreter fetches from.
+    s.push_str("local FM={");
+    for (index, op) in program.opcodes().iter().enumerate() {
+        if index > 0 {
+            s.push(',');
+        }
+        write!(s, "[{}]={}", *op as u8, custom::encoding_form(*op)).unwrap();
+    }
+    s.push_str("};");
+    s.push_str(
+        "local Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
+if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*128;if v<128 then E()end;\
+if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*16384;if v<16384 then E()end;\
+if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*2097152;if v<2097152 then E()end;\
+if w>=128 then E()end;end;end;end;return v,p end;",
+    );
+    s.push_str(
+        "for id=0,np-1 do local F=P[id];local CD=F.__obf_proto_code;local p=1;local XB={};\
+for at=0,F.__obf_proto_nc-1 do local o=SB(CD,p);if o==nil then E()end;p=p+1;local f=FM[o];\
+if f==nil then E()end;local a,b,c;\
+if f==1 then local j;j,p=Dv(CD,p);if j>16777215 then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
+elseif f==2 then a,p=Dv(CD,p);if a>255 then E()end;b=0;c=0;\
+elseif f==3 then a,p=Dv(CD,p);b,p=Dv(CD,p);if a>255 or b>255 then E()end;c=0;\
+elseif f==4 then a,p=Dv(CD,p);if a>255 then E()end;local k2;k2,p=Dv(CD,p);if k2>65535 then E()end;b=k2%256;c=(k2-k2%256)/256;\
+else a,p=Dv(CD,p);b,p=Dv(CD,p);c,p=Dv(CD,p);if a>255 or b>255 or c>255 then E()end end;\
+local k=b+c*256;local j=a+k*256;local ok=false;",
+    );
     for (index, op) in program.opcodes().iter().enumerate() {
         write!(
             s,
@@ -155,7 +188,7 @@ for id=0,np-1 do
         )
         .unwrap();
     }
-    s.push_str("else E()end;if not ok then E()end;end;local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);");
+    s.push_str("else E()end;if not ok then E()end;XB[at+1]=NCH(o,a,b,c);end;if p~=#CD+1 then E()end;F.__obf_proto_code=TC(XB);local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);");
     write!(
         s,
         "if last~={} and last~={} and last~={} then E()end;end;",
@@ -193,11 +226,11 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         }
     }
     // Entry method: chains the section functions in order, then runs the
-    // program. IF/Freeze bind to nil on Lua 5.1 (18 prelude results); unused
+    // program. IF/Freeze bind to nil on Lua 5.1 (20 prelude results); unused
     // parameters of target-specific sections accept nil the same way.
     write!(
         s,
-        "\nreturn CV,SV,Lookup\nend,[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal P,np,entry=VMS[{}](E,SB,SS,SF,MF,IF);\nVMS[{}](P,np,SB,E);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        "\nreturn CV,SV,Lookup\nend,[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();\nlocal P,np,entry=VMS[{}](E,SB,SS,SF,MF,IF);\nVMS[{}](P,np,SB,E,NCH,TC);\nlocal CV,SV,Lookup=VMS[{}](TY,E);\nlocal H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);\nlocal result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
         keys[0], keys[1], keys[2], keys[3], keys[4], keys[4]
     )
     .unwrap();
@@ -483,13 +516,14 @@ mod tests {
                     0 => bad[39] = 255,
                     1 => bad[36..38].copy_from_slice(&257u16.to_le_bytes()),
                     2 => bad[48..52].copy_from_slice(&u32::MAX.to_le_bytes()),
+                    // dangling varint continuation in the final instruction
                     3 => {
-                        let last = bad.len() - 4;
-                        bad[last..].copy_from_slice(&[Opcode::Jump as u8, 255, 255, 255]);
+                        let last = bad.len() - 1;
+                        bad[last] = 0x80;
                     }
+                    // instruction byte count outside the 2..=7-per-instruction band
                     _ => {
-                        let last = bad.len() - 4;
-                        bad[last + 1] = 255;
+                        bad[52..56].copy_from_slice(&u32::MAX.to_le_bytes());
                     }
                 }
                 let checksum = custom::checksum(&bad[32..]);
@@ -531,16 +565,20 @@ mod tests {
                 ir::Constant::Method(s) => 5 + s.len(),
             })
             .sum();
-        let child = 32 + 20 + root.captures.len() * 2 + constant_bytes + root.code.len() * 4;
-        assert_eq!(data[child + 20], 2);
+        let child = 32
+            + 24
+            + root.captures.len() * 2
+            + constant_bytes
+            + custom::encode_code(&root.code).unwrap().len();
+        assert_eq!(data[child + 24], 2);
         for kind in 0..5 {
             let mut bad = data.clone();
             match kind {
                 0 => bad[24..28].copy_from_slice(&1u32.to_le_bytes()),
                 1 => bad[child + 7] &= !8,
                 2 => bad[child + 7] |= 16,
-                3 => bad[child + 20] = 3,
-                _ => bad[child + 21] = 255,
+                3 => bad[child + 24] = 3,
+                _ => bad[child + 25] = 255,
             }
             let checksum = custom::checksum(&bad[32..]);
             bad[28..32].copy_from_slice(&checksum.to_le_bytes());

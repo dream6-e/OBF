@@ -280,7 +280,9 @@ mod tests {
                     "format",
                     "floor",
                     "fromstring",
-                    "freeze"
+                    "freeze",
+                    "char",
+                    "concat"
                 ])));
             }
         }

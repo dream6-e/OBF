@@ -1,6 +1,6 @@
 # OBF
 
-面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox 方向** 的 std-only Rust 工具链。默认 `virtualize` 已实现真正的 **AST → IR → 自定义 Bytecode → 寄存器 VM**：固定 **32-byte Header**、**4 bytes/instruction**、独立常量/捕获/prototype。生成器不依赖原生 compiler，不用 `load/loadstring` 委托执行；原生后端只通过 `--backend native` 显式选择。当前不做加密、压缩、随机 section 或随机 opcode；所有脚本生成完后才统一随机一/两字母 local 并输出为单行。
+面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox 方向** 的 std-only Rust 工具链。默认 `virtualize` 已实现真正的 **AST → IR → 自定义 Bytecode → 寄存器 VM**：固定 **32-byte Header**、指令操作数以 **7-bit varint** 序列化（小数值 1 byte，较大值 2~N bytes），独立常量/捕获/prototype。生成器不依赖原生 compiler，不用 `load/loadstring` 委托执行；原生后端只通过 `--backend native` 显式选择。当前不做加密、压缩、随机 section 或随机 opcode；所有脚本生成完后才统一随机一/两字母 local 并输出为单行。
 
 新接手开发者请先阅读 [`项目交接总结.md`](项目交接总结.md)，其中集中记录架构、硬约束、测试门禁、常见陷阱和下一阶段优先级。
 
@@ -100,13 +100,13 @@ source → 现有 AST / BindingId → typed register IR / basic blocks
        → 校验 / decoder / register VM → 完整生成后随机短名 / 单行化
 ```
 
-这条链路**不调用原生 compiler，不存 native word，也不默默 fallback**。新 `ir::Module` 包含函数、常量、cell/upvalue 捕获和带符号后继的基本块；IR 的 branch 生成 `Test + Jump + Jump`，每条均为 4 bytes。Header 固定 **32 bytes**，含版本、目标、端序、宽度、文件长度、prototype 数量、入口、ISA 版本和 Adler-32。完整逐字段规范与 **49 条 ISA** 见 [`自定义字节码.md`](自定义字节码.md)。
+这条链路**不调用原生 compiler，不存 native word，也不默默 fallback**。新 `ir::Module` 包含函数、常量、cell/upvalue 捕获和带符号后继的基本块；IR 的 branch 生成 `Test + Jump + Jump`。Header 固定 **32 bytes**，含版本、目标、端序、宽度码、文件长度、prototype 数量、入口、ISA 版本和 Adler-32。指令流按每条 opcode 的 Form 列写成 `[opcode][各字段 varint]`（A/AB/ABC/ABx/Ax，2~7 bytes），目标端校验后展开回定长 4-byte 指令串执行。完整逐字段规范与 **49 条 ISA** 见 [`自定义字节码.md`](自定义字节码.md)。
 
 - Lua 5.1：46 个 `src/vm/opcode/lua51/c*.rs`；Luau：49 个 `src/vm/opcode/luau/c*.rs`。每条有效 opcode 有一份独立固定 handler，不以 NOP 代替未实现语义。
 - 每 frame 为寄存器文件；local 使用 heap cell，临时值为普通寄存器，闭包引用 cell。循环的新一轮/复用寄存器不会破坏逃逸闭包。
 - 显式 pack.n 处理多返回值、尾部 nil、vararg、调用/返回；VM→VM 尾调用替换 frame。支持宿主函数、元方法、回调及 coroutine。
 - 两端分别处理赋值/方法求值顺序、numeric-for、表构造器刷新和 Lua51 隐式 `arg`；Luau 另有 `//`、插值、泛型擦除、`__iter`、userdata NAMECALL、精确 i64 及冻结导出表。
-- Rust reader 与生成的 decoder 都做范围/格式验证；指令流为 byte string，每步直接 fetch 4 bytes，不是源码 table 中的伪字节码。
+- Rust reader 与生成的 decoder 都做范围/格式验证；文件内指令流为 7-bit varint byte string，目标 decoder 校验 canonical 编码并展开回定长指令串，执行时每步 fetch 4 bytes，不是源码 table 中的伪字节码。
 - **整体输出包装**：chunk 只有两条语句——`local x={}` 与 `return setmetatable({...},x):m()`。全部 VM 代码以**多个函数**的形式存放在载荷表内：5 个随机数字键 section 函数（宿主捕获预导、bytecode decoder、操作数校验、运行时辅助、解释器簇）+ 1 个随机单字母字符串键的入口方法。`:m()` 直接命中载荷表自有键进入入口函数，按顺序串联各 section 并返回程序结果；chunk 真正读取 `...` 时调用写为 `:m(...)`。方法名与数字键来自独立 seeded 随机流；不改 bytecode、最终 local 或私有字段名。
 
 ### 运行语义兼容性增量
@@ -135,8 +135,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 33,316 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,257 B | 34,066 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 29,356 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 28,729 B |
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
@@ -164,7 +164,7 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 1. 运行 Rust 全目标测试、rustfmt 与 debug/release 构建；
 2. 对原有 basic/AST/scope/reflection 语料保持双端源码/压缩的语法、运行、seed、反射保留和短名安全门禁；
-3. 检查原生 chunk，同时验证 OBF v2 Header、4-byte 大小、截断、字节损坏、恶意结构、round-trip 与资源上限；
+3. 检查原生 chunk，同时验证 OBF v2 Header、varint 指令流、截断、字节损坏、恶意结构、round-trip 与资源上限；
 4. 对 v2 执行逐 opcode fetch-loop 覆盖：**Lua51 46/46，Luau 49/49**；不是只数未执行的指令；
 5. 编译/执行每份 VM seed 变体，确认单行、不委托 loadstring、没有生成器错误消息、所有显式 local 最后才改名且 payload 字节不变；
 6. 检查新目标目录的 46/49 个 handler 和旧兼容目录的 38/91 个 handler；
@@ -180,7 +180,9 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 2026-09-06 VM 私有字段压缩后的完整矩阵 **PASS 149**（40 单元 + 109 集成）：此前 140 项全部保留，新增 4 项内部和 5 项集成测试。原生/VM 输出、debug/release、两套后端及 46/49 实际执行覆盖均通过。两份示例分别减少 **164 / 159 B**，除私有字段外所有 token（含原 seed 的 local 名称和字面量）完全一致，内嵌与独立 bytecode 逐字节不变；seed 现在控制最终 local 与私有字段名，不控制 v2 binary。
 
-2026-09-06 输出整体改为 `local x={};return setmetatable({...},x):m()` 的分函数载荷形式后的完整矩阵 **PASS 150**（41 单元 + 109 集成）：此前 149 项全部保留，形状/差分单元测试改为断言新结构。默认后端与 `wrap-bytecode` 的全部代码位于载荷表的 5 个随机数字键 section 函数与 1 个随机字母键入口函数中；环境捕获审计下降到各 section 函数体内执行，根表检查允许数字/字符串键函数字段。两份示例相对私有字段批次各增加 **484 B**，`.obf` 二进制与 SHA-256 逐字节不变；seed 额外控制包装方法名与数字键。旧 `--backend native` 输出保持原状。
+2026-09-06 输出整体改为 `local x={};return setmetatable({...},x):m()` 的分函数载荷形式后的完整矩阵 **PASS 150**（41 单元 + 109 集成）：此前 149 项全部保留，形状/差分单元测试改为断言新结构。默认后端与 `wrap-bytecode` 的全部代码位于载荷表的 5 个随机数字键 section 函数与 1 个随机字母键入口函数中；环境捕获审计下降到各 section 函数体内执行，根表检查允许数字/字符串键函数字段。两份示例相对私有字段批次各增加 **484 B**；seed 额外控制包装方法名与数字键。旧 `--backend native` 输出保持原状。
+
+2026-09-06 指令序列化改为 7-bit varint 后的完整矩阵 **PASS 151**（41 单元 + 110 集成）：此前 150 项全部保留，`custom_bytecode` 新增 1 项 varint codec 回归（canonical/非最小编码、字段上限、带外 code 字节数、尾随字节、varint 截断与逐 Word 语义拒绝）。文件内指令按 Form 列写成 `[opcode][字段 varint]`（2~7 bytes），prototype header 追加 `code_byte_count`（20→24 bytes），Header 宽度码改为 `0`；目标 decoder 校验后展开回定长 4-byte 指令串，fetch-loop/handler/ISA 编号完全不变。两份示例 bytecode 缩小 **19.7% / 20.4%**（6,879→5,525 / 8,257→6,575 B），脚本 33,316→29,356 / 34,066→28,729 B；ISA 修订 1/2 语义、46/49 执行覆盖、debug/release 一致性不变。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 

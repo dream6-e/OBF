@@ -196,7 +196,10 @@ fn run() -> Result<(), Diagnostic> {
             if let Some(program) = &custom_program {
                 println!("format: OBF v2");
                 println!("header-size: {}", bytecode::custom::HEADER_SIZE);
-                println!("instruction-size: {}", bytecode::custom::INSTRUCTION_SIZE);
+                println!(
+                    "instruction-size: {}",
+                    bytecode::custom::INSTRUCTION_ENCODING
+                );
                 println!("isa-version: {}", program.isa_version);
                 println!(
                     "opcodes: {}",
@@ -295,7 +298,7 @@ obf dump-ir --target <lua51|luau> [-o FILE] <input|->\n  \
 obf compile --target <lua51|luau> [-o FILE] <input|->\n  \
 obf wrap-bytecode --target <lua51|luau> [--seed N] [-o FILE] <input.obf|->\n  \
 obf inspect-bytecode --target <lua51|luau> <input|->\n\n\
-Default virtualize: AST -> IR -> OBF v2 (32-byte header, 4-byte instructions).\n\
+Default virtualize: AST -> IR -> OBF v2 (32-byte header, 7-bit varint instructions).\n\
 No external compiler, encryption, compression or randomized bytecode layout.\n\
 compile emits binary bytecode; dump-ir emits typed register IR.\n\
 wrap-bytecode validates OBF v2 and emits its single-line register VM.\n\

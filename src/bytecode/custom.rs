@@ -1,6 +1,10 @@
-//! OBF v2: a native-independent, fixed-width register instruction set.
-//! Header and records are little endian; instructions are exactly four bytes.
-//! No native words, AUX records, compression, encryption or randomized sections.
+//! OBF v2: a native-independent register instruction set. Header and records
+//! are little endian; logical instructions are (opcode, A, B, C) words, but
+//! the file serializes each operand as a 7-bit varint (little-endian groups,
+//! canonical/minimal encoding): small values take one byte, larger values
+//! two or more. The target decoder restores the fixed 4-byte VM instruction
+//! before execution. No native words, AUX records, compression beyond the
+//! varints, encryption or randomized sections.
 
 use crate::ast::{BinaryOperator as B, UnaryOperator as U};
 use crate::ir::{self, Capture, Constant, Instruction as I, Terminator as T};
@@ -8,7 +12,9 @@ use crate::{Diagnostic, Target};
 use std::collections::BTreeSet;
 
 pub const HEADER_SIZE: usize = 32;
-pub const INSTRUCTION_SIZE: usize = 4;
+/// Header width code at offset 6: `0` denotes the 7-bit varint instruction
+/// stream (variable length, 2..=7 bytes per instruction).
+pub const INSTRUCTION_ENCODING: u8 = 0;
 pub const VERSION: u8 = 2;
 /// Revision 2 adds checked Luau closure-sharing metadata, not native words.
 /// Revision 1 remains readable and retains its original serialization.
@@ -149,6 +155,131 @@ fn jump(index: usize) -> Result<Word, Diagnostic> {
         return Err(error("24-bit jump overflow"));
     }
     abc(Opcode::Jump, index & 255, index >> 8 & 255, index >> 16)
+}
+
+/// Serialization form per opcode, mirroring the ISA's Form column:
+/// 1 = Ax (one varint), 2 = A, 3 = AB, 4 = ABx (A + 16-bit index), 5 = ABC.
+pub fn encoding_form(op: Opcode) -> u8 {
+    use Opcode::*;
+    match op {
+        Jump => 1,
+        Nil | NewTable | NewPack | Varargs | NumberPrepare | NumberStep | IteratorPrepare
+        | Return | Freeze | Test => 2,
+        Constant | ReadGlobal | WriteGlobal | Closure => 4,
+        Move | NewCell | ReadCell | WriteCell | ReadUpvalue | WriteUpvalue | Push | Extend
+        | Not | Negate | Length | IteratorNext | ToString | TailCall | Clear | NumberTest => 3,
+        _ => 5,
+    }
+}
+
+/// Canonical LEB128-style 7-bit varint: one byte for values below 128.
+fn write_varint(out: &mut Vec<u8>, value: usize) {
+    let mut value = value;
+    while value >= 128 {
+        out.push(0x80 | (value & 127) as u8);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// Read one canonical varint (final group of a multi-byte value is nonzero,
+/// at most four groups). The caller enforces the field's own range.
+fn read_varint(bytes: &[u8], pos: &mut usize) -> Result<usize, Diagnostic> {
+    let mut value = 0usize;
+    let mut shift = 0usize;
+    for group in 0..4 {
+        let byte = *bytes
+            .get(*pos)
+            .ok_or_else(|| error("truncated varint operand"))?;
+        *pos += 1;
+        value |= usize::from(byte & 127) << shift;
+        if byte < 128 {
+            if group > 0 && byte == 0 {
+                return Err(error("non-canonical varint operand"));
+            }
+            return Ok(value);
+        }
+        shift += 7;
+    }
+    Err(error("varint operand exceeds 24-bit range"))
+}
+
+/// Serialize instructions as [opcode][varint fields per Form]. Shared by the
+/// serializer and tests; always canonical, so round-trips are byte-identical.
+pub fn encode_code(code: &[Word]) -> Result<Vec<u8>, Diagnostic> {
+    let mut out = Vec::new();
+    for &word in code {
+        let op = word.opcode()?;
+        out.push(op as u8);
+        match encoding_form(op) {
+            1 => write_varint(&mut out, word.ax()),
+            2 => write_varint(&mut out, word.a()),
+            3 => {
+                write_varint(&mut out, word.a());
+                write_varint(&mut out, word.b());
+            }
+            4 => {
+                write_varint(&mut out, word.a());
+                write_varint(&mut out, word.bx());
+            }
+            _ => {
+                write_varint(&mut out, word.a());
+                write_varint(&mut out, word.b());
+                write_varint(&mut out, word.c());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn field(bytes: &[u8], pos: &mut usize, limit: usize, what: &str) -> Result<usize, Diagnostic> {
+    let value = read_varint(bytes, pos)?;
+    if value > limit {
+        return Err(error(&format!("{what} exceeds format range")));
+    }
+    Ok(value)
+}
+
+/// 7-bit decoder: restore the fixed (opcode, A, B, C) VM instructions. The
+/// stream must contain exactly `count` instructions and no trailing bytes.
+fn decode_code(bytes: &[u8], count: usize) -> Result<Vec<Word>, Diagnostic> {
+    let mut code = Vec::with_capacity(count);
+    let mut pos = 0usize;
+    for _ in 0..count {
+        let op_byte = *bytes
+            .get(pos)
+            .ok_or_else(|| error("truncated instruction stream"))?;
+        pos += 1;
+        let op = Opcode::from_byte(op_byte).ok_or_else(|| error("unknown custom opcode"))?;
+        let (a, b, c) = match encoding_form(op) {
+            1 => {
+                let j = field(bytes, &mut pos, 0xFF_FFFF, "jump target")?;
+                (j & 255, j >> 8 & 255, j >> 16)
+            }
+            2 => (field(bytes, &mut pos, 255, "register operand")?, 0, 0),
+            3 => {
+                let a = field(bytes, &mut pos, 255, "register operand")?;
+                let b = field(bytes, &mut pos, 255, "register operand")?;
+                (a, b, 0)
+            }
+            4 => {
+                let a = field(bytes, &mut pos, 255, "register operand")?;
+                let k = field(bytes, &mut pos, 65_535, "constant index")?;
+                (a, k & 255, k >> 8)
+            }
+            _ => {
+                let a = field(bytes, &mut pos, 255, "register operand")?;
+                let b = field(bytes, &mut pos, 255, "register operand")?;
+                let c = field(bytes, &mut pos, 255, "register operand")?;
+                (a, b, c)
+            }
+        };
+        code.push(Word([op_byte, a as u8, b as u8, c as u8]));
+    }
+    if pos != bytes.len() {
+        return Err(error("trailing bytes in instruction stream"));
+    }
+    Ok(code)
 }
 
 /// Resolve IR block labels, select custom opcodes, and serialize a validated
@@ -347,7 +478,12 @@ fn bytes(out: &mut Vec<u8>, v: &[u8]) -> Result<(), Diagnostic> {
 pub fn serialize(program: &Program) -> Result<Vec<u8>, Diagnostic> {
     validate(program)?;
     let mut out = Vec::from(*b"OBF\x02");
-    out.extend_from_slice(&[if program.target.is_luau() { 0x75 } else { 0x51 }, 1, 4, 0]);
+    out.extend_from_slice(&[
+        if program.target.is_luau() { 0x75 } else { 0x51 },
+        1,
+        INSTRUCTION_ENCODING,
+        0,
+    ]);
     u32_bytes(&mut out, HEADER_SIZE)?;
     u32_bytes(&mut out, 0)?;
     u32_bytes(&mut out, program.prototypes.len())?;
@@ -355,6 +491,7 @@ pub fn serialize(program: &Program) -> Result<Vec<u8>, Diagnostic> {
     out.extend_from_slice(&program.isa_version.to_le_bytes());
     u32_bytes(&mut out, 0)?;
     for p in &program.prototypes {
+        let code = encode_code(&p.code)?;
         out.extend_from_slice(&p.parent.map_or(u32::MAX, |p| p as u32).to_le_bytes());
         u16_bytes(&mut out, p.registers);
         out.extend_from_slice(&[p.parameters, p.flags]);
@@ -362,6 +499,7 @@ pub fn serialize(program: &Program) -> Result<Vec<u8>, Diagnostic> {
         u16_bytes(&mut out, 0);
         u32_bytes(&mut out, p.constants.len())?;
         u32_bytes(&mut out, p.code.len())?;
+        u32_bytes(&mut out, code.len())?;
         for capture in &p.captures {
             let (tag, index) = match *capture {
                 Capture::Local(r) => (0, r),
@@ -392,9 +530,7 @@ pub fn serialize(program: &Program) -> Result<Vec<u8>, Diagnostic> {
                 }
             }
         }
-        for word in &p.code {
-            out.extend_from_slice(&word.0);
-        }
+        out.extend_from_slice(&code);
         if out.len() > MAX_BYTES {
             return Err(error("file size exceeds safety limit"));
         }
@@ -462,7 +598,7 @@ fn decode_inner(r: &mut Reader<'_>, target: Target) -> Result<Program, Diagnosti
     if r.byte()? != if target.is_luau() { 0x75 } else { 0x51 } {
         return Err(error("target mismatch"));
     }
-    if r.take(3)? != [1, 4, 0] {
+    if r.take(3)? != [1, INSTRUCTION_ENCODING, 0] {
         return Err(error("unsupported endianness, width or flags"));
     }
     if r.u32()? as usize != HEADER_SIZE || r.u32()? as usize != data.len() {
@@ -494,8 +630,14 @@ fn decode_inner(r: &mut Reader<'_>, target: Target) -> Result<Program, Diagnosti
         }
         let nk = r.u32()? as usize;
         let ni = r.u32()? as usize;
+        let cs = r.u32()? as usize;
         if nk > 65_536 || ni > MAX_ITEMS || nk + ni + nc > MAX_ITEMS.saturating_sub(total) {
             return Err(error("record count exceeds safety limit"));
+        }
+        // Every instruction occupies at least opcode+one varint (2 bytes) and
+        // at most opcode+three 2-byte varints (7 bytes).
+        if cs < ni * 2 || cs > ni.saturating_mul(7) {
+            return Err(error("bad instruction byte count"));
         }
         total += nk + ni + nc;
         let mut captures = Vec::new();
@@ -529,11 +671,7 @@ fn decode_inner(r: &mut Reader<'_>, target: Target) -> Result<Program, Diagnosti
                 _ => return Err(error("unknown constant tag")),
             });
         }
-        let code = r
-            .take(ni * 4)?
-            .chunks_exact(4)
-            .map(|s| Word(s.try_into().unwrap()))
-            .collect();
+        let code = decode_code(r.take(cs)?, ni)?;
         prototypes.push(Prototype {
             parent,
             registers,

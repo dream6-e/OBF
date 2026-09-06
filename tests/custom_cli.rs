@@ -81,7 +81,7 @@ fn default_compile_dump_wrap_and_virtualize_work_with_missing_native_compilers()
         );
         let inspect = String::from_utf8(inspect.stdout).unwrap();
         assert!(inspect.contains("format: OBF v2"));
-        assert!(inspect.contains("instruction-size: 4"));
+        assert!(inspect.contains("instruction-size: 0"));
         assert!(inspect.contains("header-size: 32"));
         let native = missing()
             .args([
