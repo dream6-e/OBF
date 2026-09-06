@@ -118,7 +118,11 @@ source → 现有 AST / BindingId → typed register IR / basic blocks
 
 Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`、`vm::custom::{compile,emit}`，以及默认 `vm::virtualize`。`inspect-bytecode` 自动区分 OBF v2 与原生 chunk；`wrap-bytecode` 可把已保存的 `.obf` 独立包装为 VM。
 
-所有 decoder、runtime、dispatcher、字节码中出现的 handler 和执行尾部组装完后，只调用一次私有 `minify::finalize_vm`；之后不追加代码。该阶段统一随机一/两字母名，重解析复核绑定图、同域唯一性、名称长度、确实换名和 bytecode 字节不变。唯一生成器环境例外仍是严格审计的 `local G=(getfenv and getfenv(0))or _G`，没有公开忽略反射的开关。
+所有 decoder、runtime、dispatcher、handler、静态方法适配器和执行尾部组装完后，自定义 VM 先缩短私有字段，再调用一次私有 `minify::finalize_vm` 统一随机 local、分号分隔和单行化；之后不追加代码。重解析复核绑定图、同域唯一性、名称长度、确实换名和 bytecode 字节不变。唯一生成器环境例外仍是严格审计的 `local G=(getfenv and getfenv(0))or _G`，没有公开忽略反射的开关。
+
+**VM 私有字段也压缩为一/两字母**：`code`、`tags`、`parent`、`flags`、`shared`、`self`、`cached` 及原有短字段共 14 个，当前全部可分配为互不冲突的随机单字母。decoder、校验器、运行时、缓存和 opcode handler 的构造/读/写共用同一映射；同 seed 复现，使用独立随机流，不改变既有 local 名称或 bytecode。
+
+这是 crate-owned、不会逃逸的 prototype schema 的专用处理，**不是任意 `.field` 文本替换**。模板通过私有标记明确授权，词法 token/span 改写后复核所有未标记 token 和字面量不变；用户 table 字段、导出键、字符串、`string.byte` 等宿主 API、`__mode/__iter` 等元方法及 `object:code()` 等 NAMECALL 名称不改。普通 `minify` 不启用这项私有字段策略，显式旧 native backend 保持原行为。
 
 ### 显式兼容后端
 
@@ -130,8 +134,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,996 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,257 B | 33,741 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,832 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,257 B | 33,582 B |
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
@@ -168,11 +172,12 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 9. 显式执行旧 `--backend native` 的完整语料、多 seed、语法/运行回归，保留其原生 opcode coverage（Lua51 38/38、Luau ≥60）；
 10. 额外覆盖多返回值/nil、变量求值时机、闭包、循环、20k 尾调用、coroutine/回调、i64、导出模块、userdata NAMECALL、GC 及 CLI 失败不覆盖文件；
 11. `tests/semicolons.rs` 检查双目标语句分隔、必需空格、调用后缀、嵌套函数/类型/插值、字符串字节、已有分号、空块、非法源码、CLI/两 VM 后端；内部测试覆盖所有语料的边界完整性、改名偏移、幂等性和 10,000 相邻块；
-12. `tests/vm_parity.rs` 的 145 个生成式组合及应用式语料检查求值顺序、闭包身份、迭代器、捕获、返回值/模块和控制流；额外执行应用语料的 debug/release binary/VM 与原生 stdout 对照，检查修订 1 兼容性。
+12. `tests/vm_parity.rs` 的 145 个生成式组合及应用式语料检查求值顺序、闭包身份、迭代器、捕获、返回值/模块和控制流；额外执行应用语料的 debug/release binary/VM 与原生 stdout 对照，检查修订 1 兼容性；
+13. `tests/private_fields.rs` 与私有字段内部测试检查 14 字段双射、单/双字母池、关键字/冲突/越界拒绝、marker-like 用户方法名、公开字段/导出保护、CLI/修订 1 包装，以及字段之外的全部 token/变量名/字面量和 payload 不变。
 
 `tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
-2026-09-06 运行语义兼容性增量后的完整矩阵 **PASS 140**（36 单元 + 104 集成）：此前 124 项全部保留，新增 13 项 parity、2 项 codec 和 1 项独立 decoder 回归。原生/VM 确定性输出、debug/release 构建和产物一致性、两套后端及 46/49 实际执行覆盖均通过。本轮编译元数据/IR 优化会改变 bytecode；seed 仍只改变最后的变量名，最终命名不会修改 payload。
+2026-09-06 VM 私有字段压缩后的完整矩阵 **PASS 149**（40 单元 + 109 集成）：此前 140 项全部保留，新增 4 项内部和 5 项集成测试。原生/VM 输出、debug/release、两套后端及 46/49 实际执行覆盖均通过。两份示例分别减少 **164 / 159 B**，除私有字段外所有 token（含原 seed 的 local 名称和字面量）完全一致，内嵌与独立 bytecode 逐字节不变；seed 现在控制最终 local 与私有字段名，不控制 v2 binary。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 

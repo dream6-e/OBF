@@ -1,7 +1,7 @@
 //! Executable VM for AST-produced OBF v2 bytecode. Generated code fetches four
 //! bytes per instruction from each prototype's byte string. Only handlers in
 //! the program are emitted; all opcode definitions exist in the two target
-//! subfolders. `seed` affects the final variable names only, never bytecode.
+//! subfolders. `seed` affects final local/private-field names only, never bytecode.
 
 use crate::bytecode::custom::{self, Opcode, Program};
 use crate::{Diagnostic, Target};
@@ -20,7 +20,14 @@ pub fn virtualize(source: &str, target: Target, seed: u64) -> Result<String, Dia
 pub fn emit(bytecode: &[u8], target: Target, seed: u64) -> Result<String, Diagnostic> {
     let program = custom::decode(bytecode, target)?;
     let raw = generate(bytecode, &program)?;
-    crate::minify::finalize_vm(&raw, target, seed)
+    finalize(&raw, target, seed)
+}
+
+// All source (including static host method adapters) is complete before
+// shortening private fields and then applying the existing final local pass.
+fn finalize(source: &str, target: Target, seed: u64) -> Result<String, Diagnostic> {
+    let source = super::fields::shorten(source, target, seed)?;
+    crate::minify::finalize_vm(&source, target, seed)
 }
 
 pub(crate) fn generate(bytecode: &[u8], program: &Program) -> Result<String, Diagnostic> {
@@ -72,42 +79,42 @@ local check=b32();local sa,sb=1,0;for q=33,#B do sa=(sa+SB(B,q))%65521;sb=(sb+sa
 if sa+sb*65536~=check then E()end;
 local P={};local work=0;
 for id=0,np-1 do
- local F={k={},tags={},u={}};F.parent=b32();F.m=b16();F.p=b8();F.flags=b8();F.nu=b16();
- if b16()~=0 then E()end;F.nk=b32();F.nc=b32();
- if F.m<1 or F.m>256 or F.p>F.m or F.nu>256 or F.nk>65536 or F.nc<1 or F.flags>15 then E()end;
- F.shared=MF(F.flags/8)%2==1;if F.shared and (isa<2 or id==0)then E()end;
- if id==0 then if F.parent~=4294967295 or F.nu~=0 or MF(F.flags/2)%2~=0 then E()end
- elseif F.parent>=id then E()end;
- local legacy=MF(F.flags/2)%2;
- if legacy==1 and (F.flags%2==0 or F.p>=F.m)or MF(F.flags/4)%2==1 and legacy==0 then E()end;
+ local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();
+ if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();
+ if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 then E()end;
+ F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;
+ if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end
+ elseif F.__obf_proto_parent>=id then E()end;
+ local legacy=MF(F.__obf_proto_flags/2)%2;
+ if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;
 "#,
     );
     if program.target.is_luau() {
         s.push_str("if legacy~=0 then E()end;");
     } else {
-        s.push_str("if F.shared then E()end;");
+        s.push_str("if F.__obf_proto_shared then E()end;");
     }
     s.push_str(
         r#"
- work=work+F.nu+F.nk+F.nc;if work>1000000 then E()end;
- for j=0,F.nu-1 do local tag,index=b8(),b8();local parent=P[F.parent];
-  if tag>2 or not parent or tag~=1 and index>=parent.m or tag==1 and index>=parent.nu then E()end;
-  if tag==2 then if not F.shared or F.self~=nil then E()end;F.self=j end;
-  F.u[j]={tag,index};
+ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;
+ for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];
+  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;
+  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;
+  F.__obf_proto_u[j]={tag,index};
  end;
- for j=0,F.nk-1 do local tag=b8();F.tags[j]=tag;
-  if tag==0 then F.k[j]=nil
-  elseif tag==1 then local v=b8();if v>1 then E()end;F.k[j]=v==1
-  elseif tag==2 then F.k[j]=num()
-  elseif tag==3 or tag==5 then F.k[j]=str()
+ for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;
+  if tag==0 then F.__obf_proto_k[j]=nil
+  elseif tag==1 then local v=b8();if v>1 then E()end;F.__obf_proto_k[j]=v==1
+  elseif tag==2 then F.__obf_proto_k[j]=num()
+  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=str()
 "#,
     );
     if program.target.is_luau() {
-        s.push_str(r#"elseif tag==4 then local lo,hi=b32(),b32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.k[j]=v;"#);
+        s.push_str(r#"elseif tag==4 then local lo,hi=b32(),b32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
     }
-    s.push_str("else E()end end;F.code=take(F.nc*4);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;");
+    s.push_str("else E()end end;F.__obf_proto_code=take(F.__obf_proto_nc*4);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;");
     // Both Rust and target decoders validate operands before any execution.
-    s.push_str("for id=0,np-1 do local F=P[id];for at=0,F.nc-1 do local o,a,b,c=SB(F.code,at*4+1,at*4+4);local k=b+c*256;local j=a+k*256;local ok=false;");
+    s.push_str("for id=0,np-1 do local F=P[id];for at=0,F.__obf_proto_nc-1 do local o,a,b,c=SB(F.__obf_proto_code,at*4+1,at*4+4);local k=b+c*256;local j=a+k*256;local ok=false;");
     for (index, op) in program.opcodes().iter().enumerate() {
         write!(
             s,
@@ -118,7 +125,7 @@ for id=0,np-1 do
         )
         .unwrap();
     }
-    s.push_str("else E()end;if not ok then E()end;end;local last=SB(F.code,#F.code-3);");
+    s.push_str("else E()end;if not ok then E()end;end;local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);");
     write!(
         s,
         "if last~={} and last~={} and last~={} then E()end;end;",
@@ -158,21 +165,21 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local W=SM({},{__mode='kv'});local H;local Make;
 local Call=function(fn,args)local d=W[fn];if d then return H(d[1],args,d[2])else return Z(fn(U(args,1,args.n)))end end;
 Make=function(id,up)
- local F=P[id];local cached=F.cached;
+ local F=P[id];local cached=F.__obf_proto_cached;
  if cached then local previous=W[cached][2];local same=true;
-  for j=0,F.nu-1 do if j~=F.self and not RE(CV(previous[j]),CV(up[j]))then same=false;break end end;
+  for j=0,F.__obf_proto_nu-1 do if j~=F.__obf_proto_self and not RE(CV(previous[j]),CV(up[j]))then same=false;break end end;
   if same then return cached end;
  end;
  local d={id,up};local fn=function(...)local v=H(d[1],Z(...),d[2]);return U(v,1,v.n)end;W[fn]=d;
- if F.shared and not cached then F.cached=fn end;return fn
+ if F.__obf_proto_shared and not cached then F.__obf_proto_cached=fn end;return fn
 end;
 H=function(fid,args,ups)
  while true do
-  local F=P[fid];local R={};local n=args.n-F.p;if n<0 then n=0 end;
-  local va={n=n};for i=1,n do va[i]=args[F.p+i]end;
-  for i=0,F.p-1 do R[i]={args[i+1]}end;
-  if MF(F.flags/2)%2==1 then R[F.p]={};if MF(F.flags/4)%2==1 then local v={n=n};for i=1,n do v[i]=va[i]end;R[F.p][1]=v end end;
-  local pc=1;local code=F.code;
+  local F=P[fid];local R={};local n=args.n-F.__obf_proto_p;if n<0 then n=0 end;
+  local va={n=n};for i=1,n do va[i]=args[F.__obf_proto_p+i]end;
+  for i=0,F.__obf_proto_p-1 do R[i]={args[i+1]}end;
+  if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local v={n=n};for i=1,n do v[i]=va[i]end;R[F.__obf_proto_p][1]=v end end;
+  local pc=1;local code=F.__obf_proto_code;
   while true do
    local o,a,b,c=SB(code,pc,pc+3);if c==nil then E()end;pc=pc+4;
    local k=b+c*256;local j=a+k*256;
@@ -203,23 +210,27 @@ H=function(fid,args,ups)
 fn validation(op: Opcode) -> &'static str {
     use Opcode::*;
     match op {
-        Jump => "j<F.nc",
-        Constant => "a<F.m and k<F.nk",
-        ReadGlobal | WriteGlobal => "a<F.m and (F.tags[k]==3 or F.tags[k]==5)",
-        Closure => "a<F.m and P[k]~=nil and P[k].parent==id",
-        ReadUpvalue | WriteUpvalue => "a<F.m and b<F.nu and c==0",
-        Extract => "a<F.m and b<F.m and c>0",
-        Clear => "a<=b and b<F.m and c==0",
-        NumberPrepare | NumberStep => "a+2<F.m and b==0 and c==0",
-        NumberTest => "a<F.m and b+2<F.m and c==0",
-        Test => "a<F.m and b==0 and c==0 and at+2<F.nc",
-        Varargs => "a<F.m and b==0 and c==0 and F.flags%2==1",
-        Nil | NewTable | NewPack | IteratorPrepare | Return | Freeze => "a<F.m and b==0 and c==0",
+        Jump => "j<F.__obf_proto_nc",
+        Constant => "a<F.__obf_proto_m and k<F.__obf_proto_nk",
+        ReadGlobal | WriteGlobal => {
+            "a<F.__obf_proto_m and (F.__obf_proto_tags[k]==3 or F.__obf_proto_tags[k]==5)"
+        }
+        Closure => "a<F.__obf_proto_m and P[k]~=nil and P[k].__obf_proto_parent==id",
+        ReadUpvalue | WriteUpvalue => "a<F.__obf_proto_m and b<F.__obf_proto_nu and c==0",
+        Extract => "a<F.__obf_proto_m and b<F.__obf_proto_m and c>0",
+        Clear => "a<=b and b<F.__obf_proto_m and c==0",
+        NumberPrepare | NumberStep => "a+2<F.__obf_proto_m and b==0 and c==0",
+        NumberTest => "a<F.__obf_proto_m and b+2<F.__obf_proto_m and c==0",
+        Test => "a<F.__obf_proto_m and b==0 and c==0 and at+2<F.__obf_proto_nc",
+        Varargs => "a<F.__obf_proto_m and b==0 and c==0 and F.__obf_proto_flags%2==1",
+        Nil | NewTable | NewPack | IteratorPrepare | Return | Freeze => {
+            "a<F.__obf_proto_m and b==0 and c==0"
+        }
         Move | NewCell | ReadCell | WriteCell | Push | Extend | Not | Negate | Length
-        | IteratorNext | ToString | TailCall => "a<F.m and b<F.m and c==0",
+        | IteratorNext | ToString | TailCall => "a<F.__obf_proto_m and b<F.__obf_proto_m and c==0",
         GetTable | SetTable | Method | Call | Add | Subtract | Multiply | Divide | FloorDivide
         | Modulo | Power | Concat | Equal | Less | LessEqual | SetList | Export => {
-            "a<F.m and b<F.m and c<F.m"
+            "a<F.__obf_proto_m and b<F.__obf_proto_m and c<F.__obf_proto_m"
         }
     }
 }
@@ -315,7 +326,7 @@ mod tests {
         let raw=raw.replace("if c==nil then E()end;pc=pc+4;","if c==nil then E()end;pc=pc+4;Probe[o]=true;")
             .replace("return U(result,1,result.n)","for id in ProbePairs(Probe)do ProbePrint('opcode:'..id)end;return U(result,1,result.n)");
         let raw = format!("local Probe={{}};local ProbePrint,ProbePairs=print,pairs;{raw}");
-        let output = crate::minify::finalize_vm(&raw, target, 735).unwrap();
+        let output = finalize(&raw, target, 735).unwrap();
         let work = native::Workspace::new();
         let path = work.0.join("coverage.lua");
         fs::write(&path, output).unwrap();
@@ -410,7 +421,7 @@ mod tests {
                 // Bypass only Rust's input gate inside this unit test to
                 // independently exercise the emitted target-language gate.
                 let raw = generate(&bad, &program).unwrap();
-                let output = crate::minify::finalize_vm(&raw, target, 735).unwrap();
+                let output = finalize(&raw, target, 735).unwrap();
                 let work = native::Workspace::new();
                 let path = work.0.join("invalid.lua");
                 fs::write(&path, output).unwrap();
@@ -458,7 +469,7 @@ mod tests {
             bad[28..32].copy_from_slice(&checksum.to_le_bytes());
             assert!(custom::decode(&bad, Target::Luau).is_err());
             let raw = generate(&bad, &program).unwrap();
-            let output = crate::minify::finalize_vm(&raw, Target::Luau, 735).unwrap();
+            let output = finalize(&raw, Target::Luau, 735).unwrap();
             let work = native::Workspace::new();
             let path = work.0.join("invalid.luau");
             fs::write(&path, output).unwrap();
