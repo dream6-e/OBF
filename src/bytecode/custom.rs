@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 pub const HEADER_SIZE: usize = 32;
 pub const INSTRUCTION_SIZE: usize = 4;
 pub const VERSION: u8 = 2;
-pub const ISA_VERSION: u32 = 1;
+/// Revision 2 adds checked Luau closure-sharing metadata, not native words.
+/// Revision 1 remains readable and retains its original serialization.
+pub const ISA_VERSION: u32 = 2;
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ITEMS: usize = 1_000_000;
 pub const MAX_FUNCTIONS: usize = 65_536;
@@ -124,6 +126,7 @@ pub struct Prototype {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
     pub target: Target,
+    pub isa_version: u32,
     pub entry: usize,
     pub prototypes: Vec<Prototype>,
 }
@@ -231,7 +234,8 @@ pub fn encode(module: &ir::Module) -> Result<Vec<u8>, Diagnostic> {
             parameters: narrow(usize::from(f.parameters))?,
             flags: u8::from(f.variadic)
                 | u8::from(f.legacy_arg_slot) << 1
-                | u8::from(f.legacy_arg_table) << 2,
+                | u8::from(f.legacy_arg_table) << 2
+                | u8::from(f.shared_closure) << 3,
             captures: f.captures.clone(),
             constants: f.constants.clone(),
             code,
@@ -239,6 +243,7 @@ pub fn encode(module: &ir::Module) -> Result<Vec<u8>, Diagnostic> {
     }
     serialize(&Program {
         target: module.target,
+        isa_version: ISA_VERSION,
         entry: module.entry,
         prototypes,
     })
@@ -347,7 +352,7 @@ pub fn serialize(program: &Program) -> Result<Vec<u8>, Diagnostic> {
     u32_bytes(&mut out, 0)?;
     u32_bytes(&mut out, program.prototypes.len())?;
     u32_bytes(&mut out, program.entry)?;
-    out.extend_from_slice(&ISA_VERSION.to_le_bytes());
+    out.extend_from_slice(&program.isa_version.to_le_bytes());
     u32_bytes(&mut out, 0)?;
     for p in &program.prototypes {
         out.extend_from_slice(&p.parent.map_or(u32::MAX, |p| p as u32).to_le_bytes());
@@ -361,6 +366,7 @@ pub fn serialize(program: &Program) -> Result<Vec<u8>, Diagnostic> {
             let (tag, index) = match *capture {
                 Capture::Local(r) => (0, r),
                 Capture::Upvalue(u) => (1, u),
+                Capture::RecursiveLocal(r) => (2, r),
             };
             out.extend_from_slice(&[tag, narrow(index.into())?]);
         }
@@ -467,7 +473,8 @@ fn decode_inner(r: &mut Reader<'_>, target: Target) -> Result<Program, Diagnosti
     if count == 0 || count > MAX_FUNCTIONS {
         return Err(error("prototype count exceeds safety limit"));
     }
-    if r.u32()? != ISA_VERSION {
+    let isa_version = r.u32()?;
+    if !(1..=ISA_VERSION).contains(&isa_version) {
         return Err(error("unsupported ISA version"));
     }
     if r.u32()? != checksum(&data[HEADER_SIZE..]) {
@@ -498,6 +505,7 @@ fn decode_inner(r: &mut Reader<'_>, target: Target) -> Result<Program, Diagnosti
             captures.push(match tag {
                 0 => Capture::Local(index),
                 1 => Capture::Upvalue(index),
+                2 if isa_version >= 2 => Capture::RecursiveLocal(index),
                 _ => return Err(error("bad capture tag")),
             });
         }
@@ -541,6 +549,7 @@ fn decode_inner(r: &mut Reader<'_>, target: Target) -> Result<Program, Diagnosti
     }
     let program = Program {
         target,
+        isa_version,
         entry,
         prototypes,
     };
@@ -549,6 +558,9 @@ fn decode_inner(r: &mut Reader<'_>, target: Target) -> Result<Program, Diagnosti
 }
 
 pub fn validate(program: &Program) -> Result<(), Diagnostic> {
+    if !(1..=ISA_VERSION).contains(&program.isa_version) {
+        return Err(error("unsupported ISA version"));
+    }
     if program.entry != 0
         || program.prototypes.is_empty()
         || program.prototypes.len() > MAX_FUNCTIONS
@@ -564,7 +576,8 @@ pub fn validate(program: &Program) -> Result<(), Diagnostic> {
             || p.captures.len() > 256
             || p.constants.len() > 65_536
             || p.code.is_empty()
-            || p.flags & !7 != 0
+            || p.flags & !15 != 0
+            || p.flags & 8 != 0 && (program.isa_version < 2 || !program.target.is_luau() || id == 0)
             || p.flags & 4 != 0 && p.flags & 2 == 0
             || p.flags & 2 != 0
                 && (p.flags & 1 == 0
@@ -581,6 +594,14 @@ pub fn validate(program: &Program) -> Result<(), Diagnostic> {
         if total > MAX_ITEMS {
             return Err(error("record count exceeds safety limit"));
         }
+        if p.captures
+            .iter()
+            .filter(|c| matches!(c, Capture::RecursiveLocal(_)))
+            .count()
+            > 1
+        {
+            return Err(error("multiple recursive self captures"));
+        }
         for capture in &p.captures {
             let parent = &program.prototypes[p
                 .parent
@@ -588,6 +609,12 @@ pub fn validate(program: &Program) -> Result<(), Diagnostic> {
             if match *capture {
                 Capture::Local(r) => r >= parent.registers,
                 Capture::Upvalue(u) => usize::from(u) >= parent.captures.len(),
+                Capture::RecursiveLocal(r) => {
+                    r >= parent.registers
+                        || p.flags & 8 == 0
+                        || program.isa_version < 2
+                        || !program.target.is_luau()
+                }
             } {
                 return Err(error("capture source out of range"));
             }

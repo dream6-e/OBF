@@ -4,9 +4,11 @@ use crate::ast::{
 };
 use crate::scope::{Analysis, BindingId, BindingKind, ScopeKind};
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 const MAX_WORK: usize = 1_000_000;
 const MAX_DEPTH: usize = 64;
+const MAX_KNOWN_STRING_BYTES: usize = 65_536;
 
 pub(super) fn lower(chunk: &ast::Chunk) -> Result<Module, Diagnostic> {
     let analysis = crate::scope::analyze_chunk(chunk)?;
@@ -42,6 +44,18 @@ pub(super) fn lower(chunk: &ast::Chunk) -> Result<Module, Diagnostic> {
         declarations,
         references,
         function_scopes,
+        written: analysis
+            .references
+            .iter()
+            .filter(|r| r.is_write)
+            .filter_map(|r| r.binding)
+            .collect(),
+        top_bindings: BTreeSet::new(),
+        function_initializers: BTreeMap::new(),
+        shared_functions: BTreeMap::new(),
+        function_scope_ids: vec![0],
+        runtime_upvalues: BTreeMap::from([(0, vec![])]),
+        known_bindings: BTreeMap::new(),
         module: Module {
             target: chunk.target,
             entry: 0,
@@ -68,6 +82,7 @@ pub(super) fn lower(chunk: &ast::Chunk) -> Result<Module, Diagnostic> {
     compiler.block(&mut ctx, &chunk.block, false)?;
     compiler.finish(&mut ctx)?;
     compiler.module.functions[0] = ctx.function;
+    compiler.finish_captures()?;
     Ok(compiler.module)
 }
 
@@ -100,6 +115,7 @@ struct Context {
     id: FunctionId,
     function: Function,
     current: BlockId,
+    reachable: Vec<bool>,
     next: Register,
     cells: BTreeMap<BindingId, Register>,
     upvalues: BTreeMap<BindingId, u16>,
@@ -125,6 +141,7 @@ impl Context {
                 variadic,
                 legacy_arg_slot: false,
                 legacy_arg_table: false,
+                shared_closure: false,
                 registers: 1,
                 captures,
                 constants: vec![],
@@ -134,6 +151,7 @@ impl Context {
                 }],
             },
             current: 0,
+            reachable: vec![true],
             next: 0,
             cells: BTreeMap::new(),
             upvalues: BTreeMap::new(),
@@ -167,6 +185,7 @@ impl Context {
     }
     fn new_block(&mut self) -> BlockId {
         let id = self.function.blocks.len();
+        self.reachable.push(false);
         self.function.blocks.push(Block {
             instructions: vec![],
             terminator: Terminator::Unreachable,
@@ -174,6 +193,20 @@ impl Context {
         id
     }
     fn terminate(&mut self, t: Terminator) {
+        if self.reachable[self.current] {
+            match &t {
+                Terminator::Jump(to) => self.reachable[*to] = true,
+                Terminator::Branch {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    self.reachable[*then_block] = true;
+                    self.reachable[*else_block] = true;
+                }
+                _ => {}
+            }
+        }
         self.function.blocks[self.current].terminator = t;
     }
     fn jump(&mut self, to: BlockId) {
@@ -261,6 +294,15 @@ struct Compiler<'a> {
     declarations: BTreeMap<usize, BindingId>,
     references: BTreeMap<usize, Option<BindingId>>,
     function_scopes: BTreeMap<(usize, usize), usize>,
+    // Declaration identities, not spelling: closure sharing must distinguish
+    // loop/parameter captures, writes, function initializers and recursion.
+    written: BTreeSet<BindingId>,
+    top_bindings: BTreeSet<BindingId>,
+    function_initializers: BTreeMap<BindingId, usize>,
+    shared_functions: BTreeMap<usize, bool>,
+    function_scope_ids: Vec<usize>,
+    runtime_upvalues: BTreeMap<usize, Vec<BindingId>>,
+    known_bindings: BTreeMap<BindingId, Rc<Constant>>,
     module: Module,
     work: usize,
     depth: usize,
@@ -305,15 +347,306 @@ impl Compiler<'_> {
         }
         Ok(())
     }
-    fn bind(&self, ctx: &mut Context, name: &ast::Name) -> Result<Register, Diagnostic> {
+    fn bind(&mut self, ctx: &mut Context, name: &ast::Name) -> Result<Register, Diagnostic> {
         let id = *self
             .declarations
             .get(&name.span.start)
             .ok_or_else(|| Diagnostic::byte("missing binding declaration", name.span.start))?;
         let reg = ctx.alloc(name.span)?;
         ctx.cells.insert(id, reg);
+        if ctx.id == 0
+            && ctx.loops.is_empty()
+            && !matches!(
+                self.analysis.bindings[id].kind,
+                BindingKind::NumericFor | BindingKind::GenericFor
+            )
+        {
+            self.top_bindings.insert(id);
+        }
         Ok(reg)
     }
+    fn function_initializer(
+        &mut self,
+        name: &ast::Name,
+        body: &ast::FunctionBody,
+    ) -> Result<(), Diagnostic> {
+        let binding = *self
+            .declarations
+            .get(&name.span.start)
+            .ok_or_else(|| Diagnostic::new("missing initializer binding"))?;
+        let scope = *self
+            .function_scopes
+            .get(&(body.span.start, body.span.end))
+            .ok_or_else(|| Diagnostic::new("missing initializer function scope"))?;
+        self.function_initializers.insert(binding, scope);
+        Ok(())
+    }
+    fn share_function(&mut self, scope: usize, depth: usize) -> Result<bool, Diagnostic> {
+        if let Some(&shared) = self.shared_functions.get(&scope) {
+            return Ok(shared);
+        }
+        if depth >= MAX_DEPTH {
+            return Err(Diagnostic::new("closure sharing analysis nesting limit"));
+        }
+        let captures = self
+            .runtime_upvalues
+            .get(&scope)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new("missing runtime capture scope"))?;
+        // A conservative in-progress entry also bounds pathological cycles;
+        // direct local-function self capture is handled explicitly below.
+        self.shared_functions.insert(scope, false);
+        for binding in captures {
+            self.charge(self.analysis.scopes[scope].span)?;
+            if self.written.contains(&binding) {
+                return Ok(false);
+            }
+            if self.top_bindings.contains(&binding) {
+                continue;
+            }
+            let Some(&initializer) = self.function_initializers.get(&binding) else {
+                return Ok(false);
+            };
+            if initializer != scope && !self.share_function(initializer, depth + 1)? {
+                return Ok(false);
+            }
+        }
+        self.shared_functions.insert(scope, true);
+        Ok(true)
+    }
+    /// Drop captures used only by erased types or statically dead code, then
+    /// remap transitive captures bottom-up. The public lexical resolver still
+    /// accounts for all source references for naming and grammar validation.
+    fn finish_captures(&mut self) -> Result<(), Diagnostic> {
+        let mut children = vec![Vec::new(); self.module.functions.len()];
+        for (id, function) in self.module.functions.iter().enumerate().skip(1) {
+            children[function.parent.unwrap()].push(id);
+        }
+        for id in (0..self.module.functions.len()).rev() {
+            let count = self.module.functions[id].captures.len();
+            let mut used = vec![false; count];
+            for block in &self.module.functions[id].blocks {
+                for op in &block.instructions {
+                    self.work += 1;
+                    if let Instruction::ReadUpvalue(_, up) | Instruction::WriteUpvalue(up, _) = *op
+                    {
+                        used[up as usize] = true;
+                    }
+                }
+            }
+            for &child in &children[id] {
+                for capture in &self.module.functions[child].captures {
+                    self.work += 1;
+                    if let Capture::Upvalue(up) = *capture {
+                        used[up as usize] = true;
+                    }
+                }
+            }
+            self.charge(ast::Span::default())?;
+            let mut remap = vec![0u16; count];
+            let mut next = 0u16;
+            for (i, used) in used.iter().enumerate() {
+                if *used {
+                    remap[i] = next;
+                    next += 1;
+                }
+            }
+            let function = &mut self.module.functions[id];
+            let old = std::mem::take(&mut function.captures);
+            function.captures = old
+                .into_iter()
+                .zip(&used)
+                .filter_map(|(c, u)| u.then_some(c))
+                .collect();
+            for block in &mut function.blocks {
+                for op in &mut block.instructions {
+                    if let Instruction::ReadUpvalue(_, up) | Instruction::WriteUpvalue(up, _) = op {
+                        *up = remap[*up as usize];
+                    }
+                }
+            }
+            for &child in &children[id] {
+                for capture in &mut self.module.functions[child].captures {
+                    if let Capture::Upvalue(up) = capture {
+                        *up = remap[*up as usize];
+                    }
+                }
+            }
+            let scope = self.function_scope_ids[id];
+            let bindings = self.runtime_upvalues.get_mut(&scope).unwrap();
+            let old = std::mem::take(bindings);
+            *bindings = old
+                .into_iter()
+                .zip(&used)
+                .filter_map(|(b, u)| u.then_some(b))
+                .collect();
+        }
+        if self.module.target.is_luau() {
+            for id in 1..self.module.functions.len() {
+                let scope = self.function_scope_ids[id];
+                let shared = self.share_function(scope, 0)?;
+                self.module.functions[id].shared_closure = shared;
+                if shared {
+                    for (capture, binding) in self.module.functions[id]
+                        .captures
+                        .iter_mut()
+                        .zip(&self.runtime_upvalues[&scope])
+                    {
+                        if self.function_initializers.get(binding) == Some(&scope) {
+                            if let Capture::Local(reg) = *capture {
+                                *capture = Capture::RecursiveLocal(reg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn luau_truth(&mut self, expression: &ast::Expression) -> Result<Option<bool>, Diagnostic> {
+        if !self.module.target.is_luau() {
+            return Ok(None);
+        }
+        Ok(self
+            .known(expression, 0)?
+            .map(|value| !matches!(*value, Constant::Nil | Constant::Boolean(false))))
+    }
+
+    /// Small, bounded pure-value analysis for Luau's compile-time branches.
+    /// Never visits/evaluates calls, table accesses, allocations or globals.
+    /// Shared string values avoid quadratic storage across alias declarations.
+    fn known(
+        &mut self,
+        e: &ast::Expression,
+        depth: usize,
+    ) -> Result<Option<Rc<Constant>>, Diagnostic> {
+        self.charge(e.span)?;
+        if depth >= MAX_DEPTH {
+            return Err(Diagnostic::byte(
+                "constant analysis nesting limit",
+                e.span.start,
+            ));
+        }
+        let truth = |v: &Constant| !matches!(v, Constant::Nil | Constant::Boolean(false));
+        let result = match &e.kind {
+            E::Nil => Constant::Nil,
+            E::Boolean(v) => Constant::Boolean(*v),
+            E::Number(v) => number(v, self.module.target, e.span)?,
+            E::String(v) if v.len() <= MAX_KNOWN_STRING_BYTES => Constant::String(
+                crate::minify::literal_bytes(v, self.module.target).map_err(Diagnostic::new)?,
+            ),
+            E::Name(name) => {
+                return Ok(self
+                    .references
+                    .get(&name.span.start)
+                    .and_then(|b| *b)
+                    .and_then(|b| self.known_bindings.get(&b))
+                    .cloned())
+            }
+            E::Group(inner)
+            | E::TypeAssertion {
+                expression: inner, ..
+            }
+            | E::TypeInstantiation {
+                expression: inner, ..
+            } => return self.known(inner, depth + 1),
+            E::Unary {
+                operator,
+                expression,
+            } => {
+                let Some(value) = self.known(expression, depth + 1)? else {
+                    return Ok(None);
+                };
+                match (operator, value.as_ref()) {
+                    (U::Not, v) => Constant::Boolean(!truth(v)),
+                    (U::Negate, Constant::Number(n)) => Constant::number(-f64::from_bits(*n)),
+                    // Integer values propagate, but even a -Ni initializer
+                    // is not a propagated constant in the pinned compiler.
+                    // Runtime expression emission separately handles direct
+                    // negated literals; never fold dynamic integer arithmetic.
+                    (U::Length, Constant::String(v)) => Constant::number(v.len() as f64),
+                    _ => return Ok(None),
+                }
+            }
+            E::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let Some(a) = self.known(left, depth + 1)? else {
+                    return Ok(None);
+                };
+                if matches!(operator, B::And | B::Or) {
+                    return if (*operator == B::And) == truth(&a) {
+                        self.known(right, depth + 1)
+                    } else {
+                        Ok(Some(a))
+                    };
+                }
+                let Some(b) = self.known(right, depth + 1)? else {
+                    return Ok(None);
+                };
+                if let (Constant::Number(a), Constant::Number(b)) = (a.as_ref(), b.as_ref()) {
+                    let (a, b) = (f64::from_bits(*a), f64::from_bits(*b));
+                    match operator {
+                        B::Add => Constant::number(a + b),
+                        B::Subtract => Constant::number(a - b),
+                        B::Multiply => Constant::number(a * b),
+                        B::Divide => Constant::number(a / b),
+                        B::FloorDivide => Constant::number((a / b).floor()),
+                        B::Modulo => Constant::number(a - (a / b).floor() * b),
+                        B::Power => Constant::number(a.powf(b)),
+                        B::Equal => Constant::Boolean(a == b),
+                        B::NotEqual => Constant::Boolean(a != b),
+                        B::Less => Constant::Boolean(a < b),
+                        B::LessEqual => Constant::Boolean(a <= b),
+                        B::Greater => Constant::Boolean(a > b),
+                        B::GreaterEqual => Constant::Boolean(a >= b),
+                        _ => return Ok(None),
+                    }
+                } else if *operator == B::Concat {
+                    let (Constant::String(a), Constant::String(b)) = (a.as_ref(), b.as_ref())
+                    else {
+                        return Ok(None);
+                    };
+                    if a.len() + b.len() > MAX_KNOWN_STRING_BYTES {
+                        return Ok(None);
+                    }
+                    self.work += a.len() + b.len();
+                    self.charge(e.span)?;
+                    let mut joined = a.clone();
+                    joined.extend_from_slice(b);
+                    Constant::String(joined)
+                } else if matches!(operator, B::Equal | B::NotEqual) {
+                    if let (Constant::String(a), Constant::String(b)) = (a.as_ref(), b.as_ref()) {
+                        self.work += a.len() + b.len();
+                        self.charge(e.span)?;
+                    }
+                    Constant::Boolean((a == b) == (*operator == B::Equal))
+                } else {
+                    return Ok(None);
+                }
+            }
+            E::IfExpression {
+                branches,
+                else_expression,
+            } => {
+                for branch in branches {
+                    let Some(value) = self.known(&branch.condition, depth + 1)? else {
+                        return Ok(None);
+                    };
+                    if truth(&value) {
+                        return self.known(&branch.value, depth + 1);
+                    }
+                }
+                return self.known(else_expression, depth + 1);
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(Rc::new(result)))
+    }
+
     fn name(&self, ctx: &mut Context, name: &ast::Name) -> Result<Place, Diagnostic> {
         match self.references.get(&name.span.start) {
             Some(Some(id)) => ctx.location(*id),
@@ -362,6 +695,15 @@ impl Compiler<'_> {
         let id = self.module.functions.len();
         let mut child = Context::new(id, Some(parent.id), 0, body.has_vararg, captures);
         child.upvalues = upvalues;
+        self.function_scope_ids.push(scope);
+        self.runtime_upvalues.insert(
+            scope,
+            self.analysis.scopes[scope]
+                .upvalues
+                .iter()
+                .copied()
+                .collect(),
+        );
         for &binding in &self.analysis.scopes[scope].bindings {
             let b = &self.analysis.bindings[binding];
             match b.kind {
@@ -393,6 +735,9 @@ impl Compiler<'_> {
         self.enter(block.span)?;
         let mark = ctx.next;
         for s in &block.statements {
+            if self.module.target.is_luau() && (!ctx.open() || !ctx.reachable[ctx.current]) {
+                break;
+            }
             if !ctx.open() {
                 ctx.current = ctx.new_block();
             }
@@ -419,6 +764,31 @@ impl Compiler<'_> {
                 for b in bindings {
                     regs.push(self.bind(ctx, &b.name)?);
                 }
+                if self.module.target.is_luau() {
+                    for (index, binding) in bindings.iter().enumerate() {
+                        let id = self.declarations[&binding.name.span.start];
+                        if self.written.contains(&id) {
+                            continue;
+                        }
+                        let value = if let Some(value) = values.get(index) {
+                            self.known(value, 0)?
+                        } else if values.last().is_some_and(multret) {
+                            None
+                        } else {
+                            Some(Rc::new(Constant::Nil))
+                        };
+                        if let Some(value) = value {
+                            self.known_bindings.insert(id, value);
+                        }
+                    }
+                }
+                for (binding, value) in bindings.iter().zip(values) {
+                    // Parentheses intentionally do not count as a function
+                    // initializer in the pinned target's sharing heuristic.
+                    if let E::Function(body) = &value.kind {
+                        self.function_initializer(&binding.name, body)?;
+                    }
+                }
                 let keep = ctx.next;
                 let pack = self.values(ctx, values)?;
                 let tmp = ctx.alloc(s.span)?;
@@ -438,6 +808,7 @@ impl Compiler<'_> {
                 ..
             } => {
                 let reg = self.bind(ctx, name)?;
+                self.function_initializer(name, body)?;
                 let keep = ctx.next;
                 let tmp = ctx.alloc(s.span)?;
                 ctx.emit(Instruction::Nil(tmp));
@@ -516,7 +887,17 @@ impl Compiler<'_> {
                 else_block,
             } => {
                 let join = ctx.new_block();
+                let mut fallthrough = true;
                 for branch in branches {
+                    if let Some(value) = self.luau_truth(&branch.condition)? {
+                        if !value {
+                            continue;
+                        }
+                        self.block(ctx, &branch.body, true)?;
+                        ctx.jump(join);
+                        fallthrough = false;
+                        break;
+                    }
                     let yes = ctx.new_block();
                     let no = ctx.new_block();
                     let cond = self.condition(ctx, &branch.condition)?;
@@ -532,25 +913,36 @@ impl Compiler<'_> {
                     ctx.current = no;
                     ctx.next = mark;
                 }
-                if let Some(block) = else_block {
-                    self.block(ctx, block, true)?;
+                if fallthrough {
+                    if let Some(block) = else_block {
+                        self.block(ctx, block, true)?;
+                    }
+                    ctx.jump(join);
                 }
-                ctx.jump(join);
                 ctx.current = join;
                 ctx.release(mark);
             }
             S::While { condition, body } => {
+                let known = self.luau_truth(condition)?;
+                if known == Some(false) {
+                    self.depth -= 1;
+                    return Ok(());
+                }
                 let test = ctx.new_block();
                 let yes = ctx.new_block();
                 let exit = ctx.new_block();
                 ctx.jump(test);
                 ctx.current = test;
-                let cond = self.condition(ctx, condition)?;
-                ctx.terminate(Terminator::Branch {
-                    condition: cond,
-                    then_block: yes,
-                    else_block: exit,
-                });
+                if known == Some(true) {
+                    ctx.jump(yes);
+                } else {
+                    let cond = self.condition(ctx, condition)?;
+                    ctx.terminate(Terminator::Branch {
+                        condition: cond,
+                        then_block: yes,
+                        else_block: exit,
+                    });
+                }
                 ctx.next = mark;
                 ctx.loops.push(Loop {
                     exit,
@@ -581,6 +973,10 @@ impl Compiler<'_> {
                     repeat_continues: Some(vec![]),
                 });
                 for stmt in &body.statements {
+                    if self.module.target.is_luau() && (!ctx.open() || !ctx.reachable[ctx.current])
+                    {
+                        break;
+                    }
                     if !ctx.open() {
                         ctx.current = ctx.new_block();
                     }
@@ -589,7 +985,7 @@ impl Compiler<'_> {
                 }
                 ctx.jump(test);
                 ctx.current = test;
-                let cond = self.condition(ctx, condition)?;
+                let live_test = !self.module.target.is_luau() || ctx.reachable[test];
                 let loop_info = ctx.loops.pop().unwrap();
                 if let Some(span) = loop_info
                     .repeat_continues
@@ -614,11 +1010,20 @@ impl Compiler<'_> {
                     }
                     self.charge(condition.span)?;
                 }
-                ctx.terminate(Terminator::Branch {
-                    condition: cond,
-                    then_block: exit,
-                    else_block: again,
-                });
+                let cond = if live_test {
+                    Some(self.condition(ctx, condition)?)
+                } else {
+                    None
+                };
+                if let Some(cond) = cond {
+                    ctx.terminate(Terminator::Branch {
+                        condition: cond,
+                        then_block: exit,
+                        else_block: again,
+                    });
+                } else {
+                    ctx.terminate(Terminator::Jump(exit));
+                }
                 ctx.current = again;
                 ctx.release(mark);
                 ctx.jump(start);
@@ -1073,6 +1478,9 @@ impl Compiler<'_> {
         ctx: &mut Context,
         e: &ast::Expression,
     ) -> Result<Register, Diagnostic> {
+        if let Some(value) = self.luau_truth(e)? {
+            return ctx.load(Constant::Boolean(value), e.span);
+        }
         // Lua 5.1's truth-only literal conditions do not intern a numeric K.
         // In particular, `if 0 then` must not determine a later -0 constant.
         if !self.module.target.is_luau() {
@@ -1105,6 +1513,18 @@ impl Compiler<'_> {
                 let k = ctx.constant(Constant::number(value))?;
                 ctx.emit(Instruction::Constant(dst, k));
                 ctx.release(keep);
+                self.depth -= 1;
+                return Ok(dst);
+            }
+        }
+        if self.module.target.is_luau() && matches!(e.kind, E::Name(_)) {
+            if let Some(value) = self.known(e, 0)? {
+                if let Constant::String(bytes) = value.as_ref() {
+                    self.work += bytes.len();
+                    self.charge(e.span)?;
+                }
+                let k = ctx.constant(value.as_ref().clone())?;
+                ctx.emit(Instruction::Constant(dst, k));
                 self.depth -= 1;
                 return Ok(dst);
             }
@@ -1198,6 +1618,20 @@ impl Compiler<'_> {
                 left,
                 right,
             } => {
+                if matches!(operator, B::And | B::Or) {
+                    if let Some(truth) = self.luau_truth(left)? {
+                        let selected = if (*operator == B::And) == truth {
+                            right
+                        } else {
+                            left
+                        };
+                        let value = self.expression(ctx, selected, false)?;
+                        ctx.emit(Instruction::Move(dst, value));
+                        ctx.release(keep);
+                        self.depth -= 1;
+                        return Ok(dst);
+                    }
+                }
                 let l = if matches!(operator, B::And | B::Or | B::Concat) {
                     Operand::Value(self.expression(ctx, left, false)?)
                 } else {
@@ -1245,7 +1679,19 @@ impl Compiler<'_> {
                 else_expression,
             } => {
                 let join = ctx.new_block();
+                let mut fallthrough = true;
                 for branch in branches {
+                    if let Some(value) = self.luau_truth(&branch.condition)? {
+                        if !value {
+                            continue;
+                        }
+                        let v = self.expression(ctx, &branch.value, false)?;
+                        ctx.emit(Instruction::Move(dst, v));
+                        ctx.release(keep);
+                        ctx.jump(join);
+                        fallthrough = false;
+                        break;
+                    }
                     let yes = ctx.new_block();
                     let no = ctx.new_block();
                     let c = self.condition(ctx, &branch.condition)?;
@@ -1263,10 +1709,12 @@ impl Compiler<'_> {
                     ctx.current = no;
                     ctx.next = keep;
                 }
-                let v = self.expression(ctx, else_expression, false)?;
-                ctx.emit(Instruction::Move(dst, v));
-                ctx.release(keep);
-                ctx.jump(join);
+                if fallthrough {
+                    let v = self.expression(ctx, else_expression, false)?;
+                    ctx.emit(Instruction::Move(dst, v));
+                    ctx.release(keep);
+                    ctx.jump(join);
+                }
                 ctx.current = join;
             }
             E::Table(fields) => self.table(ctx, dst, fields, e.span)?,

@@ -108,6 +108,14 @@ source → 现有 AST / BindingId → typed register IR / basic blocks
 - 两端分别处理赋值/方法求值顺序、numeric-for、表构造器刷新和 Lua51 隐式 `arg`；Luau 另有 `//`、插值、泛型擦除、`__iter`、userdata NAMECALL、精确 i64 及冻结导出表。
 - Rust reader 与生成的 decoder 都做范围/格式验证；指令流为 byte string，每步直接 fetch 4 bytes，不是源码 table 中的伪字节码。
 
+### 运行语义兼容性增量
+
+已修复 Luau callable iterator、`__iter` 原始查找/false 处理、常用闭包共享与递归身份差异；增加运行时捕获裁剪、只读标量传播与可达性分析，原先因死分支 `continue` 被拒绝的一批合法源码现在可执行。Lua51 的已有赋值/数值/闭包语义仍单独回归。
+
+默认产物为 **OBF v2 / ISA 修订 2**，只增加经过双侧验证的闭包共享 metadata，Header/指令宽度/49 个稳定编号不变。**修订 1 仍可读取、执行、原样序列化**，CLI 显示实际文件版本。
+
+“运行输出与原始源码一致”的支持条件、测试证据与已知反例边界见 [`虚拟机兼容性.md`](虚拟机兼容性.md)。有限差分不能推出任意源码等价，也不能把 opcode 覆盖率当作语言兼容率。
+
 Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`、`vm::custom::{compile,emit}`，以及默认 `vm::virtualize`。`inspect-bytecode` 自动区分 OBF v2 与原生 chunk；`wrap-bytecode` 可把已保存的 `.obf` 独立包装为 VM。
 
 所有 decoder、runtime、dispatcher、字节码中出现的 handler 和执行尾部组装完后，只调用一次私有 `minify::finalize_vm`；之后不追加代码。该阶段统一随机一/两字母名，重解析复核绑定图、同域唯一性、名称长度、确实换名和 bytecode 字节不变。唯一生成器环境例外仍是严格审计的 `local G=(getfenv and getfenv(0))or _G`，没有公开忽略反射的开关。
@@ -122,8 +130,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,568 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,489 B | 34,033 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,996 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,257 B | 33,741 B |
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
@@ -159,11 +167,12 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 8. 比较 debug/release 的 binary 和 VM、默认虚拟化与独立 wrap、根目录 golden；
 9. 显式执行旧 `--backend native` 的完整语料、多 seed、语法/运行回归，保留其原生 opcode coverage（Lua51 38/38、Luau ≥60）；
 10. 额外覆盖多返回值/nil、变量求值时机、闭包、循环、20k 尾调用、coroutine/回调、i64、导出模块、userdata NAMECALL、GC 及 CLI 失败不覆盖文件；
-11. `tests/semicolons.rs` 检查双目标语句分隔、必需空格、调用后缀、嵌套函数/类型/插值、字符串字节、已有分号、空块、非法源码、CLI/两 VM 后端；内部测试覆盖所有语料的边界完整性、改名偏移、幂等性和 10,000 相邻块。
+11. `tests/semicolons.rs` 检查双目标语句分隔、必需空格、调用后缀、嵌套函数/类型/插值、字符串字节、已有分号、空块、非法源码、CLI/两 VM 后端；内部测试覆盖所有语料的边界完整性、改名偏移、幂等性和 10,000 相邻块；
+12. `tests/vm_parity.rs` 的 145 个生成式组合及应用式语料检查求值顺序、闭包身份、迭代器、捕获、返回值/模块和控制流；额外执行应用语料的 debug/release binary/VM 与原生 stdout 对照，检查修订 1 兼容性。
 
 `tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
-2026-09-06 分号分隔增量后的完整矩阵 **PASS 124**（35 单元 + 89 集成）：此前 114 项全部保留，新增 3 项内部与 7 项原生差分/入口测试；debug/release 构建、binary/脚本一致性及两套后端均通过。两份 VM 示例除分号/间隔外的 token（含名称与字符串）不变，内嵌及独立 v2 bytecode 与修改前逐字节一致。
+2026-09-06 运行语义兼容性增量后的完整矩阵 **PASS 140**（36 单元 + 104 集成）：此前 124 项全部保留，新增 13 项 parity、2 项 codec 和 1 项独立 decoder 回归。原生/VM 确定性输出、debug/release 构建和产物一致性、两套后端及 46/49 实际执行覆盖均通过。本轮编译元数据/IR 优化会改变 bytecode；seed 仍只改变最后的变量名，最终命名不会修改 payload。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 
@@ -171,7 +180,7 @@ VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_lu
 
 默认 AST/IR/v2 register VM、独立 reader/encoder、完整 ISA 与最终随机短名已可运行。后续优先扩展语义/压力差分、寄存器/pack 的体积和运行开销、IR 数据流验证及宿主接口边界；按本次要求，暂不推进复杂加密、压缩、随机 section 或多模板随机化。
 
-当前限制必须保留：不模拟原始 debug/环境反射与错误位置；`repeat/continue` 跳过条件所用 local 初始化时保守拒绝；不可见/被隐藏元表的 generalized iterator 不属于已支持保证，Roblox executor 尚未实机验证。结构验证不是沙箱或任意输入的语义等价证明。详细限制及 16 MiB/256 registers 等门限见 [`自定义字节码.md`](自定义字节码.md)。
+当前限制必须保留：不模拟原始 debug/环境反射与错误位置；消除已证明的死路径后，仍对可能跳过条件所用 local 初始化的 `repeat/continue` 保守拒绝；隐藏元表、GC/分配时机、含洞 table 的 `#` 和布局敏感遍历不属于完全等价保证，Roblox executor 尚未实机验证。原生所有优化相关的函数身份也尚未完整模拟。结构验证不是沙箱或任意输入的语义等价证明。详见 [`虚拟机兼容性.md`](虚拟机兼容性.md) 和 [`自定义字节码.md`](自定义字节码.md)。
 
 ## Anti 状态
 

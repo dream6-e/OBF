@@ -25,7 +25,10 @@ fn header_is_fixed_32_bytes_and_all_instruction_records_are_four_bytes() {
             u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize,
             bytes.len()
         );
-        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            bc::ISA_VERSION
+        );
         assert_eq!(std::mem::size_of::<Word>(), 4);
         // This fixture has one 20-byte prototype header and one tagged f64.
         assert_eq!(bytes.len(), 32 + 20 + 9 + p.prototypes[0].code.len() * 4);
@@ -248,4 +251,71 @@ fn invalid_ir_is_rejected_instead_of_truncating_operands_or_emitting_partial_cod
             .message
             .contains("256 live registers")
     );
+}
+
+#[test]
+fn isa_revisions_roundtrip_without_silently_upgrading_legacy_programs() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data =
+            vm::custom::compile("local function f(x)return x+1 end print(f(2))", target).unwrap();
+        let mut program = bc::decode(&data, target).unwrap();
+        assert_eq!(program.isa_version, 2);
+        program.isa_version = 1;
+        for p in &mut program.prototypes {
+            p.flags &= 7;
+        }
+        let legacy = bc::serialize(&program).unwrap();
+        assert_eq!(&legacy[24..28], &1u32.to_le_bytes());
+        let decoded = bc::decode(&legacy, target).unwrap();
+        assert_eq!(decoded, program);
+        assert_eq!(bc::serialize(&decoded).unwrap(), legacy);
+        for revision in [0, 3, u32::MAX] {
+            let mut bad = legacy.clone();
+            bad[24..28].copy_from_slice(&revision.to_le_bytes());
+            assert!(bc::decode(&bad, target)
+                .unwrap_err()
+                .message
+                .contains("ISA version"));
+        }
+    }
+}
+
+#[test]
+fn closure_sharing_metadata_is_target_version_scope_and_capture_checked() {
+    let source="local function make() local function recursive(n)if n>0 then return recursive(n-1)end return 3 end return recursive end print(make()==make())";
+    let data = vm::custom::compile(source, Target::Luau).unwrap();
+    let valid = bc::decode(&data, Target::Luau).unwrap();
+    let index = valid
+        .prototypes
+        .iter()
+        .position(|p| {
+            p.captures
+                .iter()
+                .any(|c| matches!(c, ir::Capture::RecursiveLocal(_)))
+        })
+        .unwrap();
+    assert_ne!(valid.prototypes[index].flags & 8, 0);
+    assert_eq!(bc::serialize(&valid).unwrap(), data);
+    let mut bad = valid.clone();
+    bad.isa_version = 1;
+    assert!(bc::validate(&bad).is_err());
+    let mut bad = valid.clone();
+    bad.target = Target::Lua51;
+    assert!(bc::validate(&bad).is_err());
+    let mut bad = valid.clone();
+    bad.prototypes[0].flags |= 8;
+    assert!(bc::validate(&bad).is_err());
+    let mut bad = valid.clone();
+    bad.prototypes[index].flags &= !8;
+    assert!(bc::validate(&bad).is_err());
+    let mut bad = valid.clone();
+    let capture = bad.prototypes[index].captures[0];
+    bad.prototypes[index].captures.push(capture);
+    assert!(bc::validate(&bad).is_err());
+    let mut bad = valid.clone();
+    bad.prototypes[index].captures[0] = ir::Capture::RecursiveLocal(256);
+    assert!(bc::validate(&bad).is_err());
+    let mut bad = valid.clone();
+    bad.prototypes[index].flags |= 16;
+    assert!(bc::validate(&bad).is_err());
 }

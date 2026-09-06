@@ -36,6 +36,9 @@ impl Constant {
 pub enum Capture {
     Local(Register),
     Upvalue(u16),
+    /// Luau shared local-function initializer: this cell becomes the function
+    /// being created. It is excluded from the cache's raw-value comparison.
+    RecursiveLocal(Register),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -106,6 +109,8 @@ pub struct Function {
     pub variadic: bool,
     pub legacy_arg_slot: bool,
     pub legacy_arg_table: bool,
+    /// Pinned Luau closure-identity policy; never enabled for Lua 5.1.
+    pub shared_closure: bool,
     pub registers: u16,
     pub captures: Vec<Capture>,
     pub constants: Vec<Constant>,

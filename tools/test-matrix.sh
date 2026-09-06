@@ -231,6 +231,7 @@ for target in lua51 luau; do
     grep -qx 'format: OBF v2' "$tmp/$target.custom.inspect"
     grep -qx 'instruction-size: 4' "$tmp/$target.custom.inspect"
     grep -qx 'header-size: 32' "$tmp/$target.custom.inspect"
+    grep -qx 'isa-version: 2' "$tmp/$target.custom.inspect"
     "$OBF" wrap-bytecode --target "$target" --seed "$seed" -o "$tmp/$prefix.wrapped.lua" "$tmp/$target.obf"
     cmp "$tmp/$prefix.lua" "$tmp/$prefix.wrapped.lua"
     env OBF_LUAC51="$tmp/missing-compiler" OBF_LUAU_COMPILE="$tmp/missing-compiler" \
@@ -250,6 +251,29 @@ for target in lua51 luau; do
         echo 'error: custom bytecode wrapper accepted truncation' >&2; exit 1
     fi
     [[ ! -s "$tmp/rejected.out" ]]
+done
+
+printf '%s\n' '[matrix] VM semantic parity: application corpora, native output and debug/release equality'
+for target in lua51 luau; do
+    if [[ $target == lua51 ]]; then runner=$LUA; else runner=$LUAU; fi
+    corpora=(parity_common)
+    if [[ $target == luau ]]; then corpora+=(parity_luau); fi
+    for corpus in "${corpora[@]}"; do
+        original="tests/fixtures/$corpus.lua"
+        "$runner" "$original" >"$tmp/$target.$corpus.expected"
+        for profile in debug release; do
+            compiler="$ROOT/target/$profile/obf"
+            output="$tmp/$target.$corpus.$profile.lua"
+            "$compiler" compile --target "$target" -o "$tmp/$target.$corpus.$profile.obf" "$original"
+            "$compiler" virtualize --target "$target" --seed 735 -o "$output" "$original"
+            if [[ $target == lua51 ]]; then "$LUAC" -p "$output"; else "$LUAUC" "$output" >/dev/null; fi
+            "$runner" "$output" >"$tmp/$target.$corpus.actual"
+            cmp "$tmp/$target.$corpus.expected" "$tmp/$target.$corpus.actual"
+        done
+        cmp "$tmp/$target.$corpus.debug.obf" "$tmp/$target.$corpus.release.obf"
+        cmp "$tmp/$target.$corpus.debug.lua" "$tmp/$target.$corpus.release.lua"
+        printf '[matrix] %s %s native/custom output: identical\n' "$target" "$corpus"
+    done
 done
 
 printf '%s\n' '[matrix] Explicit legacy backend: all existing native VM fixtures and seed variants'

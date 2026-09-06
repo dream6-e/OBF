@@ -30,7 +30,7 @@ pub(crate) fn generate(bytecode: &[u8], program: &Program) -> Result<String, Dia
 local SC=select;local Z=function(...)return{n=SC('#',...),...}end;
 local U=unpack or table.unpack;local G=(getfenv and getfenv(0))or _G;local E=error;
 local SB,SS,SF=string.byte,string.sub,string.format;
-local MF,TN,TY,TS,NX,MT,SM=math.floor,tonumber,type,tostring,next,getmetatable,setmetatable;
+local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetatable,setmetatable,rawget,rawequal;
 "#,
     );
     if program.target.is_luau() {
@@ -67,14 +67,15 @@ if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=2 then E()end;
     s.push_str(
         r#"
 if b8()~=1 or b8()~=4 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
-local np=b32();local entry=b32();if np==0 or np>65536 or entry~=0 or b32()~=1 then E()end;
+local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa<1 or isa>2 then E()end;
 local check=b32();local sa,sb=1,0;for q=33,#B do sa=(sa+SB(B,q))%65521;sb=(sb+sa)%65521 end;
 if sa+sb*65536~=check then E()end;
 local P={};local work=0;
 for id=0,np-1 do
  local F={k={},tags={},u={}};F.parent=b32();F.m=b16();F.p=b8();F.flags=b8();F.nu=b16();
  if b16()~=0 then E()end;F.nk=b32();F.nc=b32();
- if F.m<1 or F.m>256 or F.p>F.m or F.nu>256 or F.nk>65536 or F.nc<1 or F.flags>7 then E()end;
+ if F.m<1 or F.m>256 or F.p>F.m or F.nu>256 or F.nk>65536 or F.nc<1 or F.flags>15 then E()end;
+ F.shared=MF(F.flags/8)%2==1;if F.shared and (isa<2 or id==0)then E()end;
  if id==0 then if F.parent~=4294967295 or F.nu~=0 or MF(F.flags/2)%2~=0 then E()end
  elseif F.parent>=id then E()end;
  local legacy=MF(F.flags/2)%2;
@@ -83,12 +84,15 @@ for id=0,np-1 do
     );
     if program.target.is_luau() {
         s.push_str("if legacy~=0 then E()end;");
+    } else {
+        s.push_str("if F.shared then E()end;");
     }
     s.push_str(
         r#"
  work=work+F.nu+F.nk+F.nc;if work>1000000 then E()end;
  for j=0,F.nu-1 do local tag,index=b8(),b8();local parent=P[F.parent];
-  if tag>1 or not parent or tag==0 and index>=parent.m or tag==1 and index>=parent.nu then E()end;
+  if tag>2 or not parent or tag~=1 and index>=parent.m or tag==1 and index>=parent.nu then E()end;
+  if tag==2 then if not F.shared or F.self~=nil then E()end;F.self=j end;
   F.u[j]={tag,index};
  end;
  for j=0,F.nk-1 do local tag=b8();F.tags[j]=tag;
@@ -154,7 +158,13 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local W=SM({},{__mode='kv'});local H;local Make;
 local Call=function(fn,args)local d=W[fn];if d then return H(d[1],args,d[2])else return Z(fn(U(args,1,args.n)))end end;
 Make=function(id,up)
- local d={id,up};local fn=function(...)local v=H(d[1],Z(...),d[2]);return U(v,1,v.n)end;W[fn]=d;return fn
+ local F=P[id];local cached=F.cached;
+ if cached then local previous=W[cached][2];local same=true;
+  for j=0,F.nu-1 do if j~=F.self and not RE(CV(previous[j]),CV(up[j]))then same=false;break end end;
+  if same then return cached end;
+ end;
+ local d={id,up};local fn=function(...)local v=H(d[1],Z(...),d[2]);return U(v,1,v.n)end;W[fn]=d;
+ if F.shared and not cached then F.cached=fn end;return fn
 end;
 H=function(fid,args,ups)
  while true do
@@ -413,6 +423,52 @@ mod tests {
                 assert!(!result.status.success());
                 assert!(result.stdout.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn target_decoder_independently_rejects_invalid_closure_sharing_metadata() {
+        let source = "local function f(n)if n>0 then return f(n-1)end return 3 end print('MUST_NOT_RUN',f(2))";
+        let data = compile(source, Target::Luau).unwrap();
+        let program = custom::decode(&data, Target::Luau).unwrap();
+        let root = &program.prototypes[0];
+        let constant_bytes: usize = root
+            .constants
+            .iter()
+            .map(|c| match c {
+                ir::Constant::Nil => 1,
+                ir::Constant::Boolean(_) => 2,
+                ir::Constant::Number(_) | ir::Constant::Integer(_) => 9,
+                ir::Constant::String(s) => 5 + s.len(),
+                ir::Constant::Method(s) => 5 + s.len(),
+            })
+            .sum();
+        let child = 32 + 20 + root.captures.len() * 2 + constant_bytes + root.code.len() * 4;
+        assert_eq!(data[child + 20], 2);
+        for kind in 0..5 {
+            let mut bad = data.clone();
+            match kind {
+                0 => bad[24..28].copy_from_slice(&1u32.to_le_bytes()),
+                1 => bad[child + 7] &= !8,
+                2 => bad[child + 7] |= 16,
+                3 => bad[child + 20] = 3,
+                _ => bad[child + 21] = 255,
+            }
+            let checksum = custom::checksum(&bad[32..]);
+            bad[28..32].copy_from_slice(&checksum.to_le_bytes());
+            assert!(custom::decode(&bad, Target::Luau).is_err());
+            let raw = generate(&bad, &program).unwrap();
+            let output = crate::minify::finalize_vm(&raw, Target::Luau, 735).unwrap();
+            let work = native::Workspace::new();
+            let path = work.0.join("invalid.luau");
+            fs::write(&path, output).unwrap();
+            assert!(native::compile(Target::Luau, &path).status.success());
+            let result = Command::new(native::root().join("toolchains/bin/luau"))
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            assert!(result.stdout.is_empty());
         }
     }
 }

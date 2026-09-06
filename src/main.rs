@@ -197,7 +197,7 @@ fn run() -> Result<(), Diagnostic> {
                 println!("format: OBF v2");
                 println!("header-size: {}", bytecode::custom::HEADER_SIZE);
                 println!("instruction-size: {}", bytecode::custom::INSTRUCTION_SIZE);
-                println!("isa-version: {}", bytecode::custom::ISA_VERSION);
+                println!("isa-version: {}", program.isa_version);
                 println!(
                     "opcodes: {}",
                     program
