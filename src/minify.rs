@@ -54,7 +54,7 @@ fn finalize(
     generated_vm: bool,
 ) -> Result<String, Diagnostic> {
     let tokens = lexer::lex(source, target)?;
-    let chunk = parser::parse_lexed(source, &tokens, target)?;
+    let (chunk, statement_ends) = parser::parse_lexed_with_statement_ends(source, &tokens, target)?;
     let analysis = if options.rename_locals {
         Some(scope::analyze_chunk(&chunk)?)
     } else {
@@ -76,9 +76,13 @@ fn finalize(
     };
     let output = if let Some(renamed) = renamed {
         let tokens = lexer::lex(&renamed, target)?;
-        emit_tokens(&renamed, &tokens, target, 0)?
+        // Renaming changes byte offsets. Never apply the original sidecar
+        // to the newly spelled source, including its interpolation fragments.
+        let (_, statement_ends) =
+            parser::parse_lexed_with_statement_ends(&renamed, &tokens, target)?;
+        emit_tokens(&renamed, &tokens, target, &statement_ends, 0)?
     } else {
-        emit_tokens(source, &tokens, target, 0)?
+        emit_tokens(source, &tokens, target, &statement_ends, 0)?
     };
     // Fail closed: reparse the final, normalized source and verify that every
     // reference still resolves to exactly the same binding (or global).
@@ -109,8 +113,8 @@ fn finalize(
 /// Lexical-only compatibility entry point for an externally supplied token
 /// array. For default safe local renaming, use `obf::minify` instead.
 pub fn minify(source: &str, tokens: &[Token], target: Target) -> Result<String, Diagnostic> {
-    parser::parse(source, tokens, target)?;
-    let output = emit_tokens(source, tokens, target, 0)?;
+    let (_, statement_ends) = parser::parse_with_statement_ends(source, tokens, target)?;
+    let output = emit_tokens(source, tokens, target, &statement_ends, 0)?;
     parser::parse_source(&output, target)?;
     Ok(output)
 }
@@ -119,6 +123,7 @@ fn emit_tokens(
     source: &str,
     tokens: &[Token],
     target: Target,
+    statement_ends: &[usize],
     depth: usize,
 ) -> Result<String, Diagnostic> {
     if depth > 64 {
@@ -127,12 +132,12 @@ fn emit_tokens(
         ));
     }
     let mut output = String::new();
-    let mut previous: Option<(TokenKind, String)> = None;
+    let mut previous: Option<(TokenKind, String, usize)> = None;
 
     for token in tokens.iter().filter(|token| token.kind != TokenKind::Eof) {
         let raw = token.text(source);
         let text = if token.kind == TokenKind::String && raw.starts_with('`') {
-            emit_interpolated(source, token, target, depth + 1)?
+            emit_interpolated(source, token, target, statement_ends, depth + 1)?
         } else if token.kind == TokenKind::String {
             normalize_string(raw, target).map_err(|error| {
                 Diagnostic::at(error, token.span.start, token.line, token.column)
@@ -141,13 +146,19 @@ fn emit_tokens(
             raw.to_owned()
         };
 
-        if let Some((previous_kind, previous_text)) = &previous {
-            if needs_separator(*previous_kind, previous_text, token.kind, &text) {
+        if let Some((previous_kind, previous_text, previous_end)) = &previous {
+            if text != ";" && statement_ends.binary_search(previous_end).is_ok() {
+                // A semicolon is a statement terminator, NOT general trivia.
+                // Prefer it at every proven statement boundary, even when
+                // the old emitter could concatenate the tokens without space.
+                // Existing ';' tokens are retained; never introduce ';;'.
+                output.push(';');
+            } else if needs_separator(*previous_kind, previous_text, token.kind, &text) {
                 output.push(' ');
             }
         }
         output.push_str(&text);
-        previous = Some((token.kind, text));
+        previous = Some((token.kind, text, token.span.end));
     }
 
     if output.contains(['\n', '\r']) {
@@ -162,6 +173,7 @@ fn emit_interpolated(
     source: &str,
     token: &Token,
     target: Target,
+    statement_ends: &[usize],
     depth: usize,
 ) -> Result<String, Diagnostic> {
     let ranges = lexer::interpolated_expression_ranges(source, token.span.clone(), target)?;
@@ -171,7 +183,7 @@ fn emit_interpolated(
         emit_segment(source, start, range.start - 1, target, &mut output)?;
         output.push('{');
         let tokens = lexer::lex_fragment(source, range.clone(), target)?;
-        let expression = emit_tokens(source, &tokens, target, depth)?;
+        let expression = emit_tokens(source, &tokens, target, statement_ends, depth)?;
         // `{{` is not a valid interpolation opener in Luau. A table literal
         // as the first expression token needs this otherwise-unnecessary gap.
         if expression.starts_with('{') {
@@ -471,8 +483,56 @@ mod tests {
     fn removes_comments_without_merging_tokens() {
         assert_eq!(
             compact("local a = 1 -- x\nlocal b = a - -2", Target::Lua51),
-            "local a=1 local b=a- -2"
+            "local a=1;local b=a- -2"
         );
+    }
+
+    #[test]
+    fn every_statement_on_all_corpora_is_delimited_even_after_offset_changing_renames() {
+        for (target, sources) in [
+            (
+                Target::Lua51,
+                [
+                    include_str!("../tests/fixtures/lua51.lua"),
+                    include_str!("../tests/fixtures/ast_lua51.lua"),
+                    include_str!("../tests/fixtures/scope_lua51.lua"),
+                    include_str!("../tests/fixtures/reflection_lua51.lua"),
+                    include_str!("../tests/fixtures/vm_lua51.lua"),
+                ],
+            ),
+            (
+                Target::Luau,
+                [
+                    include_str!("../tests/fixtures/luau.lua"),
+                    include_str!("../tests/fixtures/ast_luau.lua"),
+                    include_str!("../tests/fixtures/scope_luau.lua"),
+                    include_str!("../tests/fixtures/reflection_luau.lua"),
+                    include_str!("../tests/fixtures/vm_luau.lua"),
+                ],
+            ),
+        ] {
+            for source in sources {
+                for options in [
+                    Options::lexical(),
+                    Options::seeded(0),
+                    Options::seeded(u64::MAX),
+                ] {
+                    let output = with_options(source, target, options).unwrap();
+                    let tokens = lexer::lex(&output, target).unwrap();
+                    let (_, ends) =
+                        parser::parse_lexed_with_statement_ends(&output, &tokens, target).unwrap();
+                    for end in ends {
+                        // Includes statements nested in function expressions,
+                        // type syntax and interpolation, using GLOBAL offsets.
+                        assert!(
+                            end == output.len() || output.as_bytes()[end] == b';',
+                            "{target}: {output}"
+                        );
+                    }
+                    assert_eq!(compact(&output, target), output);
+                }
+            }
+        }
     }
 
     #[test]

@@ -229,7 +229,7 @@ fn command_line_supports_no_rename_and_rejects_it_for_other_commands() {
             .unwrap()
             .as_bytes()
         );
-        assert_eq!(lexical.stdout, b"local longerName=1 return longerName");
+        assert_eq!(lexical.stdout, b"local longerName=1;return longerName");
         for command in ["check", "virtualize", "inspect-bytecode"] {
             let output = Command::new(binary)
                 .args([command, "--no-rename", "--target", target])

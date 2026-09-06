@@ -14,6 +14,15 @@ const MAX_NESTING: usize = 64;
 /// Token arrays are validated before parsing so this public entry point also
 /// fails safely when called with tokens that did not originate in the lexer.
 pub fn parse(source: &str, tokens: &[Token], target: Target) -> Result<Chunk, Diagnostic> {
+    validate_external_tokens(source, tokens, target)?;
+    parse_lexed(source, tokens, target)
+}
+
+fn validate_external_tokens(
+    source: &str,
+    tokens: &[Token],
+    target: Target,
+) -> Result<(), Diagnostic> {
     validate_tokens(source, tokens, source.len())?;
     let expected = lexer::lex(source, target)?;
     if tokens != expected {
@@ -21,7 +30,17 @@ pub fn parse(source: &str, tokens: &[Token], target: Target) -> Result<Chunk, Di
             "token stream does not match the source and selected target",
         ));
     }
-    parse_lexed(source, tokens, target)
+    Ok(())
+}
+
+/// The public token-array minifier must retain the same validation as parse.
+pub(crate) fn parse_with_statement_ends(
+    source: &str,
+    tokens: &[Token],
+    target: Target,
+) -> Result<(Chunk, Vec<usize>), Diagnostic> {
+    validate_external_tokens(source, tokens, target)?;
+    parse_lexed_with_statement_ends(source, tokens, target)
 }
 
 pub(crate) fn parse_lexed(
@@ -29,6 +48,27 @@ pub(crate) fn parse_lexed(
     tokens: &[Token],
     target: Target,
 ) -> Result<Chunk, Diagnostic> {
+    parse_lexed_inner(source, tokens, target, false).map(|(chunk, _)| chunk)
+}
+
+/// Private formatting sidecar: global source byte offsets immediately after
+/// complete statements, BEFORE an optional existing semicolon. Recording in
+/// the grammar covers function bodies in expressions, types and interpolation
+/// without a second, potentially incomplete AST walker. Parsing is unchanged.
+pub(crate) fn parse_lexed_with_statement_ends(
+    source: &str,
+    tokens: &[Token],
+    target: Target,
+) -> Result<(Chunk, Vec<usize>), Diagnostic> {
+    parse_lexed_inner(source, tokens, target, true)
+}
+
+fn parse_lexed_inner(
+    source: &str,
+    tokens: &[Token],
+    target: Target,
+    collect_statement_ends: bool,
+) -> Result<(Chunk, Vec<usize>), Diagnostic> {
     if source.len() > lexer::MAX_SOURCE_BYTES {
         return Err(Diagnostic::new("source exceeds parser safety limit"));
     }
@@ -48,6 +88,7 @@ pub(crate) fn parse_lexed(
         has_value_exports: false,
         has_module_return: false,
         needs_binding_validation: false,
+        statement_ends: collect_statement_ends.then(Vec::new),
     };
     let block = parser.block(&[])?;
     parser.expect_eof()?;
@@ -61,7 +102,7 @@ pub(crate) fn parse_lexed(
     if parser.needs_binding_validation {
         crate::scope::analyze_chunk(&chunk)?;
     }
-    Ok(chunk)
+    Ok((chunk, parser.statement_ends.unwrap_or_default()))
 }
 
 /// Lex and parse source in one bounded operation.
@@ -139,6 +180,7 @@ struct Parser<'a> {
     has_value_exports: bool,
     has_module_return: bool,
     needs_binding_validation: bool,
+    statement_ends: Option<Vec<usize>>,
 }
 
 impl<'a> Parser<'a> {
@@ -156,6 +198,23 @@ impl<'a> Parser<'a> {
         let mut statements = Vec::new();
         while !self.at_eof() && !terminators.iter().any(|word| self.at(word)) {
             let mut statement = self.statement()?;
+            if let Some(ends) = &mut self.statement_ends {
+                if ends.len() >= MAX_NODES {
+                    return Err(Diagnostic::byte(
+                        "statement boundary count exceeds safety limit",
+                        statement.span.end,
+                    ));
+                }
+                // Nested bodies finish before their containing statement.
+                // Keep a sorted, unique sidecar for bounded emitter lookups.
+                if ends.last().is_some_and(|&end| end >= statement.span.end) {
+                    return Err(Diagnostic::byte(
+                        "unordered statement boundary",
+                        statement.span.end,
+                    ));
+                }
+                ends.push(statement.span.end);
+            }
             if self.consume(";") {
                 statement.span.end = self.previous_end();
             }
@@ -879,10 +938,14 @@ impl<'a> Parser<'a> {
             has_value_exports: false,
             has_module_return: false,
             needs_binding_validation: false,
+            // Move the shared sidecar through fragment parsers. Do not clone
+            // or repeatedly append all nested boundaries at each depth.
+            statement_ends: self.statement_ends.take(),
         };
         let expression = child.expression(0)?;
         child.expect_eof()?;
         self.needs_binding_validation |= child.needs_binding_validation;
+        self.statement_ends = child.statement_ends;
         self.nodes = self
             .nodes
             .checked_add(child.nodes)
@@ -2088,5 +2151,44 @@ mod tests {
         let result = parsed(&nested_interpolation, Target::Luau);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("nesting"));
+    }
+}
+
+#[cfg(test)]
+mod formatting_tests {
+    use super::*;
+
+    #[test]
+    fn statement_sidecar_keeps_the_same_ast_and_global_offsets_in_fragments() {
+        let lua51 = "local f=(function()local x=1;return x end)();print(f)";
+        let luau = concat!(
+            "local text=`{(function()local x=1 ",
+            "return `inner {(function()return x end)()}` end)()}`;print(text)"
+        );
+        for (source, target, count) in [(lua51, Target::Lua51, 4), (luau, Target::Luau, 5)] {
+            let tokens = lexer::lex(source, target).unwrap();
+            let (chunk, ends) = parse_with_statement_ends(source, &tokens, target).unwrap();
+            assert_eq!(chunk, parse(source, &tokens, target).unwrap());
+            assert_eq!(ends.len(), count);
+            assert!(ends.windows(2).all(|w| w[0] < w[1]));
+            assert_eq!(ends.last(), Some(&source.len()));
+            for &end in &ends {
+                assert!(source.is_char_boundary(end));
+                assert_ne!(source.as_bytes()[end - 1], b';');
+            }
+            assert!(parse_lexed_inner(source, &tokens, target, false)
+                .unwrap()
+                .1
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn many_sibling_statements_keep_a_bounded_sorted_sidecar() {
+        let source = "do local value=1 end ".repeat(10_000);
+        let tokens = lexer::lex(&source, Target::Lua51).unwrap();
+        let (_, ends) = parse_lexed_with_statement_ends(&source, &tokens, Target::Lua51).unwrap();
+        assert_eq!(ends.len(), 20_000);
+        assert!(ends.windows(2).all(|w| w[0] < w[1]));
     }
 }

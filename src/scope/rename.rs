@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(
             crate::minify_with_options(source, Target::Luau, crate::MinifyOptions::seeded(0))
                 .unwrap(),
-            source
+            "local print=1;local print=2;return print"
         );
     }
 

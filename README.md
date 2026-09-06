@@ -57,6 +57,13 @@ target/debug/obf virtualize --backend native --target lua51 --seed 123 -o script
 
 ## 安全压缩、作用域复用与最终随机命名（M3）
 
+压缩采用**分号优先的语句分隔**：例如 `--no-rename` 将 `local a=1 local b=2 return a+b` 输出为 `local a=1;local b=2;return a+b`。
+
+- 完整语句之间，以及非空块最后一条语句与 `end/else/elseif/until` 之间用 `;`，不再用空格作为语句分隔。已有分号不重复，EOF 不额外补分号，空块不插入空语句。
+- `local a`、`return a`、`then f()`、循环头、`a and b`、`- -`、数字/点号等语法必需的空格仍保留；不拆开函数表达式与调用后缀，不改表字段分隔、字符串值或字节码。
+- 解析器提供完整语句结束位置，覆盖函数表达式、`typeof`、type function 和嵌套插值；改名后重新计算偏移，最终仍重解析并验证绑定。
+- 默认 minify、`--no-rename`、低层 token-array API 和两套 VM 的最终输出共享这条规则。即便原先可直接相连的语句也补分号，因此这是分隔策略，不承诺进一步缩小体积；与 bytecode 加密/压缩无关。
+
 `obf minify` 默认解析 AST、建立 lexical scope 与 local/parameter/upvalue 绑定身份，再对全部可安全改名的绑定分配 **1–2 个小写字母**，例如 `d`、`q`、`ab`、`ef`。单字母池和双字母池分别按 seed 洗牌，引用频率高的绑定优先使用单字母。**原本已是一、两字母的安全局部变量也必须换成不同的名称**，不是固定按 `a,b,c` 顺序缩短。
 
 新名字**同域唯一，跨域安全复用**，覆盖 function、if/elseif/else、while、do、for 和 repeat。每个命名域内的所有可改名声明保持不同，包括未使用及原先同名遮蔽的 locals；函数参数与直接函数体 locals 共用命名域，for 变量与直接循环体 locals 也共用命名域。`Scope.name_scope` 表示这个唯一性分组，不改变原有 lexical scope ID、parent 或可见性。
@@ -115,10 +122,10 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,524 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,489 B | 33,980 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 6,879 B | 32,568 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 8,489 B | 34,033 B |
 
-生成器或命名策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
+生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
 ## 固定环境
 
@@ -151,11 +158,12 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 7. 独立执行 `dump-ir → compile → inspect → wrap`，证明缺少原生 compiler 也能生成默认 VM；
 8. 比较 debug/release 的 binary 和 VM、默认虚拟化与独立 wrap、根目录 golden；
 9. 显式执行旧 `--backend native` 的完整语料、多 seed、语法/运行回归，保留其原生 opcode coverage（Lua51 38/38、Luau ≥60）；
-10. 额外覆盖多返回值/nil、变量求值时机、闭包、循环、20k 尾调用、coroutine/回调、i64、导出模块、userdata NAMECALL、GC 及 CLI 失败不覆盖文件。
+10. 额外覆盖多返回值/nil、变量求值时机、闭包、循环、20k 尾调用、coroutine/回调、i64、导出模块、userdata NAMECALL、GC 及 CLI 失败不覆盖文件；
+11. `tests/semicolons.rs` 检查双目标语句分隔、必需空格、调用后缀、嵌套函数/类型/插值、字符串字节、已有分号、空块、非法源码、CLI/两 VM 后端；内部测试覆盖所有语料的边界完整性、改名偏移、幂等性和 10,000 相邻块。
 
 `tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
-2026-09-06 默认 AST 后端接入后的完整矩阵 **PASS 114**（32 单元 + 82 集成）：在原 84 项基础上新增 30 项 IR/bytecode/VM/CLI 回归，debug/release 构建、binary/脚本一致性及两套后端均通过。
+2026-09-06 分号分隔增量后的完整矩阵 **PASS 124**（35 单元 + 89 集成）：此前 114 项全部保留，新增 3 项内部与 7 项原生差分/入口测试；debug/release 构建、binary/脚本一致性及两套后端均通过。两份 VM 示例除分号/间隔外的 token（含名称与字符串）不变，内嵌及独立 v2 bytecode 与修改前逐字节一致。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 

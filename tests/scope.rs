@@ -257,7 +257,7 @@ fn original_short_names_and_globals_cannot_be_captured() {
         assert_ne!(left, right);
         assert_eq!(
             output,
-            format!("a=10 local {left}=2 local {right}=1 return a,{left},{right},{right}")
+            format!("a=10;local {left}=2;local {right}=1;return a,{left},{right},{right}")
         );
         assert_eq!(output, minify(source, target).unwrap());
         let lexical = minify_with_options(source, target, MinifyOptions::lexical()).unwrap();
