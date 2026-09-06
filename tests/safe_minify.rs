@@ -65,19 +65,14 @@ fn differential(source: &str, target: Target) -> (String, String) {
         "export type Value=number export const answer=42",
     )
     .unwrap();
-    let compact = obf::minify(source, target).unwrap();
-    let lexical = obf::minify_with_options(
-        source,
-        target,
-        MinifyOptions {
-            rename_locals: false,
-        },
-    )
-    .unwrap();
+    let compact = obf::minify_with_options(source, target, MinifyOptions::seeded(735)).unwrap();
+    let lexical = obf::minify_with_options(source, target, MinifyOptions::lexical()).unwrap();
     assert!(!compact.contains(['\n', '\r']));
     assert!(!lexical.contains(['\n', '\r']));
-    assert!(compact.len() <= lexical.len());
-    assert_eq!(compact, obf::minify(source, target).unwrap());
+    assert_eq!(
+        compact,
+        obf::minify_with_options(source, target, MinifyOptions::seeded(735)).unwrap()
+    );
     let original_path = workspace.0.join("original.lua");
     let compact_path = workspace.0.join("compact.lua");
     let lexical_path = workspace.0.join("lexical.lua");
@@ -91,6 +86,16 @@ fn differential(source: &str, target: Target) -> (String, String) {
         "{target}: {compact}"
     );
     assert_eq!(expected, compile_and_run(target, &lexical_path));
+    for seed in [0, 1, 0x735, u64::MAX] {
+        let variant =
+            obf::minify_with_options(source, target, MinifyOptions::seeded(seed)).unwrap();
+        fs::write(&compact_path, &variant).unwrap();
+        assert_eq!(
+            expected,
+            compile_and_run(target, &compact_path),
+            "{target}, seed={seed}: {variant}"
+        );
+    }
     (compact, lexical)
 }
 
@@ -250,7 +255,7 @@ fn command_line_supports_no_rename_and_rejects_it_for_other_commands() {
     for target in ["lua51", "luau"] {
         let compact = success(
             Command::new(binary)
-                .args(["minify", "--target", target])
+                .args(["minify", "--target", target, "--seed", "735"])
                 .arg(&input),
         );
         let lexical = success(
@@ -258,7 +263,21 @@ fn command_line_supports_no_rename_and_rejects_it_for_other_commands() {
                 .args(["minify", "--no-rename", "--target", target])
                 .arg(&input),
         );
-        assert_eq!(compact.stdout, b"local a=1 return a");
+        let target_kind = if target == "lua51" {
+            Target::Lua51
+        } else {
+            Target::Luau
+        };
+        assert_eq!(
+            compact.stdout,
+            obf::minify_with_options(
+                "local longerName=1 return longerName",
+                target_kind,
+                MinifyOptions::seeded(735)
+            )
+            .unwrap()
+            .as_bytes()
+        );
         assert_eq!(lexical.stdout, b"local longerName=1 return longerName");
         for command in ["check", "virtualize", "inspect-bytecode"] {
             let output = Command::new(binary)
@@ -269,5 +288,190 @@ fn command_line_supports_no_rename_and_rejects_it_for_other_commands() {
             assert!(!output.status.success());
             assert!(String::from_utf8_lossy(&output.stderr).contains("--no-rename is only valid"));
         }
+    }
+}
+
+#[test]
+fn near_capacity_already_short_locals_run_identically_even_if_output_grows() {
+    let mut source = String::from("local z=0 ");
+    for index in 0..650 {
+        source.push_str(&format!("do local a={index} z=z+a end "));
+    }
+    source.push_str("assert(z==210925) print('short-names:ok')");
+    for target in [Target::Lua51, Target::Luau] {
+        let (compact, lexical) = differential(&source, target);
+        assert!(
+            compact.len() > lexical.len(),
+            "strict globally unique names may grow existing one-letter locals"
+        );
+    }
+}
+
+#[test]
+fn full_virtual_machines_compile_and_run_across_edge_seeds() {
+    let workspace = Workspace::new();
+    for (target, fixture) in [
+        (Target::Lua51, "vm_lua51.lua"),
+        (Target::Luau, "vm_luau.lua"),
+    ] {
+        let input = root().join("tests/fixtures").join(fixture);
+        let source = fs::read(&input).unwrap();
+        let expected = compile_and_run(target, &input);
+        let path = workspace.0.join(fixture);
+        for seed in [0, 1, 0x735, u64::MAX] {
+            let output = obf::vm::virtualize(&source, target, obf::vm::Options { seed }).unwrap();
+            assert!(!output.contains(['\n', '\r']));
+            let analysis = obf::scope::analyze(&output, target).unwrap();
+            let mut names = std::collections::BTreeSet::new();
+            for binding in analysis
+                .bindings
+                .iter()
+                .filter(|binding| binding.declaration.is_some())
+            {
+                assert!((1..=2).contains(&binding.name.len()));
+                assert!(binding.name.bytes().all(|byte| byte.is_ascii_lowercase()));
+                assert!(names.insert(&binding.name));
+            }
+            fs::write(&path, &output).unwrap();
+            assert_eq!(
+                expected,
+                compile_and_run(target, &path),
+                "{target}, seed={seed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cli_default_seed_is_reported_reproducible_and_does_not_pollute_scripts() {
+    let workspace = Workspace::new();
+    let input = workspace.0.join("input.lua");
+    let output_path = workspace.0.join("output.lua");
+    let mut source = String::new();
+    for index in 0..40 {
+        source.push_str(&format!("local originalValue{index}={index} "));
+    }
+    source.push_str("print(originalValue39)");
+    fs::write(&input, source).unwrap();
+    let binary = env!("CARGO_BIN_EXE_obf");
+    for target in [Target::Lua51, Target::Luau] {
+        for command in ["minify", "virtualize"] {
+            let mut seeds = std::collections::BTreeSet::new();
+            let mut outputs = std::collections::BTreeSet::new();
+            for _ in 0..2 {
+                let generated = success(
+                    Command::new(binary)
+                        .args([command, "--target", target.name()])
+                        .arg(&input),
+                );
+                let report = String::from_utf8(generated.stderr).unwrap();
+                let seed: u64 = report
+                    .trim()
+                    .strip_prefix("seed: ")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(seeds.insert(seed));
+                let repeated = success(
+                    Command::new(binary)
+                        .args([
+                            command,
+                            "--target",
+                            target.name(),
+                            "--seed",
+                            &seed.to_string(),
+                        ])
+                        .arg(&input),
+                );
+                assert!(repeated.stderr.is_empty());
+                assert_eq!(generated.stdout, repeated.stdout);
+                assert!(!generated.stdout.contains(&b'\n') && !generated.stdout.contains(&b'\r'));
+                fs::write(&output_path, &generated.stdout).unwrap();
+                assert_eq!(compile_and_run(target, &output_path), b"39\n");
+                assert!(outputs.insert(generated.stdout));
+            }
+            let decimal = success(
+                Command::new(binary)
+                    .args([command, "--target", target.name(), "--seed", "1845"])
+                    .arg(&input),
+            );
+            let hex = success(
+                Command::new(binary)
+                    .args([command, "--target", target.name(), "--seed=0x735"])
+                    .arg(&input),
+            );
+            assert_eq!(decimal.stdout, hex.stdout);
+            assert!(decimal.stderr.is_empty() && hex.stderr.is_empty());
+            fs::write(&output_path, &hex.stdout).unwrap();
+            assert_eq!(compile_and_run(target, &output_path), b"39\n");
+        }
+    }
+}
+
+#[test]
+fn cli_rejects_invalid_seed_options_and_never_writes_partial_results() {
+    let workspace = Workspace::new();
+    let input = workspace.0.join("input.lua");
+    let output_path = workspace.0.join("output.lua");
+    let binary = env!("CARGO_BIN_EXE_obf");
+    fs::write(&input, "local originalValue=1 return originalValue").unwrap();
+    for target in ["lua51", "luau"] {
+        for args in [
+            vec!["minify", "--seed", "0", "--no-rename"],
+            vec!["minify", "--seed", "-1"],
+            vec!["minify", "--seed", "18446744073709551616"],
+            vec!["minify", "--seed=0x10000000000000000"],
+            vec!["virtualize", "--seed", "not-a-seed"],
+            vec!["check", "--seed", "0"],
+            vec!["inspect-bytecode", "--seed", "0"],
+        ] {
+            let result = Command::new(binary)
+                .args(args)
+                .args(["--target", target])
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            assert!(result.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&result.stderr).contains("seed"));
+        }
+    }
+    let mut source = String::new();
+    for index in 0..703 {
+        source.push_str(&format!("do local originalValue{index}=1 end "));
+    }
+    fs::write(&input, source).unwrap();
+    for target in [Target::Lua51, Target::Luau] {
+        for existing in [false, true] {
+            let _ = fs::remove_file(&output_path);
+            if existing {
+                fs::write(&output_path, "previous successful output").unwrap();
+            }
+            let result = Command::new(binary)
+                .args(["minify", "--target", target.name(), "--seed", "0", "-o"])
+                .arg(&output_path)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            assert!(result.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&result.stderr).contains("pool exhausted"));
+            if existing {
+                assert_eq!(
+                    fs::read_to_string(&output_path).unwrap(),
+                    "previous successful output"
+                );
+            } else {
+                assert!(!output_path.exists());
+            }
+        }
+        let lexical = success(
+            Command::new(binary)
+                .args(["minify", "--target", target.name(), "--no-rename"])
+                .arg(&input),
+        );
+        assert!(lexical.stderr.is_empty());
+        fs::write(&output_path, &lexical.stdout).unwrap();
+        assert!(compile_and_run(target, &output_path).is_empty());
     }
 }

@@ -3,16 +3,33 @@ use crate::{parser, scope, Diagnostic, Target};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
-    /// Shorten only proven lexical bindings; known reflection/environment
-    /// access disables this automatically. Turn off for opaque host reflection.
+    /// Randomly rename safe locals; known reflection/environment access in
+    /// user source disables this automatically. Opaque host reflection should
+    /// use `Options::lexical()` instead.
     pub rename_locals: bool,
+    /// Controls final 1-2 letter variable names. Defaults to a fresh seed.
+    pub seed: u64,
+}
+
+impl Options {
+    pub const fn seeded(seed: u64) -> Self {
+        Self {
+            rename_locals: true,
+            seed,
+        }
+    }
+
+    pub const fn lexical() -> Self {
+        Self {
+            rename_locals: false,
+            seed: 0,
+        }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self {
-            rename_locals: true,
-        }
+        Self::seeded(crate::random::fresh_seed())
     }
 }
 
@@ -20,6 +37,21 @@ pub(crate) fn with_options(
     source: &str,
     target: Target,
     options: Options,
+) -> Result<String, Diagnostic> {
+    finalize(source, target, options, false)
+}
+
+/// Called only by `vm::virtualize` after all crate-owned VM source has been
+/// assembled. The checked generated-VM policy is NOT available to user source.
+pub(crate) fn finalize_vm(source: &str, target: Target, seed: u64) -> Result<String, Diagnostic> {
+    finalize(source, target, Options::seeded(seed), true)
+}
+
+fn finalize(
+    source: &str,
+    target: Target,
+    options: Options,
+    generated_vm: bool,
 ) -> Result<String, Diagnostic> {
     let tokens = lexer::lex(source, target)?;
     let chunk = parser::parse_lexed(source, &tokens, target)?;
@@ -30,7 +62,13 @@ pub(crate) fn with_options(
     };
     let plan = analysis
         .as_ref()
-        .map(|analysis| analysis.rename_plan(target))
+        .map(|analysis| {
+            if generated_vm {
+                analysis.generated_vm_plan(&chunk, options.seed)
+            } else {
+                analysis.rename_plan(target, options.seed)
+            }
+        })
         .transpose()?;
     let renamed = match (&analysis, &plan) {
         (Some(analysis), Some(plan)) => plan.apply(source, analysis)?,
@@ -46,7 +84,24 @@ pub(crate) fn with_options(
     // reference still resolves to exactly the same binding (or global).
     let compact = parser::parse_source(&output, target)?;
     if let (Some(analysis), Some(plan)) = (analysis, plan) {
-        analysis.verify_renamed(&scope::analyze_chunk(&compact)?, &plan)?;
+        let compact_analysis = scope::analyze_chunk(&compact)?;
+        analysis.verify_renamed(&compact_analysis, &plan)?;
+        if generated_vm
+            && analysis
+                .bindings
+                .iter()
+                .zip(&compact_analysis.bindings)
+                .any(|(original, binding)| {
+                    binding.declaration.is_some()
+                        && (original.name == binding.name
+                            || !(1..=2).contains(&binding.name.len())
+                            || !binding.name.bytes().all(|byte| byte.is_ascii_lowercase()))
+                })
+        {
+            return Err(Diagnostic::new(
+                "generated VM retained a non-random or oversized local name",
+            ));
+        }
     }
     Ok(output)
 }
@@ -438,5 +493,38 @@ mod tests {
             compact(r#"return "\x41\u{42}""#, Target::Luau),
             "return\"AB\""
         );
+    }
+}
+
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn vm_exception_only_allows_the_audited_environment_capture() {
+        let prefix = "local G=(getfenv and getfenv(0))or _G;";
+        for target in [Target::Lua51, Target::Luau] {
+            let source = format!("{prefix}local privateValue=1;return privateValue,G");
+            let output = finalize_vm(&source, target, 42).unwrap();
+            assert!(!output.contains("privateValue"));
+            assert!(output.contains("getfenv(0)"));
+            for invalid in [
+                "local G=getfenv(1);local privateValue=1;return privateValue",
+                "local G=(getfenv and getfenv(1))or _G;return G",
+                "local G=(getfenv and getfenv(0,1))or _G;return G",
+                "local G,H=(getfenv and getfenv(0))or _G,1;return G,H",
+                "local _G={};local G=(getfenv and getfenv(0))or _G;return G",
+                "local G=(getfenv and getfenv(0))or _G;return _G",
+                "local G=(getfenv and getfenv(0))or _G;return observer.getfenv",
+                "local G=(getfenv and getfenv(0))or _G;return observer[\"get\"..\"local\"]",
+                "local G=(getfenv and getfenv(0))or _G;return debug",
+                "local getfenv=function() return {} end;local G=(getfenv and getfenv(0))or _G;return G",
+                "local G=(getfenv and getfenv(0))or _G;local G=(getfenv and getfenv(0))or _G;return G",
+                "local G=(getfenv and getfenv(0))or _G;local self=1;return G,self",
+                "local privateValue=1;return privateValue",
+            ] {
+                assert!(finalize_vm(invalid, target, 42).is_err(), "{target}: {invalid}");
+            }
+        }
     }
 }

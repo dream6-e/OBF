@@ -41,7 +41,7 @@ fn run() -> Result<(), Diagnostic> {
     let mut target = None;
     let mut output = None;
     let mut input = None;
-    let mut seed = vm::Options::default().seed;
+    let mut seed = 0;
     let mut seed_was_set = false;
     let mut no_rename = false;
     let mut rest = arguments.peekable();
@@ -90,9 +90,14 @@ fn run() -> Result<(), Diagnostic> {
         input.ok_or_else(|| Diagnostic::new("input file is required (use '-' for stdin)"))?;
     let data = read_input(&input)?;
 
-    if seed_was_set && command != "virtualize" {
+    if seed_was_set && !matches!(command.as_str(), "minify" | "virtualize") {
         return Err(Diagnostic::new(
-            "--seed is only valid for the 'virtualize' command",
+            "--seed is only valid for the 'minify' or 'virtualize' command",
+        ));
+    }
+    if seed_was_set && no_rename {
+        return Err(Diagnostic::new(
+            "--seed cannot be combined with --no-rename",
         ));
     }
 
@@ -100,6 +105,13 @@ fn run() -> Result<(), Diagnostic> {
         return Err(Diagnostic::new(
             "--no-rename is only valid for the 'minify' command",
         ));
+    }
+
+    if !seed_was_set && !no_rename && matches!(command.as_str(), "minify" | "virtualize") {
+        seed = vm::Options::default().seed;
+        // Keep stdout a pure single-line script, while making default random
+        // generations reproducible with a reported --seed value.
+        eprintln!("seed: {seed}");
     }
 
     match command.as_str() {
@@ -117,6 +129,7 @@ fn run() -> Result<(), Diagnostic> {
                 target,
                 obf::MinifyOptions {
                     rename_locals: !no_rename,
+                    seed,
                 },
             )?;
             write_output(output, result.as_bytes())
@@ -204,11 +217,12 @@ fn print_help() {
     println!(
         "OBF - std-only Lua 5.1 and Luau toolchain\n\n\
 Usage:\n  obf check --target <lua51|luau> <input|->\n  \
-obf minify --target <lua51|luau> [--no-rename] [-o FILE] <input|->\n  \
+obf minify --target <lua51|luau> [--seed N | --no-rename] [-o FILE] <input|->\n  \
 obf virtualize --target <lua51|luau> [--seed N] [-o FILE] <input|->\n  \
 obf inspect-bytecode --target <lua51|luau> <input>\n\n\
-Minify safely shortens local bindings; --no-rename keeps their spellings.\n\
-Known reflection/environment access automatically disables local renaming.\n\
+Final output uses randomized 1-2 letter locals; --no-rename keeps source names.\n\
+Use --seed for reproducibility; omitted seeds are fresh and printed to stderr.\n\
+Known reflection/environment access in user source disables local renaming.\n\
 The virtualize command compiles source into a randomized private instruction\n\
 format and emits a single-line target-language interpreter."
     );

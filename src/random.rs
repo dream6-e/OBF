@@ -1,11 +1,15 @@
-use std::collections::BTreeSet;
+use std::collections::{hash_map::RandomState, BTreeSet};
 use std::fmt::Write;
+use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Small deterministic generator used only for layout randomization.
+/// Small deterministic generator for layout and identifier randomization.
 ///
 /// This is deliberately not presented as a cryptographic primitive. Data
 /// encryption and key derivation belong to a later milestone.
-pub struct Prng {
+pub(crate) struct Prng {
     state: u64,
 }
 
@@ -101,9 +105,46 @@ impl Prng {
     }
 }
 
+/// Fresh per-generation default, not a cryptographic key. A process-random
+/// std hasher initializes the stream once; a bijective mixer of the atomic
+/// counter avoids repeats within a process (until the u64 counter wraps).
+/// Explicit user seeds never pass through this nondeterministic path.
+pub(crate) fn fresh_seed() -> u64 {
+    static BASE: OnceLock<u64> = OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let base = *BASE.get_or_init(|| {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.write(
+            &SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_le_bytes(),
+        );
+        hasher.finish()
+    });
+    let mut value = base.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed));
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Prng;
+    use super::{fresh_seed, Prng};
+
+    #[test]
+    fn default_seeds_are_distinct_across_threads() {
+        let threads: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(|| (0..128).map(|_| fresh_seed()).collect::<Vec<_>>()))
+            .collect();
+        let seeds: std::collections::BTreeSet<_> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(seeds.len(), 1024);
+    }
 
     #[test]
     fn deterministic_and_unique() {

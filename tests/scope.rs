@@ -1,5 +1,9 @@
 use obf::scope::{self, Analysis, BindingKind, PreserveReason, ScopeKind};
-use obf::{minify, minify_with_options, MinifyOptions, Target};
+use obf::{minify_with_options, MinifyOptions, Target};
+
+fn minify(source: &str, target: Target) -> Result<String, obf::Diagnostic> {
+    minify_with_options(source, target, MinifyOptions::seeded(735))
+}
 
 fn bindings(analysis: &Analysis, name: &str) -> Vec<usize> {
     analysis
@@ -244,32 +248,36 @@ fn original_short_names_and_globals_cannot_be_captured() {
     for target in [Target::Lua51, Target::Luau] {
         let source = "a=10 local b=2 local longerName=1 return a,b,longerName,longerName";
         let output = minify(source, target).unwrap();
-        assert_eq!(output, "a=10 local b=2 local c=1 return a,b,c,c");
+        let renamed = scope::analyze(&output, target).unwrap();
+        let left = &renamed.bindings[0].name;
+        let right = &renamed.bindings[1].name;
+        assert_ne!(left, "b", "an already-short local must be renamed too");
+        assert_ne!(left, "a");
+        assert_ne!(right, "a");
+        assert_ne!(left, right);
+        assert_eq!(
+            output,
+            format!("a=10 local {left}=2 local {right}=1 return a,{left},{right},{right}")
+        );
         assert_eq!(output, minify(source, target).unwrap());
-        let lexical = minify_with_options(
-            source,
-            target,
-            MinifyOptions {
-                rename_locals: false,
-            },
-        )
-        .unwrap();
+        let lexical = minify_with_options(source, target, MinifyOptions::lexical()).unwrap();
         assert!(lexical.contains("longerName"));
         assert!(output.len() < lexical.len());
     }
 }
 
 #[test]
-fn shorter_names_go_to_more_frequent_bindings_and_never_lengthen_locals() {
+fn single_letter_names_go_to_more_frequent_bindings() {
     let mut source = String::new();
     for index in 0..40 {
         source.push_str(&format!("local lengthyVariable{index}={index} "));
     }
     source.push_str("local frequentlyUsed=99 print(frequentlyUsed,frequentlyUsed,frequentlyUsed)");
     let output = minify(&source, Target::Lua51).unwrap();
-    assert!(output.contains("local a=99"), "{output}");
     let before = scope::analyze(&source, Target::Lua51).unwrap();
     let after = scope::analyze(&output, Target::Lua51).unwrap();
+    let frequent = bindings(&before, "frequentlyUsed")[0];
+    assert_eq!(after.bindings[frequent].name.len(), 1);
     for (before, after) in before.bindings.iter().zip(&after.bindings) {
         assert!(after.name.len() <= before.name.len());
     }
@@ -278,7 +286,7 @@ fn shorter_names_go_to_more_frequent_bindings_and_never_lengthen_locals() {
 #[test]
 fn allocator_skips_keywords_and_remains_deterministic_beyond_one_letter() {
     let mut source = String::new();
-    for index in 0..750 {
+    for index in 0..650 {
         source.push_str(&format!(
             "do local lengthyVariable{index}={index} print(lengthyVariable{index}) end "
         ));
@@ -293,7 +301,9 @@ fn allocator_skips_keywords_and_remains_deterministic_beyond_one_letter() {
             .iter()
             .map(|binding| &binding.name)
             .collect();
-        assert_eq!(names.len(), 750);
+        assert_eq!(names.len(), 650);
+        assert!(names.iter().all(|name| (1..=2).contains(&name.len())
+            && name.bytes().all(|byte| byte.is_ascii_lowercase())));
         for name in ["do", "if", "in", "or", "and", "end", "for", "nil", "not"] {
             assert!(!names.iter().any(|candidate| candidate.as_str() == name));
         }
@@ -323,14 +333,7 @@ fn reflection_aliases_escaped_fields_and_environment_access_disable_renaming() {
             assert!(!analysis.rename_barriers.is_empty(), "{source}");
             assert_eq!(
                 minify(&source, target).unwrap(),
-                minify_with_options(
-                    &source,
-                    target,
-                    MinifyOptions {
-                        rename_locals: false
-                    }
-                )
-                .unwrap()
+                minify_with_options(&source, target, MinifyOptions::lexical()).unwrap()
             );
         }
     }

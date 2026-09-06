@@ -45,7 +45,7 @@ trap 'rm -rf "$tmp"' EXIT
 run_target() {
     local target=$1 source=$2 output=$3
     "$OBF" check --target "$target" "$source"
-    "$OBF" minify --target "$target" --output "$output" "$source"
+    "$OBF" minify --target "$target" --seed 735 --output "$output" "$source"
     if [[ $(wc -l <"$output") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$output"; then
         echo "error: $target output contains a physical newline" >&2
         exit 1
@@ -111,9 +111,10 @@ for target in lua51 luau; do
         lexical="$tmp/$label.lexical.lua"
         run_target "$target" "$original" "$compact"
         "$OBF" minify --target "$target" --no-rename -o "$lexical" "$original"
-        "$OBF" minify --target "$target" -o "$tmp/$label.same.lua" "$original"
+        "$OBF" minify --target "$target" --seed 735 -o "$tmp/$label.same.lua" "$original"
+        "$OBF" minify --target "$target" --seed 736 -o "$tmp/$label.other.lua" "$original"
         cmp "$compact" "$tmp/$label.same.lua"
-        for source in "$original" "$compact" "$lexical"; do
+        for source in "$original" "$compact" "$lexical" "$tmp/$label.same.lua" "$tmp/$label.other.lua"; do
             if [[ $target == lua51 ]]; then
                 "$LUAC" -p "$source"
             else
@@ -121,24 +122,29 @@ for target in lua51 luau; do
             fi
         done
         "$runner" "$original" >"$tmp/$label.original.out"
-        "$runner" "$compact" >"$tmp/$label.compact.out"
-        "$runner" "$lexical" >"$tmp/$label.lexical.out"
-        cmp "$tmp/$label.original.out" "$tmp/$label.compact.out"
-        cmp "$tmp/$label.original.out" "$tmp/$label.lexical.out"
-        if [[ $(wc -l <"$lexical") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$lexical"; then
-            echo "error: $label lexical-only output contains a physical newline" >&2
-            exit 1
-        fi
+        for variant in "$compact" "$lexical" "$tmp/$label.same.lua" "$tmp/$label.other.lua"; do
+            "$runner" "$variant" >"$tmp/$label.variant.out"
+            cmp "$tmp/$label.original.out" "$tmp/$label.variant.out"
+            if [[ $(wc -l <"$variant") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$variant"; then
+                echo "error: $label output contains a physical newline" >&2
+                exit 1
+            fi
+        done
         if [[ $corpus == scope ]]; then
             if [[ $(wc -c <"$compact") -ge $(wc -c <"$lexical") ]] \
                 || grep -q 'local safeCompressionMarker' "$compact"; then
                 echo "error: $label did not exercise safe local renaming" >&2
                 exit 1
             fi
+            if cmp -s "$compact" "$tmp/$label.other.lua"; then
+                echo "error: $label local names did not change with seed" >&2
+                exit 1
+            fi
             printf '[matrix] %s safe minify: source=%s, lexical=%s, renamed=%s bytes\n' \
                 "$target" "$(wc -c <"$original")" "$(wc -c <"$lexical")" "$(wc -c <"$compact")"
         else
             cmp "$compact" "$lexical"
+            cmp "$tmp/$label.other.lua" "$lexical"
         fi
     done
 done
@@ -171,15 +177,19 @@ if cmp -s "$tmp/vm51.lua" "$tmp/vm51.other.lua"; then
     echo 'error: Lua 5.1 VM layout did not change with seed' >&2
     exit 1
 fi
-"$LUAC" -p "$tmp/vm51.lua"
 "$LUAC" -l -p tests/fixtures/vm_lua51.lua >"$tmp/vm51.opcodes"
 lua51_opcode_count=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+\[/ {print $3}' "$tmp/vm51.opcodes" | sort -u | wc -l)
 if [[ $lua51_opcode_count -ne 38 ]]; then
     echo "error: Lua 5.1 VM fixture covers $lua51_opcode_count of 38 opcodes" >&2
     exit 1
 fi
-"$LUA" "$tmp/vm51.lua" >"$tmp/vm51.virtual.out"
-cmp "$tmp/vm51.original.out" "$tmp/vm51.virtual.out"
+for variant in "$tmp/vm51.lua" "$tmp/vm51.same.lua" "$tmp/vm51.other.lua"; do
+    "$OBF" check --target lua51 "$variant"
+    "$LUAC" -p "$variant"
+    "$LUA" "$variant" >"$tmp/vm51.virtual.out"
+    cmp "$tmp/vm51.original.out" "$tmp/vm51.virtual.out"
+done
+cmp "$tmp/vm51.lua" "$ROOT/vm_lua51.out.lua"
 
 printf '%s\n' '[matrix] Luau VM: private lowering, deterministic seed, compile, execute'
 "$LUAU" tests/fixtures/vm_luau.lua >"$tmp/vmluau.original.out"
@@ -191,17 +201,21 @@ if cmp -s "$tmp/vmluau.lua" "$tmp/vmluau.other.lua"; then
     echo 'error: Luau VM layout did not change with seed' >&2
     exit 1
 fi
-"$LUAUC" "$tmp/vmluau.lua" >/dev/null
 "$LUAUC" --text -O1 -g0 tests/fixtures/vm_luau.lua >"$tmp/vmluau.opcodes"
 luau_opcode_count=$(awk '{line=$0; sub(/^L[0-9]+: /,"",line); if(line ~ /^[A-Z][A-Z0-9_]+([[:space:]]|$)/){split(line,a,/ /); if(a[1]!="REMARK") print a[1]}}' "$tmp/vmluau.opcodes" | sort -u | wc -l)
 if [[ $luau_opcode_count -lt 60 ]]; then
     echo "error: Luau VM fixture only covers $luau_opcode_count core opcodes" >&2
     exit 1
 fi
-"$LUAU" "$tmp/vmluau.lua" >"$tmp/vmluau.virtual.out"
-cmp "$tmp/vmluau.original.out" "$tmp/vmluau.virtual.out"
+for variant in "$tmp/vmluau.lua" "$tmp/vmluau.same.lua" "$tmp/vmluau.other.lua"; do
+    "$OBF" check --target luau "$variant"
+    "$LUAUC" "$variant" >/dev/null
+    "$LUAU" "$variant" >"$tmp/vmluau.virtual.out"
+    cmp "$tmp/vmluau.original.out" "$tmp/vmluau.virtual.out"
+done
+cmp "$tmp/vmluau.lua" "$ROOT/vm_luau.out.lua"
 
-for vm in "$tmp/vm51.lua" "$tmp/vmluau.lua"; do
+for vm in "$tmp"/vm51*.lua "$tmp"/vmluau*.lua; do
     if [[ $(wc -l <"$vm") -ne 0 ]] || LC_ALL=C grep -q $'\r' "$vm"; then
         echo "error: VM output $vm contains a physical newline" >&2
         exit 1
@@ -214,22 +228,21 @@ for vm in "$tmp/vm51.lua" "$tmp/vmluau.lua"; do
         echo "error: VM output $vm contains a generated error message" >&2
         exit 1
     fi
-done
-if grep -Eq '0[bB][01_]' "$tmp/vm51.lua"; then
-    echo 'error: Lua 5.1 VM output contains a Luau binary literal' >&2
-    exit 1
-fi
-if ! grep -Eq '0[bB][01_]' "$tmp/vmluau.lua"; then
-    echo 'error: seeded Luau VM output did not exercise binary numeric spelling' >&2
-    exit 1
-fi
-for vm in "$tmp/vm51.lua" "$tmp/vmluau.lua"; do
-    if ! grep -q 'local B=' "$vm"; then
-        echo "error: VM output $vm is missing its private bytecode blob" >&2
+    if [[ $vm == "$tmp"/vm51* ]] && grep -Eq '0[bB][01_]' "$vm"; then
+        echo 'error: Lua 5.1 VM output contains a Luau binary literal' >&2
         exit 1
     fi
-    if grep -Eq 'P\[[0-9]+\]=\{' "$vm"; then
-        echo "error: VM output $vm contains legacy inline instruction tables" >&2
+    if [[ $vm == "$tmp"/vmluau* ]] && ! grep -Eq '0[bB][01_]' "$vm"; then
+        echo 'error: seeded Luau VM output did not exercise binary numeric spelling' >&2
+        exit 1
+    fi
+    # Do not depend on the blob/prototype variables' old B/P spellings.
+    # Rust VM tests also decode and verify magic/version/target/length/Adler
+    # and assert byte-for-byte preservation across the final naming pass.
+    # An AST check rejects inline metadata while allowing Luau NAMECALL
+    # wrapper tables (a broad identifier[n]={...} grep would reject those).
+    if ! grep -Eq "local [a-z]{1,2}=['\"]OBF" "$vm"; then
+        echo "error: VM output $vm is missing its private bytecode blob" >&2
         exit 1
     fi
 done

@@ -6,6 +6,7 @@
 //! inspected conservatively but never renamed by this first-stage pass.
 
 use crate::ast::*;
+use crate::random::Prng;
 use crate::{Diagnostic, Target};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -83,7 +84,9 @@ pub struct Analysis {
     /// Known reflection/environment access makes automatic renaming unsafe.
     /// A nonempty set causes the minifier to retain all local spellings.
     pub rename_barriers: BTreeSet<String>,
+    // Globals and type names, not spellings of locals being replaced.
     reserved: BTreeSet<String>,
+    barrier_locations: Vec<Span>,
 }
 
 /// Parse source and resolve its lexical value bindings with bounded work.
@@ -109,6 +112,7 @@ pub(crate) fn analyze_chunk(chunk: &Chunk) -> Result<Analysis, Diagnostic> {
             globals: BTreeSet::new(),
             rename_barriers: BTreeSet::new(),
             reserved: BTreeSet::new(),
+            barrier_locations: Vec::new(),
         },
         visible: BTreeMap::new(),
         current: 0,
@@ -233,7 +237,7 @@ impl<'a> Walker<'a> {
                     self.reference(root)?;
                 }
                 for field in name.path.iter().skip(1).chain(name.method.iter()) {
-                    self.inspect_name(&field.value);
+                    self.inspect_name(&field.value, field.span);
                 }
                 self.tasks.push(Task::Function(FunctionVisit {
                     body,
@@ -431,12 +435,12 @@ impl<'a> Walker<'a> {
                 self.tasks.push(Task::Expression(expression));
             }
             ExpressionKind::Field { table, field } => {
-                self.inspect_name(&field.value);
+                self.inspect_name(&field.value, field.span);
                 self.tasks.push(Task::Expression(table));
             }
             ExpressionKind::Index { table, index } => {
                 if let Some(name) = static_string(index, self.target) {
-                    self.inspect_name(&name);
+                    self.inspect_name(&name, index.span);
                 }
                 self.tasks.push(Task::Expression(index));
                 self.tasks.push(Task::Expression(table));
@@ -447,7 +451,7 @@ impl<'a> Walker<'a> {
                 arguments,
             } => {
                 if let Some(method) = method {
-                    self.inspect_name(&method.value);
+                    self.inspect_name(&method.value, method.span);
                 }
                 self.expressions(arguments);
                 self.tasks.push(Task::Expression(function));
@@ -599,8 +603,9 @@ impl<'a> Walker<'a> {
         if self.result.bindings.len() >= MAX_ITEMS {
             return Err(Diagnostic::new("binding count exceeds safety limit"));
         }
-        self.reserve(name);
-        self.inspect_name(name);
+        if let Some(span) = declaration {
+            self.inspect_name(name, span);
+        }
         let preserve = if declaration.is_none() {
             Some(PreserveReason::Implicit)
         } else if exported {
@@ -631,7 +636,7 @@ impl<'a> Walker<'a> {
         if self.result.references.len() >= MAX_ITEMS {
             return Err(Diagnostic::new("reference count exceeds safety limit"));
         }
-        self.inspect_name(&name.value);
+        self.inspect_name(&name.value, name.span);
         let binding = self
             .visible
             .get(&name.value)
@@ -673,9 +678,10 @@ impl<'a> Walker<'a> {
         self.result.reserved.insert(name.to_owned());
     }
 
-    fn inspect_name(&mut self, name: &str) {
+    fn inspect_name(&mut self, name: &str, span: Span) {
         if is_rename_barrier(name) {
             self.result.rename_barriers.insert(name.to_owned());
+            self.result.barrier_locations.push(span);
         }
     }
 }
@@ -757,16 +763,90 @@ pub(crate) struct RenamePlan {
 }
 
 impl Analysis {
-    pub(crate) fn rename_plan(&self, target: Target) -> Result<RenamePlan, Diagnostic> {
-        let mut names = vec![None; self.bindings.len()];
+    pub(crate) fn rename_plan(&self, target: Target, seed: u64) -> Result<RenamePlan, Diagnostic> {
         if !self.rename_barriers.is_empty() {
-            return Ok(RenamePlan { names });
+            return Ok(RenamePlan {
+                names: vec![None; self.bindings.len()],
+            });
         }
-        // Reserve every original value/type spelling, even when it will be
-        // shortened. New names are globally unique: deliberately no risky
-        // lifetime-based name reuse in this first implementation.
+        self.random_short_plan(target, seed)
+    }
+
+    /// Only for the crate-owned, fully assembled VM template. Do not expose
+    /// this as a user-source "force rename" switch. The sole permitted
+    /// environment operation must have the exact audited AST shape, and ALL
+    /// barrier occurrences must be its three unbound value references.
+    pub(crate) fn generated_vm_plan(
+        &self,
+        chunk: &Chunk,
+        seed: u64,
+    ) -> Result<RenamePlan, Diagnostic> {
+        let mut captures = chunk.block.statements.iter().filter_map(|statement| {
+            let StatementKind::Local {
+                bindings,
+                values,
+                exported: false,
+                is_const: false,
+            } = &statement.kind
+            else {
+                return None;
+            };
+            if bindings.len() == 1
+                && bindings[0].name.value == "G"
+                && bindings[0].annotation.is_none()
+                && values.len() == 1
+                && is_vm_environment(&values[0])
+            {
+                Some(values[0].span)
+            } else {
+                None
+            }
+        });
+        let capture = captures.next().ok_or_else(|| {
+            Diagnostic::new("generated VM is missing its audited environment capture")
+        })?;
+        if captures.next().is_some()
+            || self.barrier_locations.len() != 3
+            || self
+                .barrier_locations
+                .iter()
+                .any(|span| span.start < capture.start || span.end > capture.end)
+            || self
+                .rename_barriers
+                .iter()
+                .any(|name| !matches!(name.as_str(), "getfenv" | "_G"))
+            || self.references.iter().any(|reference| {
+                matches!(reference.name.as_str(), "getfenv" | "_G") && reference.binding.is_some()
+            })
+        {
+            return Err(Diagnostic::new(
+                "generated VM contains an unaudited reflection/environment access",
+            ));
+        }
+        if self
+            .bindings
+            .iter()
+            .any(|binding| binding.declaration.is_some() && binding.preserve.is_some())
+        {
+            return Err(Diagnostic::new("generated VM contains a protected explicit binding; refusing partial random renaming"));
+        }
+        self.random_short_plan(chunk.target, seed)
+    }
+
+    fn random_short_plan(&self, target: Target, seed: u64) -> Result<RenamePlan, Diagnostic> {
+        let mut names: Vec<Option<String>> = vec![None; self.bindings.len()];
         let mut reserved = self.reserved.clone();
-        let mut order: Vec<_> = (0..self.bindings.len()).collect();
+        // Reuse old spellings ONLY for locals that will ALL be simultaneously
+        // replaced. Retained locals, globals and types remain unavailable.
+        reserved.extend(
+            self.bindings
+                .iter()
+                .filter(|binding| binding.preserve.is_some())
+                .map(|binding| binding.name.clone()),
+        );
+        let mut order: Vec<_> = (0..self.bindings.len())
+            .filter(|&id| self.bindings[id].preserve.is_none())
+            .collect();
         order.sort_by_key(|&id| {
             let binding = &self.bindings[id];
             (
@@ -775,34 +855,64 @@ impl Analysis {
                 id,
             )
         });
-        let mut counter = 0usize;
-        let mut next = None;
+
+        let mut single = Vec::new();
+        let mut double = Vec::new();
+        for first in b'a'..=b'z' {
+            single.push(char::from(first).to_string());
+            for second in b'a'..=b'z' {
+                double.push(format!("{}{}", char::from(first), char::from(second)));
+            }
+        }
+        for pool in [&mut single, &mut double] {
+            pool.retain(|name| !reserved.contains(name) && !target.is_reserved_name(name));
+        }
+        // Independent stream: dispatcher/template choices cannot consume the
+        // random state used to allocate final variable names.
+        let domain = if target.is_luau() {
+            0x6e61_6d65_0000_0735
+        } else {
+            0x6e61_6d65_0000_0051
+        };
+        let mut random = Prng::new(seed ^ domain);
+        random.shuffle(&mut single);
+        random.shuffle(&mut double);
+        single.extend(double);
+        let mut available = single;
+        if order.len() > available.len() {
+            return Err(Diagnostic::new(format!(
+                "1-2 letter variable name pool exhausted: {} bindings require distinct names, only {} are safe; use --no-rename or split the source",
+                order.len(), available.len()
+            )));
+        }
+        let mut assigned: Vec<BindingId> = Vec::new();
         for id in order {
-            let binding = &self.bindings[id];
-            if binding.preserve.is_some() {
-                continue;
-            }
-            let candidate = loop {
-                let candidate = if let Some(candidate) = next.take() {
-                    candidate
-                } else {
-                    let candidate = short_name(counter);
-                    counter = counter
-                        .checked_add(1)
-                        .ok_or_else(|| Diagnostic::new("short-name counter overflow"))?;
-                    candidate
-                };
-                if !reserved.contains(&candidate) && !target.is_reserved_name(&candidate) {
-                    break candidate;
-                }
-            };
-            if candidate.len() < binding.name.len() {
-                reserved.insert(candidate.clone());
-                names[id] = Some(candidate);
+            let original = &self.bindings[id].name;
+            if let Some(index) = available.iter().position(|name| name != original) {
+                // At most 702 candidates. Ordered removal keeps one-letter
+                // priority for frequent bindings, while each pool is shuffled.
+                names[id] = Some(available.remove(index));
             } else {
-                // Never lengthen a binding (or churn equally short names).
-                next = Some(candidate);
+                // A greedy allocation can leave the last binding its own old
+                // name. Repair with a safe two-way swap instead of spuriously
+                // reporting exhaustion when a full derangement exists.
+                let remaining = available
+                    .pop()
+                    .ok_or_else(|| Diagnostic::new("1-2 letter variable name pool exhausted"))?;
+                let previous = assigned
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&previous| self.bindings[previous].name != remaining)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "1-2 letter variable name pool cannot rename every binding without retaining an original name",
+                        )
+                    })?;
+                names[id] = names[previous].take();
+                names[previous] = Some(remaining);
             }
+            assigned.push(id);
         }
         Ok(RenamePlan { names })
     }
@@ -906,16 +1016,47 @@ impl RenamePlan {
     }
 }
 
-fn short_name(mut index: usize) -> String {
-    let mut bytes = Vec::new();
-    loop {
-        bytes.push(b'a' + (index % 26) as u8);
-        index /= 26;
-        if index == 0 {
-            break;
-        }
-        index -= 1;
+// Match only `(getfenv and getfenv(0)) or _G`, not an arbitrary environment
+// alias, call, field access, dynamically assembled key, or method invocation.
+fn is_vm_environment(expression: &Expression) -> bool {
+    let ExpressionKind::Binary {
+        operator: BinaryOperator::Or,
+        left,
+        right,
+    } = &expression.kind
+    else {
+        return false;
+    };
+    if !is_name(right, "_G") {
+        return false;
     }
-    bytes.reverse();
-    bytes.into_iter().map(char::from).collect()
+    let ExpressionKind::Group(inner) = &left.kind else {
+        return false;
+    };
+    let ExpressionKind::Binary {
+        operator: BinaryOperator::And,
+        left,
+        right,
+    } = &inner.kind
+    else {
+        return false;
+    };
+    if !is_name(left, "getfenv") {
+        return false;
+    }
+    let ExpressionKind::Call {
+        function,
+        method: None,
+        arguments,
+    } = &right.kind
+    else {
+        return false;
+    };
+    is_name(function, "getfenv")
+        && arguments.len() == 1
+        && matches!(&arguments[0].kind, ExpressionKind::Number(value) if value == "0")
+}
+
+fn is_name(expression: &Expression, expected: &str) -> bool {
+    matches!(&expression.kind, ExpressionKind::Name(name) if name.value == expected)
 }

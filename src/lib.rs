@@ -10,6 +10,7 @@ pub mod diagnostic;
 pub mod lexer;
 pub mod minify;
 pub mod parser;
+mod random;
 pub mod scope;
 pub mod target;
 pub mod vm;
@@ -28,7 +29,8 @@ pub fn check(source: &str, target: Target) -> Result<(), Diagnostic> {
     parse(source, target).map(|_| ())
 }
 
-/// Validate, safely shorten local bindings and emit a single physical line.
+/// Validate, randomly rename safe local bindings to 1-2 letters, and emit a
+/// single physical line. Use `MinifyOptions::seeded` for reproducible output.
 /// Known reflection/environment access conservatively disables renaming.
 pub fn minify(source: &str, target: Target) -> Result<String, Diagnostic> {
     minify_with_options(source, target, MinifyOptions::default())

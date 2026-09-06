@@ -1,5 +1,5 @@
-use super::prng::Prng;
-use crate::{Diagnostic, Target};
+use crate::random::Prng;
+use crate::Diagnostic;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
@@ -43,7 +43,7 @@ struct Chunk {
     main: usize,
 }
 
-pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
+pub(super) fn generate(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
     crate::bytecode::luau::inspect(data)?;
     let chunk = decode(data)?;
 
@@ -108,8 +108,9 @@ pub fn virtualize(data: &[u8], seed: u64) -> Result<String, Diagnostic> {
     source.push_str("else E()end end end;");
     source.push_str("return H(M,Z(...),{},G)");
 
-    crate::minify(&source, Target::Luau)
-        .map_err(|error| error.context("generated Luau VM failed internal validation"))
+    // The shared VM entry point performs final random renaming only after
+    // the decoder, dispatcher and every used handler have been assembled.
+    Ok(source)
 }
 
 fn handler(opcode: usize) -> &'static str {
