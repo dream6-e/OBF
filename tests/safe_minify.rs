@@ -1,61 +1,12 @@
 //! Native differential tests: parsing/binding assertions alone cannot prove
 //! that a rewritten program has the same Lua/Luau runtime behavior.
 
+mod support;
+
 use obf::{MinifyOptions, Target};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
-
-struct Workspace(PathBuf);
-
-impl Workspace {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "obf-safe-minify-{}-{}",
-            std::process::id(),
-            NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for Workspace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn success(command: &mut Command) -> Output {
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{command:?} failed: {}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
-
-fn compile_and_run(target: Target, path: &Path) -> Vec<u8> {
-    let (compiler, runtime) = match target {
-        Target::Lua51 => ("luac5.1", "lua5.1"),
-        Target::Luau => ("luau-compile", "luau"),
-    };
-    let mut compiler = Command::new(root().join("toolchains/bin").join(compiler));
-    if target == Target::Lua51 {
-        compiler.arg("-p");
-    }
-    success(compiler.arg(path));
-    success(Command::new(root().join("toolchains/bin").join(runtime)).arg(path)).stdout
-}
+use std::process::Command;
+use support::{compile_and_run, root, success, Workspace};
 
 fn differential(source: &str, target: Target) -> (String, String) {
     let workspace = Workspace::new();

@@ -408,15 +408,18 @@ fn long_iterative_chains_are_rejected_before_recursive_ast_drop_can_overflow() {
             assert!(result.unwrap_err().message.contains("chain"));
         }
     }
-    for source in [
-        format!("type Value=number{}", "?".repeat(100_000)),
-        format!("return value{}", "::number".repeat(100_000)),
-    ] {
+    for source in [format!("type Value=number{}", "?".repeat(100_000))] {
         assert!(minify(&source, Target::Luau)
             .unwrap_err()
             .message
             .contains("chain"));
     }
+    // Flat repeated assertions are not valid Luau grammar in the first place.
+    assert!(minify(
+        &format!("return value{}", "::number".repeat(100_000)),
+        Target::Luau
+    )
+    .is_err());
 }
 
 #[test]

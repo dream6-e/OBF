@@ -46,14 +46,22 @@ pub(crate) fn parse_lexed(
         vararg_allowed: true,
         exported_values: HashSet::new(),
         has_value_exports: false,
+        has_module_return: false,
+        needs_binding_validation: false,
     };
     let block = parser.block(&[])?;
     parser.expect_eof()?;
-    Ok(Chunk {
+    let chunk = Chunk {
         target,
         block,
         span: Span::new(0, source.len()),
-    })
+    };
+    // Reuse the lexical resolver for Luau's binding-dependent syntax rules.
+    // This does not reenter the parser and is unnecessary for ordinary chunks.
+    if parser.needs_binding_validation {
+        crate::scope::analyze_chunk(&chunk)?;
+    }
+    Ok(chunk)
 }
 
 /// Lex and parse source in one bounded operation.
@@ -129,6 +137,8 @@ struct Parser<'a> {
     vararg_allowed: bool,
     exported_values: HashSet<String>,
     has_value_exports: bool,
+    has_module_return: bool,
+    needs_binding_validation: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -196,15 +206,6 @@ impl<'a> Parser<'a> {
             }
             self.advance();
             StatementKind::Break
-        } else if self.at("continue") {
-            if !self.target.is_luau() {
-                return Err(self.error_current("'continue' is only valid for Luau"));
-            }
-            if self.loop_depth == 0 {
-                return Err(self.error_current("'continue' used outside a loop"));
-            }
-            self.advance();
-            StatementKind::Continue
         } else if self.starts_type_declaration() {
             self.type_declaration()?
         } else {
@@ -248,6 +249,7 @@ impl<'a> Parser<'a> {
                 return Err(self.error_current("attributes require a value function declaration"));
             }
             if self.consume("function") {
+                self.needs_binding_validation = true;
                 let name = self.name("expected type function name")?;
                 let body = self.function_body(Vec::new())?;
                 return Ok(StatementKind::TypeFunction {
@@ -272,6 +274,7 @@ impl<'a> Parser<'a> {
         }
         if self.consume("function") {
             if exported {
+                self.needs_binding_validation = true;
                 let name = self.name("expected exported function name")?;
                 self.record_value_export(&name)?;
                 let body = self.function_body(attributes)?;
@@ -435,6 +438,7 @@ impl<'a> Parser<'a> {
         exported: bool,
         attributes: Vec<Attribute>,
     ) -> Result<StatementKind, Diagnostic> {
+        self.needs_binding_validation |= is_const;
         if self.consume("function") {
             let name = self.name("expected local function name")?;
             if exported {
@@ -461,8 +465,18 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
-        if is_const && values.is_empty() {
-            return Err(self.error_current("const declarations require an initializer"));
+        if is_const
+            && values.len() != bindings.len()
+            && !values.last().is_some_and(|value| {
+                matches!(
+                    value.kind,
+                    ExpressionKind::Call { .. } | ExpressionKind::Vararg
+                )
+            })
+        {
+            return Err(self.error_current(
+                "const initializer count must match bindings, unless the last value is a call or vararg",
+            ));
         }
         if exported {
             for binding in &bindings {
@@ -478,12 +492,14 @@ impl<'a> Parser<'a> {
     }
 
     fn return_statement(&mut self) -> Result<StatementKind, Diagnostic> {
-        if self.target.is_luau()
-            && self.function_depth == 0
-            && self.block_depth == 1
-            && self.has_value_exports
-        {
-            return Err(self.error_current("top-level return is incompatible with exported values"));
+        if self.target.is_luau() && self.function_depth == 0 {
+            if self.has_value_exports {
+                return Err(
+                    self.error_current("top-level return is incompatible with exported values")
+                );
+            }
+            // A return in a top-level if/do/loop still returns from the module.
+            self.has_module_return = true;
         }
         self.expect("return")?;
         let values =
@@ -531,6 +547,13 @@ impl<'a> Parser<'a> {
             Ok(StatementKind::Assignment { targets, values })
         } else if first.is_call() {
             Ok(StatementKind::Call(first))
+        } else if self.target.is_luau()
+            && matches!(&first.kind, ExpressionKind::Name(name) if name.value == "continue")
+        {
+            if self.loop_depth == 0 {
+                return Err(self.error_current("'continue' used outside a loop"));
+            }
+            Ok(StatementKind::Continue)
         } else {
             Err(self.error_current("expected assignment or function call statement"))
         }
@@ -565,26 +588,28 @@ impl<'a> Parser<'a> {
                 self.previous_end(),
             )?
         } else {
-            self.primary()?
-        };
-
-        let mut chain = 0usize;
-        loop {
+            let primary = self.primary()?;
+            // Luau: assertion binds to a simple expression, at most once.
+            // Repeated assertions need parentheses; unary/binary precedence
+            // must not accidentally turn `-x::T` into `(-x)::T`.
             if self.target.is_luau() && self.consume("::") {
-                self.extend_chain(&mut chain, "expression")?;
+                let start = primary.span.start;
                 let asserted = self.type_expression()?;
-                let start = expression.span.start;
-                expression = self.make_expression(
+                self.make_expression(
                     ExpressionKind::TypeAssertion {
-                        expression: Box::new(expression),
+                        expression: Box::new(primary),
                         asserted,
                     },
                     start,
                     self.previous_end(),
-                )?;
-                continue;
+                )?
+            } else {
+                primary
             }
+        };
 
+        let mut chain = 0usize;
+        loop {
             let Some((operator, left, right)) = infix_operator(self.text(), self.target) else {
                 break;
             };
@@ -653,8 +678,13 @@ impl<'a> Parser<'a> {
             return Err(self.error_current("expected expression"));
         };
 
+        let prefix = matches!(kind, ExpressionKind::Name(_) | ExpressionKind::Group(_));
         let expression = self.make_expression(kind, start, self.previous_end())?;
-        self.suffixes(expression)
+        if prefix {
+            self.suffixes(expression)
+        } else {
+            Ok(expression)
+        }
     }
 
     fn suffixes(&mut self, mut expression: Expression) -> Result<Expression, Diagnostic> {
@@ -663,20 +693,7 @@ impl<'a> Parser<'a> {
             let start = expression.span.start;
             if self.target.is_luau() && self.at("<") && self.peek_text(1) == "<" {
                 self.extend_chain(&mut chain, "expression suffix")?;
-                self.advance();
-                self.advance();
-                let mut arguments = Vec::new();
-                if !(self.at(">") && self.peek_text(1) == ">") {
-                    loop {
-                        let value = self.type_expression_allow_pack()?;
-                        arguments.push(type_argument(value));
-                        if !self.consume(",") {
-                            break;
-                        }
-                    }
-                }
-                self.expect(">")?;
-                self.expect(">")?;
+                let arguments = self.explicit_type_arguments()?;
                 let end = self.previous_end();
                 expression = self.make_expression(
                     ExpressionKind::TypeInstantiation {
@@ -714,12 +731,22 @@ impl<'a> Parser<'a> {
             } else if self.consume(":") {
                 self.extend_chain(&mut chain, "expression suffix")?;
                 let method = self.name("expected method name after ':'")?;
+                let type_arguments =
+                    if self.target.is_luau() && self.at("<") && self.peek_text(1) == "<" {
+                        self.explicit_type_arguments()?
+                    } else {
+                        Vec::new()
+                    };
+                // The reference parser compares '(' with the method name,
+                // even when explicit type arguments occur between them.
+                self.check_call_line(method.span.end)?;
                 let arguments = self.call_arguments()?;
                 let end = self.previous_end();
                 expression = self.make_expression(
                     ExpressionKind::Call {
                         function: Box::new(expression),
                         method: Some(method),
+                        type_arguments,
                         arguments,
                     },
                     start,
@@ -727,12 +754,14 @@ impl<'a> Parser<'a> {
                 )?;
             } else if self.starts_call_arguments() {
                 self.extend_chain(&mut chain, "expression suffix")?;
+                self.check_call_line(expression.span.end)?;
                 let arguments = self.call_arguments()?;
                 let end = self.previous_end();
                 expression = self.make_expression(
                     ExpressionKind::Call {
                         function: Box::new(expression),
                         method: None,
+                        type_arguments: Vec::new(),
                         arguments,
                     },
                     start,
@@ -743,6 +772,40 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(expression)
+    }
+
+    fn explicit_type_arguments(&mut self) -> Result<Vec<TypeArgument>, Diagnostic> {
+        self.expect("<")?;
+        self.expect("<")?;
+        let mut arguments = Vec::new();
+        if !(self.at(">") && self.peek_text(1) == ">") {
+            loop {
+                arguments.push(type_argument(self.type_expression_allow_pack()?));
+                if !self.consume(",") {
+                    break;
+                }
+            }
+        }
+        self.expect(">")?;
+        self.expect(">")?;
+        Ok(arguments)
+    }
+
+    fn check_call_line(&self, callee_end: usize) -> Result<(), Diagnostic> {
+        // Luau's reference lexer counts only LF as a source line break;
+        // Lua 5.1 also counts a bare CR. Inspect the gap after the callee's
+        // END so multiline strings/type arguments do not cause false errors.
+        let gap = &self.source[callee_end..self.current().span.start];
+        if self.at("(")
+            && gap
+                .bytes()
+                .any(|byte| byte == b'\n' || (byte == b'\r' && !self.target.is_luau()))
+        {
+            return Err(self.error_current(
+                "ambiguous call across a newline; use a semicolon between statements",
+            ));
+        }
+        Ok(())
     }
 
     fn interpolated_string_expression(&mut self) -> Result<Expression, Diagnostic> {
@@ -814,9 +877,12 @@ impl<'a> Parser<'a> {
             vararg_allowed: self.vararg_allowed,
             exported_values: HashSet::new(),
             has_value_exports: false,
+            has_module_return: false,
+            needs_binding_validation: false,
         };
         let expression = child.expression(0)?;
         child.expect_eof()?;
+        self.needs_binding_validation |= child.needs_binding_validation;
         self.nodes = self
             .nodes
             .checked_add(child.nodes)
@@ -870,9 +936,7 @@ impl<'a> Parser<'a> {
             }
         } else if self.at("{") {
             Ok(vec![self.table_constructor()?])
-        } else if self.kind() == TokenKind::String && self.text().starts_with('`') {
-            Ok(vec![self.interpolated_string_expression()?])
-        } else if self.kind() == TokenKind::String {
+        } else if self.kind() == TokenKind::String && !self.text().starts_with('`') {
             let start = self.current().span.start;
             let raw = self.text().to_owned();
             self.advance();
@@ -888,7 +952,9 @@ impl<'a> Parser<'a> {
     }
 
     fn starts_call_arguments(&self) -> bool {
-        self.at("(") || self.at("{") || self.kind() == TokenKind::String
+        self.at("(")
+            || self.at("{")
+            || (self.kind() == TokenKind::String && !self.text().starts_with('`'))
     }
 
     fn table_constructor(&mut self) -> Result<Expression, Diagnostic> {
@@ -1542,6 +1608,9 @@ impl<'a> Parser<'a> {
     }
 
     fn record_value_export(&mut self, name: &Name) -> Result<(), Diagnostic> {
+        if self.has_module_return {
+            return Err(self.error_current("exported values are incompatible with a module return"));
+        }
         self.has_value_exports = true;
         if self.exported_values.insert(name.value.clone()) {
             Ok(())

@@ -231,6 +231,9 @@ pub enum ExpressionKind {
     Call {
         function: Box<Expression>,
         method: Option<Name>,
+        /// Explicit types on a Luau method call, `receiver:m<<T>>(args)`.
+        /// Ordinary `f<<T>>` remains a TypeInstantiation expression.
+        type_arguments: Vec<TypeArgument>,
         arguments: Vec<Expression>,
     },
 }

@@ -63,6 +63,7 @@ pub struct LocalBinding {
     pub scope: ScopeId,
     pub references: usize,
     pub captured: bool,
+    pub is_const: bool,
     pub preserve: Option<PreserveReason>,
 }
 
@@ -73,6 +74,8 @@ pub struct Reference {
     pub scope: ScopeId,
     /// `None` denotes a global value reference, never a field/type name.
     pub binding: Option<BindingId>,
+    /// True only for assignment to the value binding, not its table fields.
+    pub is_write: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,7 +119,7 @@ pub(crate) fn analyze_chunk(chunk: &Chunk) -> Result<Analysis, Diagnostic> {
         },
         visible: BTreeMap::new(),
         current: 0,
-        opaque: 0,
+        opaque_boundaries: Vec::new(),
         tasks: vec![Task::Block(&chunk.block)],
     };
     // Use a work stack: long left-associated expressions must not translate
@@ -138,7 +141,7 @@ pub(crate) fn analyze_chunk(chunk: &Chunk) -> Result<Analysis, Diagnostic> {
 struct FunctionVisit<'a> {
     body: &'a FunctionBody,
     method: bool,
-    local: Option<(&'a Name, bool)>,
+    local: Option<(&'a Name, bool, bool)>,
     type_function: bool,
 }
 
@@ -147,9 +150,10 @@ enum Task<'a> {
     ScopedBlock(&'a Block),
     Statement(&'a Statement),
     Expression(&'a Expression),
+    AssignmentTarget(&'a Expression),
     Type(&'a TypeExpression),
     Function(FunctionVisit<'a>),
-    Declare(&'a Name, BindingKind, bool),
+    Declare(&'a Name, BindingKind, bool, bool),
     Implicit(&'static str, BindingKind),
     Enter(ScopeKind, Span),
     Leave,
@@ -161,7 +165,8 @@ struct Walker<'a> {
     result: Analysis,
     visible: BTreeMap<String, Vec<BindingId>>,
     current: ScopeId,
-    opaque: usize,
+    // A type function cannot reference bindings created before its signature.
+    opaque_boundaries: Vec<usize>,
     tasks: Vec<Task<'a>>,
 }
 
@@ -179,18 +184,24 @@ impl<'a> Walker<'a> {
             }
             Task::Statement(statement) => self.statement(statement)?,
             Task::Expression(expression) => self.expression(expression)?,
+            Task::AssignmentTarget(expression) => {
+                if let ExpressionKind::Name(name) = &expression.kind {
+                    self.reference(name, true)?;
+                } else {
+                    self.expression(expression)?;
+                }
+            }
             Task::Type(value) => self.type_expression(value)?,
             Task::Function(function) => self.function(function),
-            Task::Declare(name, kind, exported) => {
-                self.declare(&name.value, Some(name.span), kind, exported)?;
+            Task::Declare(name, kind, exported, is_const) => {
+                self.declare(&name.value, Some(name.span), kind, exported, is_const)?;
             }
-            Task::Implicit(name, kind) => self.declare(name, None, kind, false)?,
+            Task::Implicit(name, kind) => self.declare(name, None, kind, false, false)?,
             Task::Enter(kind, span) => self.enter(kind, span)?,
             Task::Leave => self.leave()?,
             Task::EndOpaque => {
-                self.opaque = self
-                    .opaque
-                    .checked_sub(1)
+                self.opaque_boundaries
+                    .pop()
                     .ok_or_else(|| Diagnostic::new("unbalanced type-function scope"))?;
             }
         }
@@ -202,22 +213,23 @@ impl<'a> Walker<'a> {
             StatementKind::Empty | StatementKind::Break | StatementKind::Continue => {}
             StatementKind::Assignment { targets, values } => {
                 self.expressions(values);
-                self.expressions(targets);
+                self.tasks
+                    .extend(targets.iter().rev().map(Task::AssignmentTarget));
             }
             StatementKind::CompoundAssignment { target, value, .. } => {
                 self.tasks.push(Task::Expression(value));
-                self.tasks.push(Task::Expression(target));
+                self.tasks.push(Task::AssignmentTarget(target));
             }
             StatementKind::Call(value) => self.tasks.push(Task::Expression(value)),
             StatementKind::Local {
                 bindings,
                 values,
                 exported,
-                ..
+                is_const,
             } => {
                 // All annotations and initializers see the OLD environment,
                 // including closures in `local f = function() return f end`.
-                self.declarations(bindings, BindingKind::Local, *exported);
+                self.declarations(bindings, BindingKind::Local, *exported, *is_const);
                 self.expressions(values);
                 self.annotations(bindings);
             }
@@ -225,16 +237,16 @@ impl<'a> Walker<'a> {
                 name,
                 body,
                 exported,
-                ..
+                is_const,
             } => self.tasks.push(Task::Function(FunctionVisit {
                 body,
                 method: false,
-                local: Some((name, *exported)),
+                local: Some((name, *exported, *is_const)),
                 type_function: false,
             })),
             StatementKind::Function { name, body } => {
                 if let Some(root) = name.path.first() {
-                    self.reference(root)?;
+                    self.reference(root, name.path.len() == 1 && name.method.is_none())?;
                 }
                 for field in name.path.iter().skip(1).chain(name.method.iter()) {
                     self.inspect_name(&field.value, field.span);
@@ -279,8 +291,12 @@ impl<'a> Walker<'a> {
             } => {
                 self.tasks.push(Task::Leave);
                 self.tasks.push(Task::ScopedBlock(body));
-                self.tasks
-                    .push(Task::Declare(&binding.name, BindingKind::NumericFor, false));
+                self.tasks.push(Task::Declare(
+                    &binding.name,
+                    BindingKind::NumericFor,
+                    false,
+                    false,
+                ));
                 self.tasks
                     .push(Task::Enter(ScopeKind::Block, statement.span));
                 if let Some(step) = step {
@@ -297,7 +313,7 @@ impl<'a> Walker<'a> {
             } => {
                 self.tasks.push(Task::Leave);
                 self.tasks.push(Task::ScopedBlock(body));
-                self.declarations(bindings, BindingKind::GenericFor, false);
+                self.declarations(bindings, BindingKind::GenericFor, false, false);
                 self.tasks
                     .push(Task::Enter(ScopeKind::Block, statement.span));
                 self.expressions(values);
@@ -330,9 +346,9 @@ impl<'a> Walker<'a> {
     fn function(&mut self, visit: FunctionVisit<'a>) {
         let body = visit.body;
         if visit.type_function {
-            // Preserve the type-function body AND any outside binding it
-            // mentions. Do not pretend to resolve its separate type runtime.
-            self.opaque += 1;
+            // The pinned parser forbids captures from outside the type
+            // function, including in its signature. Preserve its own locals.
+            self.opaque_boundaries.push(self.result.bindings.len());
             self.tasks.push(Task::EndOpaque);
         }
         self.tasks.push(Task::Leave);
@@ -343,7 +359,7 @@ impl<'a> Walker<'a> {
             self.tasks
                 .push(Task::Implicit("arg", BindingKind::ImplicitArg));
         }
-        self.declarations(&body.parameters, BindingKind::Parameter, false);
+        self.declarations(&body.parameters, BindingKind::Parameter, false, false);
         if visit.method {
             self.tasks
                 .push(Task::Implicit("self", BindingKind::ImplicitSelf));
@@ -356,9 +372,13 @@ impl<'a> Walker<'a> {
             },
             body.span,
         ));
-        if let Some((name, exported)) = visit.local {
-            self.tasks
-                .push(Task::Declare(name, BindingKind::LocalFunction, exported));
+        if let Some((name, exported, is_const)) = visit.local {
+            self.tasks.push(Task::Declare(
+                name,
+                BindingKind::LocalFunction,
+                exported,
+                is_const,
+            ));
         }
         // Luau parses the entire signature in the enclosing value scope:
         // neither the new parameters nor a recursive local function is in
@@ -374,7 +394,7 @@ impl<'a> Walker<'a> {
 
     fn expression(&mut self, expression: &'a Expression) -> Result<(), Diagnostic> {
         match &expression.kind {
-            ExpressionKind::Name(name) => self.reference(name)?,
+            ExpressionKind::Name(name) => self.reference(name, false)?,
             ExpressionKind::Nil
             | ExpressionKind::Boolean(_)
             | ExpressionKind::Number(_)
@@ -448,12 +468,14 @@ impl<'a> Walker<'a> {
             ExpressionKind::Call {
                 function,
                 method,
+                type_arguments,
                 arguments,
             } => {
                 if let Some(method) = method {
                     self.inspect_name(&method.value, method.span);
                 }
                 self.expressions(arguments);
+                self.type_arguments(type_arguments);
                 self.tasks.push(Task::Expression(function));
             }
         }
@@ -469,7 +491,7 @@ impl<'a> Walker<'a> {
                 }
                 if path.len() > 1 {
                     if let Some(prefix) = path.first() {
-                        self.reference(prefix)?;
+                        self.reference(prefix, false)?;
                     }
                 }
                 self.type_arguments(arguments);
@@ -515,12 +537,18 @@ impl<'a> Walker<'a> {
         self.tasks.extend(values.iter().rev().map(Task::Expression));
     }
 
-    fn declarations(&mut self, bindings: &'a [Binding], kind: BindingKind, exported: bool) {
+    fn declarations(
+        &mut self,
+        bindings: &'a [Binding],
+        kind: BindingKind,
+        exported: bool,
+        is_const: bool,
+    ) {
         self.tasks.extend(
             bindings
                 .iter()
                 .rev()
-                .map(|binding| Task::Declare(&binding.name, kind, exported)),
+                .map(|binding| Task::Declare(&binding.name, kind, exported, is_const)),
         );
     }
 
@@ -599,6 +627,7 @@ impl<'a> Walker<'a> {
         declaration: Option<Span>,
         kind: BindingKind,
         exported: bool,
+        is_const: bool,
     ) -> Result<(), Diagnostic> {
         if self.result.bindings.len() >= MAX_ITEMS {
             return Err(Diagnostic::new("binding count exceeds safety limit"));
@@ -610,7 +639,7 @@ impl<'a> Walker<'a> {
             Some(PreserveReason::Implicit)
         } else if exported {
             Some(PreserveReason::Exported)
-        } else if self.opaque != 0 {
+        } else if !self.opaque_boundaries.is_empty() {
             Some(PreserveReason::TypeFunction)
         } else if self.target.is_reserved_name(name) {
             Some(PreserveReason::Reserved)
@@ -625,6 +654,7 @@ impl<'a> Walker<'a> {
             scope: self.current,
             references: 0,
             captured: false,
+            is_const,
             preserve,
         });
         self.result.scopes[self.current].bindings.push(id);
@@ -632,7 +662,7 @@ impl<'a> Walker<'a> {
         Ok(())
     }
 
-    fn reference(&mut self, name: &Name) -> Result<(), Diagnostic> {
+    fn reference(&mut self, name: &Name, is_write: bool) -> Result<(), Diagnostic> {
         if self.result.references.len() >= MAX_ITEMS {
             return Err(Diagnostic::new("reference count exceeds safety limit"));
         }
@@ -643,12 +673,31 @@ impl<'a> Walker<'a> {
             .and_then(|stack| stack.last())
             .copied();
         if let Some(id) = binding {
+            if self
+                .opaque_boundaries
+                .last()
+                .is_some_and(|&start| id < start)
+            {
+                return Err(Diagnostic::byte(
+                    format!(
+                        "type function cannot reference outer local '{}'",
+                        name.value
+                    ),
+                    name.span.start,
+                ));
+            }
             let local = &mut self.result.bindings[id];
+            if is_write && local.is_const {
+                return Err(Diagnostic::byte(
+                    format!("constant '{}' may not be reassigned", name.value),
+                    name.span.start,
+                ));
+            }
             local.references = local
                 .references
                 .checked_add(1)
                 .ok_or_else(|| Diagnostic::new("binding reference count overflow"))?;
-            if self.opaque != 0 && local.preserve.is_none() {
+            if !self.opaque_boundaries.is_empty() && local.preserve.is_none() {
                 local.preserve = Some(PreserveReason::TypeFunction);
             }
             let owner = self.result.scopes[local.scope].function;
@@ -670,6 +719,7 @@ impl<'a> Walker<'a> {
             span: name.span,
             scope: self.current,
             binding,
+            is_write,
         });
         Ok(())
     }
@@ -942,6 +992,7 @@ impl Analysis {
                         && a.scope == b.scope
                         && a.references == b.references
                         && a.captured == b.captured
+                        && a.is_const == b.is_const
                 });
         let same_references = self.references.len() == other.references.len()
             && self.references.iter().zip(&other.references).all(|(a, b)| {
@@ -949,7 +1000,10 @@ impl Analysis {
                     .binding
                     .and_then(|id| plan.names[id].as_deref())
                     .unwrap_or(&a.name);
-                a.binding == b.binding && a.scope == b.scope && expected == b.name
+                a.binding == b.binding
+                    && a.scope == b.scope
+                    && a.is_write == b.is_write
+                    && expected == b.name
             });
         if same_scopes && same_bindings && same_references && self.globals == other.globals {
             Ok(())
@@ -1047,12 +1101,14 @@ fn is_vm_environment(expression: &Expression) -> bool {
     let ExpressionKind::Call {
         function,
         method: None,
+        type_arguments,
         arguments,
     } = &right.kind
     else {
         return false;
     };
     is_name(function, "getfenv")
+        && type_arguments.is_empty()
         && arguments.len() == 1
         && matches!(&arguments[0].kind, ExpressionKind::Number(value) if value == "0")
 }

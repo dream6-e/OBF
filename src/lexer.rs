@@ -712,14 +712,14 @@ fn valid_decimal_literal(value: &str) -> bool {
     })
 }
 
-pub(crate) fn is_keyword(value: &str, target: Target) -> bool {
+pub(crate) fn is_keyword(value: &str, _target: Target) -> bool {
     const LUA51: &[&str] = &[
         "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
         "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
     ];
-    // `type` and `export` are contextual in Luau and must remain usable as
-    // ordinary identifiers (notably the built-in `type` function).
-    LUA51.contains(&value) || (target.is_luau() && value == "continue")
+    // Luau's `continue`, `type`, `export` and `const` are contextual,
+    // including in binding/field positions and call/assignment statements.
+    LUA51.contains(&value)
 }
 
 #[cfg(test)]
