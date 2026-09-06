@@ -6,9 +6,10 @@
 //! inspected conservatively but never renamed by this first-stage pass.
 
 use crate::ast::*;
-use crate::random::Prng;
 use crate::{Diagnostic, Target};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod rename;
 
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_WORK: usize = 8_000_000;
@@ -49,6 +50,9 @@ pub struct Scope {
     /// The enclosing function scope, or the chunk scope for top-level code.
     pub function: ScopeId,
     pub kind: ScopeKind,
+    /// Final-name uniqueness group, without changing lexical visibility.
+    /// Parameters/for variables share a group with their direct body locals.
+    pub name_scope: ScopeId,
     pub span: Span,
     pub bindings: Vec<BindingId>,
     /// Includes transitive captures needed by nested functions.
@@ -90,6 +94,9 @@ pub struct Analysis {
     // Globals and type names, not spellings of locals being replaced.
     reserved: BTreeSet<String>,
     barrier_locations: Vec<Span>,
+    // Reference ordinal when each declaration becomes active. Byte offsets
+    // are insufficient: initializers/signatures are visited before binding.
+    activations: Vec<usize>,
 }
 
 /// Parse source and resolve its lexical value bindings with bounded work.
@@ -106,6 +113,7 @@ pub(crate) fn analyze_chunk(chunk: &Chunk) -> Result<Analysis, Diagnostic> {
                 parent: None,
                 function: 0,
                 kind: ScopeKind::Chunk,
+                name_scope: 0,
                 span: chunk.span,
                 bindings: Vec::new(),
                 upvalues: BTreeSet::new(),
@@ -116,6 +124,7 @@ pub(crate) fn analyze_chunk(chunk: &Chunk) -> Result<Analysis, Diagnostic> {
             rename_barriers: BTreeSet::new(),
             reserved: BTreeSet::new(),
             barrier_locations: Vec::new(),
+            activations: Vec::new(),
         },
         visible: BTreeMap::new(),
         current: 0,
@@ -148,6 +157,7 @@ struct FunctionVisit<'a> {
 enum Task<'a> {
     Block(&'a Block),
     ScopedBlock(&'a Block),
+    BodyBlock(&'a Block),
     Statement(&'a Statement),
     Expression(&'a Expression),
     AssignmentTarget(&'a Expression),
@@ -177,11 +187,8 @@ impl<'a> Walker<'a> {
                 self.tasks
                     .extend(block.statements.iter().rev().map(Task::Statement));
             }
-            Task::ScopedBlock(block) => {
-                self.enter(ScopeKind::Block, block.span)?;
-                self.tasks.push(Task::Leave);
-                self.tasks.push(Task::Block(block));
-            }
+            Task::ScopedBlock(block) => self.scoped_block(block, false)?,
+            Task::BodyBlock(block) => self.scoped_block(block, true)?,
             Task::Statement(statement) => self.statement(statement)?,
             Task::Expression(expression) => self.expression(expression)?,
             Task::AssignmentTarget(expression) => {
@@ -290,7 +297,7 @@ impl<'a> Walker<'a> {
                 body,
             } => {
                 self.tasks.push(Task::Leave);
-                self.tasks.push(Task::ScopedBlock(body));
+                self.tasks.push(Task::BodyBlock(body));
                 self.tasks.push(Task::Declare(
                     &binding.name,
                     BindingKind::NumericFor,
@@ -312,7 +319,7 @@ impl<'a> Walker<'a> {
                 body,
             } => {
                 self.tasks.push(Task::Leave);
-                self.tasks.push(Task::ScopedBlock(body));
+                self.tasks.push(Task::BodyBlock(body));
                 self.declarations(bindings, BindingKind::GenericFor, false, false);
                 self.tasks
                     .push(Task::Enter(ScopeKind::Block, statement.span));
@@ -352,7 +359,7 @@ impl<'a> Walker<'a> {
             self.tasks.push(Task::EndOpaque);
         }
         self.tasks.push(Task::Leave);
-        self.tasks.push(Task::ScopedBlock(&body.body));
+        self.tasks.push(Task::BodyBlock(&body.body));
         if !self.target.is_luau() && body.has_vararg {
             // The pinned 5.1.5 runtime enables LUA_COMPAT_VARARG. Its implicit
             // `arg` local is introduced AFTER the explicit parameters.
@@ -578,6 +585,17 @@ impl<'a> Walker<'a> {
         }
     }
 
+    fn scoped_block(&mut self, block: &'a Block, share_names: bool) -> Result<(), Diagnostic> {
+        let parent_group = self.result.scopes[self.current].name_scope;
+        self.enter(ScopeKind::Block, block.span)?;
+        if share_names {
+            self.result.scopes[self.current].name_scope = parent_group;
+        }
+        self.tasks.push(Task::Leave);
+        self.tasks.push(Task::Block(block));
+        Ok(())
+    }
+
     fn enter(&mut self, kind: ScopeKind, span: Span) -> Result<(), Diagnostic> {
         if self.result.scopes.len() >= MAX_ITEMS {
             return Err(Diagnostic::new("scope count exceeds safety limit"));
@@ -592,6 +610,7 @@ impl<'a> Walker<'a> {
             parent: Some(self.current),
             function,
             kind,
+            name_scope: id,
             span,
             bindings: Vec::new(),
             upvalues: BTreeSet::new(),
@@ -657,6 +676,7 @@ impl<'a> Walker<'a> {
             is_const,
             preserve,
         });
+        self.result.activations.push(self.result.references.len());
         self.result.scopes[self.current].bindings.push(id);
         self.visible.entry(name.to_owned()).or_default().push(id);
         Ok(())
@@ -884,87 +904,7 @@ impl Analysis {
     }
 
     fn random_short_plan(&self, target: Target, seed: u64) -> Result<RenamePlan, Diagnostic> {
-        let mut names: Vec<Option<String>> = vec![None; self.bindings.len()];
-        let mut reserved = self.reserved.clone();
-        // Reuse old spellings ONLY for locals that will ALL be simultaneously
-        // replaced. Retained locals, globals and types remain unavailable.
-        reserved.extend(
-            self.bindings
-                .iter()
-                .filter(|binding| binding.preserve.is_some())
-                .map(|binding| binding.name.clone()),
-        );
-        let mut order: Vec<_> = (0..self.bindings.len())
-            .filter(|&id| self.bindings[id].preserve.is_none())
-            .collect();
-        order.sort_by_key(|&id| {
-            let binding = &self.bindings[id];
-            (
-                std::cmp::Reverse(binding.references),
-                binding.declaration.map_or(usize::MAX, |span| span.start),
-                id,
-            )
-        });
-
-        let mut single = Vec::new();
-        let mut double = Vec::new();
-        for first in b'a'..=b'z' {
-            single.push(char::from(first).to_string());
-            for second in b'a'..=b'z' {
-                double.push(format!("{}{}", char::from(first), char::from(second)));
-            }
-        }
-        for pool in [&mut single, &mut double] {
-            pool.retain(|name| !reserved.contains(name) && !target.is_reserved_name(name));
-        }
-        // Independent stream: dispatcher/template choices cannot consume the
-        // random state used to allocate final variable names.
-        let domain = if target.is_luau() {
-            0x6e61_6d65_0000_0735
-        } else {
-            0x6e61_6d65_0000_0051
-        };
-        let mut random = Prng::new(seed ^ domain);
-        random.shuffle(&mut single);
-        random.shuffle(&mut double);
-        single.extend(double);
-        let mut available = single;
-        if order.len() > available.len() {
-            return Err(Diagnostic::new(format!(
-                "1-2 letter variable name pool exhausted: {} bindings require distinct names, only {} are safe; use --no-rename or split the source",
-                order.len(), available.len()
-            )));
-        }
-        let mut assigned: Vec<BindingId> = Vec::new();
-        for id in order {
-            let original = &self.bindings[id].name;
-            if let Some(index) = available.iter().position(|name| name != original) {
-                // At most 702 candidates. Ordered removal keeps one-letter
-                // priority for frequent bindings, while each pool is shuffled.
-                names[id] = Some(available.remove(index));
-            } else {
-                // A greedy allocation can leave the last binding its own old
-                // name. Repair with a safe two-way swap instead of spuriously
-                // reporting exhaustion when a full derangement exists.
-                let remaining = available
-                    .pop()
-                    .ok_or_else(|| Diagnostic::new("1-2 letter variable name pool exhausted"))?;
-                let previous = assigned
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|&previous| self.bindings[previous].name != remaining)
-                    .ok_or_else(|| {
-                        Diagnostic::new(
-                            "1-2 letter variable name pool cannot rename every binding without retaining an original name",
-                        )
-                    })?;
-                names[id] = names[previous].take();
-                names[previous] = Some(remaining);
-            }
-            assigned.push(id);
-        }
-        Ok(RenamePlan { names })
+        rename::plan(self, target, seed)
     }
 
     pub(crate) fn verify_renamed(
@@ -972,11 +912,17 @@ impl Analysis {
         other: &Analysis,
         plan: &RenamePlan,
     ) -> Result<(), Diagnostic> {
+        if plan.names.len() != self.bindings.len() {
+            return Err(Diagnostic::new(
+                "invalid rename plan length; refusing output",
+            ));
+        }
         let same_scopes = self.scopes.len() == other.scopes.len()
             && self.scopes.iter().zip(&other.scopes).all(|(a, b)| {
                 a.parent == b.parent
                     && a.function == b.function
                     && a.kind == b.kind
+                    && a.name_scope == b.name_scope
                     && a.bindings == b.bindings
                     && a.upvalues == b.upvalues
             });
@@ -1005,8 +951,14 @@ impl Analysis {
                     && a.is_write == b.is_write
                     && expected == b.name
             });
-        if same_scopes && same_bindings && same_references && self.globals == other.globals {
-            Ok(())
+        if same_scopes
+            && same_bindings
+            && same_references
+            && self.globals == other.globals
+            && self.activations == other.activations
+        {
+            // Graph identity alone misses collisions between unused locals.
+            rename::verify_names(other, plan)
         } else {
             Err(Diagnostic::new(
                 "safe minification changed lexical bindings; refusing output",

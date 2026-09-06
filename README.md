@@ -1,6 +1,6 @@
 # OBF
 
-面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox** 的 std-only Rust 工具链。当前版本包含带 byte span 的 owned AST 源码前端、基于作用域的安全随机短名、单行压缩、防御式字节码解析，以及可执行的随机私有寄存器 VM。`virtualize` 会先调用固定目标编译器，再把原生指令、常量、prototype、闭包与 AUX/data word 序列化为真正的版本化二进制私有字节码。输出脚本只嵌入一个带目标标记、payload 长度和 Adler-32 完整性字段的 byte string，由生成的 decoder 恢复 VM 状态并直接解释，**不会用 Lua table 伪装字节码，也不会用 `load`/`loadstring` 重新加载原始源码**。
+面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox** 的 std-only Rust 工具链。当前版本包含带 byte span 的 owned AST 源码前端、支持跨作用域复用的安全随机短名、单行压缩、防御式字节码解析，以及可执行的随机私有寄存器 VM。`virtualize` 会先调用固定目标编译器，再把原生指令、常量、prototype、闭包与 AUX/data word 序列化为真正的版本化二进制私有字节码。输出脚本只嵌入一个带目标标记、payload 长度和 Adler-32 完整性字段的 byte string，由生成的 decoder 恢复 VM 状态并直接解释，**不会用 Lua table 伪装字节码，也不会用 `load`/`loadstring` 重新加载原始源码**。
 
 新接手开发者请先阅读 [`项目交接总结.md`](项目交接总结.md)，其中集中记录架构、硬约束、测试门禁、常见陷阱和下一阶段优先级。
 
@@ -47,13 +47,15 @@ seed 控制最终变量随机短名；对 VM 还控制私有 opcode、dispatcher
 
 `check` **只检查词法、语法及上述绑定规则，不等价于原生编译成功**；例如 Luau `continue` 跳过 `repeat` 局部初始化的控制流检查、目标寄存器/局部变量资源上限仍由编译器负责。安全限制内的有限差分回归不代表解析器已被证明对任意输入完全正确。`tests/parser_audit.rs` 对固定参考编译器检查接受/拒绝案例、生成式运算符组合和三种压缩配置，并固定记录 parser/compiler 边界。
 
-## 安全压缩与最终随机命名（M3）
+## 安全压缩、作用域复用与最终随机命名（M3）
 
 `obf minify` 默认解析 AST、建立 lexical scope 与 local/parameter/upvalue 绑定身份，再对全部可安全改名的绑定分配 **1–2 个小写字母**，例如 `d`、`q`、`ab`、`ef`。单字母池和双字母池分别按 seed 洗牌，引用频率高的绑定优先使用单字母。**原本已是一、两字母的安全局部变量也必须换成不同的名称**，不是固定按 `a,b,c` 顺序缩短。
 
-新名字在整份输出中唯一，避开 global、类型/泛型、受保护的 local、目标保留字及标准库/Roblox API 集合。可以使用另一个将被同时替换的 local 的旧拼写；改写按绑定 ID 和原始 span 一次完成，不按文本全局替换。不做跨作用域短名复用、常量折叠或死代码删除。
+新名字**同域唯一，跨域安全复用**，覆盖 function、if/elseif/else、while、do、for 和 repeat。每个命名域内的所有可改名声明保持不同，包括未使用及原先同名遮蔽的 locals；函数参数与直接函数体 locals 共用命名域，for 变量与直接循环体 locals 也共用命名域。`Scope.name_scope` 表示这个唯一性分组，不改变原有 lexical scope ID、parent 或可见性。
 
-字母池最多 `26 + 26×26 = 702` 个候选，排除保留名称后更少。若不能为全部可改名绑定安全分配不同于各自原名的短名，则返回诊断，**不输出三字母名、不部分改名、不写出失败结果**；`minify` 可显式 `--no-rename`，或拆分源码。严格全局唯一可能使某些原本大量复用单字母的代码稍长，这是本轮“全部重新随机命名”的明确取舍。
+复用不是逐块重置名称池：分析声明实际生效的顺序，禁止会截获外层引用、闭包/upvalue 或写入目标的同名分配；已被原拼写遮蔽的声明也纳入约束。globals、类型/泛型、受保护 local、保留字和标准库/Roblox API 仍全局排除。原本必须保留的同名遮蔽保持原样，不引入新冲突。改写按绑定 ID 和原始 span 一次完成，可以使用其他同时改名 local 的旧拼写；不做文本全局替换、常量折叠或死代码删除。
+
+字母池最多 `26 + 26×26 = 702` 个候选，排除保留名称后更少，但**整份源码的绑定数不再受 702 限制**。分配使用按引用频率排序的 seeded 着色，同域冲突以名称占用表表示，跨域使用有界稀疏干涉边；末位冲突通过同域迭代匹配修复，其他域的颜色保持固定。它不是全局最优着色器：某域超出候选池、当前有界分配找不到安全方案或超出资源门限时返回诊断，**不输出三字母名、不部分改名、不写出失败结果**；可显式 `--no-rename` 或拆分源码。
 
 已处理：
 
@@ -63,7 +65,7 @@ seed 控制最终变量随机短名；对 VM 还控制私有 opcode、dispatcher
 - Luau `typeof` 中的值引用和 `Module.Type` 中的局部模块前缀；函数签名按固定 0.735 parser 的外层值作用域解析；
 - 嵌套插值中的引用、函数和局部声明；表达式内部的多行空白/注释会压缩，字面文本的换行、花括号、反引号及转义按值保留。
 
-全局、表字段、方法、未限定的类型名称和泛型名称不会改名；Luau value export 的公开名称保持不变。type function 内部名称暂时保持原样；外层运行时 local 捕获按 Luau 规则拒绝，而不是通过保留名称放行。改写后会**重新解析最终单行输出并核对 scope、每个引用的绑定身份、global 和 upvalue 集合**，校验失败则拒绝输出。
+全局、表字段、方法、未限定的类型名称和泛型名称不会改名；Luau value export 的公开名称保持不变。type function 内部名称暂时保持原样；外层运行时 local 捕获按 Luau 规则拒绝，而不是通过保留名称放行。改写后会**重新解析最终单行输出，核对 scope、声明生效顺序、每个引用/写入的绑定身份、global 和 upvalue 集合，并独立检查同域不产生重复名称**；后者还能发现仅靠引用图无法发现的未使用变量撞名，任何校验失败均拒绝输出。
 
 遇到已知反射/动态环境访问（如 `debug`、`_G`、`_ENV`、`getfenv`、`setfenv`、`loadstring`、`string.dump`，以及可静态识别的反射字段，包括转义/拼接字符串 key）时，默认整份源码退回仅词法压缩。通过未知宿主回调传入的任意反射能力无法静态证明安全，此时请显式使用：
 
@@ -73,13 +75,13 @@ target/debug/obf minify --target lua51 --no-rename -o script.min.lua script.lua
 
 两个模式都不承诺保留源码行号、调试位置信息、dump 字节或错误文本中的位置；`--no-rename` 保留的是名称，不是原始源码布局。
 
-公共接口为 `obf::scope::analyze(source, target)`、默认使用新 seed 的 `obf::minify(...)`，以及 `obf::minify_with_options(..., MinifyOptions::seeded(123))` / `MinifyOptions::lexical()`。`MinifyOptions` 现在含 `rename_locals` 和 `seed`；推荐使用上述构造方法。原有低层 `obf::minify::minify(source, tokens, target)` 仍为词法模式，并验证外部 token stream。作用域分析使用显式工作栈，scope/binding/reference 各限 1,000,000 项，工作项限 8,000,000。
+公共接口为 `obf::scope::analyze(source, target)`、默认使用新 seed 的 `obf::minify(...)`，以及 `obf::minify_with_options(..., MinifyOptions::seeded(123))` / `MinifyOptions::lexical()`。`MinifyOptions` 现在含 `rename_locals` 和 `seed`；推荐使用上述构造方法。原有低层 `obf::minify::minify(source, tokens, target)` 仍为词法模式，并验证外部 token stream。作用域分析使用显式工作栈，scope/binding/reference 各限 1,000,000 项，工作项限 8,000,000。名称复用另有 8,000,000 次工作预算及 1,000,000 条跨域干涉边上限，同域不构造平方规模的两两边。
 
 ## 私有字节码与 VM
 
 所有 VM 指令都平铺在唯一的 `src/vm/opcode/` 文件夹内：Lua 5.1 共 38 个 `lua51_*.rs` 文件，Luau 0.735 共 91 个 `luau_*.rs` 文件。每个文件只负责一条指令，并通过固定的 `code() -> &'static str` 返回该指令的解释器代码；`src/vm/opcode/mod.rs` 仅负责注册和按 opcode 取用。生成时只装入当前 chunk 实际使用的 handler，不再输出无用 dispatcher 分支。
 
-decoder、runtime、dispatcher、全部已用 handler 和执行尾部**全部组装完成后**，`vm::virtualize` 仅调用一次内部 `minify::finalize_vm`，随后不再追加代码。该阶段统一随机命名所有显式 local、局部函数、参数与循环变量，并在最终单行输出中再次核对绑定图、名称长度与确实已换名；隐式 Lua 5.1 `arg` 不属于源码中的显式声明。
+decoder、runtime、dispatcher、全部已用 handler 和执行尾部**全部组装完成后**，`vm::virtualize` 仅调用一次内部 `minify::finalize_vm`，随后不再追加代码。该阶段统一随机命名所有显式 local、局部函数、参数与循环变量，并在最终单行输出中再次核对绑定图、同域唯一性、名称长度与确实已换名；隐式 Lua 5.1 `arg` 不属于源码中的显式声明。
 
 生成器只有一个严格审计的环境捕获例外：`local G=(getfenv and getfenv(0))or _G`。仅内部生成路径可使用，额外检测到的反射/环境访问（barrier）或受保护显式绑定会导致生成失败。普通 `minify` 对同样的源码仍执行保守保留策略，没有公开的“强制忽略反射”选项。全局、字段、方法和私有 bytecode/string 内容不会随局部变量改名；这也不承诺模拟任意宿主反射、调试栈或原始调试名称。
 
@@ -89,8 +91,8 @@ decoder、runtime、dispatcher、全部已用 handler 和执行尾部**全部组
 
 仓库根目录同时提交两份可直接检查和运行的生成结果：
 
-- `vm_lua51.out.lua`：`tests/fixtures/vm_lua51.lua`，seed **7001**，**16,491 B**；
-- `vm_luau.out.lua`：`tests/fixtures/vm_luau.lua`，seed **7351**，**24,491 B**。
+- `vm_lua51.out.lua`：`tests/fixtures/vm_lua51.lua`，seed **7001**，**16,212 B**；
+- `vm_luau.out.lua`：`tests/fixtures/vm_luau.lua`，seed **7351**，**23,986 B**。
 
 生成器或命名策略变更后需同步再生成这两份文件；测试矩阵会与固定 seed 新生成结果逐字节比较。
 
@@ -128,15 +130,15 @@ decoder、runtime、dispatcher、全部已用 handler 和执行尾部**全部组
 10. 对 `scope_lua51.lua` / `scope_luau.lua` 比较原始、仅词法、seed 735/736 安全压缩的编译和运行结果，验证固定 seed 确定性、异 seed 换名及这些 fixture 的实际缩短；
 11. 对 `reflection_lua51.lua` / `reflection_luau.lua` 验证反射可观察名称不变，自动保留输出与 `--no-rename` 逐字节一致。
 
-`tests/scope.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/唯一性/换名断言，短名重分配，末位冲突修复，名称池耗尽，CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行。
+`tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
-2026-09-06 完整矩阵通过，Rust 单元/集成测试合计 **72 项**（24 单元 + 48 集成，其中 11 项 parser audit），debug/release 构建通过。
+2026-09-06 完整矩阵通过，Rust 单元/集成测试合计 **84 项**（29 单元 + 55 集成，其中 11 项 parser audit、7 项 scope reuse），debug/release 构建通过。
 
 VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_luau.lua`，包含闭包/upvalue、vararg、多返回值、调用、循环、泛型迭代、table、元表/方法、分支、算术以及 Luau 专属语法路径。
 
 ## 当前边界与后续工作
 
-当前 owned AST、lexical scope、local/upvalue 绑定解析、保守安全改名和完整 VM 生成后的随机一/两字母命名已完成；跨作用域名字复用、常量折叠/死代码删除及更全面的宿主反射模型尚未实现。VM 已具备可执行的二进制私有 register bytecode，instruction/prototype 状态表由 bytecode decoder 动态构造，不再作为编译结果中的伪字节码字面量。VM wrapper 已经通过私有审计路径统一随机命名，但 binary blob 仍是可逆明文容器；分阶段字节加密、拆分隐藏密钥、进一步的安全压缩优化、更多 handler 等价模板与 Roblox-only bit32 后端仍按 [`总路线.md`](总路线.md) 后续里程碑推进。
+当前 owned AST、lexical scope、local/upvalue 绑定解析、保守安全改名、跨作用域名字复用和完整 VM 生成后的随机一/两字母命名已完成本轮增量；常量折叠/死代码删除及更全面的宿主反射模型尚未实现。VM 已具备可执行的二进制私有 register bytecode，instruction/prototype 状态表由 bytecode decoder 动态构造，不再作为编译结果中的伪字节码字面量。VM wrapper 已经通过私有审计路径统一随机命名，但 binary blob 仍是可逆明文容器；分阶段字节加密、拆分隐藏密钥、进一步的安全压缩优化、更多 handler 等价模板与 Roblox-only bit32 后端仍按 [`总路线.md`](总路线.md) 后续里程碑推进。
 
 ## Anti 状态
 

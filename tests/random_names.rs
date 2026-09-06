@@ -14,13 +14,14 @@ fn assert_renamed(before: &Analysis, after: &Analysis) {
         assert_eq!(old.kind, new.kind);
         assert_eq!(old.scope, new.scope);
         assert_eq!(old.captured, new.captured);
+        assert_eq!(old.is_const, new.is_const);
         if old.preserve.is_some() {
             assert_eq!(old.name, new.name);
         } else {
             assert_ne!(old.name, new.name, "already-short locals must change too");
             assert!((1..=2).contains(&new.name.len()));
             assert!(new.name.bytes().all(|byte| byte.is_ascii_lowercase()));
-            assert!(allocated.insert(&new.name));
+            assert!(allocated.insert((after.scopes[new.scope].name_scope, &new.name)));
             assert!(!before.globals.contains(&new.name));
         }
     }
@@ -28,6 +29,7 @@ fn assert_renamed(before: &Analysis, after: &Analysis) {
     for (old, new) in before.references.iter().zip(&after.references) {
         assert_eq!(old.binding, new.binding);
         assert_eq!(old.scope, new.scope);
+        assert_eq!(old.is_write, new.is_write);
         if old.binding.is_none() {
             assert_eq!(old.name, new.name);
         }
@@ -140,7 +142,7 @@ fn near_exhaustion_derangement_repairs_the_last_self_assignment() {
 fn exhausted_name_space_is_a_diagnostic_not_three_letters_or_unsafe_reuse() {
     let mut too_many = String::new();
     for index in 0..703 {
-        too_many.push_str(&format!("do local originalValue{index}=1 end "));
+        too_many.push_str(&format!("local originalValue{index}=1 "));
     }
     for target in [Target::Lua51, Target::Luau] {
         let error = randomize(&too_many, target, 0).unwrap_err();
@@ -153,10 +155,7 @@ fn exhausted_name_space_is_a_diagnostic_not_three_letters_or_unsafe_reuse() {
             .unwrap_err()
             .message
             .contains("pool exhausted"));
-        let duplicate = format!(
-            "{}do local a=1 end do local a=2 end",
-            reserve_except(&["a", "b"])
-        );
+        let duplicate = format!("{}local a=1 local a=2", reserve_except(&["a", "b"]));
         assert!(randomize(&duplicate, target, 0)
             .unwrap_err()
             .message

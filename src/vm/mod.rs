@@ -168,7 +168,9 @@ mod tests {
                         assert_ne!(old.name, new.name);
                         assert!((1..=2).contains(&new.name.len()));
                         assert!(new.name.bytes().all(|byte| byte.is_ascii_lowercase()));
-                        assert!(names.insert(new.name.clone()));
+                        assert!(
+                            names.insert((after.scopes[new.scope].name_scope, new.name.clone()))
+                        );
                     } else {
                         assert_eq!(old.name, new.name);
                     }
@@ -176,6 +178,12 @@ mod tests {
                 assert!(
                     names.len() > 100,
                     "test must cover decoder AND late dispatcher/handler locals"
+                );
+                let spellings: std::collections::BTreeSet<_> =
+                    names.iter().map(|(_, name)| name).collect();
+                assert!(
+                    spellings.len() < names.len(),
+                    "VM scopes must actually reuse names"
                 );
                 // A vector, not a set: equal alphabets may be assigned to
                 // different bindings in different seeded layouts.

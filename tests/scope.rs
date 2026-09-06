@@ -286,9 +286,9 @@ fn single_letter_names_go_to_more_frequent_bindings() {
 #[test]
 fn allocator_skips_keywords_and_remains_deterministic_beyond_one_letter() {
     let mut source = String::new();
-    for index in 0..650 {
+    for index in 0..80 {
         source.push_str(&format!(
-            "do local lengthyVariable{index}={index} print(lengthyVariable{index}) end "
+            "local lengthyVariable{index}={index} print(lengthyVariable{index}) "
         ));
     }
     for target in [Target::Lua51, Target::Luau] {
@@ -301,7 +301,8 @@ fn allocator_skips_keywords_and_remains_deterministic_beyond_one_letter() {
             .iter()
             .map(|binding| &binding.name)
             .collect();
-        assert_eq!(names.len(), 650);
+        assert_eq!(names.len(), 80);
+        assert!(names.iter().any(|name| name.len() == 2));
         assert!(names.iter().all(|name| (1..=2).contains(&name.len())
             && name.bytes().all(|byte| byte.is_ascii_lowercase())));
         for name in ["do", "if", "in", "or", "and", "end", "for", "nil", "not"] {

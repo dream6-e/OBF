@@ -243,7 +243,7 @@ fn command_line_supports_no_rename_and_rejects_it_for_other_commands() {
 }
 
 #[test]
-fn near_capacity_already_short_locals_run_identically_even_if_output_grows() {
+fn hundreds_of_sibling_short_locals_reuse_names_without_global_pool_growth() {
     let mut source = String::from("local z=0 ");
     for index in 0..650 {
         source.push_str(&format!("do local a={index} z=z+a end "));
@@ -252,8 +252,8 @@ fn near_capacity_already_short_locals_run_identically_even_if_output_grows() {
     for target in [Target::Lua51, Target::Luau] {
         let (compact, lexical) = differential(&source, target);
         assert!(
-            compact.len() > lexical.len(),
-            "strict globally unique names may grow existing one-letter locals"
+            compact.len() <= lexical.len(),
+            "independent sibling scopes should reuse one-letter names"
         );
     }
 }
@@ -281,7 +281,7 @@ fn full_virtual_machines_compile_and_run_across_edge_seeds() {
             {
                 assert!((1..=2).contains(&binding.name.len()));
                 assert!(binding.name.bytes().all(|byte| byte.is_ascii_lowercase()));
-                assert!(names.insert(&binding.name));
+                assert!(names.insert((analysis.scopes[binding.scope].name_scope, &binding.name)));
             }
             fs::write(&path, &output).unwrap();
             assert_eq!(
@@ -388,9 +388,21 @@ fn cli_rejects_invalid_seed_options_and_never_writes_partial_results() {
         }
     }
     let mut source = String::new();
-    for index in 0..703 {
-        source.push_str(&format!("do local originalValue{index}=1 end "));
+    // Exhaust the palette with globals in a natively compilable program;
+    // 703 siblings are now safe to reuse, while 703 same-scope locals would
+    // test the compiler's own resource limit instead of the name allocator.
+    for first in b'a'..=b'z' {
+        let mut names = vec![char::from(first).to_string()];
+        names.extend(
+            (b'a'..=b'z').map(|second| format!("{}{}", char::from(first), char::from(second))),
+        );
+        for name in names {
+            if !matches!(name.as_str(), "do" | "if" | "in" | "or") {
+                source.push_str(&format!("{name}=0 "));
+            }
+        }
     }
+    source.push_str("local originalValue=1");
     fs::write(&input, source).unwrap();
     for target in [Target::Lua51, Target::Luau] {
         for existing in [false, true] {
