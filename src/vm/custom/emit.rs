@@ -363,25 +363,53 @@ pub(crate) fn generate(
                 "if not(A and A.what==\"C\")then E()end;",
             )
         };
-        let mut chunk = String::new();
-        write!(
-            chunk,
-            "[{key}]=function(E,SB,NCH,TC,DB,GI,LS)local A={probe};{gate}\
-local S=\"{text}\";local o={{}};for i=1,#S-#S%5,5 do local v=0;local m=1;\
+        // Control-flow flattening: the base86 decode is a seeded state
+        // machine -- main-step self-loop, tail handling, finish -- with
+        // per-seed state numbers, shuffled branch order and varied
+        // condition spellings, so the decode never appears as one linear
+        // loop.
+        let sv = state_values(&mut structure, 3);
+        let (k_main, k_tail, k_done) = (sv[0], sv[1], sv[2]);
+        let decode5 = "local v=0;local m=1;\
 for j=0,4 do local b=SB(S,i+j);if b==92 or b<35 or b>121 then E()end;\
 if b>92 then b=b-36 else b=b-35 end;v=v+b*m;m=m*86 end;\
 if v>4294967295 then E()end;o[#o+1]=NCH(v%256);v=(v-v%256)/256;\
 o[#o+1]=NCH(v%256);v=(v-v%256)/256;o[#o+1]=NCH(v%256);v=(v-v%256)/256;\
-o[#o+1]=NCH(v)end;local r2=#S%5;if r2==1 then E()end;\
-if r2>0 then local v=0;local m=1;for j=0,r2-1 do local b=SB(S,#S-r2+1+j);\
+o[#o+1]=NCH(v);";
+        let decode_tail = "local v=0;local m=1;for j=0,r2-1 do local b=SB(S,#S-r2+1+j);\
 if b==92 or b<35 or b>121 then E()end;\
 if b>92 then b=b-36 else b=b-35 end;v=v+b*m;m=m*86 end;\
 if v>256^(r2-1)-1 then E()end;\
-for j=1,r2-1 do o[#o+1]=NCH(v%256);v=(v-v%256)/256 end end;return TC(o);end,",
+for j=1,r2-1 do o[#o+1]=NCH(v%256);v=(v-v%256)/256 end;";
+        let machine = state_machine(
+            &mut structure,
+            "st",
+            vec![
+                (
+                    k_main,
+                    format!("if i>L then st={k_tail} else {decode5} i=i+5 end;"),
+                ),
+                (
+                    k_tail,
+                    format!(
+                        "local r2=#S%5;if r2==1 then E()end;\
+if r2>0 then {decode_tail} end;st={k_done};"
+                    ),
+                ),
+                (k_done, "return TC(o);".to_owned()),
+            ],
+        );
+        let mut chunk = String::new();
+        write!(
+            chunk,
+            "[{key}]=function(E,SB,NCH,TC,DB,GI,LS)local A={probe};{gate}\
+local S=\"{text}\";local o={{}};local i=1;local L=#S-#S%5;local st={k_main};{machine}end,",
             key = keys[8 + hold[part]],
             probe = probe,
             gate = gate,
             text = text,
+            k_main = k_main,
+            machine = machine,
         )
         .unwrap();
         segment_fields.push(chunk);
@@ -409,17 +437,36 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
     // dependency chain. `bp` stays an upvalue inside the reader cluster;
     // the core's final position check goes through the exported `pos`
     // accessor (a returned copy of the number would go stale).
-    let mut decrypt_text = String::new();
-    write!(
-        decrypt_text,
-        "local st=1+(s1+s2+s3+{mix}*#B)%2147483646;local XB={{}};for i=1,#B do \
-st={outer}*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
+    // Flattened outer-decrypt machine: keystream XOR self-loop, rebuild
+    // and size gate, finish -- state numbers and spellings per seed.
+    let dsv = state_values(&mut structure, 3);
+    let (d_loop, d_gate, d_done) = (dsv[0], dsv[1], dsv[2]);
+    let xor_step = format!(
+        "st={outer}*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
 for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
-XB[i]=NCH(r)end;B=TC(XB);XB=nil;if #B>16777216 then E()end;\nreturn B",
-        mix = params.mix,
+XB[i]=NCH(r);i=i+1;",
         outer = params.outer
-    )
-    .unwrap();
+    );
+    let decrypt_text = format!(
+        "local st=1+(s1+s2+s3+{mix}*#B)%2147483646;local XB={{}};local i=1;local w={d_loop};\
+{machine}",
+        mix = params.mix,
+        machine = state_machine(
+            &mut structure,
+            "w",
+            vec![
+                (
+                    d_loop,
+                    format!("if i>#B then w={d_gate} else {xor_step} end;"),
+                ),
+                (
+                    d_gate,
+                    format!("B=TC(XB);XB=nil;if #B>16777216 then E()end;w={d_done};"),
+                ),
+                (d_done, "return B;".to_owned()),
+            ],
+        ),
+    );
     let decrypt_field = format!(
         "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)\n{decrypt_text}\nend,",
         keys[1]
@@ -544,44 +591,70 @@ if b8()~=1 or b8()~=0 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
 local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa<1 or isa>2 then E()end;
 local check=b32();local sa,sb=1,0;for q=33,#B do sa=(sa+SB(B,q))%65521;sb=(sb+sa)%65521 end;
 if sa+sb*65536~=check then E()end;
-local P={};local work=0;
-for id=0,np-1 do
- local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();
- if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();
- if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<F.__obf_proto_nc*2 or VMCS>F.__obf_proto_nc*7 then E()end;
- F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;
- if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end
- elseif F.__obf_proto_parent>=id then E()end;
- local legacy=MF(F.__obf_proto_flags/2)%2;
- if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;
 "#,
     );
+    // Flattened parse core: the per-prototype stages are split into local
+    // functions -- header read/validate (PH), upvalue wiring (PU), constant
+    // pool (PK) -- whose definition order shuffles per seed, driven by a
+    // seeded state machine (next/header -> upvalues -> constants -> take
+    // code -> advance; finish breaks out to the field's return).
+    let csv = state_values(&mut structure, 5);
+    let (c_next, c_up, c_konst, c_code, c_fin) = (csv[0], csv[1], csv[2], csv[3], csv[4]);
+    let mut ph = String::from(
+        "local PH=function(id,P,isa)\n local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();\n",
+    );
+    ph.push_str(
+        " if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();\n if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<F.__obf_proto_nc*2 or VMCS>F.__obf_proto_nc*7 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
+    );
     if program.target.is_luau() {
-        core_text.push_str("if legacy~=0 then E()end;");
+        ph.push_str("if legacy~=0 then E()end;");
     } else {
-        core_text.push_str("if F.__obf_proto_shared then E()end;");
+        ph.push_str("if F.__obf_proto_shared then E()end;");
     }
-    core_text.push_str(
-        r#"
- work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;
- for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];
-  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;
-  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;
-  F.__obf_proto_u[j]={tag,index};
- end;
- for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;
-  if tag==0 then F.__obf_proto_k[j]=nil
-  elseif tag==1 then local v=db8();if v>1 then E()end;F.__obf_proto_k[j]=v==1
-  elseif tag==2 then F.__obf_proto_k[j]=dnum()
-  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=dstr()
-"#,
+    ph.push_str("\n return F,VMCS\nend;\n");
+    let pu = "local PU=function(F,P)\n for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
+        .to_owned();
+    let mut pk = String::from(
+        "local PK=function(F,P)\n for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;\n  if tag==0 then F.__obf_proto_k[j]=nil\n  elseif tag==1 then local v=db8();if v>1 then E()end;F.__obf_proto_k[j]=v==1\n  elseif tag==2 then F.__obf_proto_k[j]=dnum()\n  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=dstr()\n",
     );
     if program.target.is_luau() {
-        core_text.push_str(r#"elseif tag==4 then local lo,hi=db32(),db32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
+        pk.push_str(r#"elseif tag==4 then local lo,hi=db32(),db32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
     }
-    core_text.push_str(
-        "else E()end end;F.__obf_proto_code=take(VMCS);P[id]=F;end;if pos()~=#B+1 then E()end;B=nil;",
-    );
+    pk.push_str("else E()end end;\nend;\n");
+    let mut defs = vec![ph, pu, pk];
+    structure.shuffle(&mut defs);
+    core_text.push('\n');
+    for definition in &defs {
+        core_text.push_str(definition);
+    }
+    core_text.push_str(&format!(
+        "local P={{}};local work=0;local id=0;local F;local VMCS;local w={c_next};\n"
+    ));
+    core_text.push_str(&state_machine(
+        &mut structure,
+        "w",
+        vec![
+            (
+                c_next,
+                format!(
+                    "if id>=np then w={c_fin} else F,VMCS=PH(id,P,isa);\
+work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;w={c_up}; end;"
+                ),
+            ),
+            (c_up, format!("PU(F,P);w={c_konst};")),
+            (c_konst, format!("PK(F,P);w={c_code};")),
+            (
+                c_code,
+                format!(
+                    "F.__obf_proto_code=take(VMCS);P[id]=F;id=id+1;w={c_next};"
+                ),
+            ),
+            (
+                c_fin,
+                "if pos()~=#B+1 then E()end;B=nil;break;".to_owned(),
+            ),
+        ],
+    ));
     decoder_fields.push(format!(
         "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum)\n{core_text}\nreturn P,np,entry\nend,",
         keys[20]
@@ -860,17 +933,36 @@ Make=function(id,up)
  local d={id,up};local fn=function(...)local v=H(d[1],Z(...),d[2]);return U(v,1,v.n)end;W[fn]=d;
  if F.__obf_proto_shared and not cached then F.__obf_proto_cached=fn end;return fn
 end;
-H=function(fid,args,ups)
- while true do
-  local F=P[fid];local R={};local n=args.n-F.__obf_proto_p;if n<0 then n=0 end;
-  local va={n=n};for i=1,n do va[i]=args[F.__obf_proto_p+i]end;
-  for i=0,F.__obf_proto_p-1 do R[i]={args[i+1]}end;
-  if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local v={n=n};for i=1,n do v[i]=va[i]end;R[F.__obf_proto_p][1]=v end end;
-  local pc=1;local code=F.__obf_proto_code;
-  while true do
-   local o,a,b,c=SB(code,pc,pc+3);if c==nil then E()end;pc=pc+4;
-   local k=b+c*256;local j=a+k*256;
+local SETUP=function(fid,args)
+ local F=P[fid];local R={};local n=args.n-F.__obf_proto_p;if n<0 then n=0 end;
+ local va={n=n};for i=1,n do va[i]=args[F.__obf_proto_p+i]end;
+ for i=0,F.__obf_proto_p-1 do R[i]={args[i+1]}end;
+ if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local v={n=n};for i=1,n do v[i]=va[i]end;R[F.__obf_proto_p][1]=v end end;
+ return F,R,va,n
+end;
 "#);
+    // Interpreter flattening: the frame setup moves into its own function
+    // and the fetch/dispatch loop becomes a two-phase state machine whose
+    // branch order, state numbers and condition spellings are per seed.
+    let fsv = state_values(&mut structure, 2);
+    let (k_fetch, k_disp) = (fsv[0], fsv[1]);
+    let c_fetch = state_condition(&mut structure, "w", k_fetch);
+    let c_disp = state_condition(&mut structure, "w", k_disp);
+    let dispatch_first = structure.next_u64() % 2 == 0;
+    let fetch_branch = format!(
+        "{c_fetch} then\n   o,a,b,c=SB(code,pc,pc+3);if c==nil then E()end;pc=pc+4;\n   k=b+c*256;j=a+k*256;w={k_disp};"
+    );
+    write!(
+        s,
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va,n=SETUP(fid,args);\n  local pc=1;local code=F.__obf_proto_code;\n  local o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
+        k_fetch = k_fetch,
+        machine_open = if dispatch_first {
+            format!("if {c_disp} then ")
+        } else {
+            format!("if {fetch_branch}\n   elseif {c_disp} then ")
+        },
+    )
+    .unwrap();
     let mut f5_arms: Vec<(u8, String)> = Vec::new();
     for op in program.opcodes() {
         let code = crate::vm::opcode::custom(program.target, op)
@@ -890,7 +982,16 @@ H=function(fid,args,ups)
     f5_arms.extend(f5_decoys);
     let f5_groups = (2 + structure.next_u64() % 3) as u8;
     s.push_str(&grouped_chain(&mut structure, f5_arms, f5_groups, "o"));
-    s.push_str("end;end;end;return H");
+    if dispatch_first {
+        write!(
+            s,
+            " w={k_fetch};\n   elseif {fetch_branch}\n   else E()end;"
+        )
+        .unwrap();
+    } else {
+        write!(s, " w={k_fetch};\n   else E()end;").unwrap();
+    }
+    s.push_str("\n  end;end;end;return H");
     let forwards_varargs = program.prototypes[program.entry]
         .code
         .iter()

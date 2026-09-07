@@ -832,6 +832,70 @@ fn global_names_are_hidden_behind_a_character_function_pool() {
 }
 
 #[test]
+fn stages_are_flattened_into_seeded_state_machines() {
+    // Control-flow flattening: the base86 segments, the outer decrypt,
+    // the parse core and the interpreter loop all run as seeded state
+    // machines (per-seed state numbers, shuffled branch order, four
+    // condition spellings), and the frame setup / per-prototype stages
+    // are split into their own functions. No stage keeps a linear
+    // loop shape.
+    let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut state_sets = BTreeSet::new();
+        for seed in 0..=11u64 {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+            // Seven machines: three segments, outer decrypt, parse core,
+            // and the interpreter's fetch/dispatch phase machine (inside
+            // its two enclosing loops).
+            assert_eq!(raw.matches("while true do").count(), 7);
+            // Split functions: frame setup, prototype header, upvalue
+            // wiring, constant pool.
+            assert!(raw.contains("local SETUP=function(fid,args)"));
+            assert!(raw.contains("local PH=function(id,P,isa)"));
+            assert!(raw.contains("local PU=function(F,P)"));
+            assert!(raw.contains("local PK=function(F,P)"));
+            assert!(raw.contains("return F,R,va,n"));
+            // The fetch line survives verbatim inside the phase machine
+            // (the coverage probe rewrites it).
+            assert_eq!(raw.matches("if c==nil then E()end;pc=pc+4;").count(), 1);
+            // Collect this seed's three-digit state numbers.
+            let mut found = std::collections::BTreeSet::new();
+            for token in crate::lexer::lex(&raw, target).unwrap() {
+                if token.kind == crate::lexer::TokenKind::Number {
+                    let text = token.text(&raw);
+                    if text.len() == 3 && !text.starts_with('0') {
+                        found.insert(text.to_owned());
+                    }
+                }
+            }
+            assert!(
+                found.len() >= 10,
+                "{target} seed {seed}: only {} state-like numbers",
+                found.len()
+            );
+            state_sets.insert(found);
+            let output = emit(&data, target, seed).unwrap();
+            assert_eq!(blob(&output, target, seed), data);
+        }
+        assert!(
+            state_sets.len() >= 6,
+            "{:?}: state numbering pinned across seeds",
+            target
+        );
+        // The flattened stages still run the program verbatim.
+        let workspace = native::Workspace::new();
+        let path = workspace.0.join("flattened.lua");
+        fs::write(&path, source).unwrap();
+        let expected = native::compile_and_run(target, &path);
+        fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+        assert_eq!(expected, native::compile_and_run(target, &path));
+    }
+}
+
+#[test]
 fn decoder_splits_into_seeded_random_sections() {
     // Random decoder sections: the monolithic decoder is flattened
     // into a decrypt field, a seeded 2..4 cluster split of its six
@@ -910,9 +974,12 @@ fn dispatch_chains_split_into_seeded_subchains() {
             let vld_end = vld_at + raw[vld_at..].find("if not ok then E()end;").unwrap();
             let bounds = &raw[vld_at..vld_end];
             // Interpreter chain: from the fetch line to the H return.
+            // Anchor on the hoisted fetch locals: with the
+            // fetch/dispatch phase machine the chain may sit before or
+            // after the fetch line in the text.
             let f5_at = raw
-                .find("if c==nil then E()end;pc=pc+4;")
-                .expect("interpreter fetch");
+                .find("local o,a,b,c,k,j;local w=")
+                .expect("interpreter phase machine");
             let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
             let interp = &raw[f5_at..f5_end];
             let mut chain_groups = Vec::new();
@@ -1249,17 +1316,18 @@ fn generation_respects_the_documented_size_budget() {
     // generated script beyond the documented caps (headroom over the
     // current goldens; raise the caps deliberately, never silently --
     // raised 24000/26000 -> 25500/27000 when global names moved behind
-    // the character-function pool).
+    // the character-function pool, then -> 27500/28500 when all stages
+    // were flattened into state machines).
     for (target, fixture, budget) in [
         (
             Target::Lua51,
             include_str!("../../../tests/fixtures/vm_lua51.lua"),
-            25_500usize,
+            27_500usize,
         ),
         (
             Target::Luau,
             include_str!("../../../tests/fixtures/vm_luau.lua"),
-            27_000usize,
+            28_500usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();

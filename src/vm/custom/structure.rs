@@ -132,6 +132,56 @@ pub(crate) fn selector_condition(
     }
 }
 
+/// Control-flow flattening: distinct per-seed state numbers for one
+/// machine (three digits keeps them visually indistinct from operands).
+pub(crate) fn state_values(structure: &mut crate::random::Prng, count: usize) -> Vec<u16> {
+    let mut used = std::collections::BTreeSet::new();
+    while used.len() < count {
+        used.insert((100 + structure.next_u64() % 900) as u16);
+    }
+    used.into_iter().collect()
+}
+
+/// State-test condition, one of four exactly equivalent spellings of
+/// `var == value` (raw integer comparison, no metamethods).
+pub(crate) fn state_condition(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    value: u16,
+) -> String {
+    match structure.next_u64() % 4 {
+        0 => format!("{var}=={value}"),
+        1 => format!("{value}=={var}"),
+        2 => format!("not({var}~={value})"),
+        _ => format!("{var}-{value}==0"),
+    }
+}
+
+/// A flattened state machine: `while true do if <c1> then B1 elseif <c2>
+/// then B2 ... else E()end end;` with the branch bodies supplied by the
+/// caller and both the textual branch order and every condition spelling
+/// drawn from the structure stream. The caller declares and initializes
+/// the state variable before the machine.
+pub(crate) fn state_machine(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    mut branches: Vec<(u16, String)>,
+) -> String {
+    structure.shuffle(&mut branches);
+    let mut text = String::from("while true do ");
+    for (index, (value, body)) in branches.iter().enumerate() {
+        let condition = state_condition(structure, var, *value);
+        write!(
+            text,
+            "{} {condition} then {body}",
+            if index == 0 { "if" } else { "elseif" }
+        )
+        .unwrap();
+    }
+    text.push_str(" else E()end;end;");
+    text
+}
+
 /// Per-seed opcode renumbering: an injective map from the 64 canonical ISA
 /// slots to byte values 0..=255, drawn by rejection sampling from a
 /// seed-salted stream. Both sides derive it identically: the generator
