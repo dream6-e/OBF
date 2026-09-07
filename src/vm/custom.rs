@@ -431,68 +431,145 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
             keys[12]
         ),
     ];
-    let f2_start = s.len();
+    // Random decoder sections: the monolithic decoder is flattened into
+    // sibling payload fields -- a decrypt field, a seeded 2..4 cluster
+    // split of the six helper groups (byte-stream readers, double
+    // reconstructor, constant keystream, XOR core, encrypted readers,
+    // number family) and the parse core. Every field lands at a random
+    // layout position; the call order in the entry is the fixed
+    // dependency chain. `bp` stays an upvalue inside the reader cluster;
+    // the core's final position check goes through the exported `pos`
+    // accessor (a returned copy of the number would go stale).
+    let mut decrypt_text = String::new();
     write!(
-        s,
-        "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF,ca,cb)\n",
-        keys[1]
-    )
-    .unwrap();
-    write!(
-        s,
+        decrypt_text,
         "local st=1+(s1+s2+s3+{mix}*#B)%2147483646;local XB={{}};for i=1,#B do \
 st={outer}*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
 for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
-XB[i]=NCH(r)end;B=TC(XB);XB=nil;",
+XB[i]=NCH(r)end;B=TC(XB);XB=nil;if #B>16777216 then E()end;\nreturn B",
         mix = params.mix,
         outer = params.outer
     )
     .unwrap();
-    s.push_str(
-        r#"
-if #B>16777216 then E()end;
-local bp=1;
+    let decrypt_field = format!(
+        "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)\n{decrypt_text}\nend,",
+        keys[1]
+    );
+    let g1 = r#"local bp=1;
 local b8=function()local v=SB(B,bp);if v==nil then E()end;bp=bp+1;return v end;
 local b16=function()local a,b=b8(),b8();return a+b*256 end;
 local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;
 local take=function(n)if n>#B-bp+1 then E()end;local v=SS(B,bp,bp+n-1);bp=bp+n;return v end;
 local str=function()return take(b32())end;
-"#,
-    );
-    s.push_str(
-        r#"
-local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;
-"#,
-    );
+local pos=function()return bp end;"#
+        .to_owned();
+    let g2 = r#"local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;"#
+        .to_owned();
     let mut ku_steps = String::new();
     for _ in 0..params.constant_rounds {
         ku_steps.push_str(&format!("ku={}*ku%2147483647;", params.constant));
     }
-    write!(
-        s,
-        "local ku=(ca*{mix}+cb)%2147483647;{ku_steps}\nlocal ks=1+(ku+{mix}*#B)%2147483646;local KA=function()ks={mult}*ks%2147483647;return ks%256 end;\n",
+    let g3 = format!(
+        "local ku=(ca*{mix}+cb)%2147483647;{ku_steps}\nlocal ks=1+(ku+{mix}*#B)%2147483646;local KA=function()ks={mult}*ks%2147483647;return ks%256 end;",
         mix = params.mix,
         mult = params.constant
-    )
-    .unwrap();
-    s.push_str(
-        r#"
-local DX=function(u)local y=KA();local r=0;local w=1;for j=1,8 do local q=(u%2+y%2)%2;if q==1 then r=r+w end;u=(u-u%2)/2;y=(y-y%2)/2;w=w*2 end;return r end;
+    );
+    let g4g5g6 = r#"local DX=function(u)local y=KA();local r=0;local w=1;for j=1,8 do local q=(u%2+y%2)%2;if q==1 then r=r+w end;u=(u-u%2)/2;y=(y-y%2)/2;w=w*2 end;return r end;
 local db8=function()return DX(b8())end;
 local db32=function()local p,q,r,t=db8(),db8(),db8(),db8();return p+q*256+r*65536+t*16777216 end;
 local dstr=function()local v=take(b32());local o={}for i=1,#v do o[i]=NCH(DX(SB(v,i)))end;return TC(o)end;
 local num=function()return fin(b32(),b32())end;
-local dnum=function()return fin(db32(),db32())end;
-if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=2 then E()end;
+local dnum=function()return fin(db32(),db32())end;"#
+        .to_owned();
+    let (g4, g5, g6) = (
+        g4g5g6[..g4g5g6.find("local db8").unwrap()].to_owned(),
+        g4g5g6[g4g5g6.find("local db8").unwrap()..g4g5g6.find("local num").unwrap()].to_owned(),
+        g4g5g6[g4g5g6.find("local num").unwrap()..].to_owned(),
+    );
+    // (params, exports, text) per helper group, in dependency order.
+    let groups: Vec<(&[&str], &[&str], String)> = vec![
+        (
+            &["B", "E", "SB", "SS"],
+            &["b8", "b16", "b32", "take", "str", "pos"],
+            g1,
+        ),
+        (&["MF"], &["fin"], g2),
+        (&["B", "ca", "cb"], &["KA"], g3),
+        (&["KA"], &["DX"], g4),
+        (
+            &["b8", "b32", "take", "SB", "NCH", "TC", "DX"],
+            &["db8", "db32", "dstr"],
+            g5,
+        ),
+        (&["fin", "b32", "db32"], &["num", "dnum"], g6),
+    ];
+    let base_names = ["B", "E", "SB", "SS", "NCH", "TC", "MF", "ca", "cb"];
+    let cluster_count = 2 + structure.next_u64() % 3;
+    let mut bounds_set = std::collections::BTreeSet::new();
+    while bounds_set.len() < (cluster_count - 1) as usize {
+        bounds_set.insert(1 + structure.next_u64() % 5);
+    }
+    let mut bounds: Vec<usize> = bounds_set.into_iter().map(|b| b as usize).collect();
+    bounds.push(groups.len());
+    let mut decoder_fields = vec![decrypt_field];
+    let mut decoder_wiring = format!(
+        "local B=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF);",
+        keys[1]
+    );
+    let mut prior_exports: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    for (index, bound) in bounds.iter().enumerate() {
+        let cluster = &groups[start..*bound];
+        start = *bound;
+        let mut params: Vec<&str> = Vec::new();
+        for (needs, _, _) in cluster {
+            for need in *needs {
+                if !params.contains(need)
+                    && (base_names.contains(need) || prior_exports.contains(need))
+                {
+                    params.push(need);
+                }
+            }
+        }
+        let mut exports: Vec<&str> = Vec::new();
+        let mut text = String::new();
+        for (_, group_exports, group_text) in cluster {
+            text.push_str(group_text);
+            text.push('\n');
+            exports.extend_from_slice(group_exports);
+        }
+        let key = keys[16 + index];
+        decoder_fields.push(format!(
+            "[{key}]=function({})\n{text}return {};\nend,",
+            params.join(","),
+            exports.join(",")
+        ));
+        let args = params
+            .iter()
+            .map(|name| match *name {
+                "ca" => keys[4].to_string(),
+                "cb" => keys[7].to_string(),
+                other => other.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        decoder_wiring.push_str(&format!(
+            "\nlocal {}=VMS[{key}]({args});",
+            exports.join(",")
+        ));
+        prior_exports.extend(exports);
+    }
+    let mut core_text = String::from(
+        r#"if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=2 then E()end;
 "#,
     );
     write!(
-        s,
+        core_text,
         "if b8()~={} then E()end;",
         if program.target.is_luau() { 117 } else { 81 }
     )
     .unwrap();
-    s.push_str(
+    core_text.push_str(
         r#"
 if b8()~=1 or b8()~=0 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
 local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa<1 or isa>2 then E()end;
@@ -511,11 +588,11 @@ for id=0,np-1 do
 "#,
     );
     if program.target.is_luau() {
-        s.push_str("if legacy~=0 then E()end;");
+        core_text.push_str("if legacy~=0 then E()end;");
     } else {
-        s.push_str("if F.__obf_proto_shared then E()end;");
+        core_text.push_str("if F.__obf_proto_shared then E()end;");
     }
-    s.push_str(
+    core_text.push_str(
         r#"
  work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;
  for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];
@@ -531,12 +608,19 @@ for id=0,np-1 do
 "#,
     );
     if program.target.is_luau() {
-        s.push_str(r#"elseif tag==4 then local lo,hi=db32(),db32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
+        core_text.push_str(r#"elseif tag==4 then local lo,hi=db32(),db32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
     }
-    s.push_str(
-        "else E()end end;F.__obf_proto_code=take(VMCS);P[id]=F;end;if bp~=#B+1 then E()end;B=nil;",
+    core_text.push_str(
+        "else E()end end;F.__obf_proto_code=take(VMCS);P[id]=F;end;if pos()~=#B+1 then E()end;B=nil;",
     );
-    s.push_str("\nreturn P,np,entry\nend,");
+    decoder_fields.push(format!(
+        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum)\n{core_text}\nreturn P,np,entry\nend,",
+        keys[20]
+    ));
+    decoder_wiring.push_str(&format!(
+        "\nlocal P,np,entry=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum);",
+        keys[20]
+    ));
     let f3_start = s.len();
     // Feature-split hiding: the operand validator used to carry three
     // instant static signatures inside one field -- the sequential-key
@@ -767,6 +851,12 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[4]
     )
     .unwrap();
+    // Swap the monolithic decoder call for the random-section wiring.
+    let old_decoder_line = format!(
+        "local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});",
+        keys[1], keys[4], keys[7]
+    );
+    s = s.replacen(&old_decoder_line, &decoder_wiring, 1);
     // M7: wrap the just-emitted entry body in an opaque branch. The live
     // side carries the real chain; the dead side carries real-looking,
     // never-executing instructions behind a constant contradiction.
@@ -860,8 +950,7 @@ H=function(fid,args,ups)
     let f5_chunk = s[f5_start..tail_start].to_owned();
     let tail = s[tail_start..].to_owned();
     let mut fields: Vec<String> = vec![
-        s[header_end..f2_start].to_owned(),
-        s[f2_start..f3_start].to_owned(),
+        s[header_end..f3_start].to_owned(),
         s[f3_start..f4_start].to_owned(),
         s[f4_start..entry_start].to_owned(),
     ];
@@ -869,6 +958,7 @@ H=function(fid,args,ups)
     fields.extend(segment_fields);
     fields.extend(watermark_fields);
     fields.extend([forms_field, decode_field, validate_field]);
+    fields.extend(decoder_fields);
     fields.extend([entry_chunk, f5_chunk]);
     structure.shuffle(&mut fields);
     let mut out = s[..header_end].to_owned();
@@ -927,7 +1017,7 @@ fn wrapper_keys(seed: u64) -> Vec<u64> {
     let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
     let mut used = std::collections::BTreeSet::new();
     let mut keys = Vec::new();
-    while keys.len() < 16 {
+    while keys.len() < 21 {
         let key = 100 + random.next_u64() % 9900;
         if used.insert(key) {
             keys.push(key);
@@ -1853,7 +1943,7 @@ mod tests {
                 let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
                     panic!("{target}: {output}");
                 };
-                assert_eq!(fields.len(), 17, "{target}: {output}");
+                assert!((20..=22).contains(&fields.len()), "{target}: {output}");
                 let mut numeric_keys = std::collections::BTreeSet::new();
                 let mut entries = 0;
                 for field in fields {
@@ -1882,7 +1972,7 @@ mod tests {
                     }
                 }
                 assert_eq!(entries, 1);
-                assert_eq!(numeric_keys.len(), 16);
+                assert!((19..=21).contains(&numeric_keys.len()));
                 // The wrapper is not just structural: it runs the program.
                 let workspace = native::Workspace::new();
                 let path = workspace.0.join("wrapped.lua");
@@ -2181,7 +2271,7 @@ mod tests {
                         starts.push(tokens[index + 1].text(&raw).to_owned());
                     }
                 }
-                assert_eq!(starts.len(), 17, "{target} seed {seed}");
+                assert!((20..=22).contains(&starts.len()), "{target} seed {seed}");
                 let keys = wrapper_keys(seed);
                 let interpreter_key = keys[4].to_string();
                 entry_ranks.insert(starts.iter().position(|k| k.starts_with('"')).unwrap());
@@ -2333,6 +2423,66 @@ mod tests {
             // The hidden-name script still runs the program verbatim.
             let workspace = native::Workspace::new();
             let path = workspace.0.join("hidden_names.lua");
+            fs::write(&path, source).unwrap();
+            let expected = native::compile_and_run(target, &path);
+            fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+            assert_eq!(expected, native::compile_and_run(target, &path));
+        }
+    }
+
+    #[test]
+    fn decoder_splits_into_seeded_random_sections() {
+        // Random decoder sections: the monolithic decoder is flattened
+        // into a decrypt field, a seeded 2..4 cluster split of its six
+        // helper groups and a parse core -- sibling payload fields at
+        // random layout positions, wired through the entry in the fixed
+        // dependency order. The stream position stays an upvalue inside
+        // the reader cluster; the core checks it through the exported
+        // `pos` accessor.
+        let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+        for target in [Target::Lua51, Target::Luau] {
+            let data = compile(source, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let mut cluster_counts = BTreeSet::new();
+            for seed in 0..=11u64 {
+                let raw = generate(&data, &program, seed).unwrap();
+                assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+                // Decrypt field and parse core keep their audited roles;
+                // between them 2..=4 randomly grouped helper fields.
+                assert!(raw.contains(&format!(
+                    "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)",
+                    wrapper_keys(seed)[1]
+                )));
+                assert!(raw.contains(&format!(
+                    "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum)",
+                    wrapper_keys(seed)[20]
+                )));
+                assert!(raw.contains("local pos=function()return bp end;"));
+                assert!(!raw.contains("bp~=#B+1"));
+                let numeric = raw.matches("]=function(").count() - 1;
+                let clusters = numeric - 17;
+                assert!(
+                    (2..=4).contains(&clusters),
+                    "{target} seed {seed}: {clusters} decoder clusters"
+                );
+                cluster_counts.insert(clusters);
+                // Wiring order is the dependency chain: decrypt first, core
+                // last, every cluster field called exactly once.
+                let wiring_at = raw.find("local B=VMS[").expect("decoder wiring");
+                let wiring_end =
+                    wiring_at + raw[wiring_at..].find("local P,np,entry=VMS[").unwrap();
+                let wiring = &raw[wiring_at..wiring_end];
+                assert_eq!(wiring.matches("=VMS[").count(), clusters as usize + 1);
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(blob(&output, target, seed), data);
+            }
+            assert!(
+                cluster_counts.len() >= 2,
+                "{target}: decoder split pinned ({cluster_counts:?})"
+            );
+            // The randomly split decoder still runs the program verbatim.
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("random_sections.lua");
             fs::write(&path, source).unwrap();
             let expected = native::compile_and_run(target, &path);
             fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
@@ -2564,7 +2714,7 @@ mod tests {
                         order.push(tokens[index + 1].text(&output).to_owned());
                     }
                 }
-                assert_eq!(order.len(), 16, "{target} seed {seed}");
+                assert!((19..=21).contains(&order.len()), "{target} seed {seed}");
                 layouts.insert((format!("{target:?}"), order));
                 for multiplier in [16_807u64, 48_271, 65_539] {
                     if output.contains(&format!("={multiplier}*"))
