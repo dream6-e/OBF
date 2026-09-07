@@ -143,33 +143,173 @@ pub(crate) fn generate(
     let mut s = String::from("local x={};return setmetatable({");
     let header_end = s.len();
     write!(s, "[{}]=function()\n", keys[0]).unwrap();
-    // Prelude-order variants: the host-capture statements are independent
-    // (the only dependency is Z reading SC), so the definition order, the
-    // return order and the entry destructuring order are separately seeded
-    // shuffles. The return list keeps every name on both targets; IF/Freeze
-    // still read as nil globals on Lua 5.1.
-    let mut units: Vec<(&str, &str)> = vec![
-        ("SC", "local SC=select;"),
+    // Hidden-name prelude: apart from the audited environment capture
+    // (getfenv/_G -- taken at level 1 so hidden-name lookups resolve
+    // exactly like bare global names, keeping sandbox tampering of
+    // loadstring/debug detectable by the probes) and the outer
+    // setmetatable call, no global name is
+    // spelled out. Every captured global -- string, math, error, tonumber,
+    // type, loadstring, debug, ... -- is resolved through G[name], where
+    // each name is assembled at run time from single-character functions
+    // in a pool table: the char-to-slot assignment, the per-name index
+    // sequence and the assembly format (direct concat vs a table-driven
+    // concat helper) are all drawn per seed. The capture statements stay
+    // independent (Z reads SC) and shuffle as before; the return and
+    // entry-destructuring orders are a separate shuffle.
+    s.push_str("\nlocal G=(getfenv and getfenv(1))or _G;");
+    let mut hidden: Vec<&str> = vec![
+        "select",
+        "error",
+        "unpack",
+        "string",
+        "byte",
+        "sub",
+        "format",
+        "table",
+        "concat",
+        "char",
+        "math",
+        "floor",
+        "tonumber",
+        "type",
+        "tostring",
+        "next",
+        "getmetatable",
+        "setmetatable",
+        "rawget",
+        "rawequal",
+        "debug",
+        "loadstring",
+    ];
+    if program.target.is_luau() {
+        hidden.extend(["integer", "fromstring", "freeze", "info"]);
+    } else {
+        hidden.push("getinfo");
+    }
+    let mut chars: Vec<char> = hidden
+        .iter()
+        .flat_map(|name| name.chars())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    structure.shuffle(&mut chars);
+    let slot: std::collections::BTreeMap<char, usize> = chars
+        .iter()
+        .enumerate()
+        .map(|(index, c)| (*c, index + 1))
+        .collect();
+    s.push('\n');
+    write!(s, "local s={{").unwrap();
+    for c in &chars {
+        write!(s, "function()return\"{c}\"end,").unwrap();
+    }
+    s.push_str("};");
+    s.push_str("\nlocal C=function(t,d)local r=''for i=1,#d do r=r..t[d[i]]()end return r end;");
+    let gv =
+        |map: &std::collections::BTreeMap<&str, String>, name: &str| format!("G[{}]", map[name]);
+    let mut var_of: std::collections::BTreeMap<&str, String> = Default::default();
+    let mut definitions: Vec<String> = Vec::new();
+    for (index, name) in hidden.iter().enumerate() {
+        let expression = if structure.next_u64() % 100 < 92 {
+            let indexes = name
+                .chars()
+                .map(|c| slot[&c].to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("C(s,{{{indexes}}})")
+        } else {
+            name.chars()
+                .map(|c| format!("s[{}]()", slot[&c]))
+                .collect::<Vec<_>>()
+                .join("..")
+        };
+        definitions.push(format!("v{index}={expression}"));
+        var_of.insert(name, format!("v{index}"));
+    }
+    // Batched local statements keep the pool definitions compact.
+    for chunk in definitions.chunks(4) {
+        let vars: Vec<&str> = chunk
+            .iter()
+            .map(|definition| definition.split('=').next().unwrap())
+            .collect();
+        let expressions: Vec<&str> = chunk
+            .iter()
+            .map(|definition| &definition[definition.find('=').unwrap() + 1..])
+            .collect();
+        write!(s, "\nlocal {}={};\n", vars.join(","), expressions.join(",")).unwrap();
+    }
+    let mut units: Vec<(&str, String)> = vec![
+        ("SC", format!("local SC={};", gv(&var_of, "select"))),
         (
             "Z",
-            "local Z=function(...)return{n=SC('#',...),...}end;",
+            "local Z=function(...)return{n=SC('#',...),...}end;".to_owned(),
         ),
-        ("U", "local U=unpack or table.unpack;"),
-        ("G", "local G=(getfenv and getfenv(0))or _G;"),
-        ("E", "local E=error;"),
+        (
+            "U",
+            format!(
+                "local U={}or G[{}][{}];",
+                gv(&var_of, "unpack"),
+                var_of["table"],
+                var_of["unpack"]
+            ),
+        ),
+        ("E", format!("local E={};", gv(&var_of, "error"))),
         (
             "SB",
-            "local SB,SS,SF=string.byte,string.sub,string.format;",
+            format!(
+                "local SB,SS,SF=G[{0}][{1}],G[{0}][{2}],G[{0}][{3}];",
+                var_of["string"], var_of["byte"], var_of["sub"], var_of["format"]
+            ),
         ),
-        ("NCH", "local NCH,TC=string.char,table.concat;"),
+        (
+            "NCH",
+            format!(
+                "local NCH,TC=G[{0}][{1}],G[{2}][{3}];",
+                var_of["string"], var_of["char"], var_of["table"], var_of["concat"]
+            ),
+        ),
         (
             "MF",
-            "local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetatable,setmetatable,rawget,rawequal;",
+            format!(
+                "local MF,TN,TY,TS,NX,MT,SM,RG,RE=G[{0}][{1}],{2},{3},{4},{5},{6},{7},{8},{9};",
+                var_of["math"],
+                var_of["floor"],
+                gv(&var_of, "tonumber"),
+                gv(&var_of, "type"),
+                gv(&var_of, "tostring"),
+                gv(&var_of, "next"),
+                gv(&var_of, "getmetatable"),
+                gv(&var_of, "setmetatable"),
+                gv(&var_of, "rawget"),
+                gv(&var_of, "rawequal")
+            ),
+        ),
+        (
+            "REF",
+            format!(
+                "local DBG={0};local GI=DBG and DBG[{1}];local LS={2};",
+                gv(&var_of, "debug"),
+                var_of[if program.target.is_luau() {
+                    "info"
+                } else {
+                    "getinfo"
+                }],
+                gv(&var_of, "loadstring")
+            ),
         ),
     ];
     if program.target.is_luau() {
-        units.push(("IF", "local IF=integer and integer.fromstring;"));
-        units.push(("Freeze", "local Freeze=table.freeze;"));
+        units.push((
+            "IF",
+            format!(
+                "local IG=G[{0}];local IF=IG and IG[{1}];",
+                var_of["integer"], var_of["fromstring"]
+            ),
+        ));
+        units.push((
+            "Freeze",
+            format!("local Freeze=G[{}][{}];", var_of["table"], var_of["freeze"]),
+        ));
     }
     structure.shuffle(&mut units);
     let sc_at = units.iter().position(|(name, _)| *name == "SC").unwrap();
@@ -183,7 +323,7 @@ pub(crate) fn generate(
     }
     let mut ret_order: Vec<&str> = vec![
         "SC", "Z", "U", "G", "E", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS", "NX",
-        "MT", "SM", "RG", "RE", "IF", "Freeze",
+        "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS",
     ];
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
@@ -247,17 +387,17 @@ pub(crate) fn generate(
         let text = &encoded[at..at + chars];
         at += chars;
         let (probe, gate) = if program.target.is_luau() {
-            ("debug.info(loadstring,\"s\")", "if A~=\"[C]\" then E()end;")
+            ("DB and GI(LS,\"s\")", "if A~=\"[C]\" then E()end;")
         } else {
             (
-                "debug.getinfo(loadstring,\"S\")",
+                "DB and GI(LS,\"S\")",
                 "if not(A and A.what==\"C\")then E()end;",
             )
         };
         let mut chunk = String::new();
         write!(
             chunk,
-            "[{key}]=function(E,SB,NCH,TC)local A=debug and {probe};{gate}\
+            "[{key}]=function(E,SB,NCH,TC,DB,GI,LS)local A={probe};{gate}\
 local S=\"{text}\";local o={{}};for i=1,#S-#S%5,5 do local v=0;local m=1;\
 for j=0,4 do local b=SB(S,i+j);if b==92 or b<35 or b>121 then E()end;\
 if b>92 then b=b-36 else b=b-35 end;v=v+b*m;m=m*86 end;\
@@ -567,13 +707,11 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         for _ in 0..params.probe_rounds[index] {
             steps.push_str(&format!("x={}*x%2147483647;", params.outer));
         }
-        let mut field = format!("[{}]=function(E,a,b)local A=debug and ", keys[5 + index]);
+        let mut field = format!("[{}]=function(E,a,b,DB,GI,LS)local A=", keys[5 + index]);
         if program.target.is_luau() {
-            field.push_str("debug.info(loadstring,\"s\");if A~=\"[C]\" then E()end;");
+            field.push_str("DB and GI(LS,\"s\");if A~=\"[C]\" then E()end;");
         } else {
-            field.push_str(
-                "debug.getinfo(loadstring,\"S\");if not(A and A.what==\"C\")then E()end;",
-            );
+            field.push_str("DB and GI(LS,\"S\");if not(A and A.what==\"C\")then E()end;");
         }
         let _ = write!(
             field,
@@ -589,8 +727,8 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     write!(
         s,
         "[\"{method}\"]=function(VMS,...)\nlocal {names}=VMS[{}]();
-local c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});
-local Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);
+local c1=VMS[{}](E,{},{},DBG,GI,LS);local c2=VMS[{}](E,{},{},DBG,GI,LS);local c3=VMS[{}](E,{},{},DBG,GI,LS);
+local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
 local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal FMt,PT=VMS[{}](E,SB);local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,NCH,TC,dec,vld,PT);
 local CV,SV,Lookup=VMS[{}](TY,E);
@@ -2054,16 +2192,21 @@ mod tests {
                 if raw.contains("end;[") || raw.contains("end;\n[") || raw.contains("end;}") {
                     semicolon_outputs += 1;
                 }
-                // Prelude: the first capture statement after the field
-                // opener varies, and SC always precedes its only dependent.
+                // Prelude: the environment capture is fixed-first (every
+                // hidden-name lookup flows through it); the char pool's
+                // slot assignment varies, and SC always precedes its only
+                // dependent.
                 let prelude_at = raw
                     .find(&format!("[{}]=function()", keys[0]))
                     .expect("prelude opener");
                 let rest = &raw[prelude_at..];
-                let local_at = rest.find("local ").expect("first capture");
-                let name = rest[local_at + "local ".len()..].split('=').next().unwrap();
-                first_statements.insert(name.to_owned());
-                let sc_at = raw.find("local SC=select").expect("SC capture");
+                let pool_at = rest.find("local s={").expect("char pool");
+                let head = rest[pool_at + "local s={function()return\"".len()..]
+                    .chars()
+                    .next()
+                    .unwrap();
+                first_statements.insert(head.to_string());
+                let sc_at = raw.find("local SC=G[").expect("SC capture");
                 let z_at = raw
                     .find("local Z=function(...)return{n=SC(")
                     .expect("Z capture");
@@ -2092,6 +2235,104 @@ mod tests {
             // The fully shuffled layout still runs the program verbatim.
             let workspace = native::Workspace::new();
             let path = workspace.0.join("unanchored.lua");
+            fs::write(&path, source).unwrap();
+            let expected = native::compile_and_run(target, &path);
+            fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+            assert_eq!(expected, native::compile_and_run(target, &path));
+        }
+    }
+
+    #[test]
+    fn global_names_are_hidden_behind_a_character_function_pool() {
+        // No captured global name is spelled out: string, math, error,
+        // tonumber, type, loadstring, debug, ... are resolved through
+        // G[name], where each name is assembled from single-character
+        // functions in a seeded-shuffled pool (random slot assignment and
+        // per-name format: direct concat or a table-driven helper). Only
+        // the audited environment capture (getfenv/_G) and the outer
+        // setmetatable call keep their plaintext spelling.
+        let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+        for target in [Target::Lua51, Target::Luau] {
+            let data = compile(source, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let mut pool_heads = BTreeSet::new();
+            let mut formats = BTreeSet::new();
+            for seed in 0..=11u64 {
+                let raw = generate(&data, &program, seed).unwrap();
+                // Pool present with per-seed slot assignment, both assembly
+                // formats appear across seeds.
+                let pool_at = raw.find("local s={").expect("char pool");
+                pool_heads.insert(
+                    raw[pool_at + "local s={function()return\"".len()..]
+                        .chars()
+                        .next()
+                        .unwrap(),
+                );
+                if raw.contains("()..s[") {
+                    formats.insert("direct");
+                }
+                if raw.contains("C(s,{") {
+                    formats.insert("helper");
+                }
+                assert!(raw.contains("local G=(getfenv and getfenv(1))or _G;"));
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(emit(&data, target, seed).unwrap(), output);
+                // Name-token scan of the final script: identifiers only,
+                // so packed/segment literals cannot false-positive.
+                let tokens = crate::lexer::lex(&output, target).unwrap();
+                let mut seen: std::collections::BTreeMap<&str, usize> = Default::default();
+                for token in &tokens {
+                    if token.kind == crate::lexer::TokenKind::Identifier {
+                        *seen.entry(token.text(&output)).or_default() += 1;
+                    }
+                }
+                for name in [
+                    "string",
+                    "math",
+                    "error",
+                    "tonumber",
+                    "type",
+                    "select",
+                    "tostring",
+                    "next",
+                    "unpack",
+                    "loadstring",
+                    "debug",
+                    "getinfo",
+                    "info",
+                    "rawget",
+                    "rawequal",
+                    "getmetatable",
+                    "floor",
+                    "concat",
+                    "char",
+                    "byte",
+                    "format",
+                    "table",
+                    "integer",
+                    "fromstring",
+                    "freeze",
+                ] {
+                    assert_eq!(
+                        seen.get(name),
+                        None,
+                        "{target} seed {seed}: plaintext global {name}"
+                    );
+                }
+                assert_eq!(seen.get("setmetatable"), Some(&1), "outer wrapper call");
+                assert_eq!(seen.get("getfenv"), Some(&2), "audited capture");
+                assert_eq!(seen.get("_G"), Some(&1), "audited capture");
+                // Differential: the payload is untouched canonical bytes.
+                assert_eq!(blob(&output, target, seed), data);
+            }
+            assert!(
+                pool_heads.len() >= 3,
+                "{target}: pool slot assignment pinned"
+            );
+            assert_eq!(formats.len(), 2, "{target}: assembly format pinned");
+            // The hidden-name script still runs the program verbatim.
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("hidden_names.lua");
             fs::write(&path, source).unwrap();
             let expected = native::compile_and_run(target, &path);
             fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
@@ -2455,18 +2696,20 @@ mod tests {
     #[test]
     fn generation_respects_the_documented_size_budget() {
         // M7 size budget: the structural variants must not inflate a
-        // generated script beyond the documented caps (~15% headroom over
-        // the current goldens; raise the caps deliberately, never silently).
+        // generated script beyond the documented caps (headroom over the
+        // current goldens; raise the caps deliberately, never silently --
+        // raised 24000/26000 -> 25500/27000 when global names moved behind
+        // the character-function pool).
         for (target, fixture, budget) in [
             (
                 Target::Lua51,
                 include_str!("../../tests/fixtures/vm_lua51.lua"),
-                24_000usize,
+                25_500usize,
             ),
             (
                 Target::Luau,
                 include_str!("../../tests/fixtures/vm_luau.lua"),
-                26_000usize,
+                27_000usize,
             ),
         ] {
             let data = compile(fixture, target).unwrap();

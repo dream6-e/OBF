@@ -562,25 +562,25 @@ mod generated_tests {
 
     #[test]
     fn vm_exception_only_allows_the_audited_environment_capture() {
-        let prefix = "local G=(getfenv and getfenv(0))or _G;";
+        let prefix = "local G=(getfenv and getfenv(1))or _G;";
         for target in [Target::Lua51, Target::Luau] {
             let source = format!("{prefix}local privateValue=1;return privateValue,G");
             let output = finalize_vm(&source, target, 42).unwrap();
             assert!(!output.contains("privateValue"));
-            assert!(output.contains("getfenv(0)"));
+            assert!(output.contains("getfenv(1)"));
             for invalid in [
                 "local G=getfenv(1);local privateValue=1;return privateValue",
-                "local G=(getfenv and getfenv(1))or _G;return G",
+                "local G=(getfenv and getfenv(2))or _G;return G",
                 "local G=(getfenv and getfenv(0,1))or _G;return G",
-                "local G,H=(getfenv and getfenv(0))or _G,1;return G,H",
-                "local _G={};local G=(getfenv and getfenv(0))or _G;return G",
-                "local G=(getfenv and getfenv(0))or _G;return _G",
-                "local G=(getfenv and getfenv(0))or _G;return observer.getfenv",
-                "local G=(getfenv and getfenv(0))or _G;return observer[\"get\"..\"local\"]",
-                "local G=(getfenv and getfenv(0))or _G;return debug",
-                "local getfenv=function() return {} end;local G=(getfenv and getfenv(0))or _G;return G",
-                "local G=(getfenv and getfenv(0))or _G;local G=(getfenv and getfenv(0))or _G;return G",
-                "local G=(getfenv and getfenv(0))or _G;local self=1;return G,self",
+                "local G,H=(getfenv and getfenv(1))or _G,1;return G,H",
+                "local _G={};local G=(getfenv and getfenv(1))or _G;return G",
+                "local G=(getfenv and getfenv(1))or _G;return _G",
+                "local G=(getfenv and getfenv(1))or _G;return observer.getfenv",
+                "local G=(getfenv and getfenv(1))or _G;return observer[\"get\"..\"local\"]",
+                "local G=(getfenv and getfenv(1))or _G;return debug",
+                "local getfenv=function() return {} end;local G=(getfenv and getfenv(1))or _G;return G",
+                "local G=(getfenv and getfenv(1))or _G;local G=(getfenv and getfenv(1))or _G;return G",
+                "local G=(getfenv and getfenv(1))or _G;local self=1;return G,self",
                 "local privateValue=1;return privateValue",
             ] {
                 assert!(finalize_vm(invalid, target, 42).is_err(), "{target}: {invalid}");

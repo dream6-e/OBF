@@ -956,37 +956,23 @@ impl Analysis {
                 "generated VM must carry exactly six audited environment probes or none",
             ));
         }
-        // Barrier accounting: three getfenv/_G occurrences inside the capture
-        // span, plus (when probed) three debug/loadstring occurrences inside
-        // each probe span. Every other barrier location is unaudited.
+        // Barrier accounting: exactly three getfenv/_G occurrences, all
+        // inside the capture span, and nothing else. The probes carry no
+        // spelled-out reflection names at all: debug, its introspection
+        // function and loadstring reach them as parameters threaded from
+        // the audited environment capture, so any barrier occurrence
+        // outside the capture is unaudited by definition.
         let outside: Vec<Span> = self
             .barrier_locations
             .iter()
             .copied()
             .filter(|span| span.start < capture.start || span.end > capture.end)
             .collect();
-        // Each audited probe contributes three barrier occurrences on Luau
-        // (debug x2, loadstring) and four on Lua 5.1, where the `getinfo`
-        // FIELD NAME is itself a listed executor-reflection barrier.
-        let per_probe = if chunk.target.is_luau() { 3 } else { 4 };
         if captures.next().is_some()
-            || self.barrier_locations.len() != 3 + per_probe * probes.len()
-            || outside.len() != per_probe * probes.len()
-            || outside.iter().any(|span| {
-                !probes
-                    .iter()
-                    .any(|probe| span.start >= probe.start && span.end <= probe.end)
-            })
+            || self.barrier_locations.len() != 3
+            || !outside.is_empty()
             || self.rename_barriers.iter().any(|name| {
-                let allowed = match name.as_str() {
-                    "getfenv" | "_G" => true,
-                    "debug" | "loadstring" => probed,
-                    // Lua 5.1 probes spell the debug field `getinfo`, a
-                    // listed executor-reflection barrier name in its own
-                    // right; allow it only inside the audited probes.
-                    "getinfo" => probed && !chunk.target.is_luau(),
-                    _ => false,
-                };
+                let allowed = matches!(name.as_str(), "getfenv" | "_G");
                 !allowed
             })
             || self.references.iter().any(|reference| {
@@ -1136,6 +1122,11 @@ impl RenamePlan {
 /// (Luau: debug.info; Lua 5.1: debug.getinfo). Any other spelling, target
 /// mismatch, extra argument or bound local is unaudited and rejected.
 fn is_vm_probe(expression: &Expression, target: Target) -> bool {
+    // The probes spell no global names: they receive the environment
+    // references as parameters (threaded from the audited capture) and
+    // gate on `DB and GI(LS, TAG)` -- a guarded two-argument call whose
+    // tag is exact per target. The structural shape plus the capture
+    // threading is the audited invariant.
     let ExpressionKind::Binary {
         operator: BinaryOperator::And,
         left,
@@ -1144,7 +1135,7 @@ fn is_vm_probe(expression: &Expression, target: Target) -> bool {
     else {
         return false;
     };
-    if !is_name(left, "debug") {
+    if !matches!(left.kind, ExpressionKind::Name(_)) {
         return false;
     }
     let ExpressionKind::Call {
@@ -1159,20 +1150,12 @@ fn is_vm_probe(expression: &Expression, target: Target) -> bool {
     if !type_arguments.is_empty() || arguments.len() != 2 {
         return false;
     }
-    let ExpressionKind::Field { table, field } = &function.kind else {
-        return false;
-    };
-    if !is_name(table, "debug") {
-        return false;
-    }
-    let (name, tag) = if target.is_luau() {
-        ("info", "s")
-    } else {
-        ("getinfo", "S")
-    };
-    if field.value != name || !is_name(&arguments[0], "loadstring") {
+    if !matches!(function.kind, ExpressionKind::Name(_))
+        || !matches!(arguments[0].kind, ExpressionKind::Name(_))
+    {
         return false;
     }
+    let tag = if target.is_luau() { "s" } else { "S" };
     matches!(&arguments[1].kind, ExpressionKind::String(raw)
         if crate::minify::literal_bytes(raw, target).ok().as_deref() == Some(tag.as_bytes()))
 }
@@ -1212,10 +1195,15 @@ fn is_vm_environment(expression: &Expression) -> bool {
     else {
         return false;
     };
+    // Level 0 (the thread globals, legacy backends) or level 1 (the
+    // chunk's own environment, custom backend): the hidden-name lookups
+    // G[name] must resolve exactly like bare global names would, so a
+    // sandbox that tampers with loadstring/debug through setfenv stays
+    // detectable by the probes. Any other level is unaudited.
     is_name(function, "getfenv")
         && type_arguments.is_empty()
         && arguments.len() == 1
-        && matches!(&arguments[0].kind, ExpressionKind::Number(value) if value == "0")
+        && matches!(&arguments[0].kind, ExpressionKind::Number(value) if value == "0" || value == "1")
 }
 
 fn is_name(expression: &Expression, expected: &str) -> bool {
