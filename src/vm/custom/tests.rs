@@ -1119,31 +1119,49 @@ fn opcode_dispatch_numbers_are_renumbered_per_seed() {
             );
             assert!(numberings.insert(perm.clone()));
             // The packed renumbering string decodes back to the same
-            // permutation the generator used for its arms. It lives in a
-            // scratch-table slot (`g[key]="~..."`), so locate it by its
-            // unique 129-byte base86 form instead of a `local U=`
-            // spelling.
+            // permutation the generator used for its arms. Two tilde-
+            // marked 129-byte strings exist -- the real one in the forms
+            // field and a fake anchor on the entry's dead side -- and
+            // exactly one must decode to the permutation.
             let raw = generate(&data, &program, seed).unwrap();
-            let mut packed = "";
+            let mut tilde_strings = Vec::new();
             let mut at = 0usize;
             while let Some(found) = raw[at..].find("=\"~") {
                 let start = at + found + "=\"".len();
                 let end = raw[start..].find('"').expect("unterminated") + start;
                 if end - start == 129 {
-                    packed = &raw[start..end];
-                    break;
+                    tilde_strings.push(raw[start..end].to_owned());
                 }
                 at = end;
             }
-            assert_eq!(packed.len(), 129, "packed renumbering string");
-            assert_eq!(packed.as_bytes()[0], b'~');
-            for slot in 0..64usize {
-                let x = packed.as_bytes()[1 + slot * 2];
-                let y = packed.as_bytes()[2 + slot * 2];
-                let dx = (if x > 92 { x - 1 } else { x }) - 35;
-                let dy = (if y > 92 { y - 1 } else { y }) - 35;
-                assert_eq!(u8::from(dx + dy * 86), perm[slot]);
+            assert_eq!(
+                tilde_strings.len(),
+                2,
+                "{target} seed {seed}: expected one real and one fake packed string"
+            );
+            let mut matches = 0;
+            for packed in &tilde_strings {
+                assert_eq!(packed.as_bytes()[0], b'~');
+                let mut decoded = true;
+                for slot in 0..64usize {
+                    let x = packed.as_bytes()[1 + slot * 2];
+                    let y = packed.as_bytes()[2 + slot * 2];
+                    let dx = u32::from((if x > 92 { x - 1 } else { x }) - 35);
+                    let dy = u32::from((if y > 92 { y - 1 } else { y }) - 35);
+                    let value = dx + dy * 86;
+                    // The fake anchor's random pairs need not stay in the
+                    // u8 range at all.
+                    if value > 255 || value as u8 != perm[slot] {
+                        decoded = false;
+                        break;
+                    }
+                }
+                matches += usize::from(decoded);
             }
+            assert_eq!(
+                matches, 1,
+                "{target} seed {seed}: the fake anchor must not decode to the permutation"
+            );
             // Differential: the embedded payload is untouched canonical
             // bytecode regardless of the renumbering.
             let output = emit(&data, target, seed).unwrap();
@@ -1400,17 +1418,19 @@ fn generation_respects_the_documented_size_budget() {
     // the character-function pool, then -> 27500/28500 when all stages
     // were flattened into state machines, then luau 28500 -> 29800 when
     // live locals moved into scratch-table slots whose `g[key]` reads
-    // are longer than the renamed locals they replaced).
+    // are longer than the renamed locals they replaced, then
+    // 27500/29800 -> 29500/31800 when in-image decoy dispatch arms and
+    // fake key-material anchors joined the dead code).
     for (target, fixture, budget) in [
         (
             Target::Lua51,
             include_str!("../../../tests/fixtures/vm_lua51.lua"),
-            27_500usize,
+            29_500usize,
         ),
         (
             Target::Luau,
             include_str!("../../../tests/fixtures/vm_luau.lua"),
-            29_800usize,
+            31_800usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -1532,5 +1552,165 @@ fn embedded_payload_is_high_entropy_ciphertext_and_seed_dependent() {
         let (plain, cipher) = (entropy(&data), entropy(&encrypted));
         assert!(cipher > plain, "{target}: {cipher} <= {plain}");
         assert!(cipher > 7.5, "{target}: entropy {cipher}");
+    }
+}
+
+#[test]
+fn decoy_arms_and_fake_anchors_poison_static_recovery() {
+    // A1: dispatch arms keyed on the perm image of UNUSED opcodes carry a
+    // different opcode's handler text. Rebuilding the packed permutation
+    // table filters nothing (the keys are in-image), the arms are
+    // unreachable at runtime (the forms table marks unused slots with an
+    // invalid form, so decode aborts before dispatch), and a static
+    // semantic recovery that trusts every arm reconstructs a poisoned
+    // opcode table the program's own asserts can never contradict.
+    // C1: a second, fake 129-byte packed renumbering string (plus fake
+    // LCG-share / Adler arithmetic) rides the entry's dead side; nothing
+    // downstream verifies it.
+    let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+    let literal_value = |token: &str| -> Option<u64> {
+        let cleaned: String = token.chars().filter(|c| *c != '_').collect();
+        let (radix, digits) = if let Some(hex) = cleaned.strip_prefix("0x") {
+            (16, hex)
+        } else if let Some(bin) = cleaned.strip_prefix("0b") {
+            (2, bin)
+        } else {
+            (10, cleaned.as_str())
+        };
+        u64::from_str_radix(digits, radix).ok()
+    };
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let used: BTreeSet<u8> = program.opcodes().iter().map(|op| *op as u8).collect();
+        let used_texts: BTreeSet<&str> = program
+            .opcodes()
+            .iter()
+            .filter_map(|op| crate::vm::opcode::custom(target, *op))
+            .collect();
+        let unused: Vec<u8> = (0u8..64).filter(|slot| !used.contains(slot)).collect();
+        assert!(unused.len() >= 8, "test program must leave decoy room");
+        let mut decoy_sets = BTreeSet::new();
+        for seed in 0..=5u64 {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+            let perm = opcode_permutation(seed, 64);
+            let image: BTreeSet<u8> = perm.iter().copied().collect();
+            let f5_at = raw
+                .find("local o,a,b,c,k,j;local w=")
+                .expect("interpreter phase machine");
+            let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
+            let interp = &raw[f5_at..f5_end];
+            // Collect every dispatch-arm key from the four condition
+            // spellings (decimal/hex/binary literals).
+            let bytes = interp.as_bytes();
+            let mut keys = BTreeSet::new();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                let boundary = |index: usize| {
+                    index < bytes.len()
+                        && !bytes[index].is_ascii_alphanumeric()
+                        && bytes[index] != b'_'
+                };
+                if bytes[i] == b'o' && i > 0 && boundary(i - 1) {
+                    let mut j = i + 1;
+                    if interp[j..].starts_with("==") || interp[j..].starts_with("~=") {
+                        j += 2;
+                    } else if bytes.get(j) == Some(&b'-') {
+                        j += 1;
+                    } else {
+                        i += 1;
+                        continue;
+                    }
+                    let start = j;
+                    while j < bytes.len()
+                        && (bytes[j].is_ascii_hexdigit()
+                            || bytes[j] == b'_'
+                            || bytes[j] == b'x'
+                            || bytes[j] == b'b')
+                    {
+                        j += 1;
+                    }
+                    if let Some(value) = literal_value(&interp[start..j]).filter(|v| *v <= 255) {
+                        keys.insert(value as u8);
+                    }
+                    i = j;
+                    continue;
+                }
+                if interp[i..].starts_with("==o") && boundary(i + 3) {
+                    let mut start = i;
+                    while start > 0
+                        && (bytes[start - 1].is_ascii_hexdigit()
+                            || bytes[start - 1] == b'_'
+                            || bytes[start - 1] == b'x'
+                            || bytes[start - 1] == b'b')
+                    {
+                        start -= 1;
+                    }
+                    if let Some(value) = literal_value(&interp[start..i]).filter(|v| *v <= 255) {
+                        keys.insert(value as u8);
+                    }
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+            }
+            // Every live opcode keeps its arm.
+            for op in &used {
+                assert!(keys.contains(&perm[*op as usize]), "live arm missing");
+            }
+            // In-image decoys cover the unused slots (minus up to two
+            // seed-dropped ones) and their key sets vary across seeds.
+            let decoys: Vec<u8> = unused
+                .iter()
+                .map(|slot| perm[*slot as usize])
+                .filter(|key| keys.contains(key))
+                .collect();
+            assert!(
+                decoys.len() >= unused.len() - 2,
+                "{target} seed {seed}: {} in-image decoys for {} unused slots",
+                decoys.len(),
+                unused.len()
+            );
+            decoy_sets.insert(decoys);
+            // The classic out-of-image decoys stay as noise.
+            let outside: Vec<u8> = keys
+                .iter()
+                .copied()
+                .filter(|key| !image.contains(key))
+                .collect();
+            assert!(
+                outside.len() >= 2,
+                "{target} seed {seed}: only {outside:?} outside-image keys"
+            );
+            // Poison: no unused opcode's own handler text appears in the
+            // interpreter, so every in-image decoy arm is semantically
+            // wrong for its key.
+            for slot in &unused {
+                if let Some(text) =
+                    Opcode::from_byte(*slot).and_then(|op| crate::vm::opcode::custom(target, op))
+                {
+                    if !used_texts.contains(text) {
+                        assert!(
+                            !interp.contains(text),
+                            "{target} seed {seed}: decoy for slot {slot} carries its own semantics"
+                        );
+                    }
+                }
+            }
+            let output = emit(&data, target, seed).unwrap();
+            assert_eq!(blob(&output, target, seed), data);
+        }
+        assert!(
+            decoy_sets.len() >= 2,
+            "{target}: decoy key sets pinned across seeds"
+        );
+        // The poisoned dispatch still runs the program verbatim.
+        let workspace = native::Workspace::new();
+        let path = workspace.0.join("decoy_dispatch.lua");
+        fs::write(&path, source).unwrap();
+        let expected = native::compile_and_run(target, &path);
+        fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+        assert_eq!(expected, native::compile_and_run(target, &path));
     }
 }

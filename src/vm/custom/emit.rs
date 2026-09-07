@@ -41,6 +41,11 @@ pub(crate) fn generate(
         .iter()
         .map(|op| perm[(*op as u8) as usize])
         .collect();
+    // The interpreter's classic decoys must dodge the FULL permutation
+    // image (all 64 slots, not just the program's opcodes): the in-image
+    // decoy arms below own every unused-slot value, so a decoy colliding
+    // with one would silently duplicate a poisoned arm's key.
+    let perm_image: std::collections::BTreeSet<u8> = perm.iter().copied().collect();
     // M7 structural randomization stream: per-handler dispatch comparison
     // variants (one of four equivalent forms, seeded), integer bound-check
     // variants in the decoder/validator, and metamethod dispatch branch
@@ -76,10 +81,44 @@ pub(crate) fn generate(
     // numbers that can never occur. Both user-requested forms.
     let (opaque_true, opaque_false) = opaque_pair(&mut structure);
     let entry_flip = structure.next_u64() % 2 == 0;
-    let entry_decoy = format!(
-        "local d1=VMS[{}](E);local d2=VMS[{}](d1,E);if d2 then E()end;",
-        keys[0], keys[1]
+    // Fake anchors on the entry's dead side: constructions shaped exactly
+    // like the pipeline's real key material -- a packed base86 renumbering
+    // string of the same 129-byte shape rebuilt into a table, LCG share
+    // arithmetic over real table keys, and an Adler-style checksum gate.
+    // Nothing downstream ever verifies them; static methodology that
+    // anchors on checksums and key derivations has to disprove each decoy
+    // before the real one, and executing the branch is impossible.
+    let mut fake_packed = String::from("~");
+    for _ in 1..129 {
+        fake_packed.push(pack86((structure.next_u64() % 86) as u8));
+    }
+    let (fake_a, fake_b) = {
+        let first = structure.next_u64() as usize % keys.len();
+        let mut second = structure.next_u64() as usize % keys.len();
+        if second == first {
+            second = (second + 1) % keys.len();
+        }
+        (keys[first], keys[second])
+    };
+    let fake_adler = 1_000_000_000u64 + structure.next_u64() % 3_000_000_000u64;
+    let mut entry_decoy = format!(
+        "local d1=VMS[{}](E);local d2=VMS[{}](d1,E);if d2 then E()end;\
+local d3=\"{fake_packed}\";local d4={{}};for dq=2,#d3,2 do local dx,dy=SB(d3,dq),SB(d3,dq+1);\
+d4[(dq-2)/2]=dx-35+(dy-35)*86 end;",
+        keys[0], keys[1],
     );
+    if structure.next_u64() % 2 == 0 {
+        entry_decoy.push_str(&format!(
+            "local d5=({fake_a}*31+{fake_b})%2147483647;d5=48271*d5%2147483647;\
+d5=65539*d5%2147483647;local d6=1+(d5+31*#d3)%2147483646;"
+        ));
+    }
+    if structure.next_u64() % 2 == 0 {
+        entry_decoy.push_str(&format!(
+            "local d7,d8=1,0;for dq=1,#d3 do d7=(d7+SB(d3,dq))%65521;d8=(d8+d7)%65521 end;\
+if d7+d8*65521~={fake_adler} then E()end;"
+        ));
+    }
     let f3_decoys = decoy_arms(
         &mut structure,
         2,
@@ -87,7 +126,7 @@ pub(crate) fn generate(
         &["ok=j%2==0;", "ok=a+b<511;", "ok=c<256;"],
         &opcode_image,
     );
-    let f5_decoys = decoy_arms(
+    let mut f5_decoys = decoy_arms(
         &mut structure,
         2,
         program.target.is_luau(),
@@ -96,7 +135,7 @@ pub(crate) fn generate(
             "R[a]=R[b][R[c]];pc=pc+4;",
             "k=j;R[a]=k;pc=pc+4;",
         ],
-        &opcode_image,
+        &perm_image,
     );
     let (entry_head, entry_tail) = if entry_flip {
         (
@@ -1041,6 +1080,48 @@ end;
                     program.target.is_luau()
                 ),
                 code
+            ),
+        ));
+    }
+    // In-image decoy arms: keys are the perm image of canonical opcodes
+    // the program never uses. Rebuilding the packed permutation table
+    // statically cannot filter these -- they look exactly like live
+    // dispatch values -- yet they are unreachable at runtime because the
+    // forms table encodes every unused slot with an invalid form, so the
+    // decoder aborts before dispatch. Each decoy runs the handler text of
+    // a DIFFERENT opcode: static semantic recovery that trusts every arm
+    // reconstructs a poisoned opcode table the program's own asserts can
+    // never contradict, because these opcodes never execute here.
+    let used_ops: Vec<u8> = program.opcodes().iter().map(|op| *op as u8).collect();
+    let used_set: std::collections::BTreeSet<u8> = used_ops.iter().copied().collect();
+    let mut unused_slots: Vec<u8> = (0u8..64).filter(|slot| !used_set.contains(slot)).collect();
+    let dropped = unused_slots.len().min((structure.next_u64() % 3) as usize);
+    let keep = unused_slots.len() - dropped;
+    structure.shuffle(&mut unused_slots);
+    for slot in unused_slots.into_iter().take(keep) {
+        let key = perm[slot as usize];
+        let own =
+            Opcode::from_byte(slot).and_then(|op| crate::vm::opcode::custom(program.target, op));
+        let live = |byte: u8| {
+            crate::vm::opcode::custom(
+                program.target,
+                Opcode::from_byte(byte).expect("live opcode"),
+            )
+            .expect("live handler")
+        };
+        let mut index = (structure.next_u64() % used_ops.len().max(1) as u64) as usize;
+        let mut body = live(used_ops[index]);
+        if Some(body) == own && used_ops.len() > 1 {
+            // Never hand a decoy its own canonical semantics.
+            index = (index + 1) % used_ops.len();
+            body = live(used_ops[index]);
+        }
+        f5_decoys.push((
+            key,
+            format!(
+                "{} then {}",
+                structure.dispatch_condition(u16::from(key), program.target.is_luau()),
+                body
             ),
         ));
     }
