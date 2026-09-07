@@ -1,0 +1,184 @@
+==== proto 0 ====
+local v0 = nil
+v0 = FUNC[1]
+local v1 = nil
+v1 = FUNC[2]
+local v2 = nil
+v2 = FUNC[3]
+local v3 = v2(10)
+assert((v3(2) == 12))
+assert((v3(-5) == 7))
+local v4 = nil
+v4 = FUNC[5]
+assert((v4(9)()(4) == 13))
+local v5, v6, v7 = v0(1, nil, 3)
+assert((((v5 == 1) and (v6 == nil)) and (v7 == 3)))
+assert((v1(FUNC[8], 9) == 18))
+local v8 = nil
+v8 = FUNC[9]
+local v9, v10, v11, v12, v13, v14 = v8(8, 3)
+assert((((v9 == 2.6666666666666665) and (v10 == 2)) and (v11 == 512)))
+assert((((v12 == false) and (v13 == 3)) and (v14 == 8)))
+local v15 = nil
+local v16 = true
+local v17 = 5
+v15 = FUNC[10]
+if v16 then
+  v16 = (v15() == 5)
+end
+assert((v16 and (v15() == 5)))
+v17 = 16
+assert((v17 == 16))
+assert(((2 == 2) and (32 == 32)))
+assert(((((-v17) == -16) and (not false)) and (#"abcd" == 4)))
+assert(("a" .. "b" .. 3 == "ab3"))
+assert(((((1 < 2) and (2 <= 2)) and (not (3 == 4))) and (4 == 4)))
+local tbl25 = {}
+tbl25["value"] = 4
+local v18 = tbl25
+v18["add"] = FUNC[11]
+assert((v18["add"](v18, 6) == 10))
+local v19 = 0
+for v20 = 1, 5, 1 do
+  local v24 = v20
+  v19 = (v19 + v24)
+end
+for v20 = 5, 1, -2 do
+  local v24 = v20
+  v19 = (v19 + v24)
+end
+local tbl28 = {}
+tbl28[1] = 2
+tbl28[2] = 4
+tbl28[3] = 6
+for v23_k, v23_v in ipairs(tbl28) do
+  v19 = (v19 + v23_v)
+end
+assert((v19 == 36))
+local v20 = 0
+while (v20 < 3) do
+  v20 = (v20 + 1)
+end
+repeat
+  v20 = (v20 - 1)
+until (v20 == 0)
+local tbl31 = {}
+tbl31[1] = 1
+tbl31[2] = 2
+tbl31[3] = 3
+tbl31[4] = 4
+tbl31[5] = 5
+tbl31[6] = 6
+tbl31[7] = 7
+tbl31[8] = 8
+tbl31[9] = 9
+tbl31[10] = 10
+tbl31[11] = 11
+tbl31[12] = 12
+tbl31[13] = 13
+tbl31[14] = 14
+tbl31[15] = 15
+tbl31[16] = 16
+tbl31[17] = 17
+tbl31[18] = 18
+tbl31[19] = 19
+tbl31[20] = 20
+tbl31[21] = 21
+tbl31[22] = 22
+tbl31[23] = 23
+tbl31[24] = 24
+tbl31[25] = 25
+tbl31[26] = 26
+tbl31[27] = 27
+tbl31[28] = 28
+tbl31[29] = 29
+tbl31[30] = 30
+tbl31[31] = 31
+tbl31[32] = 32
+tbl31[33] = 33
+tbl31[34] = 34
+tbl31[35] = 35
+tbl31[36] = 36
+tbl31[37] = 37
+tbl31[38] = 38
+tbl31[39] = 39
+tbl31[40] = 40
+tbl31[41] = 41
+tbl31[42] = 42
+tbl31[43] = 43
+tbl31[44] = 44
+tbl31[45] = 45
+tbl31[46] = 46
+tbl31[47] = 47
+tbl31[48] = 48
+tbl31[49] = 49
+tbl31[50] = 50
+tbl31[51] = 51
+tbl31[52] = 52
+tbl31[53] = 53
+tbl31[54] = 54
+tbl31[55] = 55
+local v21 = tbl31
+assert((v21[55] == 55))
+local v22 = nil
+local tbl33 = {}
+tbl33["__add"] = FUNC[12]
+tbl33["__tostring"] = FUNC[13]
+v22 = tbl33
+local tbl34 = {}
+tbl34["value"] = 2
+local tbl36 = {}
+tbl36["value"] = 8
+local v23 = (setmetatable(tbl34, v22) + setmetatable(tbl36, v22))
+assert((tostring(v23) == "box:10"))
+_G["__obf_vm_probe"] = 41
+__obf_vm_probe = (__obf_vm_probe + 1)
+assert((_G["__obf_vm_probe"] == 42))
+_G["__obf_vm_probe"] = nil
+print("vm:lua51:ok")
+return
+
+==== proto 1 ====
+return ...
+
+==== proto 2 ====
+return v0(...)
+
+==== proto 3 ====
+local v1 = v0
+return FUNC[4]
+
+==== proto 4 ====
+uv0 = (uv0 + v0)
+return uv0
+
+==== proto 5 ====
+return FUNC[6]
+
+==== proto 6 ====
+return FUNC[7]
+
+==== proto 7 ====
+return (uv0 + v0)
+
+==== proto 8 ====
+return (v0 * 2)
+
+==== proto 9 ====
+return (v0 / v1), (v0 % v1), (v0 ^ v1), (not v0), (v0 and v1), (v0 or v1)
+
+==== proto 10 ====
+return uv0
+
+==== proto 11 ====
+v0["value"] = (v0["value"] + v1)
+return v0["value"]
+
+==== proto 12 ====
+local tbl1 = {}
+tbl1["value"] = (v0["value"] + v1["value"])
+return setmetatable(tbl1, uv0)
+
+==== proto 13 ====
+return "box:" .. v0["value"]
+
