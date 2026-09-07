@@ -132,6 +132,72 @@ pub(crate) fn selector_condition(
     }
 }
 
+/// Scratch-table slots: rewrite the given local variables of a field's
+/// body into reads/writes of `g[key]` -- one fixed random key per variable
+/// (drawn from the structure stream, so the mapping varies per seed), the
+/// value constantly changing, `local` declarations for slots stripped
+/// (assignments target the table). The caller prepends `local g={};` and,
+/// where the field's lifetime ends, clears the table (`g=nil`) before
+/// returning. Function names, parameters and for-loop controls must not be
+/// listed; the scanner matches whole words only, so field-access prefixes
+/// and string contents are never touched.
+fn flush_word(word: &mut String, out: &mut String, keys: &std::collections::BTreeMap<&str, u64>) {
+    if !word.is_empty() {
+        match keys.get(word.as_str()) {
+            Some(key) => write!(out, "g[{key}]").unwrap(),
+            None => out.push_str(word),
+        }
+        word.clear();
+    }
+}
+
+pub(crate) fn slot_rewrite(
+    structure: &mut crate::random::Prng,
+    text: &str,
+    vars: &[&str],
+) -> String {
+    let mut keys: std::collections::BTreeMap<&str, u64> = Default::default();
+    let mut used = std::collections::BTreeSet::new();
+    for name in vars {
+        loop {
+            let key = 1 + structure.next_u64() % 99;
+            if used.insert(key) {
+                keys.insert(name, key);
+                break;
+            }
+        }
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut word = String::new();
+    // String literals are copied verbatim: packed payloads and tags must
+    // never be mistaken for variable words.
+    let mut quote: Option<char> = None;
+    for c in text.chars() {
+        if let Some(marker) = quote {
+            out.push(c);
+            if c == marker {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            flush_word(&mut word, &mut out, &keys);
+            out.push(c);
+            quote = Some(c);
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush_word(&mut word, &mut out, &keys);
+            out.push(c);
+        }
+    }
+    flush_word(&mut word, &mut out, &keys);
+    // Slot declarations lose `local ` (they are table assignments now).
+    out.replace("local g[", "g[")
+}
+
 /// Control-flow flattening: distinct per-seed state numbers for one
 /// machine (three digits keeps them visually indistinct from operands).
 pub(crate) fn state_values(structure: &mut crate::random::Prng, count: usize) -> Vec<u16> {

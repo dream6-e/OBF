@@ -366,8 +366,8 @@ pub(crate) fn generate(
         // Control-flow flattening: the base86 decode is a seeded state
         // machine -- main-step self-loop, tail handling, finish -- with
         // per-seed state numbers, shuffled branch order and varied
-        // condition spellings, so the decode never appears as one linear
-        // loop.
+        // condition spellings; every data local flows through the
+        // scratch table g[...] and is cleared before returning.
         let sv = state_values(&mut structure, 3);
         let (k_main, k_tail, k_done) = (sv[0], sv[1], sv[2]);
         let decode5 = "local v=0;local m=1;\
@@ -396,20 +396,29 @@ for j=1,r2-1 do o[#o+1]=NCH(v%256);v=(v-v%256)/256 end;";
 if r2>0 then {decode_tail} end;st={k_done};"
                     ),
                 ),
-                (k_done, "return TC(o);".to_owned()),
+                (k_done, "local rr=TC(o);g=nil;return rr;".to_owned()),
             ],
+        );
+        let mut body = format!(
+            "local S=\"{text}\";local o={{}};local i=1;local L=#S-#S%5;local st={k_main};{machine}",
+            text = text,
+            k_main = k_main,
+            machine = machine,
+        );
+        body = slot_rewrite(
+            &mut structure,
+            &body,
+            &["S", "o", "i", "L", "st", "v", "m", "b", "r2"],
         );
         let mut chunk = String::new();
         write!(
             chunk,
             "[{key}]=function(E,SB,NCH,TC,DB,GI,LS)local A={probe};{gate}\
-local S=\"{text}\";local o={{}};local i=1;local L=#S-#S%5;local st={k_main};{machine}end,",
+local g={{}};{body}end,",
             key = keys[8 + hold[part]],
             probe = probe,
             gate = gate,
-            text = text,
-            k_main = k_main,
-            machine = machine,
+            body = body,
         )
         .unwrap();
         segment_fields.push(chunk);
@@ -438,7 +447,9 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
     // the core's final position check goes through the exported `pos`
     // accessor (a returned copy of the number would go stale).
     // Flattened outer-decrypt machine: keystream XOR self-loop, rebuild
-    // and size gate, finish -- state numbers and spellings per seed.
+    // and size gate, finish -- state numbers and spellings per seed. All
+    // data locals flow through the scratch table g[...] (per-seed keys),
+    // cleared before the field returns.
     let dsv = state_values(&mut structure, 3);
     let (d_loop, d_gate, d_done) = (dsv[0], dsv[1], dsv[2]);
     let xor_step = format!(
@@ -447,7 +458,7 @@ for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;
 XB[i]=NCH(r);i=i+1;",
         outer = params.outer
     );
-    let decrypt_text = format!(
+    let mut decrypt_text = format!(
         "local st=1+(s1+s2+s3+{mix}*#B)%2147483646;local XB={{}};local i=1;local w={d_loop};\
 {machine}",
         mix = params.mix,
@@ -463,12 +474,17 @@ XB[i]=NCH(r);i=i+1;",
                     d_gate,
                     format!("B=TC(XB);XB=nil;if #B>16777216 then E()end;w={d_done};"),
                 ),
-                (d_done, "return B;".to_owned()),
+                (d_done, "g=nil;return B;".to_owned()),
             ],
         ),
     );
+    decrypt_text = slot_rewrite(
+        &mut structure,
+        &decrypt_text,
+        &["st", "XB", "i", "w", "x", "y", "r", "p", "q"],
+    );
     let decrypt_field = format!(
-        "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)\n{decrypt_text}\nend,",
+        "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)\nlocal g={{}};\n{decrypt_text}\nend,",
         keys[1]
     );
     let g1 = r#"local bp=1;
@@ -601,7 +617,7 @@ if sa+sb*65536~=check then E()end;
     let csv = state_values(&mut structure, 5);
     let (c_next, c_up, c_konst, c_code, c_fin) = (csv[0], csv[1], csv[2], csv[3], csv[4]);
     let mut ph = String::from(
-        "local PH=function(id,P,isa)\n local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();\n",
+        "local PH=function()\n local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();\n",
     );
     ph.push_str(
         " if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();\n if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<F.__obf_proto_nc*2 or VMCS>F.__obf_proto_nc*7 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
@@ -612,10 +628,10 @@ if sa+sb*65536~=check then E()end;
         ph.push_str("if F.__obf_proto_shared then E()end;");
     }
     ph.push_str("\n return F,VMCS\nend;\n");
-    let pu = "local PU=function(F,P)\n for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
+    let pu = "local PU=function()\n for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
         .to_owned();
     let mut pk = String::from(
-        "local PK=function(F,P)\n for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;\n  if tag==0 then F.__obf_proto_k[j]=nil\n  elseif tag==1 then local v=db8();if v>1 then E()end;F.__obf_proto_k[j]=v==1\n  elseif tag==2 then F.__obf_proto_k[j]=dnum()\n  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=dstr()\n",
+        "local PK=function()\n for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;\n  if tag==0 then F.__obf_proto_k[j]=nil\n  elseif tag==1 then local v=db8();if v>1 then E()end;F.__obf_proto_k[j]=v==1\n  elseif tag==2 then F.__obf_proto_k[j]=dnum()\n  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=dstr()\n",
     );
     if program.target.is_luau() {
         pk.push_str(r#"elseif tag==4 then local lo,hi=db32(),db32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
@@ -628,7 +644,7 @@ if sa+sb*65536~=check then E()end;
         core_text.push_str(definition);
     }
     core_text.push_str(&format!(
-        "local P={{}};local work=0;local id=0;local F;local VMCS;local w={c_next};\n"
+        "local P={{}};local work=0;local id=0;local w={c_next};\n"
     ));
     core_text.push_str(&state_machine(
         &mut structure,
@@ -637,12 +653,12 @@ if sa+sb*65536~=check then E()end;
             (
                 c_next,
                 format!(
-                    "if id>=np then w={c_fin} else F,VMCS=PH(id,P,isa);\
+                    "if id>=np then w={c_fin} else F,VMCS=PH();\
 work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;w={c_up}; end;"
                 ),
             ),
-            (c_up, format!("PU(F,P);w={c_konst};")),
-            (c_konst, format!("PK(F,P);w={c_code};")),
+            (c_up, format!("PU();w={c_konst};")),
+            (c_konst, format!("PK();w={c_code};")),
             (
                 c_code,
                 format!(
@@ -655,8 +671,17 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
             ),
         ],
     ));
+    core_text.push_str("\nlocal rP,rnp,ren=P,np,entry;g=nil;return rP,rnp,ren\n");
+    core_text = slot_rewrite(
+        &mut structure,
+        &core_text,
+        &[
+            "P", "work", "id", "w", "np", "entry", "isa", "check", "sa", "sb", "F", "VMCS",
+            "legacy", "tag", "index", "parent", "v", "lo", "hi",
+        ],
+    );
     decoder_fields.push(format!(
-        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum)\n{core_text}\nreturn P,np,entry\nend,",
+        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum)\nlocal g={{}};{core_text}end,",
         keys[20]
     ));
     decoder_wiring.push_str(&format!(
@@ -700,32 +725,39 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
     // base86 alphabet, so the payload-segment audit (which collects the
     // three longest alphabet-only literals) never mistakes them for
     // transport segments however small the program is.
-    let forms_field = format!(
-        "[{key}]=function(E,SB)local t={{}};local p={{}};local S=\"~{text}\";for i=2,#S do local b=SB(S,i);\
+    let mut forms_body = format!(
+        "local t={{}};local p={{}};local S=\"~{text}\";for i=2,#S do local b=SB(S,i);\
 if b==92 or b<35 or b>121 then E()end;if b>92 then b=b-1 end;t[i-2]=(b-35-{rot})%86+1 end;\
 local U=\"~{renum}\";for i=2,#U,2 do local x=SB(U,i);local y=SB(U,i+1);\
 if x==92 or x<35 or x>121 or y==92 or y<35 or y>121 then E()end;\
-if x>92 then x=x-1 end;if y>92 then y=y-1 end;p[(i-2)/2]=x-35+(y-35)*86 end;return t,p;end,",
-        key = keys[13],
+if x>92 then x=x-1 end;if y>92 then y=y-1 end;p[(i-2)/2]=x-35+(y-35)*86 end;\
+local rt,rp=t,p;g=nil;return rt,rp;",
         text = forms_text,
         rot = forms_rot,
         renum = perm_text,
     );
-    // Both Rust and target decoders validate operands before any execution.
-    // The 7-bit varint stream is decoded by this field's returned closure
-    // and validated per shape; the consumer expands it back into the fixed
+    forms_body = slot_rewrite(
+        &mut structure,
+        &forms_body,
+        &["t", "p", "S", "U", "b", "x", "y"],
+    );
+    let forms_field = format!(
+        "[{key}]=function(E,SB)local g={{}};{body}end,",
+        key = keys[13],
+        body = forms_body,
+    );
     // 4-byte-per-instruction string the interpreter fetches from.
-    let decode_field = format!(
-        "[{key}]=function(E,SB,FM)\nlocal Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
+    let mut decode_body = format!(
+        "[{key}]=function(E,SB,FM)local g={{}};\nlocal Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*128;if v<128 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*16384;if v<16384 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*2097152;if v<2097152 then E()end;\
 if w>=128 then E()end;end;end;end;return v,p end;\nreturn function(CD,p)local o=SB(CD,p);if o==nil then E()end;p=p+1;\
-local f=FM[o];if f==nil or f>5 then E()end;local a,b,c;\
-if f==1 then local j;j,p=Dv(CD,p);if {jx} then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
+local f=FM[o];if f==nil or f>5 then E()end;\
+if f==1 then j,p=Dv(CD,p);if {jx} then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
 elseif f==2 then a,p=Dv(CD,p);if {ax} then E()end;b=0;c=0;\
 elseif f==3 then a,p=Dv(CD,p);b,p=Dv(CD,p);if {ax} or {bx} then E()end;c=0;\
-elseif f==4 then a,p=Dv(CD,p);if {ax} then E()end;local k2;k2,p=Dv(CD,p);if {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;\
+elseif f==4 then a,p=Dv(CD,p);if {ax} then E()end;k2,p=Dv(CD,p);if {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;\
 else a,p=Dv(CD,p);b,p=Dv(CD,p);c,p=Dv(CD,p);if {ax} or {bx} or {cx} then E()end end;\
 return o,a,b,c,p end;\nend,",
         key = keys[14],
@@ -735,6 +767,12 @@ return o,a,b,c,p end;\nend,",
         kx = kx,
         cx = cx,
     );
+    decode_body = slot_rewrite(
+        &mut structure,
+        &decode_body,
+        &["w", "v", "o", "f", "a", "b", "c", "j", "k2"],
+    );
+    let decode_field = decode_body;
     let mut f3_arms: Vec<(u8, String)> = program
         .opcodes()
         .iter()
@@ -930,17 +968,37 @@ Make=function(id,up)
   for j=0,F.__obf_proto_nu-1 do if j~=F.__obf_proto_self and not RE(CV(previous[j]),CV(up[j]))then same=false;break end end;
   if same then return cached end;
  end;
- local d={id,up};local fn=function(...)local v=H(d[1],Z(...),d[2]);return U(v,1,v.n)end;W[fn]=d;
+ local d={id,up};local fn=function(...)local vv=H(d[1],Z(...),d[2]);return U(vv,1,vv.n)end;W[fn]=d;
  if F.__obf_proto_shared and not cached then F.__obf_proto_cached=fn end;return fn
 end;
 local SETUP=function(fid,args)
- local F=P[fid];local R={};local n=args.n-F.__obf_proto_p;if n<0 then n=0 end;
- local va={n=n};for i=1,n do va[i]=args[F.__obf_proto_p+i]end;
+ local F=P[fid];local R={};local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
+ local va2={};va2.n=nn;for i=1,nn do va2[i]=args[F.__obf_proto_p+i]end;
  for i=0,F.__obf_proto_p-1 do R[i]={args[i+1]}end;
- if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local v={n=n};for i=1,n do v[i]=va[i]end;R[F.__obf_proto_p][1]=v end end;
- return F,R,va,n
+ if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[F.__obf_proto_p][1]=vv end end;
+ return F,R,va2,nn
 end;
 "#);
+    // SETUP-only scratch slots: the frame registers F/R keep their locals
+    // because the interpreter recurses (nested frames would clobber a
+    // single slot), but SETUP's own intermediates flow through g[key].
+    {
+        let original = r#"local SETUP=function(fid,args)
+ local F=P[fid];local R={};local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
+ local va2={};va2.n=nn;for i=1,nn do va2[i]=args[F.__obf_proto_p+i]end;
+ for i=0,F.__obf_proto_p-1 do R[i]={args[i+1]}end;
+ if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[F.__obf_proto_p][1]=vv end end;
+ return F,R,va2,nn
+end;
+"#;
+        let slotted = original.to_owned();
+        let slotted = slotted.replacen(
+            "local SETUP=function(fid,args)\n",
+            "local SETUP=function(fid,args)\nlocal g={};",
+            1,
+        );
+        s = s.replacen(original, &slotted, 1);
+    }
     // Interpreter flattening: the frame setup moves into its own function
     // and the fetch/dispatch loop becomes a two-phase state machine whose
     // branch order, state numbers and condition spellings are per seed.
@@ -954,7 +1012,7 @@ end;
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va,n=SETUP(fid,args);\n  local pc=1;local code=F.__obf_proto_code;\n  local o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local pc=1;local code=F.__obf_proto_code;\n  local o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
         k_fetch = k_fetch,
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
@@ -1019,9 +1077,24 @@ end;
     let entry_chunk = s[entry_start..f5_start].to_owned();
     let f5_chunk = s[f5_start..tail_start].to_owned();
     let tail = s[tail_start..].to_owned();
+    // Scratch-table slots for the two remaining core fields: the operand
+    // validation loop and the interpreter (its frame registers R and frame
+    // F included -- every read/write goes through g[key] with per-seed
+    // keys, the value constantly changing). The interpreter's table lives
+    // as long as its closures do, so it is not cleared.
+    let f3_chunk = slot_rewrite(
+        &mut structure,
+        &s[f3_start..f4_start],
+        &["F", "CD", "p", "XB", "o", "a", "b", "c", "p2", "k", "j"],
+    );
+    let f3_chunk = f3_chunk.replacen(")\n", ")\nlocal g={};", 1);
+    // The interpreter itself keeps plain locals: it recurses through
+    // nested frames (closures, pcall), and a single g[key] slot per frame
+    // register would be clobbered by the inner frame. All non-recursive
+    // core stages flow through g[key] scratch slots instead.
     let mut fields: Vec<String> = vec![
         s[header_end..f3_start].to_owned(),
-        s[f3_start..f4_start].to_owned(),
+        f3_chunk,
         s[f4_start..entry_start].to_owned(),
     ];
     fields.extend(probe_fields);

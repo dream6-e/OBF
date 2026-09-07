@@ -832,6 +832,66 @@ fn global_names_are_hidden_behind_a_character_function_pool() {
 }
 
 #[test]
+fn core_logic_flows_through_scratch_table_slots() {
+    // Every non-recursive core stage keeps its data in one scratch table
+    // g[key]: per-variable fixed random keys (per seed), the value
+    // constantly changing, and the table cleared before the field returns.
+    // The interpreter's own frame registers stay local -- it recurses
+    // through nested frames -- but its SETUP intermediates are slotted.
+    let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut key_sets = BTreeSet::new();
+        for seed in 0..=11u64 {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+            // Slotted fields: decrypt, three segments, forms, decode,
+            // validate, parse core, the validation loop and SETUP.
+            let tables = raw.matches("local g={};").count();
+            assert!(
+                (8..=10).contains(&tables),
+                "{target} seed {seed}: {tables} scratch tables"
+            );
+            // Finish-style fields clear the table before returning.
+            let clears = raw.matches("g=nil;").count();
+            assert_eq!(clears, 6, "{target} seed {seed}: {clears} clears");
+            // No slotted field still declares its data as locals: the
+            // parse core and segments no longer spell `local P=`, `local
+            // st=` style stage locals (frame locals of the interpreter
+            // remain by design).
+            assert!(!raw.contains("local P={};local work=0;"));
+            assert!(!raw.contains("local S=\""));
+            let mut keys = std::collections::BTreeSet::new();
+            for token in crate::lexer::lex(&raw, target).unwrap() {
+                if token.kind == crate::lexer::TokenKind::Number {
+                    let text = token.text(&raw);
+                    if (1..=99).contains(&text.parse::<u64>().unwrap_or(0)) {
+                        keys.insert(text.to_owned());
+                    }
+                }
+            }
+            assert!(keys.len() >= 8, "{target} seed {seed}: thin key set");
+            key_sets.insert(keys);
+            let output = emit(&data, target, seed).unwrap();
+            assert_eq!(blob(&output, target, seed), data);
+        }
+        assert!(
+            key_sets.len() >= 6,
+            "{:?}: scratch keys pinned across seeds",
+            target
+        );
+        // The slotted stages still run the program verbatim.
+        let workspace = native::Workspace::new();
+        let path = workspace.0.join("slotted.lua");
+        fs::write(&path, source).unwrap();
+        let expected = native::compile_and_run(target, &path);
+        fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+        assert_eq!(expected, native::compile_and_run(target, &path));
+    }
+}
+
+#[test]
 fn stages_are_flattened_into_seeded_state_machines() {
     // Control-flow flattening: the base86 segments, the outer decrypt,
     // the parse core and the interpreter loop all run as seeded state
@@ -854,10 +914,10 @@ fn stages_are_flattened_into_seeded_state_machines() {
             // Split functions: frame setup, prototype header, upvalue
             // wiring, constant pool.
             assert!(raw.contains("local SETUP=function(fid,args)"));
-            assert!(raw.contains("local PH=function(id,P,isa)"));
-            assert!(raw.contains("local PU=function(F,P)"));
-            assert!(raw.contains("local PK=function(F,P)"));
-            assert!(raw.contains("return F,R,va,n"));
+            assert!(raw.contains("local PH=function()"));
+            assert!(raw.contains("local PU=function()"));
+            assert!(raw.contains("local PK=function()"));
+            assert!(raw.contains("local F,R,va=SETUP(fid,args);"));
             // The fetch line survives verbatim inside the phase machine
             // (the coverage probe rewrites it).
             assert_eq!(raw.matches("if c==nil then E()end;pc=pc+4;").count(), 1);
@@ -1059,13 +1119,23 @@ fn opcode_dispatch_numbers_are_renumbered_per_seed() {
             );
             assert!(numberings.insert(perm.clone()));
             // The packed renumbering string decodes back to the same
-            // permutation the generator used for its arms.
+            // permutation the generator used for its arms. It lives in a
+            // scratch-table slot (`g[key]="~..."`), so locate it by its
+            // unique 129-byte base86 form instead of a `local U=`
+            // spelling.
             let raw = generate(&data, &program, seed).unwrap();
-            let at = raw.find("local U=\"").expect("packed renumbering string");
-            let start = at + "local U=\"".len();
-            let end = raw[start..].find('"').expect("unterminated") + start;
-            let packed = &raw[start..end];
-            assert_eq!(packed.len(), 129);
+            let mut packed = "";
+            let mut at = 0usize;
+            while let Some(found) = raw[at..].find("=\"~") {
+                let start = at + found + "=\"".len();
+                let end = raw[start..].find('"').expect("unterminated") + start;
+                if end - start == 129 {
+                    packed = &raw[start..end];
+                    break;
+                }
+                at = end;
+            }
+            assert_eq!(packed.len(), 129, "packed renumbering string");
             assert_eq!(packed.as_bytes()[0], b'~');
             for slot in 0..64usize {
                 let x = packed.as_bytes()[1 + slot * 2];
@@ -1114,17 +1184,28 @@ fn operand_features_are_split_into_separate_shuffled_fields() {
                 keys[2]
             )));
             assert!(raw.contains(&format!("VMS[{}](E,SB)", keys[13])));
-            // The packed form string is the only short `local S="..."`
-            // in the raw script (segment fields carry long base86
-            // text); its bytes must rotate with the seed.
+            // The packed form strings are the only short `g[key]="..."`
+            // literals in the raw script (segment fields carry long
+            // base86 text); their bytes must rotate with the seed.
             let mut at = 0usize;
-            while let Some(found) = raw[at..].find("local S=\"") {
-                let start = at + found + 9;
-                let end = raw[start..].find('"').expect("unterminated string") + start;
-                if end - start <= 96 {
-                    packed_strings.insert(raw[start..end].to_owned());
+            while let Some(found) = raw[at..].find("g[") {
+                let base = at + found;
+                let mut digits = base + 2;
+                let bytes = raw.as_bytes();
+                while digits < bytes.len() && bytes[digits].is_ascii_digit() {
+                    digits += 1;
                 }
-                at = end;
+                if raw[digits..].starts_with("]=\"") {
+                    let start = digits + 3;
+                    if let Some(end) = raw[start..].find('"').map(|n| n + start) {
+                        if end - start <= 96 {
+                            packed_strings.insert(raw[start..end].to_owned());
+                        }
+                        at = end;
+                        continue;
+                    }
+                }
+                at = base + 2;
             }
             let output = emit(&data, target, seed).unwrap();
             assert_eq!(blob(&output, target, seed), data);
@@ -1317,7 +1398,9 @@ fn generation_respects_the_documented_size_budget() {
     // current goldens; raise the caps deliberately, never silently --
     // raised 24000/26000 -> 25500/27000 when global names moved behind
     // the character-function pool, then -> 27500/28500 when all stages
-    // were flattened into state machines).
+    // were flattened into state machines, then luau 28500 -> 29800 when
+    // live locals moved into scratch-table slots whose `g[key]` reads
+    // are longer than the renamed locals they replaced).
     for (target, fixture, budget) in [
         (
             Target::Lua51,
@@ -1327,7 +1410,7 @@ fn generation_respects_the_documented_size_budget() {
         (
             Target::Luau,
             include_str!("../../../tests/fixtures/vm_luau.lua"),
-            28_500usize,
+            29_800usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();

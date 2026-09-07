@@ -60,5 +60,5 @@ check() { # <name> <vm> <src> <runner> <cap>
 }
 
 check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 27500
-check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 28500
+check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 29800
 echo '[bench] PASS'
