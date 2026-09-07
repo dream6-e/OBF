@@ -141,7 +141,7 @@ pub(crate) fn embedded_outer_ciphertext(
             continue;
         }
         let cipher = &stream[4..];
-        let plain = lehmer_cipher(cipher, &shares, params.outer, params.mix);
+        let plain = outer_cipher(cipher, &shares, perm_term(seed), &params);
         // Magic + target byte alone cannot discriminate orders that share
         // the same first segment; the header Adler-32 over the whole image
         // is order-sensitive end to end, so a winner is a fully valid frame.
@@ -168,11 +168,11 @@ pub(crate) fn embedded_outer_ciphertext(
 pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let cipher = embedded_outer_ciphertext(source, target, seed)?;
     let params = cipher_params(seed);
-    Ok(lehmer_cipher(
+    Ok(outer_cipher(
         &cipher,
         &cipher_shares(&wrapper_keys(seed), &params),
-        params.outer,
-        params.mix,
+        perm_term(seed),
+        &params,
     ))
 }
 

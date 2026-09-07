@@ -407,13 +407,16 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
             let keys = wrapper_keys(seed);
             let params = cipher_params(seed);
             let shares = cipher_shares(&keys, &params);
-            let state = cipher_state(&shares, data.len(), params.mix);
+            let pv = perm_term(seed);
+            let state = cipher_state(&shares, pv, data.len(), params.mix);
             let secrets = [
                 shares[0].to_string(),
                 shares[1].to_string(),
                 shares[2].to_string(),
+                pv.to_string(),
                 state.to_string(),
-                constant_cipher_state(&keys, data.len(), &params).to_string(),
+                constant_cipher_state(&keys, constant_cross_term(&data), data.len(), &params)
+                    .to_string(),
             ];
             for secret in &secrets {
                 assert!(
@@ -973,7 +976,7 @@ fn decoder_splits_into_seeded_random_sections() {
             // Decrypt field and parse core keep their audited roles;
             // between them 2..=4 randomly grouped helper fields.
             assert!(raw.contains(&format!(
-                "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)",
+                "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF)",
                 wrapper_keys(seed)[1]
             )));
             assert!(raw.contains(&format!(
@@ -1708,6 +1711,105 @@ fn decoy_arms_and_fake_anchors_poison_static_recovery() {
         // The poisoned dispatch still runs the program verbatim.
         let workspace = native::Workspace::new();
         let path = workspace.0.join("decoy_dispatch.lua");
+        fs::write(&path, source).unwrap();
+        let expected = native::compile_and_run(target, &path);
+        fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+        assert_eq!(expected, native::compile_and_run(target, &path));
+    }
+}
+
+#[test]
+fn keystream_families_and_cross_stage_terms_couple_the_pipeline() {
+    // A2: each cipher layer independently draws one of three keystream
+    // primitive families (Lehmer / dual-Lehmer sum / mod-2^32 LCG on the
+    // top byte), so a static replay must identify the family before any
+    // keystream byte exists. B1: the payload seed mixes a term derived
+    // from the REBUILT renumbering table (forms field output) and the
+    // constant-layer seed mixes two framing bytes of the outer-DECRYPTED
+    // image -- stage outputs, not static constants.
+    let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut outer_families = BTreeSet::new();
+        let mut constant_families = BTreeSet::new();
+        for seed in 0..=11u64 {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+            let params = cipher_params(seed);
+            outer_families.insert(params.outer_stream.family);
+            constant_families.insert(params.constant_stream.family);
+            // The decrypt field runs its family step in the XOR loop.
+            let dec_at = raw
+                .find("]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF)")
+                .expect("decrypt field signature");
+            let dec_end = dec_at
+                + raw[dec_at..]
+                    .find("\nend")
+                    .unwrap_or_else(|| panic!("no end after decrypt field, {target} seed {seed}"))
+                + 4;
+            let decrypt = &raw[dec_at..dec_end];
+            match params.outer_stream.family {
+                0 => assert!(
+                    decrypt.contains(&format!("={}*", params.outer_stream.multiplier))
+                        && decrypt.contains("%2147483647")
+                ),
+                1 => assert!(
+                    decrypt.contains(&format!("={}*", params.outer_stream.multiplier))
+                        && decrypt.contains(&format!("={}*", params.outer_stream.second))
+                ),
+                _ => assert!(decrypt.contains("%4294967296")),
+            }
+            // The constant cluster runs its own family inside KA.
+            let ka_at = raw.find("local KA=function()").expect("KA definition");
+            let ka_end = ka_at
+                + raw[ka_at..]
+                    .find(" end;")
+                    .unwrap_or_else(|| panic!("no end after KA, {target} seed {seed}"));
+            let ka = &raw[ka_at..ka_end];
+            match params.constant_stream.family {
+                0 => assert!(ka.contains(&format!("={}*", params.constant_stream.multiplier))),
+                1 => assert!(
+                    ka.contains(&format!("={}*", params.constant_stream.multiplier))
+                        && ka.contains(&format!("={}*", params.constant_stream.second))
+                ),
+                _ => assert!(ka.contains("%4294967296")),
+            }
+            // B1 payload term: the entry derives pv from the rebuilt
+            // renumbering table at the per-seed slots before decrypting,
+            // and the decrypt seed adds it to the three probe shares.
+            let [i0, i1, i2] = perm_indices(seed);
+            let pv_line = format!("local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;");
+            let pv_at = raw.find(&pv_line).expect("entry permutation term");
+            let dec_call = raw
+                .find("c1,c2,c3,pv,E,SB")
+                .expect("decrypt call passes pv");
+            assert!(
+                pv_at < dec_call,
+                "pv must be derived before the decrypt call"
+            );
+            assert!(decrypt.contains("s1+s2+s3+pv+"));
+            // B1 constant term: two framing bytes of the decrypted image.
+            let ka2_at = raw
+                .find("local ka2=SB(B,33)*31+SB(B,#B);")
+                .expect("constant cross term");
+            assert!(dec_call < ka2_at, "ka2 must be read after outer decryption");
+            assert!(raw.contains("(ku+ka2+"), "constant seed mixes the term");
+            // Family parameters rotate across seeds within each family.
+            let output = emit(&data, target, seed).unwrap();
+            assert_eq!(blob(&output, target, seed), data);
+        }
+        assert!(
+            outer_families.len() >= 2,
+            "{target}: outer keystream family pinned ({outer_families:?})"
+        );
+        assert!(
+            constant_families.len() >= 2,
+            "{target}: constant keystream family pinned ({constant_families:?})"
+        );
+        // The coupled pipeline still runs the program verbatim.
+        let workspace = native::Workspace::new();
+        let path = workspace.0.join("family_coupled.lua");
         fs::write(&path, source).unwrap();
         let expected = native::compile_and_run(target, &path);
         fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();

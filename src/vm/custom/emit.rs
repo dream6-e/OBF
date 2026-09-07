@@ -345,6 +345,12 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // Lehmer 48271 mod 2147483647 keeps every intermediate below 2^53, so the
     // Lua-side double arithmetic reproduces both Rust streams bit-for-bit.
     let shares = cipher_shares(&keys, &params);
+    // B1: the payload seed additionally carries the permutation term,
+    // computed on both ends from the rebuilt renumbering table at three
+    // per-seed slots (the entry derives it from the forms field's output
+    // before calling the decrypt field).
+    let pv = perm_term(seed);
+    let pv_slots = perm_indices(seed);
     // Second, independent cipher layer over the constant pool: every
     // constant-record payload inside the embedded image (boolean value byte,
     // number/integer 8 bytes, string length + content) is XORed with its own
@@ -354,7 +360,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // image; the canonical `.obf` on disk stays plaintext and unchanged.
     let mut payload = bytecode.to_vec();
     apply_constant_cipher(&mut payload, &keys, program.target, &params)?;
-    let encrypted = lehmer_cipher(&payload, &shares, params.outer, params.mix);
+    let encrypted = outer_cipher(&payload, &shares, pv, &params);
     // Transport layer: the doubly encrypted image is base86-encoded (all
     // printable alphabet characters, ~1.25 chars per byte instead of 4-char
     // decimal escapes) and split into three segments placed in seed-shuffled
@@ -491,16 +497,50 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
     // cleared before the field returns.
     let dsv = state_values(&mut structure, 3);
     let (d_loop, d_gate, d_done) = (dsv[0], dsv[1], dsv[2]);
+    // A2: the outer keystream step is one of three arithmetic families
+    // (Lehmer / dual Lehmer sum / mod-2^32 LCG emitting the top byte),
+    // drawn per seed; the Rust cipher runs the identical family.
+    let (st_step, y_expr, sv_local) = match params.outer_stream.family {
+        0 => (
+            format!("st={}*st%2147483647;", params.outer_stream.multiplier),
+            "st%256".to_owned(),
+            false,
+        ),
+        1 => (
+            format!(
+                "st={}*st%2147483647;sv={}*sv%2147483647;",
+                params.outer_stream.multiplier, params.outer_stream.second
+            ),
+            "(st+sv)%2147483647%256".to_owned(),
+            true,
+        ),
+        _ => (
+            format!(
+                "st=({}*st+{})%4294967296;",
+                params.outer_stream.second, params.outer_stream.add
+            ),
+            "(st-st%16777216)/16777216".to_owned(),
+            false,
+        ),
+    };
     let xor_step = format!(
-        "st={outer}*st%2147483647;local x=SB(B,i);local y=st%256;local r=0;local p=1;\
+        "{st_step}local x=SB(B,i);local y={y_expr};local r=0;local p=1;\
 for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
-XB[i]=NCH(r);i=i+1;",
-        outer = params.outer
+XB[i]=NCH(r);i=i+1;"
     );
+    let mut decrypt_locals = vec!["st", "XB", "i", "w", "x", "y", "r", "p", "q"];
+    if sv_local {
+        decrypt_locals.insert(1, "sv");
+    }
     let mut decrypt_text = format!(
-        "local st=1+(s1+s2+s3+{mix}*#B)%2147483646;local XB={{}};local i=1;local w={d_loop};\
+        "local st=1+(s1+s2+s3+pv+{mix}*#B)%2147483646;{sv_init}local XB={{}};local i=1;local w={d_loop};\
 {machine}",
         mix = params.mix,
+        sv_init = if sv_local {
+            "local sv=1+(st*7+31)%2147483646;"
+        } else {
+            ""
+        },
         machine = state_machine(
             &mut structure,
             "w",
@@ -517,13 +557,9 @@ XB[i]=NCH(r);i=i+1;",
             ],
         ),
     );
-    decrypt_text = slot_rewrite(
-        &mut structure,
-        &decrypt_text,
-        &["st", "XB", "i", "w", "x", "y", "r", "p", "q"],
-    );
+    decrypt_text = slot_rewrite(&mut structure, &decrypt_text, &decrypt_locals);
     let decrypt_field = format!(
-        "[{}]=function(B,s1,s2,s3,E,SB,SS,SF,NCH,TC,MF,IF)\nlocal g={{}};\n{decrypt_text}\nend,",
+        "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF)\nlocal g={{}};\n{decrypt_text}\nend,",
         keys[1]
     );
     let g1 = r#"local bp=1;
@@ -540,10 +576,36 @@ local pos=function()return bp end;"#
     for _ in 0..params.constant_rounds {
         ku_steps.push_str(&format!("ku={}*ku%2147483647;", params.constant));
     }
+    // A2: the constant-pool keystream draws its own family; B1: the seed
+    // mixes ka2, two framing bytes the wiring reads off the outer-
+    // decrypted image (both outside every encrypted constant range), so
+    // this key cannot exist without a correct outer decryption.
+    let (kv_init, ka_step) = match params.constant_stream.family {
+        0 => (
+            String::new(),
+            format!(
+                "ks={}*ks%2147483647;return ks%256",
+                params.constant_stream.multiplier
+            ),
+        ),
+        1 => (
+            "local kv=1+(ks*7+31)%2147483646;".to_owned(),
+            format!(
+                "ks={}*ks%2147483647;kv={}*kv%2147483647;return (ks+kv)%2147483647%256",
+                params.constant_stream.multiplier, params.constant_stream.second
+            ),
+        ),
+        _ => (
+            String::new(),
+            format!(
+                "ks=({}*ks+{})%4294967296;return (ks-ks%16777216)/16777216",
+                params.constant_stream.second, params.constant_stream.add
+            ),
+        ),
+    };
     let g3 = format!(
-        "local ku=(ca*{mix}+cb)%2147483647;{ku_steps}\nlocal ks=1+(ku+{mix}*#B)%2147483646;local KA=function()ks={mult}*ks%2147483647;return ks%256 end;",
+        "local ku=(ca*{mix}+cb)%2147483647;{ku_steps}\nlocal ks=1+(ku+ka2+{mix}*#B)%2147483646;{kv_init}local KA=function(){ka_step} end;",
         mix = params.mix,
-        mult = params.constant
     );
     let g4g5g6 = r#"local DX=function(u)local y=KA();local r=0;local w=1;for j=1,8 do local q=(u%2+y%2)%2;if q==1 then r=r+w end;u=(u-u%2)/2;y=(y-y%2)/2;w=w*2 end;return r end;
 local db8=function()return DX(b8())end;
@@ -565,7 +627,7 @@ local dnum=function()return fin(db32(),db32())end;"#
             g1,
         ),
         (&["MF"], &["fin"], g2),
-        (&["B", "ca", "cb"], &["KA"], g3),
+        (&["B", "ca", "cb", "ka2"], &["KA"], g3),
         (&["KA"], &["DX"], g4),
         (
             &["b8", "b32", "take", "SB", "NCH", "TC", "DX"],
@@ -574,7 +636,7 @@ local dnum=function()return fin(db32(),db32())end;"#
         ),
         (&["fin", "b32", "db32"], &["num", "dnum"], g6),
     ];
-    let base_names = ["B", "E", "SB", "SS", "NCH", "TC", "MF", "ca", "cb"];
+    let base_names = ["B", "E", "SB", "SS", "NCH", "TC", "MF", "ca", "cb", "ka2"];
     let cluster_count = 2 + structure.next_u64() % 3;
     let mut bounds_set = std::collections::BTreeSet::new();
     while bounds_set.len() < (cluster_count - 1) as usize {
@@ -583,9 +645,21 @@ local dnum=function()return fin(db32(),db32())end;"#
     let mut bounds: Vec<usize> = bounds_set.into_iter().map(|b| b as usize).collect();
     bounds.push(groups.len());
     let mut decoder_fields = vec![decrypt_field];
+    // B1 wiring: the forms field runs FIRST so the entry can derive the
+    // payload seed's permutation term from the rebuilt renumbering table
+    // (PT) before the decrypt call, and the wiring reads two framing
+    // bytes (ka2) off the outer-decrypted image for the constant-layer
+    // seed. Neither key can exist without the upstream stage's output.
     let mut decoder_wiring = format!(
-        "local B=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF);",
-        keys[1]
+        "local FMt,PT=VMS[{forms}](E,SB);\
+local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;\
+local B=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF);\
+local ka2=SB(B,33)*31+SB(B,#B);",
+        forms = keys[13],
+        i0 = pv_slots[0],
+        i1 = pv_slots[1],
+        i2 = pv_slots[2],
+        decrypt = keys[1],
     );
     let mut prior_exports: Vec<&str> = Vec::new();
     let mut start = 0usize;
@@ -940,7 +1014,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local c1=VMS[{}](E,{},{},DBG,GI,LS);local c2=VMS[{}](E,{},{},DBG,GI,LS);local c3=VMS[{}](E,{},{},DBG,GI,LS);
 local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal FMt,PT=VMS[{}](E,SB);local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,NCH,TC,dec,vld,PT);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,NCH,TC,dec,vld,PT);
 local CV,SV,Lookup=VMS[{}](TY,E);
 local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
@@ -962,7 +1036,6 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[1],
         keys[4],
         keys[7],
-        keys[13],
         keys[14],
         keys[15],
         keys[2],
@@ -979,7 +1052,7 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
     .unwrap();
     // Swap the monolithic decoder call for the random-section wiring.
     let old_decoder_line = format!(
-        "local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});",
+        "local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});",
         keys[1], keys[4], keys[7]
     );
     s = s.replacen(&old_decoder_line, &decoder_wiring, 1);

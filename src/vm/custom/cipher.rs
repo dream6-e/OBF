@@ -1,15 +1,70 @@
 use super::*;
 
+/// Keystream primitive families (A2): every layer independently draws one
+/// of three arithmetic stream shapes so a static replay must first
+/// identify the family, then its parameters, before any keystream byte
+/// can be reproduced. All operands stay below 2^53 (65539 * (2^31-2) <
+/// 2^47; 1664525 * (2^32-1) < 2^53) so the Lua-side double arithmetic is
+/// bit-identical.
+#[derive(Clone, Copy)]
+pub(crate) struct StreamParams {
+    pub(crate) family: u64,
+    /// Family 0/1: Lehmer multiplier. Family 1: first of the dual pair.
+    pub(crate) multiplier: u64,
+    /// Family 1: second Lehmer multiplier. Family 2: LCG multiplier.
+    pub(crate) second: u64,
+    /// Family 2: odd additive constant.
+    pub(crate) add: u64,
+}
+
+pub(crate) struct Keystream {
+    params: StreamParams,
+    state: u64,
+    state2: u64,
+}
+
+impl Keystream {
+    pub(crate) fn new(params: StreamParams, state: u64) -> Self {
+        // Dual-family second state derives from the first at run time on
+        // the Lua side (1+(st*7+31)%2147483646); mirror it exactly.
+        let state2 = 1 + (state * 7 + 31) % 2_147_483_646;
+        Self {
+            params,
+            state,
+            state2,
+        }
+    }
+
+    pub(crate) fn next(&mut self) -> u8 {
+        match self.params.family {
+            0 => {
+                self.state = self.params.multiplier * self.state % 2_147_483_647;
+                (self.state % 256) as u8
+            }
+            1 => {
+                self.state = self.params.multiplier * self.state % 2_147_483_647;
+                self.state2 = self.params.second * self.state2 % 2_147_483_647;
+                (((self.state + self.state2) % 2_147_483_647) % 256) as u8
+            }
+            _ => {
+                self.state = (self.params.second * self.state + self.params.add) % 4_294_967_296;
+                ((self.state - self.state % 16_777_216) / 16_777_216) as u8
+            }
+        }
+    }
+}
+
 /// Per-generation cipher parameters ("the cipher algorithm varies every
-/// build"): Lehmer multiplier drawn from three full-period primitives mod
-/// 2^31-1 (independently for the outer blob cipher and the constant-pool
-/// layer), the structural mixing constant, the per-probe derivation round
-/// counts and the constant-layer round count. All drawn from a dedicated
-/// seeded stream; the generated Lua side emits the identical values, and
-/// every product stays below 2^53 (65539 * (2^31-2) < 2^47).
+/// build"): each layer (outer blob cipher, constant-pool cipher)
+/// independently draws a stream family and its parameters, plus the
+/// structural mixing constant, the per-probe derivation round counts and
+/// the constant-layer round count. All drawn from a dedicated seeded
+/// stream; the generated Lua side emits the identical values.
 pub(crate) struct CipherParams {
     pub(crate) outer: u64,
+    pub(crate) outer_stream: StreamParams,
     pub(crate) constant: u64,
+    pub(crate) constant_stream: StreamParams,
     pub(crate) mix: u64,
     pub(crate) probe_rounds: [u32; 3],
     pub(crate) constant_rounds: u32,
@@ -18,13 +73,43 @@ pub(crate) struct CipherParams {
 pub(crate) fn cipher_params(seed: u64) -> CipherParams {
     const MULTIPLIERS: [u64; 3] = [16_807, 48_271, 65_539];
     const MIXES: [u64; 4] = [31, 33, 37, 41];
+    // Odd, spectrally decent mod-2^32 multipliers whose product with any
+    // 2^32 state stays below 2^53 (exact Lua doubles).
+    const LCG32_MULTIPLIERS: [u64; 3] = [40_503, 69_069, 1_664_525];
     let mut random = crate::random::Prng::new(seed ^ 0x616c_676f_7661_7237);
     let pick = |random: &mut crate::random::Prng, table: &[u64]| {
         table[(random.next_u64() % table.len() as u64) as usize]
     };
+    let stream = |random: &mut crate::random::Prng, lehmer: u64| {
+        let family = random.next_u64() % 3;
+        let second = if family == 1 {
+            // Dual pair: a DIFFERENT Lehmer multiplier.
+            let others: [u64; 2] = if lehmer == MULTIPLIERS[0] {
+                [MULTIPLIERS[1], MULTIPLIERS[2]]
+            } else if lehmer == MULTIPLIERS[1] {
+                [MULTIPLIERS[0], MULTIPLIERS[2]]
+            } else {
+                [MULTIPLIERS[0], MULTIPLIERS[1]]
+            };
+            others[(random.next_u64() % 2) as usize]
+        } else {
+            // Family 2 (LCG mod 2^32) multiplier; unused by family 0.
+            pick(random, &LCG32_MULTIPLIERS)
+        };
+        StreamParams {
+            family,
+            multiplier: lehmer,
+            second,
+            add: 1 + 2 * (random.next_u64() % 1_073_741_824),
+        }
+    };
+    let outer = pick(&mut random, &MULTIPLIERS);
+    let constant = pick(&mut random, &MULTIPLIERS);
     CipherParams {
-        outer: pick(&mut random, &MULTIPLIERS),
-        constant: pick(&mut random, &MULTIPLIERS),
+        outer,
+        outer_stream: stream(&mut random, outer),
+        constant,
+        constant_stream: stream(&mut random, constant),
         mix: pick(&mut random, &MIXES),
         probe_rounds: [
             3 + (random.next_u64() % 7) as u32,
@@ -63,27 +148,76 @@ pub(crate) fn cipher_shares(keys: &[u64], params: &CipherParams) -> [u64; 3] {
     shares
 }
 
-/// Combined keystream seed: the three dynamically computed shares plus the
-/// ciphertext length (31*#B on the Lua side). Every operand stays below 2^53,
-/// so the generated decoder reproduces this value exactly.
-pub(crate) fn cipher_state(shares: &[u64; 3], length: usize, mix: u64) -> u64 {
-    1 + (shares[0] + shares[1] + shares[2] + mix * length as u64) % 2_147_483_646
+/// Combined keystream seed: the three dynamically computed shares, the
+/// cross-stage permutation term (B1: derived at run time from the rebuilt
+/// opcode-renumbering table, so the payload key cannot exist without the
+/// forms field's output) and the ciphertext length (31*#B on the Lua
+/// side). Every operand stays below 2^53, so the generated decoder
+/// reproduces this value exactly.
+pub(crate) fn cipher_state(shares: &[u64; 3], perm_term: u64, length: usize, mix: u64) -> u64 {
+    1 + (shares[0] + shares[1] + shares[2] + perm_term + mix * length as u64) % 2_147_483_646
 }
 
-/// Symmetric byte cipher over a Lehmer keystream (48271 mod 2147483647; the
-/// combined seed is 1 + (s1+s2+s3+31*#B) mod 2147483646). Every intermediate
-/// stays below 2^53, so the Lua-side double arithmetic in the generated
+/// Three distinct permutation slots (indices into the 64 canonical opcode
+/// slots) drawn from a dedicated salted stream; the entry combines the
+/// rebuilt renumbering table at these positions into the payload seed's
+/// cross-stage term. Exposed so tests can reproduce the exact value.
+pub(crate) fn perm_indices(seed: u64) -> [usize; 3] {
+    let mut random = crate::random::Prng::new(seed ^ 0x7874_6572_6d37_7333);
+    let mut used = std::collections::BTreeSet::new();
+    let mut picks = [0usize; 3];
+    for pick in &mut picks {
+        loop {
+            let index = (random.next_u64() % 64) as usize;
+            if used.insert(index) {
+                *pick = index;
+                break;
+            }
+        }
+    }
+    picks
+}
+
+/// The payload cipher's cross-stage term: 1 + (PT[i1]*31 + PT[i2]*7 +
+/// PT[i3]) over the per-seed opcode permutation. Mirror of the entry's
+/// `local pv=...` line; PT is only available at run time AFTER the forms
+/// field rebuilt it from the packed string.
+pub(crate) fn perm_term(seed: u64) -> u64 {
+    let perm = opcode_permutation(seed, 64);
+    let [a, b, c] = perm_indices(seed);
+    1 + (u64::from(perm[a]) * 31 + u64::from(perm[b]) * 7 + u64::from(perm[c])) % 2_147_483_646
+}
+
+/// Cross-stage term of the constant-pool cipher (B1): two framing bytes
+/// of the embedded image -- the first byte of the first prototype header
+/// (offset 32) and the final code byte. Both sit OUTSIDE every encrypted
+/// constant range (headers, tags, lengths and code stay plaintext), so
+/// the term is identical on the plaintext image at encryption time and
+/// on the constant-encrypted image the runtime decrypt hands to the
+/// parser: the constant-layer key cannot exist without a correctly
+/// outer-decrypted blob.
+pub(crate) fn constant_cross_term(bytes: &[u8]) -> u64 {
+    let head = u64::from(bytes[32]);
+    let tail = u64::from(bytes[bytes.len() - 1]);
+    head * 31 + tail
+}
+
+/// Symmetric byte cipher over the family keystream (the combined seed is
+/// 1 + (s1+s2+s3+pv+31*#B) mod 2147483646). Every intermediate stays
+/// below 2^53, so the Lua-side double arithmetic in the generated
 /// decoder reproduces this stream bit-for-bit. This raises the embedded
 /// blob's entropy; it is obfuscation, NOT a cryptographic primitive.
-pub(crate) fn lehmer_cipher(bytes: &[u8], shares: &[u64; 3], multiplier: u64, mix: u64) -> Vec<u8> {
-    let mut state = cipher_state(shares, bytes.len(), mix);
-    bytes
-        .iter()
-        .map(|&byte| {
-            state = multiplier * state % 2_147_483_647;
-            byte ^ (state % 256) as u8
-        })
-        .collect()
+pub(crate) fn outer_cipher(
+    bytes: &[u8],
+    shares: &[u64; 3],
+    perm_term: u64,
+    params: &CipherParams,
+) -> Vec<u8> {
+    let mut stream = Keystream::new(
+        params.outer_stream,
+        cipher_state(shares, perm_term, bytes.len(), params.mix),
+    );
+    bytes.iter().map(|&byte| byte ^ stream.next()).collect()
 }
 
 /// Byte ranges of every constant-record payload (all bytes after the type
@@ -167,21 +301,26 @@ pub(crate) fn constant_ranges(
     Ok(ranges)
 }
 
-/// Keystream seed of the independent constant-pool cipher, derived from a
-/// DIFFERENT structural key pair (wrapper keys 4/7) than the outer blob
-/// cipher shares, advanced by 11 Lehmer rounds and mixed with the image
-/// length. Never stored in the script; the target parser derives the same
-/// value from the two structural keys the entry passes in.
-pub(crate) fn constant_cipher_state(keys: &[u64], length: usize, params: &CipherParams) -> u64 {
+/// Keystream seed of the independent constant-pool cipher: a structural
+/// key pair (wrapper keys 4/7) advanced by seeded Lehmer rounds, mixed
+/// with the image length AND the cross-stage framing term (B1: two bytes
+/// only available on a correctly outer-decrypted image). Never stored in
+/// the script; the target cluster derives the same value.
+pub(crate) fn constant_cipher_state(
+    keys: &[u64],
+    cross_term: u64,
+    length: usize,
+    params: &CipherParams,
+) -> u64 {
     let mut state = (keys[4] * params.mix + keys[7]) % 2_147_483_647;
     for _ in 0..params.constant_rounds {
         state = params.constant * state % 2_147_483_647;
     }
-    1 + (state + params.mix * length as u64) % 2_147_483_646
+    1 + (state + cross_term + params.mix * length as u64) % 2_147_483_646
 }
 
 /// Symmetric constant-pool cipher: XOR every constant payload byte with the
-/// Lehmer keystream (continuing across records in file order) and patch the
+/// family keystream (continuing across records in file order) and patch the
 /// header Adler-32 over the transformed image. Applying it twice restores
 /// the canonical bytes; the generated decoder runs the identical stream.
 pub(crate) fn apply_constant_cipher(
@@ -191,11 +330,17 @@ pub(crate) fn apply_constant_cipher(
     params: &CipherParams,
 ) -> Result<(), Diagnostic> {
     let ranges = constant_ranges(bytes, target)?;
-    let mut state = constant_cipher_state(keys, bytes.len(), params);
+    // The term reads framing bytes that encryption leaves untouched, so
+    // deriving it here (before the loop) matches the runtime's read of
+    // the decrypted image exactly.
+    let cross_term = constant_cross_term(bytes);
+    let mut stream = Keystream::new(
+        params.constant_stream,
+        constant_cipher_state(keys, cross_term, bytes.len(), params),
+    );
     for range in ranges {
         for byte in &mut bytes[range] {
-            state = params.constant * state % 2_147_483_647;
-            *byte ^= (state % 256) as u8;
+            *byte ^= stream.next();
         }
     }
     let sum = custom::checksum(&bytes[32..]);
