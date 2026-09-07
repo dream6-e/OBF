@@ -92,13 +92,22 @@ impl Prng {
     /// Emit one of several side-effect-free dispatcher comparisons. Only the
     /// opcode comparison changes; handler evaluation order stays unchanged.
     pub fn dispatch_condition(&mut self, opcode: u16, luau: bool) -> String {
+        self.dispatch_condition_for("o", opcode, luau)
+    }
+
+    /// Variable-parameterized form used by the semantic recipe dispatcher.
+    /// The caller supplies an internal identifier, never user source.
+    pub fn dispatch_condition_for(&mut self, variable: &str, opcode: u16, luau: bool) -> String {
+        debug_assert!(variable
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
         let literal = self.integer_literal(u64::from(opcode), luau);
         let mut result = String::new();
         match self.index(4) {
-            0 => write!(result, "o=={literal}").unwrap(),
-            1 => write!(result, "{literal}==o").unwrap(),
-            2 => write!(result, "not(o~={literal})").unwrap(),
-            3 => write!(result, "o-{literal}==0").unwrap(),
+            0 => write!(result, "{variable}=={literal}").unwrap(),
+            1 => write!(result, "{literal}=={variable}").unwrap(),
+            2 => write!(result, "not({variable}~={literal})").unwrap(),
+            3 => write!(result, "{variable}-{literal}==0").unwrap(),
             _ => unreachable!(),
         }
         result
@@ -172,5 +181,13 @@ mod tests {
             .collect();
         assert!(literals.iter().any(|literal| literal.starts_with("0b")));
         assert!(literals.iter().any(|literal| literal.contains('_')));
+
+        let mut dispatch = Prng::new(19);
+        for opcode in 1..=64 {
+            let condition = dispatch.dispatch_condition_for("rid", opcode, true);
+            assert!(condition.contains("rid"));
+            let without_keywords = condition.replace("not", "").replace("rid", "");
+            assert!(!without_keywords.contains('o'));
+        }
     }
 }

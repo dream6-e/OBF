@@ -1,13 +1,18 @@
-//! Executable VM for AST-produced OBF v2 bytecode. The file encodes every
-//! instruction as an opcode byte plus 7-bit varint operands; the generated
-//! decoder validates them and expands the stream back into the fixed
-//! 4-byte-per-instruction string that the fetch loop then executes. Only
-//! handlers in the program are emitted; all opcode definitions exist in the
-//! two target subfolders. `seed` affects final local/private-field names
-//! only, never bytecode.
+//! Executable VM for AST-produced OBF v2 bytecode. Public `.obf` files keep
+//! the canonical opcode-plus-varint ISA2 format, but generated scripts lower
+//! that program into a private seed-specific ISA3 image: straight-line words
+//! become recipe superoperators, use sites carry operands plus random graph
+//! labels/successors (not opcode bytes), records and sibling prototypes are
+//! shuffled, an unreachable synthetic prototype subtree changes topology,
+//! and the target reconstructs a validated label-keyed graph.
+//! Primitive semantics still live in the two target opcode subfolders. The
+//! seed never changes public `.obf` bytes, but it does change the embedded
+//! semantic image as well as transport, layout, local, and private-field
+//! randomization.
 
 mod cipher;
 mod emit;
+mod semantic;
 mod structure;
 #[cfg(test)]
 mod tests;

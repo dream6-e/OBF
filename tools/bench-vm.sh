@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M7 performance benchmark and size budget for the default VM backend.
+# ISA3 semantic-VM performance benchmark and size budget.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) for the
 # checked-in goldens and enforces two hard gates:
@@ -59,6 +59,6 @@ check() { # <name> <vm> <src> <runner> <cap>
     exit 1
 }
 
-check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 29500
-check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 31800
+check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 68000
+check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 74000
 echo '[bench] PASS'

@@ -10,9 +10,17 @@ const LONG_FIELDS: &[&str] = &[
 ];
 
 fn embedded(source: &str, target: Target, seed: u64) -> Vec<u8> {
-    // The payload blob is encrypted at generation time; decrypt it with the
-    // seed that produced this script and compare against the canonical bytes.
+    // Removing both transport ciphers reveals the private seed-specific
+    // semantic image, not the public canonical bytecode supplied to `emit`.
     vm::custom::decrypt_embedded(source, target, seed).unwrap()
+}
+
+fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
+    assert_ne!(image, canonical);
+    assert_eq!(&image[..4], b"OBF\x02");
+    assert_eq!(image[4], if target.is_luau() { 0x75 } else { 0x51 });
+    assert_eq!(image[6], 1, "generated scripts require private encoding 1");
+    assert_eq!(u32::from_le_bytes(image[24..28].try_into().unwrap()), 3);
 }
 
 fn assert_private_names_hidden(output: &str, target: Target) {
@@ -59,7 +67,8 @@ fn prototype_field_shortening_preserves_bytecode_public_keys_and_runtime_output(
             let output = vm::custom::emit(&bytes, target, seed).unwrap();
             assert_eq!(output, vm::custom::emit(&bytes, target, seed).unwrap());
             assert_private_names_hidden(&output, target);
-            assert_eq!(embedded(&output, target, seed), bytes);
+            let image = embedded(&output, target, seed);
+            assert_semantic_image(&image, &bytes, target);
             let decoded = bc::decode(&bytes, target).unwrap();
             assert_eq!(bc::serialize(&decoded).unwrap(), bytes);
             fs::write(&path, output).unwrap();
@@ -175,10 +184,8 @@ fn cli_virtualize_compile_wrap_and_isa1_all_use_the_short_field_pipeline() {
         .stdout;
         assert_eq!(output, wrapped);
         assert_private_names_hidden(std::str::from_utf8(&output).unwrap(), target);
-        assert_eq!(
-            embedded(std::str::from_utf8(&output).unwrap(), target, 735),
-            compiled
-        );
+        let image = embedded(std::str::from_utf8(&output).unwrap(), target, 735);
+        assert_semantic_image(&image, &compiled, target);
         let mut old = bc::decode(&compiled, target).unwrap();
         old.isa_version = 1;
         for prototype in &mut old.prototypes {
@@ -194,7 +201,8 @@ fn cli_virtualize_compile_wrap_and_isa1_all_use_the_short_field_pipeline() {
         .stdout;
         let wrapped = String::from_utf8(wrapped).unwrap();
         assert_private_names_hidden(&wrapped, target);
-        assert_eq!(embedded(&wrapped, target, 735), legacy);
+        let image = embedded(&wrapped, target, 735);
+        assert_semantic_image(&image, &legacy, target);
         let script = work.0.join("old.lua");
         fs::write(&script, wrapped).unwrap();
         assert_eq!(compile_and_run(target, &script), b"3\n");

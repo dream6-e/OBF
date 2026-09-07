@@ -12,9 +12,15 @@ mod native {
 fn blob(source: &str, target: Target, seed: u64) -> Vec<u8> {
     let chunk = crate::parse(source, target).unwrap();
     assert!(crate::vm::tests::no_inline_metadata(&chunk));
-    // The embedded payload is encrypted; decrypt it with the seed that
-    // produced this script and compare against the canonical bytecode.
+    // The embedded payload is encrypted; removing the transport layers now
+    // yields the private, seed-specific semantic wire image rather than the
+    // canonical public `.obf` instruction stream.
     decrypt_embedded(source, target, seed).unwrap()
+}
+
+fn wire(data: &[u8], target: Target, seed: u64) -> Vec<u8> {
+    let program = custom::decode(data, target).unwrap();
+    super::semantic::encode(&program, seed).unwrap().bytes
 }
 
 #[test]
@@ -32,8 +38,8 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
         for seed in [0, 1, 735, u64::MAX] {
             let output = emit(&data, target, seed).unwrap();
             assert_eq!(emit(&data, target, seed).unwrap(), output);
-            assert_eq!(blob(&raw, target, 735), data);
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&raw, target, 735), wire(&data, target, 735));
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
             assert!(!output.contains(['\r', '\n']));
             // Field shuffling reorders the payload table per seed, so the
             // per-position local comparison runs against the same-seed
@@ -71,36 +77,41 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
 
 fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
     let program = custom::decode(data, target).unwrap();
+    let image = super::semantic::encode(&program, 735).unwrap();
     let raw = generate(data, &program, 735).unwrap();
-    // Instrument the real fetch loop BEFORE the same final whole-output
-    // naming/audit pass. This measures executed handlers, not just words
-    // present in dead branches or uncalled prototypes.
-    assert_eq!(raw.matches("if c==nil then E()end;pc=pc+4;").count(), 1);
-    let raw=raw.replace("if c==nil then E()end;pc=pc+4;","if c==nil then E()end;pc=pc+4;Probe[o]=true;")
-            .replace("return U(result,1,result.n)","for id in ProbePairs(Probe)do ProbePrint('opcode:'..id)end;return U(result,1,result.n)");
+    // Instrument the real graph fetch BEFORE the same final whole-output
+    // naming/audit pass. The probe records live recipe ids, so coverage
+    // includes every primitive in an executed 1..4-word superoperator while
+    // excluding unused decoy recipes and uncalled prototypes.
+    assert_eq!(raw.matches("rid=I[1];w=").count(), 1);
+    let raw = raw
+        .replace("rid=I[1];w=", "rid=I[1];Probe[rid]=true;w=")
+        .replace(
+        "return U(result,1,result.n)",
+        "for id in ProbePairs(Probe)do ProbePrint('recipe:'..id)end;return U(result,1,result.n)",
+    );
     let raw = format!("local Probe={{}};local ProbePrint,ProbePairs=print,pairs;{raw}");
     let output = finalize(&raw, target, 735).unwrap();
     let work = native::Workspace::new();
     let path = work.0.join("coverage.lua");
     fs::write(&path, output).unwrap();
     let stdout = native::compile_and_run(target, &path);
-    // The probe records renumbered dispatch values; translate them back
-    // through the inverse of this seed's opcode permutation.
-    let perm = opcode_permutation(735, 64);
-    let inverse: std::collections::BTreeMap<u8, u8> = perm
+    let recipes: std::collections::BTreeMap<u16, &super::semantic::SemanticRecipe> = image
+        .recipes
         .iter()
-        .enumerate()
-        .map(|(slot, value)| (*value, slot as u8))
+        .map(|recipe| (recipe.id, recipe))
         .collect();
-    String::from_utf8(stdout)
+    let mut executed = BTreeSet::new();
+    for id in String::from_utf8(stdout)
         .unwrap()
         .lines()
-        .filter_map(|line| line.strip_prefix("opcode:"))
-        .map(|id| {
-            Opcode::from_byte(inverse[&id.parse::<u8>().unwrap()])
-                .expect("probed value outside the permutation image")
-        })
-        .collect()
+        .filter_map(|line| line.strip_prefix("recipe:"))
+    {
+        let recipe = recipes[&id.parse::<u16>().unwrap()];
+        assert!(recipe.live, "an unreferenced decoy recipe executed");
+        executed.extend(recipe.ops.iter().copied());
+    }
+    executed
 }
 
 #[test]
@@ -159,109 +170,169 @@ fn every_supported_opcode_is_actually_executed_in_the_target_runtime() {
     }
 }
 
+fn semantic_prototype_layouts(bytes: &[u8]) -> Vec<(usize, usize, usize, usize)> {
+    let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+    let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let prototypes = u32_at(16) as usize;
+    let mut proto = 32usize;
+    let mut layouts = Vec::with_capacity(prototypes);
+    for _ in 0..prototypes {
+        let captures = usize::from(u16_at(proto + 8));
+        let constants = u32_at(proto + 12) as usize;
+        let records = u32_at(proto + 16) as usize;
+        let code_len = u32_at(proto + 20) as usize;
+        let mut code = proto + 24 + captures * 2;
+        for _ in 0..constants {
+            let tag = bytes[code];
+            code += 1;
+            code += match tag {
+                0 => 0,
+                1 => 1,
+                2 | 4 => 8,
+                3 | 5 => {
+                    let len = u32_at(code) as usize;
+                    4 + len
+                }
+                _ => panic!("unknown constant tag in generated semantic image"),
+            };
+        }
+        layouts.push((proto, code, code_len, records));
+        proto = code + code_len;
+    }
+    assert_eq!(proto, bytes.len());
+    layouts
+}
+
+fn semantic_first_code_layout(bytes: &[u8]) -> (usize, usize, usize) {
+    let (_, code, code_len, records) = semantic_prototype_layouts(bytes)[0];
+    (code, code_len, records)
+}
+
+fn repair_semantic_checksum(bytes: &mut [u8]) {
+    let checksum = custom::checksum(&bytes[custom::HEADER_SIZE..]);
+    bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
+}
+
 #[test]
-fn target_decoder_rejects_corrupt_repaired_payload_before_user_code_runs() {
+fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
     for target in [Target::Lua51, Target::Luau] {
         let data = compile("print('MUST_NOT_RUN')", target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        for kind in 0..5 {
-            let mut bad = data.clone();
-            match kind {
-                0 => bad[39] = 255,
-                1 => bad[36..38].copy_from_slice(&257u16.to_le_bytes()),
-                2 => bad[48..52].copy_from_slice(&u32::MAX.to_le_bytes()),
-                // dangling varint continuation in the final instruction
-                3 => {
-                    let last = bad.len() - 1;
-                    bad[last] = 0x80;
-                }
-                // instruction byte count outside the 2..=7-per-instruction band
-                _ => {
-                    bad[52..56].copy_from_slice(&u32::MAX.to_le_bytes());
-                }
-            }
-            let checksum = custom::checksum(&bad[32..]);
-            bad[28..32].copy_from_slice(&checksum.to_le_bytes());
-            assert!(custom::decode(&bad, target).is_err());
-            // Bypass only Rust's input gate inside this unit test to
-            // independently exercise the emitted target-language gate.
-            // Since the constant-pool cipher scans the payload frame,
-            // corruption that breaks the frame itself (kind 4's
-            // impossible code byte count) is rejected by the generator;
-            // every other kind still reaches the target decoder and is
-            // rejected there. Either way no user code ever runs.
-            let output = match generate(&bad, &program, 735) {
-                Ok(raw) => Some(finalize(&raw, target, 735).unwrap()),
-                Err(_) => {
-                    assert_eq!(kind, 4, "{target}: unexpected generator rejection");
-                    None
-                }
-            };
-            if let Some(output) = output {
-                let work = native::Workspace::new();
-                let path = work.0.join("invalid.lua");
-                fs::write(&path, output).unwrap();
-                assert!(native::compile(target, &path).status.success());
-                let runner = if target.is_luau() { "luau" } else { "lua5.1" };
-                let result = Command::new(native::root().join("toolchains/bin").join(runner))
-                    .arg(&path)
-                    .output()
-                    .unwrap();
-                assert!(!result.status.success());
-                assert!(result.stdout.is_empty());
-            }
+        let image = super::semantic::encode(&program, 735).unwrap();
+        let (code, code_len, records) = semantic_first_code_layout(&image.bytes);
+        assert!(code_len > 20 && records > 0);
+        let recipes = u16::from_le_bytes(image.bytes[code..code + 2].try_into().unwrap()) as usize;
+        assert!(recipes >= 2);
+        let mut cursor = code + 2;
+        let first_recipe = cursor;
+        for _ in 0..recipes {
+            let len = usize::from(image.bytes[cursor + 2]);
+            assert!((1..=4).contains(&len));
+            cursor += 3 + len;
+        }
+        let start_label = cursor;
+        let first_record = start_label + 2;
+        assert!(first_record + 8 <= code + code_len);
+        let second_recipe = first_recipe + 3 + usize::from(image.bytes[first_recipe + 2]);
+
+        let mut corruptions = Vec::new();
+        let mut bad = image.clone();
+        bad.bytes[first_recipe + 2] = 0; // empty recipe
+        corruptions.push(bad);
+        let mut bad = image.clone();
+        let duplicate = bad.bytes[first_recipe..first_recipe + 2].to_vec();
+        bad.bytes[second_recipe..second_recipe + 2].copy_from_slice(&duplicate); // duplicate id
+        corruptions.push(bad);
+        let mut bad = image.clone();
+        bad.bytes[start_label..start_label + 2].fill(0); // null entry label
+        corruptions.push(bad);
+        let mut bad = image.clone();
+        bad.bytes[first_record..first_record + 2].fill(0); // null record label
+        corruptions.push(bad);
+        let mut bad = image.clone();
+        bad.bytes[first_record + 6..first_record + 8].fill(0); // unknown recipe id
+        corruptions.push(bad);
+
+        for (kind, mut bad) in corruptions.into_iter().enumerate() {
+            repair_semantic_checksum(&mut bad.bytes);
+            let raw = super::emit::generate_from_semantic_image(&program, 735, bad).unwrap();
+            let output = finalize(&raw, target, 735).unwrap();
+            let work = native::Workspace::new();
+            let path = work.0.join("invalid_semantic.lua");
+            fs::write(&path, output).unwrap();
+            assert!(native::compile(target, &path).status.success());
+            let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+            let result = Command::new(native::root().join("toolchains/bin").join(runner))
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(!result.status.success(), "{target} corruption {kind} ran");
+            assert!(
+                result.stdout.is_empty(),
+                "{target} corruption {kind} leaked output"
+            );
         }
     }
 }
 
 #[test]
-fn target_decoder_independently_rejects_invalid_closure_sharing_metadata() {
+fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
     let source =
         "local function f(n)if n>0 then return f(n-1)end return 3 end print('MUST_NOT_RUN',f(2))";
-    let data = compile(source, Target::Luau).unwrap();
-    let program = custom::decode(&data, Target::Luau).unwrap();
-    let root = &program.prototypes[0];
-    let constant_bytes: usize = root
-        .constants
+    let target = Target::Luau;
+    let data = compile(source, target).unwrap();
+    let program = custom::decode(&data, target).unwrap();
+    let image = super::semantic::encode(&program, 735).unwrap();
+    let old_child = program
+        .prototypes
         .iter()
-        .map(|c| match c {
-            ir::Constant::Nil => 1,
-            ir::Constant::Boolean(_) => 2,
-            ir::Constant::Number(_) | ir::Constant::Integer(_) => 9,
-            ir::Constant::String(s) => 5 + s.len(),
-            ir::Constant::Method(s) => 5 + s.len(),
-        })
-        .sum();
-    let child = 32
-        + 24
-        + root.captures.len() * 2
-        + constant_bytes
-        + custom::encode_code(&root.code).unwrap().len();
-    assert_eq!(data[child + 24], 2);
-    for kind in 0..5 {
-        let mut bad = data.clone();
-        match kind {
-            0 => bad[24..28].copy_from_slice(&1u32.to_le_bytes()),
-            1 => bad[child + 7] &= !8,
-            2 => bad[child + 7] |= 16,
-            3 => bad[child + 24] = 3,
-            _ => bad[child + 25] = 255,
-        }
-        let checksum = custom::checksum(&bad[32..]);
-        bad[28..32].copy_from_slice(&checksum.to_le_bytes());
-        assert!(custom::decode(&bad, Target::Luau).is_err());
-        let raw = generate(&bad, &program, 735).unwrap();
-        let output = finalize(&raw, Target::Luau, 735).unwrap();
+        .position(|prototype| !prototype.captures.is_empty())
+        .expect("fixture must contain a captured child");
+    let child_id = image
+        .prototype_order
+        .iter()
+        .position(|old| *old == old_child)
+        .expect("real child missing after semantic reorder");
+    let layouts = semantic_prototype_layouts(&image.bytes);
+    let child = layouts[child_id].0;
+    assert!(child + 26 <= image.bytes.len());
+    let captures = u16::from_le_bytes(image.bytes[child + 8..child + 10].try_into().unwrap());
+    assert!(captures > 0, "fixture must exercise capture metadata");
+
+    let mut corruptions = Vec::new();
+    let mut bad = image.clone();
+    bad.bytes[32..36].copy_from_slice(&0u32.to_le_bytes()); // root has a parent
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    bad.bytes[child..child + 4].copy_from_slice(&u32::MAX.to_le_bytes()); // child lacks parent
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    bad.bytes[child + 7] |= 0x80; // unknown prototype flag
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    bad.bytes[child + 24] = 3; // unknown capture tag
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    bad.bytes[child + 25] = 255; // capture index outside parent frame
+    corruptions.push(bad);
+
+    for (kind, mut bad) in corruptions.into_iter().enumerate() {
+        repair_semantic_checksum(&mut bad.bytes);
+        let raw = super::emit::generate_from_semantic_image(&program, 735, bad).unwrap();
+        let output = finalize(&raw, target, 735).unwrap();
         let work = native::Workspace::new();
-        let path = work.0.join("invalid.luau");
+        let path = work.0.join("invalid_semantic_proto.luau");
         fs::write(&path, output).unwrap();
-        assert!(native::compile(Target::Luau, &path).status.success());
+        assert!(native::compile(target, &path).status.success());
         let result = Command::new(native::root().join("toolchains/bin/luau"))
             .arg(path)
             .output()
             .unwrap();
-        assert!(!result.status.success());
-        assert!(result.stdout.is_empty());
+        assert!(!result.status.success(), "prototype corruption {kind} ran");
+        assert!(
+            result.stdout.is_empty(),
+            "prototype corruption {kind} leaked output"
+        );
     }
 }
 
@@ -406,17 +477,23 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
             let output = emit(&data, target, seed).unwrap();
             let keys = wrapper_keys(seed);
             let params = cipher_params(seed);
+            let semantic = wire(&data, target, seed);
             let shares = cipher_shares(&keys, &params);
             let pv = perm_term(seed);
-            let state = cipher_state(&shares, pv, data.len(), params.mix);
+            let state = cipher_state(&shares, pv, semantic.len(), params.mix);
             let secrets = [
                 shares[0].to_string(),
                 shares[1].to_string(),
                 shares[2].to_string(),
                 pv.to_string(),
                 state.to_string(),
-                constant_cipher_state(&keys, constant_cross_term(&data), data.len(), &params)
-                    .to_string(),
+                constant_cipher_state(
+                    &keys,
+                    constant_cross_term(&semantic),
+                    semantic.len(),
+                    &params,
+                )
+                .to_string(),
             ];
             for secret in &secrets {
                 assert!(
@@ -438,7 +515,10 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
             // reproduce the exact same script, and decrypt back to the
             // canonical bytes.
             assert_eq!(emit(&data, target, seed).unwrap(), output);
-            assert_eq!(decrypt_embedded(&output, target, seed).unwrap(), data);
+            assert_eq!(
+                decrypt_embedded(&output, target, seed).unwrap(),
+                wire(&data, target, seed)
+            );
         }
     }
 }
@@ -465,7 +545,10 @@ fn constant_pool_cipher_is_an_independent_second_layer() {
         let other = extract_embedded(&other, target, 736).unwrap();
         assert_ne!(payload, other);
         // Removing both layers restores the canonical bytes exactly.
-        assert_eq!(decrypt_embedded(&output, target, 735).unwrap(), data);
+        assert_eq!(
+            decrypt_embedded(&output, target, 735).unwrap(),
+            wire(&data, target, 735)
+        );
     }
 }
 
@@ -521,7 +604,10 @@ fn m7_structural_variants_vary_across_seeds_and_stay_reproducible() {
         let mut dispatch = [false; 4];
         let mut bound = [false; 3];
         let mut call = 0usize;
-        let mut userdata = [false; 2];
+        let userdata = [
+            output.contains("==\"userdata\""),
+            output.contains("\"userdata\"=="),
+        ];
         for index in 0..tokens.len() {
             // name==number / number==name / not(name~=number) /
             if index + 2 < tokens.len() {
@@ -584,14 +670,6 @@ fn m7_structural_variants_vary_across_seeds_and_stay_reproducible() {
             {
                 call = 1;
             }
-            // Userdata guard equality order (substring forms are stable
-            // under the finalizer's quote normalization to `"..."`).
-            if output.contains("==\"userdata\"") {
-                userdata[0] = true;
-            }
-            if output.contains("\"userdata\"==") {
-                userdata[1] = true;
-            }
         }
         (
             dispatch.iter().filter(|&&hit| hit).count(),
@@ -622,7 +700,7 @@ fn m7_structural_variants_vary_across_seeds_and_stay_reproducible() {
             let output = emit(&data, target, seed).unwrap();
             // Reproducibility with structural variants enabled.
             assert_eq!(emit(&data, target, seed).unwrap(), output);
-            let (dispatch, bound, call, userdata) = forms(&output, target);
+            let (dispatch, bound, call, _userdata) = forms(&output, target);
             dispatch_total |= dispatch;
             bound_total |= bound;
             call_total |= call;
@@ -706,7 +784,7 @@ fn field_layout_is_fully_unanchored_with_separator_and_prelude_variants() {
                 .expect("Z capture");
             assert!(sc_at < z_at, "{target} seed {seed}: Z before SC");
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
         assert!(
             entry_ranks.len() >= 4,
@@ -817,7 +895,7 @@ fn global_names_are_hidden_behind_a_character_function_pool() {
             assert_eq!(seen.get("getfenv"), Some(&2), "audited capture");
             assert_eq!(seen.get("_G"), Some(&1), "audited capture");
             // Differential: the payload is untouched canonical bytes.
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
         assert!(
             pool_heads.len() >= 3,
@@ -875,7 +953,7 @@ fn core_logic_flows_through_scratch_table_slots() {
             assert!(keys.len() >= 8, "{target} seed {seed}: thin key set");
             key_sets.insert(keys);
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
         assert!(
             key_sets.len() >= 6,
@@ -919,9 +997,11 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local PU=function()"));
             assert!(raw.contains("local PK=function()"));
             assert!(raw.contains("local F,R,va=SETUP(fid,args);"));
-            // The fetch line survives verbatim inside the phase machine
-            // (the coverage probe rewrites it).
-            assert_eq!(raw.matches("if c==nil then E()end;pc=pc+4;").count(), 1);
+            // Graph fetch follows an explicit random-label successor and
+            // selects the record's recipe id (the coverage probe rewrites
+            // the latter assignment).
+            assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
+            assert_eq!(raw.matches("pc=I[2];rid=I[1];").count(), 1);
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {
@@ -939,7 +1019,7 @@ fn stages_are_flattened_into_seeded_state_machines() {
             );
             state_sets.insert(found);
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
         assert!(
             state_sets.len() >= 6,
@@ -999,7 +1079,7 @@ fn decoder_splits_into_seeded_random_sections() {
             let wiring = &raw[wiring_at..wiring_end];
             assert_eq!(wiring.matches("=VMS[").count(), clusters as usize + 1);
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
         assert!(
             cluster_counts.len() >= 2,
@@ -1017,10 +1097,10 @@ fn decoder_splits_into_seeded_random_sections() {
 
 #[test]
 fn dispatch_chains_split_into_seeded_subchains() {
-    // Two-level dispatch split: the interpreter and bounds chains are
-    // partitioned into 2..=4 sub-chains selected by `o % groups` (four
-    // selector spellings), each sub-chain keeping its own fail-closed
-    // else. The number of sub-chains and their lengths vary per seed.
+    // Two-level dispatch split: operand validation is partitioned by `o %
+    // groups`, while semantic superhandlers are partitioned by the 16-bit
+    // `rid % groups`. Each sub-chain keeps its own fail-closed else; group
+    // counts and arm layouts vary per seed.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
@@ -1041,30 +1121,29 @@ fn dispatch_chains_split_into_seeded_subchains() {
             // fetch/dispatch phase machine the chain may sit before or
             // after the fetch line in the text.
             let f5_at = raw
-                .find("local o,a,b,c,k,j;local w=")
+                .find("local I,rid,o,a,b,c,k,j;local w=")
                 .expect("interpreter phase machine");
             let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
             let interp = &raw[f5_at..f5_end];
             let mut chain_groups = Vec::new();
-            for chain in [bounds, interp] {
+            for (chain, selector) in [(bounds, "o%"), (interp, "rid%")] {
                 let mut modulus = None;
                 let mut selectors = 0usize;
                 let mut at = 0usize;
-                while let Some(found) = chain[at..].find("o%") {
-                    let digits = chain[at + found + 2..]
+                while let Some(found) = chain[at..].find(selector) {
+                    let value_at = at + found + selector.len();
+                    let digits = chain[value_at..]
                         .chars()
                         .take_while(char::is_ascii_digit)
                         .count();
-                    let value: u8 = chain[at + found + 2..at + found + 2 + digits]
-                        .parse()
-                        .unwrap();
+                    let value: u8 = chain[value_at..value_at + digits].parse().unwrap();
                     assert!((2..=4).contains(&value), "selector modulus {value}");
                     match modulus {
                         Some(seen) => assert_eq!(seen, value, "mixed sub-chain moduli"),
                         None => modulus = Some(value),
                     }
                     selectors += 1;
-                    at += found + 2;
+                    at = value_at;
                 }
                 let groups = modulus.expect("no sub-chain selector");
                 assert_eq!(selectors, groups as usize, "one selector per group");
@@ -1091,90 +1170,109 @@ fn dispatch_chains_split_into_seeded_subchains() {
 }
 
 #[test]
-fn opcode_dispatch_numbers_are_renumbered_per_seed() {
-    // Per-seed opcode renumbering: the canonical ISA numbering stays in
-    // the `.obf` file and the embedded varint stream, but the script's
-    // dispatch chains run on a per-seed shuffled numbering rebuilt from
-    // the packed base86 string. Across seeds the numbering must differ;
-    // within a seed it must be a reproducible injection whose packed
-    // form round-trips, and the program must still run unchanged.
-    let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
-    for target in [Target::Lua51, Target::Luau] {
-        let data = compile(source, target).unwrap();
+fn semantic_wire_uses_superoperators_random_graphs_and_reordered_prototypes() {
+    // This is the regression for the static recovery report. The embedded
+    // image must not be a canonically ordered stream with merely permuted
+    // opcode numbers: use sites are recipe records, most straight-line words
+    // participate in multi-primitive superoperators, records are physically
+    // shuffled behind random labels, sibling ids are reordered, and a
+    // synthetic unreachable prototype subtree breaks count/tree isomorphism.
+    for (target, fixture) in [
+        (
+            Target::Lua51,
+            include_str!("../../../tests/fixtures/vm_lua51.lua"),
+        ),
+        (
+            Target::Luau,
+            include_str!("../../../tests/fixtures/vm_luau.lua"),
+        ),
+    ] {
+        let data = compile(fixture, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let mut numberings = BTreeSet::new();
+        assert_eq!(data[6], 0, "public .obf files remain encoding zero");
+        assert_eq!(u32::from_le_bytes(data[24..28].try_into().unwrap()), 2);
+        let identity: Vec<usize> = (0..program.prototypes.len()).collect();
+        let mut wires = BTreeSet::new();
+        let mut orders = BTreeSet::new();
+        let mut saw_nonidentity_order = false;
+        let mut saw_four_word_recipe = false;
         for seed in [0u64, 1, 2, 3, 735, u64::MAX] {
-            let perm = opcode_permutation(seed, 64);
-            assert_eq!(opcode_permutation(seed, 64), perm);
-            let distinct: BTreeSet<u8> = perm.iter().copied().collect();
-            assert_eq!(distinct.len(), perm.len(), "not injective");
-            // Renumbered dispatch values must leave the canonical range
-            // 0..=63 for real opcodes, so no generation runs on the
-            // public canonical numbering.
-            let renumbered_real: BTreeSet<u8> = program
-                .opcodes()
-                .iter()
-                .map(|op| perm[(*op as u8) as usize])
-                .collect();
+            let image = super::semantic::encode(&program, seed).unwrap();
+            let again = super::semantic::encode(&program, seed).unwrap();
+            assert_eq!(
+                again.bytes, image.bytes,
+                "semantic lowering is nondeterministic"
+            );
+            assert_eq!(&image.bytes[..4], b"OBF\x02");
+            assert_eq!(image.bytes[4], data[4]);
+            assert_eq!(image.bytes[6], super::semantic::WIRE_INSTRUCTION_ENCODING);
+            assert_eq!(
+                u32::from_le_bytes(image.bytes[24..28].try_into().unwrap()),
+                super::semantic::WIRE_ISA_VERSION
+            );
+            assert_ne!(image.bytes, data);
+            assert_eq!(
+                image.canonical_words,
+                program
+                    .prototypes
+                    .iter()
+                    .map(|prototype| prototype.code.len())
+                    .sum::<usize>()
+            );
+            assert!(image.bundles < image.canonical_words);
             assert!(
-                renumbered_real.iter().any(|value| *value > 63),
-                "{target} seed {seed}: dispatch numbering still canonical"
+                image.bundled_words >= image.canonical_words / 3,
+                "{target} seed {seed}: only {}/{} words were superoperator members",
+                image.bundled_words,
+                image.canonical_words
             );
-            assert!(numberings.insert(perm.clone()));
-            // The packed renumbering string decodes back to the same
-            // permutation the generator used for its arms. Two tilde-
-            // marked 129-byte strings exist -- the real one in the forms
-            // field and a fake anchor on the entry's dead side -- and
-            // exactly one must decode to the permutation.
-            let raw = generate(&data, &program, seed).unwrap();
-            let mut tilde_strings = Vec::new();
-            let mut at = 0usize;
-            while let Some(found) = raw[at..].find("=\"~") {
-                let start = at + found + "=\"".len();
-                let end = raw[start..].find('"').expect("unterminated") + start;
-                if end - start == 129 {
-                    tilde_strings.push(raw[start..end].to_owned());
-                }
-                at = end;
-            }
+            assert!(image.recipes.iter().any(|recipe| recipe.ops.len() > 1));
+            saw_four_word_recipe |= image.recipes.iter().any(|recipe| recipe.ops.len() == 4);
+            assert!(
+                image.shuffled_records >= program.prototypes.len() / 2,
+                "{target} seed {seed}: too few shuffled prototype record sets"
+            );
+            assert!((2..=4).contains(&image.decoy_prototypes));
             assert_eq!(
-                tilde_strings.len(),
-                2,
-                "{target} seed {seed}: expected one real and one fake packed string"
+                image.prototype_order.len(),
+                program.prototypes.len() + image.decoy_prototypes
             );
-            let mut matches = 0;
-            for packed in &tilde_strings {
-                assert_eq!(packed.as_bytes()[0], b'~');
-                let mut decoded = true;
-                for slot in 0..64usize {
-                    let x = packed.as_bytes()[1 + slot * 2];
-                    let y = packed.as_bytes()[2 + slot * 2];
-                    let dx = u32::from((if x > 92 { x - 1 } else { x }) - 35);
-                    let dy = u32::from((if y > 92 { y - 1 } else { y }) - 35);
-                    let value = dx + dy * 86;
-                    // The fake anchor's random pairs need not stay in the
-                    // u8 range at all.
-                    if value > 255 || value as u8 != perm[slot] {
-                        decoded = false;
-                        break;
-                    }
-                }
-                matches += usize::from(decoded);
-            }
             assert_eq!(
-                matches, 1,
-                "{target} seed {seed}: the fake anchor must not decode to the permutation"
+                u32::from_le_bytes(image.bytes[16..20].try_into().unwrap()) as usize,
+                image.prototype_order.len()
             );
-            // Differential: the embedded payload is untouched canonical
-            // bytecode regardless of the renumbering.
+            let real_order: Vec<usize> = image
+                .prototype_order
+                .iter()
+                .copied()
+                .filter(|old| *old < program.prototypes.len())
+                .collect();
+            assert_eq!(real_order.len(), program.prototypes.len());
+            saw_nonidentity_order |= real_order != identity;
+            orders.insert(real_order);
+            assert!(
+                wires.insert(image.bytes.clone()),
+                "two seeds emitted one wire"
+            );
+
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), image.bytes);
         }
-        assert_eq!(numberings.len(), 6, "{target}: identical renumberings");
-        // The renumbered dispatch still executes the program verbatim.
+        assert!(saw_four_word_recipe, "{target}: no four-primitive recipe");
+        assert!(
+            saw_nonidentity_order,
+            "{target}: prototype ids stayed canonical"
+        );
+        assert!(
+            orders.len() >= 3,
+            "{target}: prototype order has little seed variety"
+        );
+
+        // The structural transformation is semantics preserving on the same
+        // broad corpus used for opcode coverage.
         let workspace = native::Workspace::new();
-        let path = workspace.0.join("renumbered.lua");
-        fs::write(&path, source).unwrap();
+        let path = workspace.0.join("semantic_wire.lua");
+        fs::write(&path, fixture).unwrap();
         let expected = native::compile_and_run(target, &path);
         fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
         assert_eq!(expected, native::compile_and_run(target, &path));
@@ -1201,7 +1299,7 @@ fn operand_features_are_split_into_separate_shuffled_fields() {
             assert!(raw.contains(&format!("[{}]=function(E,SB,FM)", keys[14])));
             assert!(raw.contains(&format!("[{}]=function(E)", keys[15])));
             assert!(raw.contains(&format!(
-                "[{}]=function(P,np,SB,E,NCH,TC,dec,vld,PT)",
+                "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX)",
                 keys[2]
             )));
             assert!(raw.contains(&format!("VMS[{}](E,SB)", keys[13])));
@@ -1229,7 +1327,7 @@ fn operand_features_are_split_into_separate_shuffled_fields() {
                 at = base + 2;
             }
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
         assert!(
             packed_strings.len() >= 2,
@@ -1417,23 +1515,21 @@ fn generation_respects_the_documented_size_budget() {
     // M7 size budget: the structural variants must not inflate a
     // generated script beyond the documented caps (headroom over the
     // current goldens; raise the caps deliberately, never silently --
-    // raised 24000/26000 -> 25500/27000 when global names moved behind
-    // the character-function pool, then -> 27500/28500 when all stages
-    // were flattened into state machines, then luau 28500 -> 29800 when
-    // live locals moved into scratch-table slots whose `g[key]` reads
-    // are longer than the renamed locals they replaced, then
-    // 27500/29800 -> 29500/31800 when in-image decoy dispatch arms and
-    // fake key-material anchors joined the dead code).
+    // The semantic-virtualization milestone deliberately raises the old M7
+    // 29.5/31.8 KiB ceilings: program-specific 1..4-primitive superhandlers
+    // replace the compact global one-opcode/one-handler table. Keep bounded
+    // headroom over both fixed-seed goldens rather than allowing untracked
+    // growth.
     for (target, fixture, budget) in [
         (
             Target::Lua51,
             include_str!("../../../tests/fixtures/vm_lua51.lua"),
-            29_500usize,
+            68_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../tests/fixtures/vm_luau.lua"),
-            31_800usize,
+            74_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -1481,7 +1577,10 @@ fn transport_watermark_is_present_checked_and_never_spelled_out() {
         let expected = u32::from_be_bytes(*b"XXS:").to_string();
         assert!(output.contains(&expected));
         // Extraction strips the watermark; full roundtrip still holds.
-        assert_eq!(decrypt_embedded(&output, target, 735).unwrap(), data);
+        assert_eq!(
+            decrypt_embedded(&output, target, 735).unwrap(),
+            wire(&data, target, 735)
+        );
     }
 }
 
@@ -1548,7 +1647,10 @@ fn embedded_payload_is_high_entropy_ciphertext_and_seed_dependent() {
     ] {
         let data = compile(fixture, target).unwrap();
         let output = emit(&data, target, 735).unwrap();
-        assert_eq!(decrypt_embedded(&output, target, 735).unwrap(), data);
+        assert_eq!(
+            decrypt_embedded(&output, target, 735).unwrap(),
+            wire(&data, target, 735)
+        );
         assert_ne!(emit(&data, target, 736).unwrap(), output);
         let encrypted = ciphertext(&output, target);
         assert_ne!(&encrypted[..4], b"OBF\x02");
@@ -1559,158 +1661,62 @@ fn embedded_payload_is_high_entropy_ciphertext_and_seed_dependent() {
 }
 
 #[test]
-fn decoy_arms_and_fake_anchors_poison_static_recovery() {
-    // A1: dispatch arms keyed on the perm image of UNUSED opcodes carry a
-    // different opcode's handler text. Rebuilding the packed permutation
-    // table filters nothing (the keys are in-image), the arms are
-    // unreachable at runtime (the forms table marks unused slots with an
-    // invalid form, so decode aborts before dispatch), and a static
-    // semantic recovery that trusts every arm reconstructs a poisoned
-    // opcode table the program's own asserts can never contradict.
-    // C1: a second, fake 129-byte packed renumbering string (plus fake
-    // LCG-share / Adler arithmetic) rides the entry's dead side; nothing
-    // downstream verifies it.
+fn semantic_recipe_decoys_poison_dictionary_only_translation() {
+    // Unreferenced recipe descriptors are fully well-formed and pass the
+    // target's dictionary validator, but their emitted superhandler bodies
+    // deliberately execute a different primitive sequence. Consequently a
+    // static translator cannot classify every recipe arm as ground truth;
+    // it must first recover reachability from the validated label graph.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
-    let literal_value = |token: &str| -> Option<u64> {
-        let cleaned: String = token.chars().filter(|c| *c != '_').collect();
-        let (radix, digits) = if let Some(hex) = cleaned.strip_prefix("0x") {
-            (16, hex)
-        } else if let Some(bin) = cleaned.strip_prefix("0b") {
-            (2, bin)
-        } else {
-            (10, cleaned.as_str())
-        };
-        u64::from_str_radix(digits, radix).ok()
-    };
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let used: BTreeSet<u8> = program.opcodes().iter().map(|op| *op as u8).collect();
-        let used_texts: BTreeSet<&str> = program
-            .opcodes()
-            .iter()
-            .filter_map(|op| crate::vm::opcode::custom(target, *op))
-            .collect();
-        let unused: Vec<u8> = (0u8..64).filter(|slot| !used.contains(slot)).collect();
-        assert!(unused.len() >= 8, "test program must leave decoy room");
-        let mut decoy_sets = BTreeSet::new();
+        let mut decoy_id_sets = BTreeSet::new();
         for seed in 0..=5u64 {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            assert_eq!(
+                super::semantic::encode(&program, seed).unwrap().bytes,
+                image.bytes
+            );
+            assert_ne!(image.bytes, data, "semantic wire must not be canonical");
+
+            let ids: BTreeSet<u16> = image.recipes.iter().map(|recipe| recipe.id).collect();
+            assert_eq!(ids.len(), image.recipes.len(), "recipe ids must be unique");
+            assert!(!ids.contains(&0), "zero is reserved as a null label/id");
+            let decoys: Vec<_> = image.recipes.iter().filter(|recipe| !recipe.live).collect();
+            assert_eq!(decoys.len(), 4, "one fixed decoy cohort per image");
+            for recipe in &decoys {
+                assert_ne!(recipe.ops, recipe.execute_ops);
+                assert!(!image.referenced_recipe_ids.contains(&recipe.id));
+                assert!(recipe.ops.iter().all(|op| !matches!(
+                    op,
+                    Opcode::Jump | Opcode::Test | Opcode::Return | Opcode::TailCall
+                )));
+            }
+            assert!(image
+                .recipes
+                .iter()
+                .filter(|recipe| recipe.live)
+                .all(|recipe| image.referenced_recipe_ids.contains(&recipe.id)));
+            decoy_id_sets.insert(decoys.iter().map(|recipe| recipe.id).collect::<Vec<_>>());
+
+            // Generator metadata and the encrypted dictionary come from the
+            // same deterministic semantic image; all recipe ids therefore
+            // have exactly one emitted arm even though only graph-reachable
+            // ids can execute.
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            let perm = opcode_permutation(seed, 64);
-            let image: BTreeSet<u8> = perm.iter().copied().collect();
-            let f5_at = raw
-                .find("local o,a,b,c,k,j;local w=")
-                .expect("interpreter phase machine");
-            let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
-            let interp = &raw[f5_at..f5_end];
-            // Collect every dispatch-arm key from the four condition
-            // spellings (decimal/hex/binary literals).
-            let bytes = interp.as_bytes();
-            let mut keys = BTreeSet::new();
-            let mut i = 0usize;
-            while i < bytes.len() {
-                let boundary = |index: usize| {
-                    index < bytes.len()
-                        && !bytes[index].is_ascii_alphanumeric()
-                        && bytes[index] != b'_'
-                };
-                if bytes[i] == b'o' && i > 0 && boundary(i - 1) {
-                    let mut j = i + 1;
-                    if interp[j..].starts_with("==") || interp[j..].starts_with("~=") {
-                        j += 2;
-                    } else if bytes.get(j) == Some(&b'-') {
-                        j += 1;
-                    } else {
-                        i += 1;
-                        continue;
-                    }
-                    let start = j;
-                    while j < bytes.len()
-                        && (bytes[j].is_ascii_hexdigit()
-                            || bytes[j] == b'_'
-                            || bytes[j] == b'x'
-                            || bytes[j] == b'b')
-                    {
-                        j += 1;
-                    }
-                    if let Some(value) = literal_value(&interp[start..j]).filter(|v| *v <= 255) {
-                        keys.insert(value as u8);
-                    }
-                    i = j;
-                    continue;
-                }
-                if interp[i..].starts_with("==o") && boundary(i + 3) {
-                    let mut start = i;
-                    while start > 0
-                        && (bytes[start - 1].is_ascii_hexdigit()
-                            || bytes[start - 1] == b'_'
-                            || bytes[start - 1] == b'x'
-                            || bytes[start - 1] == b'b')
-                    {
-                        start -= 1;
-                    }
-                    if let Some(value) = literal_value(&interp[start..i]).filter(|v| *v <= 255) {
-                        keys.insert(value as u8);
-                    }
-                    i += 3;
-                    continue;
-                }
-                i += 1;
-            }
-            // Every live opcode keeps its arm.
-            for op in &used {
-                assert!(keys.contains(&perm[*op as usize]), "live arm missing");
-            }
-            // In-image decoys cover the unused slots (minus up to two
-            // seed-dropped ones) and their key sets vary across seeds.
-            let decoys: Vec<u8> = unused
-                .iter()
-                .map(|slot| perm[*slot as usize])
-                .filter(|key| keys.contains(key))
-                .collect();
-            assert!(
-                decoys.len() >= unused.len() - 2,
-                "{target} seed {seed}: {} in-image decoys for {} unused slots",
-                decoys.len(),
-                unused.len()
-            );
-            decoy_sets.insert(decoys);
-            // The classic out-of-image decoys stay as noise.
-            let outside: Vec<u8> = keys
-                .iter()
-                .copied()
-                .filter(|key| !image.contains(key))
-                .collect();
-            assert!(
-                outside.len() >= 2,
-                "{target} seed {seed}: only {outside:?} outside-image keys"
-            );
-            // Poison: no unused opcode's own handler text appears in the
-            // interpreter, so every in-image decoy arm is semantically
-            // wrong for its key.
-            for slot in &unused {
-                if let Some(text) =
-                    Opcode::from_byte(*slot).and_then(|op| crate::vm::opcode::custom(target, op))
-                {
-                    if !used_texts.contains(text) {
-                        assert!(
-                            !interp.contains(text),
-                            "{target} seed {seed}: decoy for slot {slot} carries its own semantics"
-                        );
-                    }
-                }
-            }
+            assert_eq!(raw.matches(" then a,b,c=I[").count(), image.recipes.len());
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), image.bytes);
         }
         assert!(
-            decoy_sets.len() >= 2,
-            "{target}: decoy key sets pinned across seeds"
+            decoy_id_sets.len() >= 4,
+            "{target}: decoy ids are seed-pinned"
         );
-        // The poisoned dispatch still runs the program verbatim.
+
         let workspace = native::Workspace::new();
-        let path = workspace.0.join("decoy_dispatch.lua");
+        let path = workspace.0.join("semantic_decoys.lua");
         fs::write(&path, source).unwrap();
         let expected = native::compile_and_run(target, &path);
         fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
@@ -1797,7 +1803,7 @@ fn keystream_families_and_cross_stage_terms_couple_the_pipeline() {
             assert!(raw.contains("(ku+ka2+"), "constant seed mixes the term");
             // Family parameters rotate across seeds within each family.
             let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), data);
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
         assert!(
             outer_families.len() >= 2,

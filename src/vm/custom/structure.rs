@@ -116,6 +116,42 @@ pub(crate) fn grouped_chain(
     text
 }
 
+/// Wide-id form used by semantic superoperators. Recipe identifiers occupy
+/// the full nonzero u16 range rather than the byte-sized opcode image.
+pub(crate) fn grouped_recipe_chain(
+    structure: &mut crate::random::Prng,
+    mut arms: Vec<(u16, String)>,
+    groups: u8,
+    value_var: &str,
+) -> String {
+    structure.shuffle(&mut arms);
+    let mut text = String::new();
+    for group in 0..groups {
+        let condition = selector_condition(structure, value_var, groups, group);
+        write!(
+            text,
+            "{} {condition} then ",
+            if group == 0 { "if" } else { "elseif" }
+        )
+        .unwrap();
+        let members: Vec<&String> = arms
+            .iter()
+            .filter(|(value, _)| value % u16::from(groups) == u16::from(group))
+            .map(|(_, arm)| arm)
+            .collect();
+        if members.is_empty() {
+            text.push_str("E();");
+        } else {
+            for (index, arm) in members.iter().enumerate() {
+                write!(text, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
+            }
+            text.push_str(" else E()end;");
+        }
+    }
+    text.push_str(" else E()end;");
+    text
+}
+
 /// Sub-chain selector condition, one of four exactly equivalent spellings
 /// of `value % modulus == group` (raw integer arithmetic, no metamethods).
 pub(crate) fn selector_condition(

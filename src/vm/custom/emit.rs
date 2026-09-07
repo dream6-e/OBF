@@ -3,11 +3,26 @@ use super::*;
 use std::fmt::Write as _;
 
 pub(crate) fn generate(
-    bytecode: &[u8],
+    _bytecode: &[u8],
     program: &Program,
     seed: u64,
 ) -> Result<String, Diagnostic> {
     custom::validate(program)?;
+    // The public OBF v2 bytes are never embedded verbatim. Each generated
+    // script receives a seed-specific semantic wire image: straight-line
+    // instructions become superoperators, records are linked by random
+    // labels and physically shuffled, while reordered real prototypes mix
+    // with an unreachable synthetic subtree. The target-side parser below
+    // accepts only this private ISA3 image.
+    let semantic_image = semantic::encode(program, seed)?;
+    generate_semantic(program, seed, semantic_image)
+}
+
+fn generate_semantic(
+    program: &Program,
+    seed: u64,
+    semantic_image: semantic::SemanticImage,
+) -> Result<String, Diagnostic> {
     // Whole-output wrapper, strictly:
     //   local x={};return setmetatable({...},x):<random letter>()
     // The payload table carries ALL code in function form, split into section
@@ -29,23 +44,20 @@ pub(crate) fn generate(
     let method = wrapper_method(program.target, seed);
     let keys = wrapper_keys(seed);
     let params = cipher_params(seed);
-    // Per-seed opcode renumbering: every canonical ISA slot is mapped to a
-    // fresh distinct byte value, so the dispatch chains of each generation
-    // run on a different numbering. The canonical numbering survives only
-    // inside the `.obf` file and the encrypted varint stream; the Lua side
-    // rebuilds the identical table from the packed string of the forms
-    // field and rewrites each opcode byte during validation expansion.
+    // Per-seed primitive renumbering: every canonical ISA slot maps to a
+    // distinct byte used by operand validation and inside unrolled recipe
+    // bodies. Semantic use sites contain no opcode byte; their random recipe
+    // id selects a program-specific sequence. The Lua side rebuilds this
+    // primitive table from the packed forms-field string.
     let perm = opcode_permutation(seed, 64);
-    let opcode_image: std::collections::BTreeSet<u8> = program
-        .opcodes()
+    let primitive_ops: std::collections::BTreeSet<Opcode> = semantic_image
+        .recipes
         .iter()
-        .map(|op| perm[(*op as u8) as usize])
+        .flat_map(|recipe| recipe.ops.iter().chain(&recipe.execute_ops))
+        .copied()
         .collect();
-    // The interpreter's classic decoys must dodge the FULL permutation
-    // image (all 64 slots, not just the program's opcodes): the in-image
-    // decoy arms below own every unused-slot value, so a decoy colliding
-    // with one would silently duplicate a poisoned arm's key.
-    let perm_image: std::collections::BTreeSet<u8> = perm.iter().copied().collect();
+    let opcode_image: std::collections::BTreeSet<u8> =
+        primitive_ops.iter().map(|op| perm[*op as usize]).collect();
     // M7 structural randomization stream: per-handler dispatch comparison
     // variants (one of four equivalent forms, seeded), integer bound-check
     // variants in the decoder/validator, and metamethod dispatch branch
@@ -125,17 +137,6 @@ if d7+d8*65521~={fake_adler} then E()end;"
         program.target.is_luau(),
         &["ok=j%2==0;", "ok=a+b<511;", "ok=c<256;"],
         &opcode_image,
-    );
-    let mut f5_decoys = decoy_arms(
-        &mut structure,
-        2,
-        program.target.is_luau(),
-        &[
-            "R[a]={R[b]};pc=j;",
-            "R[a]=R[b][R[c]];pc=pc+4;",
-            "k=j;R[a]=k;pc=pc+4;",
-        ],
-        &perm_image,
     );
     let (entry_head, entry_tail) = if entry_flip {
         (
@@ -358,7 +359,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // cipher, so constants stay encrypted even for an analyst who strips the
     // outer layer. The Adler-32 is patched over the constant-encrypted
     // image; the canonical `.obf` on disk stays plaintext and unchanged.
-    let mut payload = bytecode.to_vec();
+    let mut payload = semantic_image.bytes.clone();
     apply_constant_cipher(&mut payload, &keys, program.target, &params)?;
     let encrypted = outer_cipher(&payload, &shares, pv, &params);
     // Transport layer: the doubly encrypted image is base86-encoded (all
@@ -716,8 +717,8 @@ local ka2=SB(B,33)*31+SB(B,#B);",
     .unwrap();
     core_text.push_str(
         r#"
-if b8()~=1 or b8()~=0 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
-local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa<1 or isa>2 then E()end;
+if b8()~=1 or b8()~=1 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
+local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa~=3 then E()end;
 local check=b32();local sa,sb=1,0;for q=33,#B do sa=(sa+SB(B,q))%65521;sb=(sb+sa)%65521 end;
 if sa+sb*65536~=check then E()end;
 "#,
@@ -733,7 +734,7 @@ if sa+sb*65536~=check then E()end;
         "local PH=function()\n local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();\n",
     );
     ph.push_str(
-        " if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();\n if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<F.__obf_proto_nc*2 or VMCS>F.__obf_proto_nc*7 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
+        " if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();\n if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<4 or VMCS>16777216 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
     );
     if program.target.is_luau() {
         ph.push_str("if legacy~=0 then E()end;");
@@ -812,8 +813,7 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
     // from a packed, per-seed rotated one-char-per-opcode string over the
     // backslash-free base86 alphabet, unused opcode slots encoding an
     // invalid form so unknown opcodes are still rejected before dispatch.
-    let forms: std::collections::BTreeMap<u8, u8> = program
-        .opcodes()
+    let forms: std::collections::BTreeMap<u8, u8> = primitive_ops
         .iter()
         .map(|op| (*op as u8, custom::encoding_form(*op)))
         .collect();
@@ -859,20 +859,22 @@ local rt,rp=t,p;g=nil;return rt,rp;",
         key = keys[13],
         body = forms_body,
     );
-    // 4-byte-per-instruction string the interpreter fetches from.
+    // Semantic-wire operand decoder. Opcode bytes no longer occur at bundle
+    // use sites: the recipe dictionary supplies a context-specific opcode
+    // sequence, and this closure reads only the operands for one advertised
+    // primitive form.
     let mut decode_body = format!(
         "[{key}]=function(E,SB,FM)local g={{}};\nlocal Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
-if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*128;if v<128 then E()end;\
-if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*16384;if v<16384 then E()end;\
+if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*128;if w<128 and v<128 then E()end;\
+if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*16384;if w<128 and v<16384 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*2097152;if v<2097152 then E()end;\
-if w>=128 then E()end;end;end;end;return v,p end;\nreturn function(CD,p)local o=SB(CD,p);if o==nil then E()end;p=p+1;\
-local f=FM[o];if f==nil or f>5 then E()end;\
+if w>=128 then E()end;end;end;end;return v,p end;\nreturn function(CD,p,o)local f=FM[o];if f==nil or f>5 then E()end;\
 if f==1 then j,p=Dv(CD,p);if {jx} then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
 elseif f==2 then a,p=Dv(CD,p);if {ax} then E()end;b=0;c=0;\
 elseif f==3 then a,p=Dv(CD,p);b,p=Dv(CD,p);if {ax} or {bx} then E()end;c=0;\
 elseif f==4 then a,p=Dv(CD,p);if {ax} then E()end;k2,p=Dv(CD,p);if {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;\
 else a,p=Dv(CD,p);b,p=Dv(CD,p);c,p=Dv(CD,p);if {ax} or {bx} or {cx} then E()end end;\
-return o,a,b,c,p end;\nend,",
+return a,b,c,p end;\nend,",
         key = keys[14],
         jx = jx,
         ax = ax,
@@ -883,11 +885,10 @@ return o,a,b,c,p end;\nend,",
     decode_body = slot_rewrite(
         &mut structure,
         &decode_body,
-        &["w", "v", "o", "f", "a", "b", "c", "j", "k2"],
+        &["w", "v", "f", "a", "b", "c", "j", "k2"],
     );
     let decode_field = decode_body;
-    let mut f3_arms: Vec<(u8, String)> = program
-        .opcodes()
+    let mut f3_arms: Vec<(u8, String)> = primitive_ops
         .iter()
         .map(|op| {
             (
@@ -909,33 +910,54 @@ return o,a,b,c,p end;\nend,",
         "local ok=false;{chain}if not ok then E()end;return true",
         chain = grouped_chain(&mut structure, f3_arms, f3_groups, "o"),
     );
-    // The bounds verdict itself flows through a scratch slot: the arms
-    // write g[key] instead of a named local (the table is per-call, no
-    // clearing needed -- the closure returns immediately after the gate).
     let validate_body = slot_rewrite(&mut structure, &validate_body, &["ok"]);
     let validate_field = format!(
         "[{key}]=function(E)\nreturn function(o,a,b,c,j,k,at,F,P,id)local g={{}};{body} end;\nend,",
         key = keys[15],
         body = validate_body,
     );
-    // The validator field itself shrinks to the loop: per instruction it
-    // calls the decoder field's closure, re-derives the packed operands and
-    // hands everything to the bounds-arms closure.
-    write!(s, "[{}]=function(P,np,SB,E,NCH,TC,dec,vld,PT)\n", keys[2]).unwrap();
-    s.push_str(
-        "for id=0,np-1 do local F=P[id];local CD=F.__obf_proto_code;local p=1;local XB={};\
-for at=0,F.__obf_proto_nc-1 do local o,a,b,c,p2=dec(CD,p);p=p2;local k=b+c*256;local j=a+k*256;\
-if not vld(PT[o],a,b,c,j,k,at,F,P,id)then E()end;XB[at+1]=NCH(PT[o],a,b,c);end;\
-if p~=#CD+1 then E()end;F.__obf_proto_code=TC(XB);local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);",
+    // Semantic graph validator. Each prototype code stream begins with a
+    // masked recipe dictionary and a random entry label. Physical records
+    // then carry (label,next,skip,recipe) plus operand-only varints. The
+    // validator builds a label-keyed table, checks every primitive operand,
+    // rejects control operations in the middle of a recipe, and verifies all
+    // graph successors only after the shuffled records have been read.
+    write!(s, "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX)\n", keys[2]).unwrap();
+    let semantic_validator = format!(
+        r#"for id=0,np-1 do
+ local F=P[id];local CD=F.__obf_proto_code;local p=1;
+ local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
+ local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};
+ for z=1,nr do local rid=D16();local n=SB(CD,p);p=p+1;if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
+  local q={{}};for qi=0,n-1 do local raw=SB(CD,p);p=p+1;if raw==nil then E()end;
+   local op=(raw-(rid*{mask_mul}+qi*{mask_add}+{mask_salt})%64)%64;
+   if op>48 or FM[op]==nil or qi<n-1 and (op==44 or op==45 or op==46 or op==47)then E()end;q[qi+1]=op;
+  end;RM[rid]=q;
+ end;
+ local start=D16();local code={{}};
+ for at=0,F.__obf_proto_nc-1 do local label,next1,skip,rid=D16(),D16(),D16(),D16();local recipe=RM[rid];
+  if label==0 or code[label]~=nil or recipe==nil then E()end;local I={{rid,next1,skip,PT[recipe[#recipe]],#recipe}};
+  for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local k=b+c*256;local j=a+k*256;
+   if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;local base=3+qi*3;I[base]=a;I[base+1]=b;I[base+2]=c;
+  end;code[label]=I;
+ end;
+ if p~=#CD+1 or start==0 or code[start]==nil then E()end;
+ for label,I in NX,code do local last=I[4];local n=I[5];local base=3+n*3;local a,b,c=I[base],I[base+1],I[base+2];local j=a+(b+c*256)*256;
+  if last=={jump} then if I[2]~=0 or I[3]~=0 or code[j]==nil then E()end
+  elseif last=={ret} or last=={tail} then if I[2]~=0 or I[3]~=0 then E()end
+  elseif last=={test} then if code[I[2]]==nil or code[I[3]]==nil then E()end
+  elseif code[I[2]]==nil or I[3]~=0 then E()end;
+ end;code[0]=start;F.__obf_proto_code=code;
+end;"#,
+        mask_mul = semantic_image.mask_mul,
+        mask_add = semantic_image.mask_add,
+        mask_salt = semantic_image.mask_salt,
+        jump = perm[Opcode::Jump as usize],
+        test = perm[Opcode::Test as usize],
+        ret = perm[Opcode::Return as usize],
+        tail = perm[Opcode::TailCall as usize],
     );
-    write!(
-        s,
-        "if last~={} and last~={} and last~={} then E()end;end;",
-        perm[Opcode::Jump as usize],
-        perm[Opcode::Return as usize],
-        perm[Opcode::TailCall as usize]
-    )
-    .unwrap();
+    s.push_str(&semantic_validator);
     s.push_str("\nend,");
     let f4_start = s.len();
     write!(s, "[{}]=function(TY,E)\n", keys[3]).unwrap();
@@ -1014,7 +1036,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local c1=VMS[{}](E,{},{},DBG,GI,LS);local c2=VMS[{}](E,{},{},DBG,GI,LS);local c3=VMS[{}](E,{},{},DBG,GI,LS);
 local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,NCH,TC,dec,vld,PT);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
 local CV,SV,Lookup=VMS[{}](TY,E);
 local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
@@ -1118,20 +1140,23 @@ end;
         );
         s = s.replacen(original, &slotted, 1);
     }
-    // Interpreter flattening: the frame setup moves into its own function
-    // and the fetch/dispatch loop becomes a two-phase state machine whose
-    // branch order, state numbers and condition spellings are per seed.
+    // Recipe-threaded semantic interpreter. The fetch phase follows a
+    // random label graph (there is no linear four-byte PC); the dispatch
+    // phase selects a program-specific recipe id and executes its 1..4
+    // primitive semantics as one unrolled superoperator. Operand records do
+    // not contain opcode bytes. Control primitives are forced to the final
+    // position of a recipe, so return/tail-call/break retain their lexical
+    // behavior in this loop.
     let fsv = state_values(&mut structure, 2);
     let (k_fetch, k_disp) = (fsv[0], fsv[1]);
     let c_fetch = state_condition(&mut structure, "w", k_fetch);
     let c_disp = state_condition(&mut structure, "w", k_disp);
     let dispatch_first = structure.next_u64() % 2 == 0;
-    let fetch_branch = format!(
-        "{c_fetch} then\n   o,a,b,c=SB(code,pc,pc+3);if c==nil then E()end;pc=pc+4;\n   k=b+c*256;j=a+k*256;w={k_disp};"
-    );
+    let fetch_branch =
+        format!("{c_fetch} then\n   I=code[pc];if I==nil then E()end;pc=I[2];rid=I[1];w={k_disp};");
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local pc=1;local code=F.__obf_proto_code;\n  local o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
         k_fetch = k_fetch,
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
@@ -1140,67 +1165,50 @@ end;
         },
     )
     .unwrap();
-    let mut f5_arms: Vec<(u8, String)> = Vec::new();
-    for op in program.opcodes() {
-        let code = crate::vm::opcode::custom(program.target, op)
+    let semantic_handler = |op: Opcode| -> Result<String, Diagnostic> {
+        let raw = crate::vm::opcode::custom(program.target, op)
             .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
-        f5_arms.push((
-            perm[(op as u8) as usize],
-            format!(
-                "{} then {}",
-                structure.dispatch_condition(
-                    u64::from(perm[(op as u8) as usize]) as u16,
-                    program.target.is_luau()
-                ),
-                code
-            ),
-        ));
-    }
-    // In-image decoy arms: keys are the perm image of canonical opcodes
-    // the program never uses. Rebuilding the packed permutation table
-    // statically cannot filter these -- they look exactly like live
-    // dispatch values -- yet they are unreachable at runtime because the
-    // forms table encodes every unused slot with an invalid form, so the
-    // decoder aborts before dispatch. Each decoy runs the handler text of
-    // a DIFFERENT opcode: static semantic recovery that trusts every arm
-    // reconstructs a poisoned opcode table the program's own asserts can
-    // never contradict, because these opcodes never execute here.
-    let used_ops: Vec<u8> = program.opcodes().iter().map(|op| *op as u8).collect();
-    let used_set: std::collections::BTreeSet<u8> = used_ops.iter().copied().collect();
-    let mut unused_slots: Vec<u8> = (0u8..64).filter(|slot| !used_set.contains(slot)).collect();
-    let dropped = unused_slots.len().min((structure.next_u64() % 3) as usize);
-    let keep = unused_slots.len() - dropped;
-    structure.shuffle(&mut unused_slots);
-    for slot in unused_slots.into_iter().take(keep) {
-        let key = perm[slot as usize];
-        let own =
-            Opcode::from_byte(slot).and_then(|op| crate::vm::opcode::custom(program.target, op));
-        let live = |byte: u8| {
-            crate::vm::opcode::custom(
-                program.target,
-                Opcode::from_byte(byte).expect("live opcode"),
-            )
-            .expect("live handler")
-        };
-        let mut index = (structure.next_u64() % used_ops.len().max(1) as u64) as usize;
-        let mut body = live(used_ops[index]);
-        if Some(body) == own && used_ops.len() > 1 {
-            // Never hand a decoy its own canonical semantics.
-            index = (index + 1) % used_ops.len();
-            body = live(used_ops[index]);
+        Ok(match op {
+            Opcode::Jump => raw.replace("pc=j*4+1;", "pc=j;"),
+            Opcode::Test => raw.replace("pc=pc+4", "pc=I[3]"),
+            _ => raw.to_owned(),
+        })
+    };
+    let mut recipe_arms: Vec<(u16, String)> = Vec::new();
+    for recipe in &semantic_image.recipes {
+        if recipe.live {
+            debug_assert_eq!(recipe.ops, recipe.execute_ops);
+        } else {
+            debug_assert_ne!(recipe.ops, recipe.execute_ops);
         }
-        f5_decoys.push((
-            key,
-            format!(
-                "{} then {}",
-                structure.dispatch_condition(u16::from(key), program.target.is_luau()),
-                body
-            ),
-        ));
+        let mut body = String::new();
+        for (index, &op) in recipe.execute_ops.iter().enumerate() {
+            let base = 6 + index * 3;
+            write!(
+                body,
+                "a,b,c=I[{base}],I[{}],I[{}];k=b+c*256;j=a+k*256;o={};",
+                base + 1,
+                base + 2,
+                perm[op as usize],
+            )
+            .unwrap();
+            body.push_str(&semantic_handler(op)?);
+        }
+        // Unused recipe ids intentionally advertise a different primitive
+        // sequence in the encrypted dictionary than the body below. Static
+        // recovery cannot trust every syntactically valid arm as ground
+        // truth; live ids are selected only by validated graph records.
+        let condition =
+            structure.dispatch_condition_for("rid", recipe.id, program.target.is_luau());
+        recipe_arms.push((recipe.id, format!("{condition} then {body}")));
     }
-    f5_arms.extend(f5_decoys);
-    let f5_groups = (2 + structure.next_u64() % 3) as u8;
-    s.push_str(&grouped_chain(&mut structure, f5_arms, f5_groups, "o"));
+    let recipe_groups = (2 + structure.next_u64() % 3) as u8;
+    s.push_str(&grouped_recipe_chain(
+        &mut structure,
+        recipe_arms,
+        recipe_groups,
+        "rid",
+    ));
     if dispatch_first {
         write!(
             s,
@@ -1300,10 +1308,20 @@ end;
     Ok(s)
 }
 
+#[cfg(test)]
+pub(crate) fn generate_from_semantic_image(
+    program: &Program,
+    seed: u64,
+    semantic_image: semantic::SemanticImage,
+) -> Result<String, Diagnostic> {
+    custom::validate(program)?;
+    generate_semantic(program, seed, semantic_image)
+}
+
 fn validation(op: Opcode) -> &'static str {
     use Opcode::*;
     match op {
-        Jump => "j<F.__obf_proto_nc",
+        Jump => "j>0 and j<=65535",
         Constant => "a<F.__obf_proto_m and k<F.__obf_proto_nk",
         ReadGlobal | WriteGlobal => {
             "a<F.__obf_proto_m and (F.__obf_proto_tags[k]==3 or F.__obf_proto_tags[k]==5)"
@@ -1314,7 +1332,7 @@ fn validation(op: Opcode) -> &'static str {
         Clear => "a<=b and b<F.__obf_proto_m and c==0",
         NumberPrepare | NumberStep => "a+2<F.__obf_proto_m and b==0 and c==0",
         NumberTest => "a<F.__obf_proto_m and b+2<F.__obf_proto_m and c==0",
-        Test => "a<F.__obf_proto_m and b==0 and c==0 and at+2<F.__obf_proto_nc",
+        Test => "a<F.__obf_proto_m and b==0 and c==0",
         Varargs => "a<F.__obf_proto_m and b==0 and c==0 and F.__obf_proto_flags%2==1",
         Nil | NewTable | NewPack | IteratorPrepare | Return | Freeze => {
             "a<F.__obf_proto_m and b==0 and c==0"

@@ -176,9 +176,10 @@ pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
     ))
 }
 
-/// Verification helper: extract the encrypted payload blob (by construction
-/// the longest string literal of a generated VM script) and remove BOTH
-/// cipher layers. The result equals the original canonical `.obf` bytes.
+/// Verification helper: resolve the generated script's segmented payload and
+/// remove both cipher layers. The result is the private, seed-specific ISA3
+/// semantic wire image; it intentionally does not equal the public canonical
+/// `.obf` bytes supplied to `emit`.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let mut payload = extract_embedded(source, target, seed)?;
     apply_constant_cipher(
