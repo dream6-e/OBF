@@ -45,6 +45,8 @@ pub(crate) fn generate(
     // functions under random numeric keys: [n1] host-capture prelude, [n2]
     // bytecode decoder (decrypts the embedded blob), [n3] operand validation,
     // [n4] runtime helpers, [n5..n7] environment-probing key-share functions,
+    // plus three split validator fields (form-table rebuild, varint decode,
+    // per-opcode bounds arms) hiding among the shuffle,
     // [n8] interpreter cluster, plus the entry method at a random letter key.
     // The embedded payload is byte-encrypted at generation time with a
     // seed-derived Lehmer keystream; the key is split into three shares, one
@@ -355,38 +357,64 @@ for id=0,np-1 do
     );
     s.push_str("\nreturn P,np,entry\nend,");
     let f3_start = s.len();
-    write!(s, "[{}]=function(P,np,SB,E,NCH,TC)\n", keys[2]).unwrap();
-    // Both Rust and target decoders validate operands before any execution.
-    // The 7-bit varint stream is decoded here and expanded back into the
-    // fixed 4-byte-per-instruction string the interpreter fetches from.
-    s.push_str("local FM={");
-    for (index, op) in program.opcodes().iter().enumerate() {
-        if index > 0 {
-            s.push(',');
+    // Feature-split hiding: the operand validator used to carry three
+    // instant static signatures inside one field -- the sequential-key
+    // `[0]=3,[1]=4,...` form-table literal, the varint reader with its
+    // `if f==1 elseif f==2 ...` operand-shape chain, and the per-opcode
+    // bounds arms. Each now lives in its own numeric-keyed payload field
+    // (shuffled into a random file position by the layout pass). The form
+    // table is no longer a literal at all: a dedicated field rebuilds it
+    // from a packed, per-seed rotated one-char-per-opcode string over the
+    // backslash-free base86 alphabet, unused opcode slots encoding an
+    // invalid form so unknown opcodes are still rejected before dispatch.
+    let forms: std::collections::BTreeMap<u8, u8> = program
+        .opcodes()
+        .iter()
+        .map(|op| (*op as u8, custom::encoding_form(*op)))
+        .collect();
+    let forms_rot = structure.next_u64() % 86;
+    let mut forms_text = String::new();
+    for slot in 0..=*forms.keys().max().unwrap() {
+        let packed = match forms.get(&slot) {
+            Some(form) => (u64::from(form - 1) + forms_rot) % 86,
+            None => (5 + forms_rot) % 86,
+        };
+        let mut byte = 35u8 + packed as u8;
+        if byte >= 92 {
+            byte += 1;
         }
-        write!(s, "[{}]={}", *op as u8, custom::encoding_form(*op)).unwrap();
+        forms_text.push(byte as char);
     }
-    s.push_str("};");
-    s.push_str(
-        "local Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
+    let forms_field = format!(
+        "[{key}]=function(E,SB)local t={{}};local S=\"{text}\";for i=1,#S do local b=SB(S,i);\
+if b==92 or b<35 or b>121 then E()end;if b>92 then b=b-1 end;t[i-1]=(b-35-{rot})%86+1 end;return t;end,",
+        key = keys[13],
+        text = forms_text,
+        rot = forms_rot,
+    );
+    // Both Rust and target decoders validate operands before any execution.
+    // The 7-bit varint stream is decoded by this field's returned closure
+    // and validated per shape; the consumer expands it back into the fixed
+    // 4-byte-per-instruction string the interpreter fetches from.
+    let decode_field = format!(
+        "[{key}]=function(E,SB,FM)\nlocal Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*128;if v<128 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*16384;if v<16384 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*2097152;if v<2097152 then E()end;\
-if w>=128 then E()end;end;end;end;return v,p end;",
-    );
-    s.push_str(
-        format!(
-            "for id=0,np-1 do local F=P[id];local CD=F.__obf_proto_code;local p=1;local XB={{}};\
-for at=0,F.__obf_proto_nc-1 do local o=SB(CD,p);if o==nil then E()end;p=p+1;local f=FM[o];\
-if f==nil then E()end;local a,b,c;\
+if w>=128 then E()end;end;end;end;return v,p end;\nreturn function(CD,p)local o=SB(CD,p);if o==nil then E()end;p=p+1;\
+local f=FM[o];if f==nil or f>5 then E()end;local a,b,c;\
 if f==1 then local j;j,p=Dv(CD,p);if {jx} then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
 elseif f==2 then a,p=Dv(CD,p);if {ax} then E()end;b=0;c=0;\
 elseif f==3 then a,p=Dv(CD,p);b,p=Dv(CD,p);if {ax} or {bx} then E()end;c=0;\
 elseif f==4 then a,p=Dv(CD,p);if {ax} then E()end;local k2;k2,p=Dv(CD,p);if {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;\
 else a,p=Dv(CD,p);b,p=Dv(CD,p);c,p=Dv(CD,p);if {ax} or {bx} or {cx} then E()end end;\
-local k=b+c*256;local j=a+k*256;local ok=false;"
-        )
-        .as_str(),
+return o,a,b,c,p end;\nend,",
+        key = keys[14],
+        jx = jx,
+        ax = ax,
+        bx = bx,
+        kx = kx,
+        cx = cx,
     );
     let mut f3_arms: Vec<String> = program
         .opcodes()
@@ -401,10 +429,31 @@ local k=b+c*256;local j=a+k*256;local ok=false;"
         .collect();
     f3_arms.extend(f3_decoys);
     structure.shuffle(&mut f3_arms);
+    let mut arms_text = String::new();
     for (index, arm) in f3_arms.iter().enumerate() {
-        write!(s, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
+        write!(
+            arms_text,
+            "{} {arm}",
+            if index == 0 { "if" } else { "elseif" }
+        )
+        .unwrap();
     }
-    s.push_str("else E()end;if not ok then E()end;XB[at+1]=NCH(o,a,b,c);end;if p~=#CD+1 then E()end;F.__obf_proto_code=TC(XB);local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);");
+    let validate_field = format!(
+        "[{key}]=function(E)\nreturn function(o,a,b,c,j,k,at,F,P,id)local ok=false;{arms} else E()end;\
+if not ok then E()end;return true end;\nend,",
+        key = keys[15],
+        arms = arms_text,
+    );
+    // The validator field itself shrinks to the loop: per instruction it
+    // calls the decoder field's closure, re-derives the packed operands and
+    // hands everything to the bounds-arms closure.
+    write!(s, "[{}]=function(P,np,SB,E,NCH,TC,dec,vld)\n", keys[2]).unwrap();
+    s.push_str(
+        "for id=0,np-1 do local F=P[id];local CD=F.__obf_proto_code;local p=1;local XB={};\
+for at=0,F.__obf_proto_nc-1 do local o,a,b,c,p2=dec(CD,p);p=p2;local k=b+c*256;local j=a+k*256;\
+if not vld(o,a,b,c,j,k,at,F,P,id)then E()end;XB[at+1]=NCH(o,a,b,c);end;\
+if p~=#CD+1 then E()end;F.__obf_proto_code=TC(XB);local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);",
+    );
     write!(
         s,
         "if last~={} and last~={} and last~={} then E()end;end;",
@@ -493,7 +542,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});
 local Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nVMS[{}](P,np,SB,E,NCH,TC);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal FMt=VMS[{}](E,SB);local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,NCH,TC,dec,vld);
 local CV,SV,Lookup=VMS[{}](TY,E);
 local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
@@ -515,6 +564,9 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[1],
         keys[4],
         keys[7],
+        keys[13],
+        keys[14],
+        keys[15],
         keys[2],
         keys[3],
         keys[4]
@@ -609,6 +661,7 @@ H=function(fid,args,ups)
     fields.extend(probe_fields);
     fields.extend(segment_fields);
     fields.extend(watermark_fields);
+    fields.extend([forms_field, decode_field, validate_field]);
     structure.shuffle(&mut fields);
     let mut out = s[..header_end].to_owned();
     for field in &fields {
@@ -645,7 +698,7 @@ fn wrapper_keys(seed: u64) -> Vec<u64> {
     let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
     let mut used = std::collections::BTreeSet::new();
     let mut keys = Vec::new();
-    while keys.len() < 13 {
+    while keys.len() < 16 {
         let key = 100 + random.next_u64() % 9900;
         if used.insert(key) {
             keys.push(key);
@@ -1468,7 +1521,7 @@ mod tests {
                 let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
                     panic!("{target}: {output}");
                 };
-                assert_eq!(fields.len(), 14, "{target}: {output}");
+                assert_eq!(fields.len(), 17, "{target}: {output}");
                 let mut numeric_keys = std::collections::BTreeSet::new();
                 let mut entries = 0;
                 for field in fields {
@@ -1497,7 +1550,7 @@ mod tests {
                     }
                 }
                 assert_eq!(entries, 1);
-                assert_eq!(numeric_keys.len(), 13);
+                assert_eq!(numeric_keys.len(), 16);
                 // The wrapper is not just structural: it runs the program.
                 let workspace = native::Workspace::new();
                 let path = workspace.0.join("wrapped.lua");
@@ -1767,6 +1820,56 @@ mod tests {
     }
 
     #[test]
+    fn operand_features_are_split_into_separate_shuffled_fields() {
+        // The operand-form map (`[0]=3,[1]=4,...` sequential-key literal),
+        // the varint reader with its `if f==1 elseif f==2 ...` shape chain
+        // and the per-opcode bounds arms used to be one field's static
+        // signature. They must now be three separate payload fields, with
+        // the form map rebuilt from a per-seed rotated packed string.
+        for target in [Target::Lua51, Target::Luau] {
+            let source = "local function add(a,b)return a+b end print(add(1,2))";
+            let data = compile(source, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let mut packed_strings = BTreeSet::new();
+            for seed in [0u64, 1, 735, u64::MAX] {
+                let raw = generate(&data, &program, seed).unwrap();
+                let keys = wrapper_keys(seed);
+                assert!(!raw.contains("local FM={"), "{target} seed {seed}");
+                assert!(raw.contains(&format!("[{}]=function(E,SB)", keys[13])));
+                assert!(raw.contains(&format!("[{}]=function(E,SB,FM)", keys[14])));
+                assert!(raw.contains(&format!("[{}]=function(E)", keys[15])));
+                assert!(raw.contains(&format!("[{}]=function(P,np,SB,E,NCH,TC,dec,vld)", keys[2])));
+                assert!(raw.contains(&format!("VMS[{}](E,SB)", keys[13])));
+                // The packed form string is the only short `local S="..."`
+                // in the raw script (segment fields carry long base86
+                // text); its bytes must rotate with the seed.
+                let mut at = 0usize;
+                while let Some(found) = raw[at..].find("local S=\"") {
+                    let start = at + found + 9;
+                    let end = raw[start..].find('"').expect("unterminated string") + start;
+                    if end - start <= 96 {
+                        packed_strings.insert(raw[start..end].to_owned());
+                    }
+                    at = end;
+                }
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(blob(&output, target, seed), data);
+            }
+            assert!(
+                packed_strings.len() >= 2,
+                "{target}: packed form strings identical across seeds"
+            );
+            // The split layout still runs the program unchanged.
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("split_features.lua");
+            fs::write(&path, source).unwrap();
+            let expected = native::compile_and_run(target, &path);
+            fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+            assert_eq!(expected, native::compile_and_run(target, &path));
+        }
+    }
+
+    #[test]
     fn full_code_randomization_layout_and_cipher_vary_per_seed() {
         // Full code randomization: payload fields (including every
         // decryption/probe/segment function) are emitted in a seeded
@@ -1804,7 +1907,7 @@ mod tests {
                         order.push(tokens[index + 1].text(&output).to_owned());
                     }
                 }
-                assert_eq!(order.len(), 13, "{target} seed {seed}");
+                assert_eq!(order.len(), 16, "{target} seed {seed}");
                 layouts.insert((format!("{target:?}"), order));
                 for multiplier in [16_807u64, 48_271, 65_539] {
                     if output.contains(&format!("={multiplier}*"))
