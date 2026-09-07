@@ -443,36 +443,30 @@ return o,a,b,c,p end;\nend,",
         kx = kx,
         cx = cx,
     );
-    let mut f3_arms: Vec<String> = program
+    let mut f3_arms: Vec<(u8, String)> = program
         .opcodes()
         .iter()
         .map(|op| {
-            format!(
-                "{} then ok={};",
-                structure.dispatch_condition(
-                    u64::from(perm[(*op as u8) as usize]) as u16,
-                    program.target.is_luau()
+            (
+                perm[(*op as u8) as usize],
+                format!(
+                    "{} then ok={};",
+                    structure.dispatch_condition(
+                        u64::from(perm[(*op as u8) as usize]) as u16,
+                        program.target.is_luau()
+                    ),
+                    validation(*op)
                 ),
-                validation(*op)
             )
         })
         .collect();
     f3_arms.extend(f3_decoys);
-    structure.shuffle(&mut f3_arms);
-    let mut arms_text = String::new();
-    for (index, arm) in f3_arms.iter().enumerate() {
-        write!(
-            arms_text,
-            "{} {arm}",
-            if index == 0 { "if" } else { "elseif" }
-        )
-        .unwrap();
-    }
+    let f3_groups = (2 + structure.next_u64() % 3) as u8;
     let validate_field = format!(
-        "[{key}]=function(E)\nreturn function(o,a,b,c,j,k,at,F,P,id)local ok=false;{arms} else E()end;\
+        "[{key}]=function(E)\nreturn function(o,a,b,c,j,k,at,F,P,id)local ok=false;{chain}\
 if not ok then E()end;return true end;\nend,",
         key = keys[15],
-        arms = arms_text,
+        chain = grouped_chain(&mut structure, f3_arms, f3_groups, "o"),
     );
     // The validator field itself shrinks to the loop: per instruction it
     // calls the decoder field's closure, re-derives the packed operands and
@@ -647,25 +641,26 @@ H=function(fid,args,ups)
    local o,a,b,c=SB(code,pc,pc+3);if c==nil then E()end;pc=pc+4;
    local k=b+c*256;local j=a+k*256;
 "#);
-    let mut f5_arms: Vec<String> = Vec::new();
+    let mut f5_arms: Vec<(u8, String)> = Vec::new();
     for op in program.opcodes() {
         let code = super::opcode::custom(program.target, op)
             .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
-        f5_arms.push(format!(
-            "{} then {}",
-            structure.dispatch_condition(
-                u64::from(perm[(op as u8) as usize]) as u16,
-                program.target.is_luau()
+        f5_arms.push((
+            perm[(op as u8) as usize],
+            format!(
+                "{} then {}",
+                structure.dispatch_condition(
+                    u64::from(perm[(op as u8) as usize]) as u16,
+                    program.target.is_luau()
+                ),
+                code
             ),
-            code
         ));
     }
     f5_arms.extend(f5_decoys);
-    structure.shuffle(&mut f5_arms);
-    for (index, arm) in f5_arms.iter().enumerate() {
-        write!(s, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
-    }
-    s.push_str("else E()end;end;end;end;return H");
+    let f5_groups = (2 + structure.next_u64() % 3) as u8;
+    s.push_str(&grouped_chain(&mut structure, f5_arms, f5_groups, "o"));
+    s.push_str("end;end;end;return H");
     let forwards_varargs = program.prototypes[program.entry]
         .code
         .iter()
@@ -767,7 +762,7 @@ fn decoy_arms(
     luau: bool,
     bodies: &[&str],
     image: &std::collections::BTreeSet<u8>,
-) -> Vec<String> {
+) -> Vec<(u8, String)> {
     let mut used = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     while used.len() < count {
@@ -779,9 +774,66 @@ fn decoy_arms(
         };
         let body = bodies[(structure.next_u64() % bodies.len() as u64) as usize];
         let condition = structure.dispatch_condition(u16::from(opcode), luau);
-        out.push(format!("{condition} then {body}"));
+        out.push((opcode, format!("{condition} then {body}")));
     }
     out
+}
+
+/// Two-level dispatch split: the arms of a dispatch chain are partitioned
+/// into a seeded number of sub-chains selected by `value_var % groups`, so
+/// the chain topology and the per-chain lengths vary per seed. Every arm
+/// lands in the sub-chain of its value's residue; each sub-chain keeps its
+/// own fail-closed `else E()end`, and a residue class no arm carries is
+/// dead by construction (the selector can only be reached by validated
+/// renumbered opcodes) and simply aborts.
+fn grouped_chain(
+    structure: &mut crate::random::Prng,
+    mut arms: Vec<(u8, String)>,
+    groups: u8,
+    value_var: &str,
+) -> String {
+    structure.shuffle(&mut arms);
+    let mut text = String::new();
+    for group in 0..groups {
+        let condition = selector_condition(structure, value_var, groups, group);
+        write!(
+            text,
+            "{} {condition} then ",
+            if group == 0 { "if" } else { "elseif" }
+        )
+        .unwrap();
+        let members: Vec<&String> = arms
+            .iter()
+            .filter(|(value, _)| value % groups == group)
+            .map(|(_, arm)| arm)
+            .collect();
+        if members.is_empty() {
+            text.push_str("E();");
+        } else {
+            for (index, arm) in members.iter().enumerate() {
+                write!(text, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
+            }
+            text.push_str(" else E()end;");
+        }
+    }
+    text.push_str(" else E()end;");
+    text
+}
+
+/// Sub-chain selector condition, one of four exactly equivalent spellings
+/// of `value % modulus == group` (raw integer arithmetic, no metamethods).
+fn selector_condition(
+    structure: &mut crate::random::Prng,
+    value_var: &str,
+    modulus: u8,
+    group: u8,
+) -> String {
+    match structure.next_u64() % 4 {
+        0 => format!("{value_var}%{modulus}=={group}"),
+        1 => format!("{group}=={value_var}%{modulus}"),
+        2 => format!("not({value_var}%{modulus}~={group})"),
+        _ => format!("{value_var}%{modulus}-{group}==0"),
+    }
 }
 
 /// Per-seed opcode renumbering: an injective map from the 64 canonical ISA
@@ -1896,6 +1948,76 @@ mod tests {
             userdata_seen == [true, true],
             "userdata guard orders: {userdata_seen:?}"
         );
+    }
+
+    #[test]
+    fn dispatch_chains_split_into_seeded_subchains() {
+        // Two-level dispatch split: the interpreter and bounds chains are
+        // partitioned into 2..=4 sub-chains selected by `o % groups` (four
+        // selector spellings), each sub-chain keeping its own fail-closed
+        // else. The number of sub-chains and their lengths vary per seed.
+        let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+        for target in [Target::Lua51, Target::Luau] {
+            let data = compile(source, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let mut topologies = BTreeSet::new();
+            for seed in 0..=11u64 {
+                let raw = generate(&data, &program, seed).unwrap();
+                // Bounds chain: inside the vld closure, before the ok check.
+                let vld_at = raw
+                    .find("return function(o,a,b,c,j,k,at,F,P,id)")
+                    .expect("bounds closure");
+                let vld_end = vld_at + raw[vld_at..].find("if not ok then E()end;").unwrap();
+                let bounds = &raw[vld_at..vld_end];
+                // Interpreter chain: from the fetch line to the H return.
+                let f5_at = raw
+                    .find("if c==nil then E()end;pc=pc+4;")
+                    .expect("interpreter fetch");
+                let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
+                let interp = &raw[f5_at..f5_end];
+                let mut chain_groups = Vec::new();
+                for chain in [bounds, interp] {
+                    let mut modulus = None;
+                    let mut selectors = 0usize;
+                    let mut at = 0usize;
+                    while let Some(found) = chain[at..].find("o%") {
+                        let digits = chain[at + found + 2..]
+                            .chars()
+                            .take_while(char::is_ascii_digit)
+                            .count();
+                        let value: u8 = chain[at + found + 2..at + found + 2 + digits]
+                            .parse()
+                            .unwrap();
+                        assert!((2..=4).contains(&value), "selector modulus {value}");
+                        match modulus {
+                            Some(seen) => assert_eq!(seen, value, "mixed sub-chain moduli"),
+                            None => modulus = Some(value),
+                        }
+                        selectors += 1;
+                        at += found + 2;
+                    }
+                    let groups = modulus.expect("no sub-chain selector");
+                    assert_eq!(selectors, groups as usize, "one selector per group");
+                    chain_groups.push(groups);
+                }
+                assert_ne!(chain_groups[0], 0);
+                topologies.insert((chain_groups[0], chain_groups[1]));
+                // Same seed must reproduce the identical topology.
+                assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+            }
+            assert!(
+                topologies.len() >= 3,
+                "{target}: only {} dispatch topologies across 12 seeds",
+                topologies.len()
+            );
+            // The split chains still execute the program verbatim.
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("split_dispatch.lua");
+            fs::write(&path, source).unwrap();
+            let expected = native::compile_and_run(target, &path);
+            fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+            assert_eq!(expected, native::compile_and_run(target, &path));
+        }
     }
 
     #[test]
