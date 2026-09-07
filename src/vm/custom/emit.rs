@@ -12,8 +12,9 @@ pub(crate) fn generate(
     // script receives a seed-specific semantic wire image: straight-line
     // instructions become superoperators, records are linked by random
     // labels and physically shuffled, while reordered real prototypes mix
-    // with an unreachable synthetic subtree. The target-side parser below
-    // accepts only this private ISA3 image.
+    // with an unreachable synthetic subtree. Record recipe ids are additionally
+    // replaced by five-stage context tokens. The target-side parser below
+    // accepts only this private ISA4 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image)
 }
@@ -715,14 +716,17 @@ local ka2=SB(B,33)*31+SB(B,#B);",
         if program.target.is_luau() { 117 } else { 81 }
     )
     .unwrap();
-    core_text.push_str(
+    write!(
+        core_text,
         r#"
 if b8()~=1 or b8()~=1 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
-local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa~=3 then E()end;
+local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa~={} then E()end;
 local check=b32();local sa,sb=1,0;for q=33,#B do sa=(sa+SB(B,q))%65521;sb=(sb+sa)%65521 end;
 if sa+sb*65536~=check then E()end;
 "#,
-    );
+        semantic::WIRE_ISA_VERSION
+    )
+    .unwrap();
     // Flattened parse core: the per-prototype stages are split into local
     // functions -- header read/validate (PH), upvalue wiring (PU), constant
     // pool (PK) -- whose definition order shuffles per seed, driven by a
@@ -918,13 +922,17 @@ return a,b,c,p end;\nend,",
     );
     // Semantic graph validator. Each prototype code stream begins with a
     // masked recipe dictionary and a random entry label. Physical records
-    // then carry (label,next,skip,recipe) plus operand-only varints. The
+    // then carry (label,next,skip,context-token) plus operand-only varints.
+    // A shared five-stage nested state machine resolves each token from its
+    // graph/prototype context both here and on every runtime fetch. The
     // validator builds a label-keyed table, checks every primitive operand,
     // rejects control operations in the middle of a recipe, and verifies all
     // graph successors only after the shuffled records have been read.
     write!(s, "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX)\n", keys[2]).unwrap();
+    let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
     let semantic_validator = format!(
-        r#"for id=0,np-1 do
+        r#"{recipe_decoder}
+for id=0,np-1 do
  local F=P[id];local CD=F.__obf_proto_code;local p=1;
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
  local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};
@@ -935,8 +943,8 @@ return a,b,c,p end;\nend,",
   end;RM[rid]=q;
  end;
  local start=D16();local code={{}};
- for at=0,F.__obf_proto_nc-1 do local label,next1,skip,rid=D16(),D16(),D16(),D16();local recipe=RM[rid];
-  if label==0 or code[label]~=nil or recipe==nil then E()end;local I={{rid,next1,skip,PT[recipe[#recipe]],#recipe}};
+ for at=0,F.__obf_proto_nc-1 do local label,next1,skip,token=D16(),D16(),D16(),D16();local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
+  if label==0 or code[label]~=nil or recipe==nil then E()end;local I={{token,next1,skip,PT[recipe[#recipe]],#recipe}};
   for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local k=b+c*256;local j=a+k*256;
    if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;local base=3+qi*3;I[base]=a;I[base+1]=b;I[base+2]=c;
   end;code[label]=I;
@@ -948,7 +956,7 @@ return a,b,c,p end;\nend,",
   elseif last=={test} then if code[I[2]]==nil or code[I[3]]==nil then E()end
   elseif code[I[2]]==nil or I[3]~=0 then E()end;
  end;code[0]=start;F.__obf_proto_code=code;
-end;"#,
+end;return RD;"#,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
         mask_salt = semantic_image.mask_salt,
@@ -1036,9 +1044,9 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local c1=VMS[{}](E,{},{},DBG,GI,LS);local c2=VMS[{}](E,{},{},DBG,GI,LS);local c3=VMS[{}](E,{},{},DBG,GI,LS);
 local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
 local CV,SV,Lookup=VMS[{}](TY,E);
-local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);
+local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[0],
         keys[5 + probe_order[0]],
@@ -1068,7 +1076,7 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
     .unwrap();
     write!(
         s,
-        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup)\n",
+        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD)\n",
         keys[4]
     )
     .unwrap();
@@ -1141,10 +1149,12 @@ end;
         s = s.replacen(original, &slotted, 1);
     }
     // Recipe-threaded semantic interpreter. The fetch phase follows a
-    // random label graph (there is no linear four-byte PC); the dispatch
-    // phase selects a program-specific recipe id and executes its 1..4
-    // primitive semantics as one unrolled superoperator. Operand records do
-    // not contain opcode bytes. Control primitives are forced to the final
+    // random label graph (there is no linear four-byte PC), then resolves the
+    // record's context token through RD's five real states, 4..5 nested opaque
+    // guards per state, and five dense dead states before recipe dispatch.
+    // The resulting program-specific recipe executes its 1..4 primitive
+    // semantics as one unrolled superoperator. Operand records do not contain
+    // opcode bytes or stable recipe ids. Control primitives are forced to the final
     // position of a recipe, so return/tail-call/break retain their lexical
     // behavior in this loop.
     let fsv = state_values(&mut structure, 2);
@@ -1152,8 +1162,9 @@ end;
     let c_fetch = state_condition(&mut structure, "w", k_fetch);
     let c_disp = state_condition(&mut structure, "w", k_disp);
     let dispatch_first = structure.next_u64() % 2 == 0;
-    let fetch_branch =
-        format!("{c_fetch} then\n   I=code[pc];if I==nil then E()end;pc=I[2];rid=I[1];w={k_disp};");
+    let fetch_branch = format!(
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;rid=RD(I[1],pc,I[2],I[3],fid);pc=I[2];w={k_disp};"
+    );
     write!(
         s,
         "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",

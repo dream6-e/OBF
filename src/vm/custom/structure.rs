@@ -284,6 +284,110 @@ pub(crate) fn state_machine(
     text
 }
 
+fn u16_expression(value: u16) -> String {
+    format!("({}*256+{})", value / 256, value % 256)
+}
+
+fn token_opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
+    let salt = u16_expression((17 + structure.next_u64() % 4_079) as u16);
+    match structure.next_u64() % 5 {
+        0 => ("v<=v and l<=l".to_owned(), "v<v or l<l".to_owned()),
+        1 => (
+            format!("(n+{salt})-{salt}==n"),
+            format!("(n+{salt})-{salt}~=n"),
+        ),
+        2 => ("s%1==0 and f%1==0".to_owned(), "s%1==1 or f<0".to_owned()),
+        3 => ("(v-l)==(v-l)".to_owned(), "(v-l)~=(v-l)".to_owned()),
+        _ => (
+            "(v<=v and v or 0)==v".to_owned(),
+            "(v<=v and v or 0)~=v".to_owned(),
+        ),
+    }
+}
+
+fn nested_token_guard(
+    structure: &mut crate::random::Prng,
+    mut live: String,
+    depth: usize,
+    decoy_states: &[u16],
+) -> String {
+    for _ in 0..depth {
+        let (truthy, falsy) = token_opaque_pair(structure);
+        let odd = 3 + 2 * (structure.next_u64() % 31);
+        let salt = u16_expression((101 + structure.next_u64() % 65_000) as u16);
+        let state = decoy_states[structure.next_u64() as usize % decoy_states.len()];
+        let dead = format!("repeat v=(v*{odd}+l+n+s+f+{salt})%65536;q={state};break until false;");
+        live = if structure.next_u64() % 2 == 0 {
+            format!("if {truthy} then {live}else {dead}end;")
+        } else {
+            format!("if {falsy} then {dead}else {live}end;")
+        };
+    }
+    live
+}
+
+/// Five-stage context-dependent recipe-token decoder. The real inverse stages
+/// are routed through a shuffled state machine and each is buried under four
+/// or five nested dynamic tautologies. Five additional state arms contain
+/// plausible one-iteration arithmetic loops but have no incoming transition
+/// from the live chain. The same function is used while validating the wire
+/// and on every interpreter fetch, so a record never exposes a stable recipe
+/// id before these runtime stages have completed.
+pub(crate) fn layered_recipe_decoder(
+    structure: &mut crate::random::Prng,
+    layers: &[semantic::RecipeTokenLayer; semantic::RECIPE_TOKEN_STAGES],
+) -> String {
+    const DECOY_STATES: usize = 5;
+    let mut states = state_values(structure, semantic::RECIPE_TOKEN_STAGES + 1 + DECOY_STATES);
+    structure.shuffle(&mut states);
+    let live_states = &states[..=semantic::RECIPE_TOKEN_STAGES];
+    let decoy_states = &states[semantic::RECIPE_TOKEN_STAGES + 1..];
+    let mut branches = Vec::new();
+    for (stage, layer) in layers.iter().rev().enumerate() {
+        let terms = [
+            u16_expression(layer.add),
+            format!("l*{}", u16_expression(layer.label)),
+            format!("n*{}", u16_expression(layer.next)),
+            format!("s*{}", u16_expression(layer.skip)),
+            format!("f*{}", u16_expression(layer.prototype)),
+            format!("((l*n+s*f)%65536)*{}", u16_expression(layer.cross)),
+        ];
+        let mut terms = terms.to_vec();
+        structure.shuffle(&mut terms);
+        let context = terms.join("+");
+        let body = format!(
+            "v=((v-({context})%65536)*{})%65536;q={};",
+            u16_expression(layer.inverse),
+            live_states[stage + 1]
+        );
+        let depth = 4 + (structure.next_u64() % 2) as usize;
+        branches.push((
+            live_states[stage],
+            nested_token_guard(structure, body, depth, decoy_states),
+        ));
+    }
+    branches.push((
+        live_states[semantic::RECIPE_TOKEN_STAGES],
+        "return v;".to_owned(),
+    ));
+    for (index, &state) in decoy_states.iter().enumerate() {
+        let next = decoy_states[(index + 1) % decoy_states.len()];
+        let odd = 3 + 2 * (structure.next_u64() % 61);
+        let salt = u16_expression((1 + structure.next_u64() % 65_535) as u16);
+        branches.push((
+            state,
+            format!(
+                "repeat v=(v*{odd}+l*n+s*f+{salt})%65536;n=(n+v+{salt})%65536;q={next};break until false;"
+            ),
+        ));
+    }
+    format!(
+        "local RD=function(v,l,n,s,f)local q={};{}end;",
+        live_states[0],
+        state_machine(structure, "q", branches)
+    )
+}
+
 /// Per-seed opcode renumbering: an injective map from the 64 canonical ISA
 /// slots to byte values 0..=255, drawn by rejection sampling from a
 /// seed-salted stream. Both sides derive it identically: the generator

@@ -83,9 +83,13 @@ fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
     // naming/audit pass. The probe records live recipe ids, so coverage
     // includes every primitive in an executed 1..4-word superoperator while
     // excluding unused decoy recipes and uncalled prototypes.
-    assert_eq!(raw.matches("rid=I[1];w=").count(), 1);
+    let fetch_probe = "rid=RD(I[1],pc,I[2],I[3],fid);pc=I[2];w=";
+    assert_eq!(raw.matches(fetch_probe).count(), 1);
     let raw = raw
-        .replace("rid=I[1];w=", "rid=I[1];Probe[rid]=true;w=")
+        .replace(
+            fetch_probe,
+            "rid=RD(I[1],pc,I[2],I[3],fid);Probe[rid]=true;pc=I[2];w=",
+        )
         .replace(
         "return U(result,1,result.n)",
         "for id in ProbePairs(Probe)do ProbePrint('recipe:'..id)end;return U(result,1,result.n)",
@@ -225,7 +229,11 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         assert!(recipes >= 2);
         let mut cursor = code + 2;
         let first_recipe = cursor;
+        let mut dictionary = BTreeSet::new();
         for _ in 0..recipes {
+            dictionary.insert(u16::from_le_bytes(
+                image.bytes[cursor..cursor + 2].try_into().unwrap(),
+            ));
             let len = usize::from(image.bytes[cursor + 2]);
             assert!((1..=4).contains(&len));
             cursor += 3 + len;
@@ -250,7 +258,25 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         bad.bytes[first_record..first_record + 2].fill(0); // null record label
         corruptions.push(bad);
         let mut bad = image.clone();
-        bad.bytes[first_record + 6..first_record + 8].fill(0); // unknown recipe id
+        let label = u16::from_le_bytes(
+            bad.bytes[first_record..first_record + 2]
+                .try_into()
+                .unwrap(),
+        );
+        let next = u16::from_le_bytes(
+            bad.bytes[first_record + 2..first_record + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let skip = u16::from_le_bytes(
+            bad.bytes[first_record + 4..first_record + 6]
+                .try_into()
+                .unwrap(),
+        );
+        let unknown = (1..=u16::MAX).find(|id| !dictionary.contains(id)).unwrap();
+        let token =
+            super::semantic::encode_recipe_token(unknown, label, next, skip, 0, &bad.token_layers);
+        bad.bytes[first_record + 6..first_record + 8].copy_from_slice(&token.to_le_bytes());
         corruptions.push(bad);
 
         for (kind, mut bad) in corruptions.into_iter().enumerate() {
@@ -986,10 +1012,16 @@ fn stages_are_flattened_into_seeded_state_machines() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Seven machines: three segments, outer decrypt, parse core,
-            // and the interpreter's fetch/dispatch phase machine (inside
-            // its two enclosing loops).
-            assert_eq!(raw.matches("while true do").count(), 7);
+            // Eight machines: three segments, outer decrypt, parse core,
+            // the interpreter's fetch/dispatch phase machine (inside its two
+            // enclosing loops), and the five-stage contextual recipe-token
+            // decoder shared by validation and runtime fetch.
+            assert_eq!(raw.matches("while true do").count(), 8);
+            assert_eq!(raw.matches("local RD=function(v,l,n,s,f)").count(), 1);
+            assert!(
+                raw.matches("repeat v=").count() >= 25,
+                "five live decode states must carry dense nested dead paths"
+            );
             // Split functions: frame setup, prototype header, upvalue
             // wiring, constant pool.
             assert!(raw.contains("local SETUP=function(fid,args)"));
@@ -997,11 +1029,14 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local PU=function()"));
             assert!(raw.contains("local PK=function()"));
             assert!(raw.contains("local F,R,va=SETUP(fid,args);"));
-            // Graph fetch follows an explicit random-label successor and
-            // selects the record's recipe id (the coverage probe rewrites
-            // the latter assignment).
+            // Graph fetch follows an explicit random-label successor, but
+            // first derives the recipe id from a per-record context token.
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
-            assert_eq!(raw.matches("pc=I[2];rid=I[1];").count(), 1);
+            assert_eq!(
+                raw.matches("rid=RD(I[1],pc,I[2],I[3],fid);pc=I[2];")
+                    .count(),
+                1
+            );
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {
@@ -1166,6 +1201,60 @@ fn dispatch_chains_split_into_seeded_subchains() {
         let expected = native::compile_and_run(target, &path);
         fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
         assert_eq!(expected, native::compile_and_run(target, &path));
+    }
+}
+
+#[test]
+fn semantic_recipe_tokens_use_five_contextual_runtime_stages() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("local function f(x)return x+1 end print(f(4),f(9))", target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 1, 735, u64::MAX] {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            assert_eq!(
+                image.token_layers.len(),
+                super::semantic::RECIPE_TOKEN_STAGES
+            );
+            for layer in image.token_layers {
+                assert_eq!(layer.multiplier % 2, 1);
+                assert_eq!(
+                    u32::from(layer.multiplier) * u32::from(layer.inverse) % 65_536,
+                    1
+                );
+            }
+            let recipe = image.recipes.iter().find(|recipe| recipe.live).unwrap().id;
+            let mut tokens = BTreeSet::new();
+            for context in 0..64u16 {
+                let label = 1 + context * 17;
+                let next = context * 29;
+                let skip = context * 43;
+                let prototype = context % image.prototype_order.len() as u16;
+                let token = super::semantic::encode_recipe_token(
+                    recipe,
+                    label,
+                    next,
+                    skip,
+                    prototype,
+                    &image.token_layers,
+                );
+                assert_eq!(
+                    super::semantic::decode_recipe_token(
+                        token,
+                        label,
+                        next,
+                        skip,
+                        prototype,
+                        &image.token_layers,
+                    ),
+                    recipe
+                );
+                tokens.insert(token);
+            }
+            assert!(
+                tokens.len() >= 56,
+                "{target} seed {seed}: recipe token is insufficiently contextual"
+            );
+        }
     }
 }
 
@@ -1515,21 +1604,20 @@ fn generation_respects_the_documented_size_budget() {
     // M7 size budget: the structural variants must not inflate a
     // generated script beyond the documented caps (headroom over the
     // current goldens; raise the caps deliberately, never silently --
-    // The semantic-virtualization milestone deliberately raises the old M7
-    // 29.5/31.8 KiB ceilings: program-specific 1..4-primitive superhandlers
-    // replace the compact global one-opcode/one-handler table. Keep bounded
-    // headroom over both fixed-seed goldens rather than allowing untracked
-    // growth.
+    // Semantic virtualization deliberately raised the old M7 ceilings for
+    // program-specific superhandlers. ISA4 adds one shared five-stage token
+    // machine with deeply nested dead paths; keep deliberate bounded headroom
+    // over both fixed-seed goldens rather than allowing untracked growth.
     for (target, fixture, budget) in [
         (
             Target::Lua51,
             include_str!("../../../tests/fixtures/vm_lua51.lua"),
-            68_000usize,
+            72_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../tests/fixtures/vm_luau.lua"),
-            74_000usize,
+            80_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();

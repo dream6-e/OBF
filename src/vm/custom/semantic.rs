@@ -2,11 +2,11 @@
 //!
 //! Public `.obf` files remain the canonical OBF v2/ISA2 format. Before a
 //! canonical program is embedded in a generated script, this module lowers
-//! its fixed one-word instructions into a private ISA3 wire image:
+//! its fixed one-word instructions into a private ISA4 wire image:
 //!
 //! * straight-line words are grouped into program-specific superoperators;
-//! * each superoperator has a random 16-bit recipe id and carries no opcode
-//!   bytes at its use sites;
+//! * each superoperator has a random 16-bit recipe id, while every use site
+//!   carries a different five-stage context token rather than that stable id;
 //! * code records use random labels and explicit successors, and are emitted
 //!   in shuffled physical order rather than source/chunk order;
 //! * sibling prototypes are seed-shuffled, Closure operands are rewritten, and
@@ -25,10 +25,27 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 3;
+pub(crate) const WIRE_ISA_VERSION: u32 = 4;
+pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 const MAX_MULTI_RECIPES: usize = 96;
 const MAX_BUNDLE_WORDS: usize = 4;
 const DECOY_RECIPES: usize = 4;
+
+/// One reversible stage of the context-dependent record-token transform.
+/// Every multiplier is odd and therefore invertible modulo 2^16. Context
+/// coefficients bind the wire token to its physical graph node, successors,
+/// and prototype rather than exposing one stable recipe id at every use site.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecipeTokenLayer {
+    pub multiplier: u16,
+    pub inverse: u16,
+    pub add: u16,
+    pub label: u16,
+    pub next: u16,
+    pub skip: u16,
+    pub prototype: u16,
+    pub cross: u16,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SemanticRecipe {
@@ -50,6 +67,7 @@ pub(crate) struct SemanticImage {
     pub mask_mul: u16,
     pub mask_add: u16,
     pub mask_salt: u16,
+    pub token_layers: [RecipeTokenLayer; RECIPE_TOKEN_STAGES],
     pub canonical_words: usize,
     pub bundles: usize,
     pub bundled_words: usize,
@@ -166,6 +184,102 @@ fn random_nonzero_u16(random: &mut crate::random::Prng, used: &mut BTreeSet<u16>
             return value;
         }
     }
+}
+
+fn inverse_odd_u16(value: u16) -> u16 {
+    debug_assert_eq!(value % 2, 1);
+    let (mut t, mut new_t) = (0i64, 1i64);
+    let (mut remainder, mut new_remainder) = (65_536i64, i64::from(value));
+    while new_remainder != 0 {
+        let quotient = remainder / new_remainder;
+        (t, new_t) = (new_t, t - quotient * new_t);
+        (remainder, new_remainder) = (new_remainder, remainder - quotient * new_remainder);
+    }
+    debug_assert_eq!(remainder, 1);
+    let inverse = t.rem_euclid(65_536) as u16;
+    debug_assert_eq!(u32::from(value) * u32::from(inverse) % 65_536, 1);
+    inverse
+}
+
+fn recipe_token_layers(
+    random: &mut crate::random::Prng,
+) -> [RecipeTokenLayer; RECIPE_TOKEN_STAGES] {
+    std::array::from_fn(|_| {
+        let multiplier = loop {
+            let candidate = (random.next_u64() as u16) | 1;
+            if candidate > 1 {
+                break candidate;
+            }
+        };
+        let add = random.next_u64() as u16;
+        let coefficients: [u16; 5] =
+            std::array::from_fn(|_| 1 + (random.next_u64() % u64::from(u16::MAX)) as u16);
+        RecipeTokenLayer {
+            multiplier,
+            inverse: inverse_odd_u16(multiplier),
+            add,
+            label: coefficients[0],
+            next: coefficients[1],
+            skip: coefficients[2],
+            prototype: coefficients[3],
+            cross: coefficients[4],
+        }
+    })
+}
+
+fn recipe_token_context(
+    layer: RecipeTokenLayer,
+    label: u16,
+    next: u16,
+    skip: u16,
+    prototype: u16,
+) -> u64 {
+    let (label, next, skip, prototype) = (
+        u64::from(label),
+        u64::from(next),
+        u64::from(skip),
+        u64::from(prototype),
+    );
+    let cross = (label * next + skip * prototype) % 65_536;
+    (u64::from(layer.add)
+        + label * u64::from(layer.label)
+        + next * u64::from(layer.next)
+        + skip * u64::from(layer.skip)
+        + prototype * u64::from(layer.prototype)
+        + cross * u64::from(layer.cross))
+        % 65_536
+}
+
+pub(crate) fn encode_recipe_token(
+    mut recipe: u16,
+    label: u16,
+    next: u16,
+    skip: u16,
+    prototype: u16,
+    layers: &[RecipeTokenLayer; RECIPE_TOKEN_STAGES],
+) -> u16 {
+    for &layer in layers {
+        recipe = ((u64::from(recipe) * u64::from(layer.multiplier)
+            + recipe_token_context(layer, label, next, skip, prototype))
+            % 65_536) as u16;
+    }
+    recipe
+}
+
+pub(crate) fn decode_recipe_token(
+    mut token: u16,
+    label: u16,
+    next: u16,
+    skip: u16,
+    prototype: u16,
+    layers: &[RecipeTokenLayer; RECIPE_TOKEN_STAGES],
+) -> u16 {
+    for &layer in layers.iter().rev() {
+        let context = recipe_token_context(layer, label, next, skip, prototype);
+        token =
+            (((u64::from(token) + 65_536 - context) * u64::from(layer.inverse)) % 65_536) as u16;
+    }
+    token
 }
 
 /// Add an internally coherent but unreachable prototype subtree. Its first
@@ -535,6 +649,7 @@ fn encode_masked_opcode(op: Opcode, id: u16, position: usize, image: &SemanticIm
 }
 
 fn encode_code(
+    prototype_id: u16,
     plan: &PrototypePlan,
     recipes: &[SemanticRecipe],
     decoys: &[usize],
@@ -567,7 +682,26 @@ fn encode_code(
         write_u16(&mut out, bundle.label);
         write_u16(&mut out, bundle.next);
         write_u16(&mut out, bundle.skip);
-        write_u16(&mut out, recipes[bundle.recipe].id);
+        let token = encode_recipe_token(
+            recipes[bundle.recipe].id,
+            bundle.label,
+            bundle.next,
+            bundle.skip,
+            prototype_id,
+            &image.token_layers,
+        );
+        debug_assert_eq!(
+            decode_recipe_token(
+                token,
+                bundle.label,
+                bundle.next,
+                bundle.skip,
+                prototype_id,
+                &image.token_layers,
+            ),
+            recipes[bundle.recipe].id
+        );
+        write_u16(&mut out, token);
         for &word in &bundle.words {
             write_operands(&mut out, word)?;
         }
@@ -583,8 +717,17 @@ fn serialize(
     random: &mut crate::random::Prng,
 ) -> Result<Vec<u8>, Diagnostic> {
     let mut codes = Vec::with_capacity(plans.len());
-    for plan in plans {
-        codes.push(encode_code(plan, &image.recipes, decoys, image, random)?);
+    for (prototype_id, plan) in plans.iter().enumerate() {
+        let prototype_id = u16::try_from(prototype_id)
+            .map_err(|_| error("prototype id exceeds recipe-token range"))?;
+        codes.push(encode_code(
+            prototype_id,
+            plan,
+            &image.recipes,
+            decoys,
+            image,
+            random,
+        )?);
     }
     let mut out = Vec::from(*b"OBF\x02");
     out.extend_from_slice(&[
@@ -738,12 +881,14 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         .flat_map(|plan| &plan.bundles)
         .map(|bundle| recipes[bundle.recipe].id)
         .collect();
+    let token_layers = recipe_token_layers(&mut random);
     let mut image = SemanticImage {
         bytes: Vec::new(),
         recipes,
         mask_mul: [17u16, 29, 37, 43, 53, 61][(random.next_u64() % 6) as usize],
         mask_add: [11u16, 19, 23, 31, 41, 47][(random.next_u64() % 6) as usize],
         mask_salt: (random.next_u64() % 64) as u16,
+        token_layers,
         canonical_words,
         bundles,
         bundled_words,

@@ -354,7 +354,7 @@ if [[ $(find src/vm/opcode/lua51 -maxdepth 1 -name 'c*.rs' | wc -l) -ne 46 ]] \
     || [[ $(find src/vm/opcode/luau -maxdepth 1 -name 'c*.rs' | wc -l) -ne 49 ]]; then
     echo 'error: custom ISA folders do not match 46 Lua51 / 49 Luau handlers' >&2; exit 1
 fi
-printf '%s\n' '[matrix] Custom ISA executed coverage: Lua 5.1=46/46, Luau=49/49 (live recipe graph probe)'
+printf '%s\n' '[matrix] Custom ISA executed coverage: Lua 5.1=46/46, Luau=49/49 (runtime context-token probe)'
 
 printf '%s\n' '[matrix] reports'
 cat "$tmp/lua51.custom.inspect"

@@ -177,7 +177,7 @@ pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
 }
 
 /// Verification helper: resolve the generated script's segmented payload and
-/// remove both cipher layers. The result is the private, seed-specific ISA3
+/// remove both cipher layers. The result is the private, seed-specific ISA4
 /// semantic wire image; it intentionally does not equal the public canonical
 /// `.obf` bytes supplied to `emit`.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {

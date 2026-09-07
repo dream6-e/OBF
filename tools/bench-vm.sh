@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ISA3 semantic-VM performance benchmark and size budget.
+# ISA4 contextual-token semantic-VM performance benchmark and size budget.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) for the
 # checked-in goldens and enforces two hard gates:
@@ -59,6 +59,6 @@ check() { # <name> <vm> <src> <runner> <cap>
     exit 1
 }
 
-check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 68000
-check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 74000
+check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 72000
+check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 80000
 echo '[bench] PASS'
