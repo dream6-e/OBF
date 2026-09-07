@@ -388,6 +388,99 @@ pub(crate) fn layered_recipe_decoder(
     )
 }
 
+fn edge_opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
+    let salt = u16_expression((23 + structure.next_u64() % 4_057) as u16);
+    match structure.next_u64() % 4 {
+        0 => ("v<=v and l<=l".to_owned(), "v<v or l<l".to_owned()),
+        1 => (
+            format!("(f+{salt})-{salt}==f"),
+            format!("(f+{salt})-{salt}~=f"),
+        ),
+        2 => ("ek%1==0 and f>=0".to_owned(), "ek%1==1 or f<0".to_owned()),
+        _ => ("(v-l)==(v-l)".to_owned(), "(v-l)~=(v-l)".to_owned()),
+    }
+}
+
+fn nested_edge_guard(
+    structure: &mut crate::random::Prng,
+    mut live: String,
+    depth: usize,
+    decoy_states: &[u16],
+) -> String {
+    for _ in 0..depth {
+        let (truthy, falsy) = edge_opaque_pair(structure);
+        let odd = 3 + 2 * (structure.next_u64() % 29);
+        let salt = u16_expression((1 + structure.next_u64() % 65_535) as u16);
+        let state = decoy_states[structure.next_u64() as usize % decoy_states.len()];
+        let dead = format!("repeat v=(v*{odd}+l+f+ek+{salt})%65536;q={state};break until false;");
+        live = if structure.next_u64() % 2 == 0 {
+            format!("if {truthy} then {live}else {dead}end;")
+        } else {
+            format!("if {falsy} then {dead}else {live}end;")
+        };
+    }
+    live
+}
+
+/// Three-stage decoder for encoded CFG successors. Raw `next`/`skip` labels
+/// exist only as short-lived locals during validation/fetch; the persistent
+/// code table retains edge tokens. A second shuffled state machine and its
+/// dead arithmetic states prevent the recipe decoder from being the sole
+/// control-flow gate.
+pub(crate) fn layered_edge_decoder(
+    structure: &mut crate::random::Prng,
+    layers: &[semantic::EdgeTokenLayer; semantic::EDGE_TOKEN_STAGES],
+) -> String {
+    const DECOY_STATES: usize = 3;
+    let mut states = state_values(structure, semantic::EDGE_TOKEN_STAGES + 1 + DECOY_STATES);
+    structure.shuffle(&mut states);
+    let live_states = &states[..=semantic::EDGE_TOKEN_STAGES];
+    let decoy_states = &states[semantic::EDGE_TOKEN_STAGES + 1..];
+    let mut branches = Vec::new();
+    for (stage, layer) in layers.iter().rev().enumerate() {
+        let terms = [
+            u16_expression(layer.add),
+            format!("l*{}", u16_expression(layer.source)),
+            format!("f*{}", u16_expression(layer.prototype)),
+            format!("ek*{}", u16_expression(layer.kind)),
+            format!("(((l+ek)*(f+1))%65536)*{}", u16_expression(layer.cross)),
+        ];
+        let mut terms = terms.to_vec();
+        structure.shuffle(&mut terms);
+        let context = terms.join("+");
+        let body = format!(
+            "v=((v-({context})%65536)*{})%65536;q={};",
+            u16_expression(layer.inverse),
+            live_states[stage + 1]
+        );
+        let depth = 2 + (structure.next_u64() % 2) as usize;
+        branches.push((
+            live_states[stage],
+            nested_edge_guard(structure, body, depth, decoy_states),
+        ));
+    }
+    branches.push((
+        live_states[semantic::EDGE_TOKEN_STAGES],
+        "return v;".to_owned(),
+    ));
+    for (index, &state) in decoy_states.iter().enumerate() {
+        let next = decoy_states[(index + 1) % decoy_states.len()];
+        let odd = 3 + 2 * (structure.next_u64() % 47);
+        let salt = u16_expression((1 + structure.next_u64() % 65_535) as u16);
+        branches.push((
+            state,
+            format!(
+                "repeat v=(v*{odd}+l*(f+1)+ek+{salt})%65536;f=(f+v+{salt})%65536;q={next};break until false;"
+            ),
+        ));
+    }
+    format!(
+        "local ED=function(v,l,f,ek)local q={};{}end;",
+        live_states[0],
+        state_machine(structure, "q", branches)
+    )
+}
+
 /// Per-seed opcode renumbering: an injective map from the 64 canonical ISA
 /// slots to byte values 0..=255, drawn by rejection sampling from a
 /// seed-salted stream. Both sides derive it identically: the generator

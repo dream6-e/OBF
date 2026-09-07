@@ -13,8 +13,9 @@ pub(crate) fn generate(
     // instructions become superoperators, records are linked by random
     // labels and physically shuffled, while reordered real prototypes mix
     // with an unreachable synthetic subtree. Record recipe ids are additionally
-    // replaced by five-stage context tokens. The target-side parser below
-    // accepts only this private ISA4 image.
+    // replaced by five-stage context tokens; successors use independent
+    // three-stage edge tokens. The target-side parser below accepts only this
+    // private ISA5 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image)
 }
@@ -922,16 +923,18 @@ return a,b,c,p end;\nend,",
     );
     // Semantic graph validator. Each prototype code stream begins with a
     // masked recipe dictionary and a random entry label. Physical records
-    // then carry (label,next,skip,context-token) plus operand-only varints.
-    // A shared five-stage nested state machine resolves each token from its
-    // graph/prototype context both here and on every runtime fetch. The
-    // validator builds a label-keyed table, checks every primitive operand,
+    // then carry (label,next-token,skip-token,recipe-token) plus operand-only
+    // varints. Shared three/five-stage nested state machines resolve edge and
+    // recipe tokens from graph/prototype context both here and on every runtime
+    // fetch. The persistent table retains only tokens. The validator builds a
+    // label-keyed table, checks every primitive operand,
     // rejects control operations in the middle of a recipe, and verifies all
     // graph successors only after the shuffled records have been read.
     write!(s, "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX)\n", keys[2]).unwrap();
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
+    let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
     let semantic_validator = format!(
-        r#"{recipe_decoder}
+        r#"{edge_decoder}{recipe_decoder}
 for id=0,np-1 do
  local F=P[id];local CD=F.__obf_proto_code;local p=1;
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
@@ -943,20 +946,20 @@ for id=0,np-1 do
   end;RM[rid]=q;
  end;
  local start=D16();local code={{}};
- for at=0,F.__obf_proto_nc-1 do local label,next1,skip,token=D16(),D16(),D16(),D16();local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
-  if label==0 or code[label]~=nil or recipe==nil then E()end;local I={{token,next1,skip,PT[recipe[#recipe]],#recipe}};
+ for at=0,F.__obf_proto_nc-1 do local label,nextToken,skipToken,token=D16(),D16(),D16(),D16();local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
+  if label==0 or code[label]~=nil or recipe==nil then E()end;local I={{token,nextToken,skipToken,PT[recipe[#recipe]],#recipe}};
   for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local k=b+c*256;local j=a+k*256;
    if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;local base=3+qi*3;I[base]=a;I[base+1]=b;I[base+2]=c;
   end;code[label]=I;
  end;
  if p~=#CD+1 or start==0 or code[start]==nil then E()end;
- for label,I in NX,code do local last=I[4];local n=I[5];local base=3+n*3;local a,b,c=I[base],I[base+1],I[base+2];local j=a+(b+c*256)*256;
-  if last=={jump} then if I[2]~=0 or I[3]~=0 or code[j]==nil then E()end
-  elseif last=={ret} or last=={tail} then if I[2]~=0 or I[3]~=0 then E()end
-  elseif last=={test} then if code[I[2]]==nil or code[I[3]]==nil then E()end
-  elseif code[I[2]]==nil or I[3]~=0 then E()end;
+ for label,I in NX,code do local next1=ED(I[2],label,id,0);local skip=ED(I[3],label,id,1);local last=I[4];local n=I[5];local base=3+n*3;local a,b,c=I[base],I[base+1],I[base+2];local j=a+(b+c*256)*256;
+  if last=={jump} then if next1~=0 or skip~=0 or code[j]==nil then E()end
+  elseif last=={ret} or last=={tail} then if next1~=0 or skip~=0 then E()end
+  elseif last=={test} then if code[next1]==nil or code[skip]==nil then E()end
+  elseif code[next1]==nil or skip~=0 then E()end;
  end;code[0]=start;F.__obf_proto_code=code;
-end;return RD;"#,
+end;return RD,ED;"#,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
         mask_salt = semantic_image.mask_salt,
@@ -1044,9 +1047,9 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local c1=VMS[{}](E,{},{},DBG,GI,LS);local c2=VMS[{}](E,{},{},DBG,GI,LS);local c3=VMS[{}](E,{},{},DBG,GI,LS);
 local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD,ED=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
 local CV,SV,Lookup=VMS[{}](TY,E);
-local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD);
+local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[0],
         keys[5 + probe_order[0]],
@@ -1076,7 +1079,7 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
     .unwrap();
     write!(
         s,
-        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD)\n",
+        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED)\n",
         keys[4]
     )
     .unwrap();
@@ -1150,9 +1153,11 @@ end;
     }
     // Recipe-threaded semantic interpreter. The fetch phase follows a
     // random label graph (there is no linear four-byte PC), then resolves the
-    // record's context token through RD's five real states, 4..5 nested opaque
-    // guards per state, and five dense dead states before recipe dispatch.
-    // The resulting program-specific recipe executes its 1..4 primitive
+    // record's two edge tokens through ED and its context token through RD.
+    // ED has three live/three dead states; RD has five real states, 4..5 nested
+    // opaque guards per state, and five dense dead states before dispatch.
+    // Reachable neutral bundles split entries and selected CFG edges. The
+    // resulting program-specific recipe executes its 1..4 primitive
     // semantics as one unrolled superoperator. Operand records do not contain
     // opcode bytes or stable recipe ids. Control primitives are forced to the final
     // position of a recipe, so return/tail-call/break retain their lexical
@@ -1163,11 +1168,11 @@ end;
     let c_disp = state_condition(&mut structure, "w", k_disp);
     let dispatch_first = structure.next_u64() % 2 == 0;
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;rid=RD(I[1],pc,I[2],I[3],fid);pc=I[2];w={k_disp};"
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);pc=next1;w={k_disp};"
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,next1,skip1,o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
         k_fetch = k_fetch,
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
@@ -1181,7 +1186,7 @@ end;
             .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
         Ok(match op {
             Opcode::Jump => raw.replace("pc=j*4+1;", "pc=j;"),
-            Opcode::Test => raw.replace("pc=pc+4", "pc=I[3]"),
+            Opcode::Test => raw.replace("pc=pc+4", "pc=skip1"),
             _ => raw.to_owned(),
         })
     };

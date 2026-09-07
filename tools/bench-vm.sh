@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ISA4 contextual-token semantic-VM performance benchmark and size budget.
+# ISA5 successor-token/reachable-neutral semantic-VM benchmark and size budget.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) for the
 # checked-in goldens and enforces two hard gates:

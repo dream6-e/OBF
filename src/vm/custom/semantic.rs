@@ -2,13 +2,14 @@
 //!
 //! Public `.obf` files remain the canonical OBF v2/ISA2 format. Before a
 //! canonical program is embedded in a generated script, this module lowers
-//! its fixed one-word instructions into a private ISA4 wire image:
+//! its fixed one-word instructions into a private ISA5 wire image:
 //!
 //! * straight-line words are grouped into program-specific superoperators;
 //! * each superoperator has a random 16-bit recipe id, while every use site
 //!   carries a different five-stage context token rather than that stable id;
-//! * code records use random labels and explicit successors, and are emitted
-//!   in shuffled physical order rather than source/chunk order;
+//! * successor labels are independently encoded by three-stage edge tokens;
+//! * reachable neutral bundles split real entry/CFG edges, and all records are
+//!   emitted in shuffled physical order rather than source/chunk order;
 //! * sibling prototypes are seed-shuffled, Closure operands are rewritten, and
 //!   an unreachable synthetic prototype subtree breaks count/tree isomorphism;
 //! * unused recipe descriptors have deliberately mismatched execution bodies.
@@ -25,8 +26,9 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 4;
+pub(crate) const WIRE_ISA_VERSION: u32 = 5;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
+pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
 const MAX_BUNDLE_WORDS: usize = 4;
 const DECOY_RECIPES: usize = 4;
@@ -44,6 +46,17 @@ pub(crate) struct RecipeTokenLayer {
     pub next: u16,
     pub skip: u16,
     pub prototype: u16,
+    pub cross: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EdgeTokenLayer {
+    pub multiplier: u16,
+    pub inverse: u16,
+    pub add: u16,
+    pub source: u16,
+    pub prototype: u16,
+    pub kind: u16,
     pub cross: u16,
 }
 
@@ -68,9 +81,13 @@ pub(crate) struct SemanticImage {
     pub mask_add: u16,
     pub mask_salt: u16,
     pub token_layers: [RecipeTokenLayer; RECIPE_TOKEN_STAGES],
+    pub edge_layers: [EdgeTokenLayer; EDGE_TOKEN_STAGES],
     pub canonical_words: usize,
     pub bundles: usize,
     pub bundled_words: usize,
+    pub reachable_decoy_bundles: usize,
+    pub reachable_decoy_words: usize,
+    pub neutral_decoy_recipe_ids: BTreeSet<u16>,
     pub prototype_order: Vec<usize>,
     pub decoy_prototypes: usize,
     pub shuffled_records: usize,
@@ -276,6 +293,69 @@ pub(crate) fn decode_recipe_token(
 ) -> u16 {
     for &layer in layers.iter().rev() {
         let context = recipe_token_context(layer, label, next, skip, prototype);
+        token =
+            (((u64::from(token) + 65_536 - context) * u64::from(layer.inverse)) % 65_536) as u16;
+    }
+    token
+}
+
+fn edge_token_layers(random: &mut crate::random::Prng) -> [EdgeTokenLayer; EDGE_TOKEN_STAGES] {
+    std::array::from_fn(|_| {
+        let multiplier = loop {
+            let candidate = (random.next_u64() as u16) | 1;
+            if candidate > 1 {
+                break candidate;
+            }
+        };
+        let coefficients: [u16; 4] =
+            std::array::from_fn(|_| 1 + (random.next_u64() % u64::from(u16::MAX)) as u16);
+        EdgeTokenLayer {
+            multiplier,
+            inverse: inverse_odd_u16(multiplier),
+            add: random.next_u64() as u16,
+            source: coefficients[0],
+            prototype: coefficients[1],
+            kind: coefficients[2],
+            cross: coefficients[3],
+        }
+    })
+}
+
+fn edge_token_context(layer: EdgeTokenLayer, source: u16, prototype: u16, kind: u16) -> u64 {
+    let (source, prototype, kind) = (u64::from(source), u64::from(prototype), u64::from(kind));
+    let cross = ((source + kind) * (prototype + 1)) % 65_536;
+    (u64::from(layer.add)
+        + source * u64::from(layer.source)
+        + prototype * u64::from(layer.prototype)
+        + kind * u64::from(layer.kind)
+        + cross * u64::from(layer.cross))
+        % 65_536
+}
+
+pub(crate) fn encode_edge_token(
+    mut target: u16,
+    source: u16,
+    prototype: u16,
+    kind: u16,
+    layers: &[EdgeTokenLayer; EDGE_TOKEN_STAGES],
+) -> u16 {
+    for &layer in layers {
+        target = ((u64::from(target) * u64::from(layer.multiplier)
+            + edge_token_context(layer, source, prototype, kind))
+            % 65_536) as u16;
+    }
+    target
+}
+
+pub(crate) fn decode_edge_token(
+    mut token: u16,
+    source: u16,
+    prototype: u16,
+    kind: u16,
+    layers: &[EdgeTokenLayer; EDGE_TOKEN_STAGES],
+) -> u16 {
+    for &layer in layers.iter().rev() {
+        let context = edge_token_context(layer, source, prototype, kind);
         token =
             (((u64::from(token) + 65_536 - context) * u64::from(layer.inverse)) % 65_536) as u16;
     }
@@ -513,8 +593,12 @@ fn plan_prototype(
     if pc_to_bundle.iter().any(|index| *index == usize::MAX) {
         return Err(error("not every instruction belongs to a bundle"));
     }
-    if temporary.len() > usize::from(u16::MAX) {
-        return Err(error("prototype exceeds the private label space"));
+    // Reserve four nonzero labels so every real prototype can receive the
+    // promised 2..=4-node neutral entry chain during ISA5 lowering.
+    if temporary.len() > usize::from(u16::MAX) - 4 {
+        return Err(error(
+            "prototype leaves no private label space for neutral entry bundles",
+        ));
     }
 
     let mut used_labels = BTreeSet::new();
@@ -566,6 +650,122 @@ fn plan_prototype(
         physical,
         recipe_indices,
     })
+}
+
+fn inject_reachable_decoys(
+    plan: &mut PrototypePlan,
+    recipes: &mut Vec<(Vec<Opcode>, bool)>,
+    by_key: &mut BTreeMap<Vec<u8>, usize>,
+    multi_count: &mut usize,
+    neutral_recipes: &mut BTreeSet<usize>,
+    random: &mut crate::random::Prng,
+) -> Result<(usize, usize), Diagnostic> {
+    let base_count = plan.bundles.len();
+    let available = usize::from(u16::MAX).saturating_sub(base_count);
+    debug_assert!(available >= 4);
+
+    let words = if plan.prototype.registers < 256 {
+        let scratch = plan.prototype.registers as u8;
+        plan.prototype.registers += 1;
+        match random.next_u64() % 3 {
+            0 => vec![
+                Word([Opcode::Nil as u8, scratch, 0, 0]),
+                Word([Opcode::Not as u8, scratch, scratch, 0]),
+                Word([Opcode::Not as u8, scratch, scratch, 0]),
+                Word([Opcode::Clear as u8, scratch, scratch, 0]),
+            ],
+            1 => vec![
+                Word([Opcode::Move as u8, scratch, scratch, 0]),
+                Word([Opcode::Nil as u8, scratch, 0, 0]),
+                Word([Opcode::Not as u8, scratch, scratch, 0]),
+                Word([Opcode::Clear as u8, scratch, scratch, 0]),
+            ],
+            _ => vec![
+                Word([Opcode::Nil as u8, scratch, 0, 0]),
+                Word([Opcode::Move as u8, scratch, scratch, 0]),
+                Word([Opcode::Move as u8, scratch, scratch, 0]),
+                Word([Opcode::Clear as u8, scratch, scratch, 0]),
+            ],
+        }
+    } else {
+        // A full 256-slot frame has no private scratch register. A self move
+        // is still neutral for values, cells, packs, functions, and nil.
+        vec![Word([Opcode::Move as u8, 0, 0, 0])]
+    };
+    let key = words.iter().map(|word| word.0[0]).collect::<Vec<_>>();
+    let (recipe, words) = match intern_recipe(key, recipes, by_key, multi_count) {
+        Some(recipe) => (recipe, words),
+        None => {
+            let words = vec![Word([Opcode::Move as u8, 0, 0, 0])];
+            let recipe = intern_recipe(vec![Opcode::Move as u8], recipes, by_key, multi_count)
+                .ok_or_else(|| error("cannot intern neutral fallback recipe"))?;
+            (recipe, words)
+        }
+    };
+    neutral_recipes.insert(recipe);
+    plan.recipe_indices.insert(recipe);
+
+    let mut used_labels: BTreeSet<u16> = plan.bundles.iter().map(|bundle| bundle.label).collect();
+    let mut edge_candidates = Vec::new();
+    for (index, bundle) in plan.bundles[..base_count].iter().enumerate() {
+        if bundle.next != 0 {
+            edge_candidates.push((index, false));
+        }
+        if bundle.skip != 0 {
+            edge_candidates.push((index, true));
+        }
+    }
+    random.shuffle(&mut edge_candidates);
+    let entry_count = (2 + random.next_u64() % 3) as usize;
+    let edge_count = (1 + base_count / 24)
+        .min(5)
+        .min(edge_candidates.len())
+        .min(available - entry_count);
+    let mut inserted = 0usize;
+
+    for &(source, is_skip) in edge_candidates.iter().take(edge_count) {
+        let old_target = if is_skip {
+            plan.bundles[source].skip
+        } else {
+            plan.bundles[source].next
+        };
+        let label = random_nonzero_u16(random, &mut used_labels);
+        if is_skip {
+            plan.bundles[source].skip = label;
+        } else {
+            plan.bundles[source].next = label;
+        }
+        plan.bundles.push(Bundle {
+            label,
+            next: old_target,
+            skip: 0,
+            recipe,
+            words: words.clone(),
+        });
+        inserted += 1;
+    }
+
+    if entry_count > 0 {
+        let old_start = plan.start;
+        let labels: Vec<u16> = (0..entry_count)
+            .map(|_| random_nonzero_u16(random, &mut used_labels))
+            .collect();
+        for (index, &label) in labels.iter().enumerate() {
+            plan.bundles.push(Bundle {
+                label,
+                next: labels.get(index + 1).copied().unwrap_or(old_start),
+                skip: 0,
+                recipe,
+                words: words.clone(),
+            });
+        }
+        plan.start = labels[0];
+        inserted += labels.len();
+    }
+
+    plan.physical = (0..plan.bundles.len()).collect();
+    random.shuffle(&mut plan.physical);
+    Ok((inserted, inserted * words.len()))
 }
 
 fn add_decoy_recipes(
@@ -680,8 +880,42 @@ fn encode_code(
     for &index in &plan.physical {
         let bundle = &plan.bundles[index];
         write_u16(&mut out, bundle.label);
-        write_u16(&mut out, bundle.next);
-        write_u16(&mut out, bundle.skip);
+        let next_token = encode_edge_token(
+            bundle.next,
+            bundle.label,
+            prototype_id,
+            0,
+            &image.edge_layers,
+        );
+        let skip_token = encode_edge_token(
+            bundle.skip,
+            bundle.label,
+            prototype_id,
+            1,
+            &image.edge_layers,
+        );
+        debug_assert_eq!(
+            decode_edge_token(
+                next_token,
+                bundle.label,
+                prototype_id,
+                0,
+                &image.edge_layers,
+            ),
+            bundle.next
+        );
+        debug_assert_eq!(
+            decode_edge_token(
+                skip_token,
+                bundle.label,
+                prototype_id,
+                1,
+                &image.edge_layers,
+            ),
+            bundle.skip
+        );
+        write_u16(&mut out, next_token);
+        write_u16(&mut out, skip_token);
         let token = encode_recipe_token(
             recipes[bundle.recipe].id,
             bundle.label,
@@ -805,6 +1039,7 @@ fn serialize(
 
 pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diagnostic> {
     custom::validate(program)?;
+    let real_prototypes = program.prototypes.len();
     let canonical_words = program
         .prototypes
         .iter()
@@ -819,14 +1054,37 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
     let mut by_key = BTreeMap::new();
     let mut multi_count = 0usize;
     let mut plans = Vec::with_capacity(program.prototypes.len());
-    for prototype in &program.prototypes {
-        plans.push(plan_prototype(
+    let mut neutral_recipe_indices = BTreeSet::new();
+    let mut reachable_decoy_bundles = 0usize;
+    let mut reachable_decoy_words = 0usize;
+    let mut bundled_words = 0usize;
+    for (prototype_id, prototype) in program.prototypes.iter().enumerate() {
+        let mut plan = plan_prototype(
             prototype,
             &mut recipes_raw,
             &mut by_key,
             &mut multi_count,
             &mut random,
-        )?);
+        )?;
+        if prototype_order[prototype_id] < real_prototypes {
+            bundled_words += plan
+                .bundles
+                .iter()
+                .filter(|bundle| bundle.words.len() > 1)
+                .map(|bundle| bundle.words.len())
+                .sum::<usize>();
+            let (bundles, words) = inject_reachable_decoys(
+                &mut plan,
+                &mut recipes_raw,
+                &mut by_key,
+                &mut multi_count,
+                &mut neutral_recipe_indices,
+                &mut random,
+            )?;
+            reachable_decoy_bundles += bundles;
+            reachable_decoy_words += words;
+        }
+        plans.push(plan);
     }
     let decoys = add_decoy_recipes(&used_ops, &mut recipes_raw, &mut by_key, &mut random);
     let mut used_ids = BTreeSet::new();
@@ -860,13 +1118,11 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
             live,
         });
     }
-    let bundles = plans.iter().map(|plan| plan.bundles.len()).sum();
-    let bundled_words = plans
+    let neutral_decoy_recipe_ids = neutral_recipe_indices
         .iter()
-        .flat_map(|plan| &plan.bundles)
-        .filter(|bundle| bundle.words.len() > 1)
-        .map(|bundle| bundle.words.len())
-        .sum();
+        .map(|index| recipes[*index].id)
+        .collect();
+    let bundles = plans.iter().map(|plan| plan.bundles.len()).sum();
     let shuffled_records = plans
         .iter()
         .filter(|plan| {
@@ -882,6 +1138,7 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         .map(|bundle| recipes[bundle.recipe].id)
         .collect();
     let token_layers = recipe_token_layers(&mut random);
+    let edge_layers = edge_token_layers(&mut random);
     let mut image = SemanticImage {
         bytes: Vec::new(),
         recipes,
@@ -889,9 +1146,13 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         mask_add: [11u16, 19, 23, 31, 41, 47][(random.next_u64() % 6) as usize],
         mask_salt: (random.next_u64() % 64) as u16,
         token_layers,
+        edge_layers,
         canonical_words,
         bundles,
         bundled_words,
+        reachable_decoy_bundles,
+        reachable_decoy_words,
+        neutral_decoy_recipe_ids,
         prototype_order,
         decoy_prototypes,
         shuffled_records,

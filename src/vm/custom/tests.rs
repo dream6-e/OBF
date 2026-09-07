@@ -75,20 +75,22 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
     }
 }
 
-fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
+fn execute_recipe_ids(
+    data: &[u8],
+    target: Target,
+) -> (super::semantic::SemanticImage, BTreeSet<u16>) {
     let program = custom::decode(data, target).unwrap();
     let image = super::semantic::encode(&program, 735).unwrap();
     let raw = generate(data, &program, 735).unwrap();
     // Instrument the real graph fetch BEFORE the same final whole-output
-    // naming/audit pass. The probe records live recipe ids, so coverage
-    // includes every primitive in an executed 1..4-word superoperator while
-    // excluding unused decoy recipes and uncalled prototypes.
-    let fetch_probe = "rid=RD(I[1],pc,I[2],I[3],fid);pc=I[2];w=";
+    // naming/audit pass. This observes ids only after both edge and recipe
+    // token machines have run.
+    let fetch_probe = "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);pc=next1;w=";
     assert_eq!(raw.matches(fetch_probe).count(), 1);
     let raw = raw
         .replace(
             fetch_probe,
-            "rid=RD(I[1],pc,I[2],I[3],fid);Probe[rid]=true;pc=I[2];w=",
+            "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);Probe[rid]=true;pc=next1;w=",
         )
         .replace(
         "return U(result,1,result.n)",
@@ -105,17 +107,71 @@ fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
         .iter()
         .map(|recipe| (recipe.id, recipe))
         .collect();
-    let mut executed = BTreeSet::new();
-    for id in String::from_utf8(stdout)
+    let executed: BTreeSet<u16> = String::from_utf8(stdout)
         .unwrap()
         .lines()
         .filter_map(|line| line.strip_prefix("recipe:"))
-    {
-        let recipe = recipes[&id.parse::<u16>().unwrap()];
-        assert!(recipe.live, "an unreferenced decoy recipe executed");
-        executed.extend(recipe.ops.iter().copied());
+        .map(|id| id.parse::<u16>().unwrap())
+        .collect();
+    assert!(
+        executed.iter().all(|id| recipes[id].live),
+        "an unreferenced poison recipe executed"
+    );
+    (image, executed)
+}
+
+fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
+    let (image, recipe_ids) = execute_recipe_ids(data, target);
+    let recipes: std::collections::BTreeMap<u16, &super::semantic::SemanticRecipe> = image
+        .recipes
+        .iter()
+        .map(|recipe| (recipe.id, recipe))
+        .collect();
+    recipe_ids
+        .iter()
+        .flat_map(|id| recipes[id].ops.iter().copied())
+        .collect()
+}
+
+#[test]
+fn reachable_neutral_decoy_bundles_execute_but_poison_recipes_do_not() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("local x=4 print(x+3)", target).unwrap();
+        let (image, executed) = execute_recipe_ids(&data, target);
+        assert!(image.reachable_decoy_bundles >= 2);
+        assert!(
+            image
+                .neutral_decoy_recipe_ids
+                .iter()
+                .any(|id| executed.contains(id)),
+            "{target}: root entry did not traverse its neutral decoy chain"
+        );
+        assert!(image
+            .recipes
+            .iter()
+            .filter(|recipe| !recipe.live)
+            .all(|recipe| !executed.contains(&recipe.id)));
+
+        // A frame already occupying all 256 slots cannot gain the private
+        // scratch register. Its reachable bundles must use the audited self-
+        // move fallback and still preserve target behavior.
+        let mut full_frame = custom::decode(&data, target).unwrap();
+        full_frame.prototypes[0].registers = 256;
+        let full_image = super::semantic::encode(&full_frame, 735).unwrap();
+        assert!(full_image.neutral_decoy_recipe_ids.iter().all(|id| {
+            full_image
+                .recipes
+                .iter()
+                .find(|recipe| recipe.id == *id)
+                .is_some_and(|recipe| recipe.ops == [Opcode::Move])
+        }));
+        let raw = generate(&data, &full_frame, 735).unwrap();
+        let output = finalize(&raw, target, 735).unwrap();
+        let work = native::Workspace::new();
+        let path = work.0.join("full_frame_neutral.lua");
+        fs::write(&path, output).unwrap();
+        assert_eq!(native::compile_and_run(target, &path), b"7\n");
     }
-    executed
 }
 
 #[test]
@@ -242,6 +298,67 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         let first_record = start_label + 2;
         assert!(first_record + 8 <= code + code_len);
         let second_recipe = first_recipe + 3 + usize::from(image.bytes[first_recipe + 2]);
+        let recipe_operands: std::collections::BTreeMap<u16, usize> = image
+            .recipes
+            .iter()
+            .map(|recipe| {
+                let operands = recipe
+                    .ops
+                    .iter()
+                    .map(|&op| match custom::encoding_form(op) {
+                        1 | 2 => 1,
+                        3 | 4 => 2,
+                        _ => 3,
+                    })
+                    .sum();
+                (recipe.id, operands)
+            })
+            .collect();
+        let mut record_cursor = first_record;
+        let mut record_labels = BTreeSet::new();
+        for _ in 0..records {
+            let label = u16::from_le_bytes(
+                image.bytes[record_cursor..record_cursor + 2]
+                    .try_into()
+                    .unwrap(),
+            );
+            record_labels.insert(label);
+            let next_token = u16::from_le_bytes(
+                image.bytes[record_cursor + 2..record_cursor + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            let skip_token = u16::from_le_bytes(
+                image.bytes[record_cursor + 4..record_cursor + 6]
+                    .try_into()
+                    .unwrap(),
+            );
+            let recipe_token = u16::from_le_bytes(
+                image.bytes[record_cursor + 6..record_cursor + 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            let next =
+                super::semantic::decode_edge_token(next_token, label, 0, 0, &image.edge_layers);
+            let skip =
+                super::semantic::decode_edge_token(skip_token, label, 0, 1, &image.edge_layers);
+            let rid = super::semantic::decode_recipe_token(
+                recipe_token,
+                label,
+                next,
+                skip,
+                0,
+                &image.token_layers,
+            );
+            record_cursor += 8;
+            for _ in 0..recipe_operands[&rid] {
+                while image.bytes[record_cursor] >= 128 {
+                    record_cursor += 1;
+                }
+                record_cursor += 1;
+            }
+        }
+        assert_eq!(record_cursor, code + code_len);
 
         let mut corruptions = Vec::new();
         let mut bad = image.clone();
@@ -263,16 +380,31 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
                 .try_into()
                 .unwrap(),
         );
-        let next = u16::from_le_bytes(
+        let unknown_label = (1..=u16::MAX)
+            .find(|label| !record_labels.contains(label))
+            .unwrap();
+        let edge_token =
+            super::semantic::encode_edge_token(unknown_label, label, 0, 0, &bad.edge_layers);
+        bad.bytes[first_record + 2..first_record + 4].copy_from_slice(&edge_token.to_le_bytes()); // decoded successor is absent
+        corruptions.push(bad);
+        let mut bad = image.clone();
+        let label = u16::from_le_bytes(
+            bad.bytes[first_record..first_record + 2]
+                .try_into()
+                .unwrap(),
+        );
+        let next_token = u16::from_le_bytes(
             bad.bytes[first_record + 2..first_record + 4]
                 .try_into()
                 .unwrap(),
         );
-        let skip = u16::from_le_bytes(
+        let skip_token = u16::from_le_bytes(
             bad.bytes[first_record + 4..first_record + 6]
                 .try_into()
                 .unwrap(),
         );
+        let next = super::semantic::decode_edge_token(next_token, label, 0, 0, &bad.edge_layers);
+        let skip = super::semantic::decode_edge_token(skip_token, label, 0, 1, &bad.edge_layers);
         let unknown = (1..=u16::MAX).find(|id| !dictionary.contains(id)).unwrap();
         let token =
             super::semantic::encode_recipe_token(unknown, label, next, skip, 0, &bad.token_layers);
@@ -1012,15 +1144,16 @@ fn stages_are_flattened_into_seeded_state_machines() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Eight machines: three segments, outer decrypt, parse core,
-            // the interpreter's fetch/dispatch phase machine (inside its two
-            // enclosing loops), and the five-stage contextual recipe-token
-            // decoder shared by validation and runtime fetch.
-            assert_eq!(raw.matches("while true do").count(), 8);
+            // Nine machines: three segments, outer decrypt, parse core,
+            // interpreter fetch/dispatch, five-stage recipe-token decode, and
+            // three-stage edge-token decode. Both token machines are shared by
+            // validation and runtime fetch.
+            assert_eq!(raw.matches("while true do").count(), 9);
             assert_eq!(raw.matches("local RD=function(v,l,n,s,f)").count(), 1);
+            assert_eq!(raw.matches("local ED=function(v,l,f,ek)").count(), 1);
             assert!(
-                raw.matches("repeat v=").count() >= 25,
-                "five live decode states must carry dense nested dead paths"
+                raw.matches("repeat v=").count() >= 34,
+                "token machines must carry dense nested dead paths"
             );
             // Split functions: frame setup, prototype header, upvalue
             // wiring, constant pool.
@@ -1033,7 +1166,7 @@ fn stages_are_flattened_into_seeded_state_machines() {
             // first derives the recipe id from a per-record context token.
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
             assert_eq!(
-                raw.matches("rid=RD(I[1],pc,I[2],I[3],fid);pc=I[2];")
+                raw.matches("next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);pc=next1;")
                     .count(),
                 1
             );
@@ -1156,7 +1289,7 @@ fn dispatch_chains_split_into_seeded_subchains() {
             // fetch/dispatch phase machine the chain may sit before or
             // after the fetch line in the text.
             let f5_at = raw
-                .find("local I,rid,o,a,b,c,k,j;local w=")
+                .find("local I,rid,next1,skip1,o,a,b,c,k,j;local w=")
                 .expect("interpreter phase machine");
             let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
             let interp = &raw[f5_at..f5_end];
@@ -1205,7 +1338,7 @@ fn dispatch_chains_split_into_seeded_subchains() {
 }
 
 #[test]
-fn semantic_recipe_tokens_use_five_contextual_runtime_stages() {
+fn semantic_recipe_and_edge_tokens_use_contextual_runtime_stages() {
     for target in [Target::Lua51, Target::Luau] {
         let data = compile("local function f(x)return x+1 end print(f(4),f(9))", target).unwrap();
         let program = custom::decode(&data, target).unwrap();
@@ -1254,6 +1387,46 @@ fn semantic_recipe_tokens_use_five_contextual_runtime_stages() {
                 tokens.len() >= 56,
                 "{target} seed {seed}: recipe token is insufficiently contextual"
             );
+
+            assert_eq!(image.edge_layers.len(), super::semantic::EDGE_TOKEN_STAGES);
+            for layer in image.edge_layers {
+                assert_eq!(layer.multiplier % 2, 1);
+                assert_eq!(
+                    u32::from(layer.multiplier) * u32::from(layer.inverse) % 65_536,
+                    1
+                );
+            }
+            let mut edge_tokens = BTreeSet::new();
+            let mut encoded_edges = 0usize;
+            for context in 0..64u16 {
+                let source = 1 + context * 31;
+                let prototype = context % image.prototype_order.len() as u16;
+                let kind = context % 2;
+                let token = super::semantic::encode_edge_token(
+                    0x4321,
+                    source,
+                    prototype,
+                    kind,
+                    &image.edge_layers,
+                );
+                assert_eq!(
+                    super::semantic::decode_edge_token(
+                        token,
+                        source,
+                        prototype,
+                        kind,
+                        &image.edge_layers,
+                    ),
+                    0x4321
+                );
+                encoded_edges += usize::from(token != 0x4321);
+                edge_tokens.insert(token);
+            }
+            assert!(encoded_edges >= 56, "edge labels remained plaintext");
+            assert!(
+                edge_tokens.len() >= 56,
+                "{target} seed {seed}: edge token is insufficiently contextual"
+            );
         }
     }
 }
@@ -1263,9 +1436,11 @@ fn semantic_wire_uses_superoperators_random_graphs_and_reordered_prototypes() {
     // This is the regression for the static recovery report. The embedded
     // image must not be a canonically ordered stream with merely permuted
     // opcode numbers: use sites are recipe records, most straight-line words
-    // participate in multi-primitive superoperators, records are physically
-    // shuffled behind random labels, sibling ids are reordered, and a
-    // synthetic unreachable prototype subtree breaks count/tree isomorphism.
+    // participate in multi-primitive superoperators, successors and recipes
+    // use separate context tokens, reachable neutral bundles split entries and
+    // selected edges, records are physically shuffled behind random labels,
+    // sibling ids are reordered, and a synthetic unreachable prototype subtree
+    // breaks count/tree isomorphism.
     for (target, fixture) in [
         (
             Target::Lua51,
@@ -1317,6 +1492,21 @@ fn semantic_wire_uses_superoperators_random_graphs_and_reordered_prototypes() {
             );
             assert!(image.recipes.iter().any(|recipe| recipe.ops.len() > 1));
             saw_four_word_recipe |= image.recipes.iter().any(|recipe| recipe.ops.len() == 4);
+            assert!(
+                image.reachable_decoy_bundles >= program.prototypes.len() * 2,
+                "{target} seed {seed}: too few reachable neutral bundles"
+            );
+            assert!(image.reachable_decoy_words >= image.reachable_decoy_bundles);
+            assert!(!image.neutral_decoy_recipe_ids.is_empty());
+            assert!(
+                image
+                    .neutral_decoy_recipe_ids
+                    .is_subset(&image.referenced_recipe_ids),
+                "neutral decoy recipes must be graph referenced"
+            );
+            assert!(image.recipes.iter().all(|recipe| {
+                !image.neutral_decoy_recipe_ids.contains(&recipe.id) || recipe.live
+            }));
             assert!(
                 image.shuffled_records >= program.prototypes.len() / 2,
                 "{target} seed {seed}: too few shuffled prototype record sets"
@@ -1605,9 +1795,10 @@ fn generation_respects_the_documented_size_budget() {
     // generated script beyond the documented caps (headroom over the
     // current goldens; raise the caps deliberately, never silently --
     // Semantic virtualization deliberately raised the old M7 ceilings for
-    // program-specific superhandlers. ISA4 adds one shared five-stage token
-    // machine with deeply nested dead paths; keep deliberate bounded headroom
-    // over both fixed-seed goldens rather than allowing untracked growth.
+    // program-specific superhandlers. ISA5 adds five-stage recipe and
+    // three-stage edge machines plus reachable neutral CFG records; keep
+    // deliberate bounded headroom over both fixed-seed goldens rather than
+    // allowing untracked growth.
     for (target, fixture, budget) in [
         (
             Target::Lua51,
