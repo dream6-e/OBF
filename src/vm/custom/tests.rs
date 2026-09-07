@@ -85,12 +85,13 @@ fn execute_recipe_ids(
     // Instrument the real graph fetch BEFORE the same final whole-output
     // naming/audit pass. This observes ids only after both edge and recipe
     // token machines have run.
-    let fetch_probe = "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);pc=next1;w=";
+    let fetch_probe =
+        "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);";
     assert_eq!(raw.matches(fetch_probe).count(), 1);
     let raw = raw
         .replace(
             fetch_probe,
-            "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);Probe[rid]=true;pc=next1;w=",
+            "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);Probe[rid]=true;",
         )
         .replace(
         "return U(result,1,result.n)",
@@ -129,7 +130,7 @@ fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
         .collect();
     recipe_ids
         .iter()
-        .flat_map(|id| recipes[id].ops.iter().copied())
+        .flat_map(|id| recipes[id].execute_ops.iter().copied())
         .collect()
 }
 
@@ -163,7 +164,7 @@ fn reachable_neutral_decoy_bundles_execute_but_poison_recipes_do_not() {
                 .recipes
                 .iter()
                 .find(|recipe| recipe.id == *id)
-                .is_some_and(|recipe| recipe.ops == [Opcode::Move])
+                .is_some_and(|recipe| recipe.execute_ops == [Opcode::Move])
         }));
         let raw = generate(&data, &full_frame, 735).unwrap();
         let output = finalize(&raw, target, 735).unwrap();
@@ -303,7 +304,7 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
             .iter()
             .map(|recipe| {
                 let operands = recipe
-                    .ops
+                    .descriptor_ops
                     .iter()
                     .map(|&op| match custom::encoding_form(op) {
                         1 | 2 => 1,
@@ -1162,14 +1163,14 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local PU=function()"));
             assert!(raw.contains("local PK=function()"));
             assert!(raw.contains("local F,R,va=SETUP(fid,args);"));
-            // Graph fetch follows an explicit random-label successor, but
-            // first derives the recipe id from a per-record context token.
+            // Graph fetch dynamically derives successors and the recipe id,
+            // then routes that id into the random semantic fragment pool.
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
-            assert_eq!(
-                raw.matches("next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);pc=next1;")
-                    .count(),
-                1
-            );
+            let fetch = "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);sid=";
+            assert_eq!(raw.matches(fetch).count(), 1);
+            let fetch_at = raw.find(fetch).unwrap();
+            assert!(raw[fetch_at..].starts_with(fetch));
+            assert!(raw[fetch_at..fetch_at + 180].contains(";pc=next1;w="));
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {
@@ -1265,10 +1266,10 @@ fn decoder_splits_into_seeded_random_sections() {
 
 #[test]
 fn dispatch_chains_split_into_seeded_subchains() {
-    // Two-level dispatch split: operand validation is partitioned by `o %
-    // groups`, while semantic superhandlers are partitioned by the 16-bit
-    // `rid % groups`. Each sub-chain keeps its own fail-closed else; group
-    // counts and arm layouts vary per seed.
+    // Three dispatch dimensions: operand validation is partitioned by `o %
+    // groups`, recipe-to-entry routing by `rid % groups`, and the global
+    // semantic fragment pool by `sid % groups`. Every sub-chain keeps its own
+    // fail-closed else; group counts and arm layouts vary per seed.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
@@ -1289,12 +1290,12 @@ fn dispatch_chains_split_into_seeded_subchains() {
             // fetch/dispatch phase machine the chain may sit before or
             // after the fetch line in the text.
             let f5_at = raw
-                .find("local I,rid,next1,skip1,o,a,b,c,k,j;local w=")
+                .find("local I,rid,sid,next1,skip1,o,a,b,c,k,j;local w=")
                 .expect("interpreter phase machine");
             let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
             let interp = &raw[f5_at..f5_end];
             let mut chain_groups = Vec::new();
-            for (chain, selector) in [(bounds, "o%"), (interp, "rid%")] {
+            for (chain, selector) in [(bounds, "o%"), (interp, "rid%"), (interp, "sid%")] {
                 let mut modulus = None;
                 let mut selectors = 0usize;
                 let mut at = 0usize;
@@ -1318,7 +1319,7 @@ fn dispatch_chains_split_into_seeded_subchains() {
                 chain_groups.push(groups);
             }
             assert_ne!(chain_groups[0], 0);
-            topologies.insert((chain_groups[0], chain_groups[1]));
+            topologies.insert((chain_groups[0], chain_groups[1], chain_groups[2]));
             // Same seed must reproduce the identical topology.
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
         }
@@ -1432,6 +1433,68 @@ fn semantic_recipe_and_edge_tokens_use_contextual_runtime_stages() {
 }
 
 #[test]
+fn live_recipe_descriptors_are_validation_equivalent_but_not_semantic_truth() {
+    for (target, fixture) in [
+        (
+            Target::Lua51,
+            include_str!("../../../tests/fixtures/vm_lua51.lua"),
+        ),
+        (
+            Target::Luau,
+            include_str!("../../../tests/fixtures/vm_luau.lua"),
+        ),
+    ] {
+        let data = compile(fixture, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut camouflage_layouts = BTreeSet::new();
+        for seed in [0u64, 1, 735, u64::MAX] {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            let live: Vec<_> = image.recipes.iter().filter(|recipe| recipe.live).collect();
+            assert!(image.camouflaged_live_recipes > live.len() / 3);
+            assert!(image.camouflaged_live_ops * 20 >= image.live_recipe_ops * 9);
+            let mut layout = Vec::new();
+            for recipe in live {
+                assert_eq!(recipe.descriptor_ops.len(), recipe.execute_ops.len());
+                for (&descriptor, &actual) in recipe.descriptor_ops.iter().zip(&recipe.execute_ops)
+                {
+                    assert_eq!(
+                        super::semantic::descriptor_class(descriptor),
+                        super::semantic::descriptor_class(actual)
+                    );
+                    assert_eq!(
+                        custom::encoding_form(descriptor),
+                        custom::encoding_form(actual)
+                    );
+                    assert_eq!(
+                        super::emit::validation(descriptor),
+                        super::emit::validation(actual)
+                    );
+                    assert_eq!(
+                        matches!(
+                            descriptor,
+                            Opcode::Jump | Opcode::Test | Opcode::Return | Opcode::TailCall
+                        ),
+                        matches!(
+                            actual,
+                            Opcode::Jump | Opcode::Test | Opcode::Return | Opcode::TailCall
+                        )
+                    );
+                    if descriptor != actual {
+                        layout.push((descriptor as u8, actual as u8));
+                    }
+                }
+            }
+            assert!(layout.len() >= 32, "{target} seed {seed}: thin camouflage");
+            camouflage_layouts.insert(layout);
+        }
+        assert!(
+            camouflage_layouts.len() >= 3,
+            "{target}: live descriptor camouflage is seed-pinned"
+        );
+    }
+}
+
+#[test]
 fn semantic_wire_uses_superoperators_random_graphs_and_reordered_prototypes() {
     // This is the regression for the static recovery report. The embedded
     // image must not be a canonically ordered stream with merely permuted
@@ -1490,8 +1553,58 @@ fn semantic_wire_uses_superoperators_random_graphs_and_reordered_prototypes() {
                 image.bundled_words,
                 image.canonical_words
             );
-            assert!(image.recipes.iter().any(|recipe| recipe.ops.len() > 1));
-            saw_four_word_recipe |= image.recipes.iter().any(|recipe| recipe.ops.len() == 4);
+            assert!(image
+                .recipes
+                .iter()
+                .any(|recipe| recipe.execute_ops.len() > 1));
+            saw_four_word_recipe |= image
+                .recipes
+                .iter()
+                .any(|recipe| recipe.execute_ops.len() == 4);
+            let live: Vec<_> = image.recipes.iter().filter(|recipe| recipe.live).collect();
+            assert_eq!(
+                image.live_recipe_ops,
+                live.iter().map(|recipe| recipe.execute_ops.len()).sum()
+            );
+            assert_eq!(
+                image.camouflaged_live_recipes,
+                live.iter()
+                    .filter(|recipe| recipe.descriptor_ops != recipe.execute_ops)
+                    .count()
+            );
+            assert_eq!(
+                image.camouflaged_live_ops,
+                live.iter()
+                    .map(|recipe| {
+                        recipe
+                            .descriptor_ops
+                            .iter()
+                            .zip(&recipe.execute_ops)
+                            .filter(|(descriptor, actual)| descriptor != actual)
+                            .count()
+                    })
+                    .sum()
+            );
+            assert!(
+                image.camouflaged_live_ops * 20 >= image.live_recipe_ops * 9,
+                "{target} seed {seed}: live descriptor camouflage {}/{} is too sparse",
+                image.camouflaged_live_ops,
+                image.live_recipe_ops
+            );
+            for recipe in live {
+                assert_eq!(recipe.descriptor_ops.len(), recipe.execute_ops.len());
+                for (&descriptor, &actual) in recipe.descriptor_ops.iter().zip(&recipe.execute_ops)
+                {
+                    assert_eq!(
+                        super::semantic::descriptor_class(descriptor),
+                        super::semantic::descriptor_class(actual)
+                    );
+                    assert_eq!(
+                        custom::encoding_form(descriptor),
+                        custom::encoding_form(actual)
+                    );
+                }
+            }
             assert!(
                 image.reachable_decoy_bundles >= program.prototypes.len() * 2,
                 "{target} seed {seed}: too few reachable neutral bundles"
@@ -1795,20 +1908,21 @@ fn generation_respects_the_documented_size_budget() {
     // generated script beyond the documented caps (headroom over the
     // current goldens; raise the caps deliberately, never silently --
     // Semantic virtualization deliberately raised the old M7 ceilings for
-    // program-specific superhandlers. ISA5 adds five-stage recipe and
-    // three-stage edge machines plus reachable neutral CFG records; keep
-    // deliberate bounded headroom over both fixed-seed goldens rather than
-    // allowing untracked growth.
+    // program-specific superhandlers. ISA6 keeps both token machines and
+    // reachable neutral CFG records, then adds live descriptor camouflage plus
+    // globally shuffled semantic fragments. The 85/94 kB caps deliberately
+    // account for the second routing dimension while retaining bounded
+    // headroom over both fixed-seed goldens.
     for (target, fixture, budget) in [
         (
             Target::Lua51,
             include_str!("../../../tests/fixtures/vm_lua51.lua"),
-            72_000usize,
+            85_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../tests/fixtures/vm_luau.lua"),
-            80_000usize,
+            94_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -1940,12 +2054,13 @@ fn embedded_payload_is_high_entropy_ciphertext_and_seed_dependent() {
 }
 
 #[test]
-fn semantic_recipe_decoys_poison_dictionary_only_translation() {
-    // Unreferenced recipe descriptors are fully well-formed and pass the
-    // target's dictionary validator, but their emitted superhandler bodies
-    // deliberately execute a different primitive sequence. Consequently a
-    // static translator cannot classify every recipe arm as ground truth;
-    // it must first recover reachability from the validated label graph.
+fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
+    // ISA6 live descriptors are validation-equivalent camouflage rather than
+    // execution truth, while unreferenced poison descriptors remain fully
+    // well-formed with mismatched bodies. Actual recipe semantics are split
+    // into shuffled random-id fragments. A static translator must therefore
+    // recover reachability and the fragment transition graph instead of
+    // expanding the encrypted dictionary as ground truth.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
@@ -1965,9 +2080,9 @@ fn semantic_recipe_decoys_poison_dictionary_only_translation() {
             let decoys: Vec<_> = image.recipes.iter().filter(|recipe| !recipe.live).collect();
             assert_eq!(decoys.len(), 4, "one fixed decoy cohort per image");
             for recipe in &decoys {
-                assert_ne!(recipe.ops, recipe.execute_ops);
+                assert_ne!(recipe.descriptor_ops, recipe.execute_ops);
                 assert!(!image.referenced_recipe_ids.contains(&recipe.id));
-                assert!(recipe.ops.iter().all(|op| !matches!(
+                assert!(recipe.descriptor_ops.iter().all(|op| !matches!(
                     op,
                     Opcode::Jump | Opcode::Test | Opcode::Return | Opcode::TailCall
                 )));
@@ -1979,13 +2094,32 @@ fn semantic_recipe_decoys_poison_dictionary_only_translation() {
                 .all(|recipe| image.referenced_recipe_ids.contains(&recipe.id)));
             decoy_id_sets.insert(decoys.iter().map(|recipe| recipe.id).collect::<Vec<_>>());
 
-            // Generator metadata and the encrypted dictionary come from the
-            // same deterministic semantic image; all recipe ids therefore
-            // have exactly one emitted arm even though only graph-reachable
-            // ids can execute.
+            // Every id has one entry route, but actual semantics live in a
+            // globally shuffled fragment pool. All multi-op recipes are split;
+            // 3/4-op recipes also retain at least one fused two-op fragment.
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            assert_eq!(raw.matches(" then a,b,c=I[").count(), image.recipes.len());
+            let fragments = raw.matches(" then a,b,c=I[").count();
+            let multi = image
+                .recipes
+                .iter()
+                .filter(|recipe| recipe.execute_ops.len() > 1)
+                .count();
+            let operations: usize = image
+                .recipes
+                .iter()
+                .map(|recipe| recipe.execute_ops.len())
+                .sum();
+            assert!(fragments >= image.recipes.len() + multi);
+            assert!(fragments <= operations);
+            if image
+                .recipes
+                .iter()
+                .any(|recipe| recipe.execute_ops.len() >= 3)
+            {
+                assert!(fragments < operations, "no fused fragment was emitted");
+            }
+            assert!((2..=4).contains(&raw.matches("sid%").count()));
             let output = emit(&data, target, seed).unwrap();
             assert_eq!(blob(&output, target, seed), image.bytes);
         }

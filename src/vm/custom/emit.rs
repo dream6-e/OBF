@@ -14,8 +14,9 @@ pub(crate) fn generate(
     // labels and physically shuffled, while reordered real prototypes mix
     // with an unreachable synthetic subtree. Record recipe ids are additionally
     // replaced by five-stage context tokens; successors use independent
-    // three-stage edge tokens. The target-side parser below accepts only this
-    // private ISA5 image.
+    // three-stage edge tokens. Live wire descriptors are validation-equivalent
+    // camouflage rather than execution truth; the target-side parser accepts
+    // only this private ISA6 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image)
 }
@@ -55,7 +56,7 @@ fn generate_semantic(
     let primitive_ops: std::collections::BTreeSet<Opcode> = semantic_image
         .recipes
         .iter()
-        .flat_map(|recipe| recipe.ops.iter().chain(&recipe.execute_ops))
+        .flat_map(|recipe| recipe.descriptor_ops.iter().chain(&recipe.execute_ops))
         .copied()
         .collect();
     let opcode_image: std::collections::BTreeSet<u8> =
@@ -1156,23 +1157,64 @@ end;
     // record's two edge tokens through ED and its context token through RD.
     // ED has three live/three dead states; RD has five real states, 4..5 nested
     // opaque guards per state, and five dense dead states before dispatch.
-    // Reachable neutral bundles split entries and selected CFG edges. The
-    // resulting program-specific recipe executes its 1..4 primitive
-    // semantics as one unrolled superoperator. Operand records do not contain
-    // opcode bytes or stable recipe ids. Control primitives are forced to the final
-    // position of a recipe, so return/tail-call/break retain their lexical
-    // behavior in this loop.
+    // Reachable neutral bundles split entries and selected CFG edges. ISA6
+    // additionally advertises validation-equivalent (not truthful) live
+    // descriptors and splits each multi-primitive recipe into 1..2-primitive
+    // fragments. Random stage ids and a globally shuffled stage dispatch keep
+    // one recipe's actual handler text from remaining contiguous. Control
+    // primitives stay in the final fragment, preserving return/tail-call/break
+    // lexical behavior in this loop.
+    let mut chunk_ranges: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut fragment_count = 0usize;
+    for recipe in &semantic_image.recipes {
+        let ranges = match recipe.execute_ops.len() {
+            1 => vec![(0, 1)],
+            2 => vec![(0, 1), (1, 1)],
+            3 if structure.next_u64() % 2 == 0 => vec![(0, 1), (1, 2)],
+            3 => vec![(0, 2), (2, 1)],
+            4 => match structure.next_u64() % 3 {
+                0 => vec![(0, 2), (2, 2)],
+                1 => vec![(0, 1), (1, 1), (2, 2)],
+                _ => vec![(0, 2), (2, 1), (3, 1)],
+            },
+            _ => return Err(Diagnostic::new("invalid semantic recipe length")),
+        };
+        fragment_count += ranges.len();
+        chunk_ranges.push(ranges);
+    }
+    if fragment_count >= 900 {
+        return Err(Diagnostic::new("semantic fragment state space exhausted"));
+    }
+    let mut fragment_states = state_values(&mut structure, fragment_count + 1);
+    structure.shuffle(&mut fragment_states);
+    let semantic_init = fragment_states.pop().unwrap();
+    let mut state_cursor = 0usize;
+    let recipe_chunks: Vec<Vec<(usize, usize, u16)>> = chunk_ranges
+        .into_iter()
+        .map(|ranges| {
+            ranges
+                .into_iter()
+                .map(|(start, length)| {
+                    let state = fragment_states[state_cursor];
+                    state_cursor += 1;
+                    (start, length, state)
+                })
+                .collect()
+        })
+        .collect();
+    debug_assert_eq!(state_cursor, fragment_count);
+
     let fsv = state_values(&mut structure, 2);
     let (k_fetch, k_disp) = (fsv[0], fsv[1]);
     let c_fetch = state_condition(&mut structure, "w", k_fetch);
     let c_disp = state_condition(&mut structure, "w", k_disp);
     let dispatch_first = structure.next_u64() % 2 == 0;
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);pc=next1;w={k_disp};"
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);sid={semantic_init};pc=next1;w={k_disp};"
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,next1,skip1,o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
         k_fetch = k_fetch,
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
@@ -1190,49 +1232,71 @@ end;
             _ => raw.to_owned(),
         })
     };
-    let mut recipe_arms: Vec<(u16, String)> = Vec::new();
-    for recipe in &semantic_image.recipes {
+    let mut recipe_entries: Vec<(u16, String)> = Vec::new();
+    let mut fragment_arms: Vec<(u16, String)> = Vec::new();
+    for (recipe, chunks) in semantic_image.recipes.iter().zip(&recipe_chunks) {
         if recipe.live {
-            debug_assert_eq!(recipe.ops, recipe.execute_ops);
+            debug_assert!(recipe.descriptor_ops.iter().zip(&recipe.execute_ops).all(
+                |(&descriptor, &actual)| {
+                    semantic::descriptor_class(descriptor) == semantic::descriptor_class(actual)
+                        && custom::encoding_form(descriptor) == custom::encoding_form(actual)
+                }
+            ));
         } else {
-            debug_assert_ne!(recipe.ops, recipe.execute_ops);
+            debug_assert_ne!(recipe.descriptor_ops, recipe.execute_ops);
         }
-        let mut body = String::new();
-        for (index, &op) in recipe.execute_ops.iter().enumerate() {
-            let base = 6 + index * 3;
-            write!(
-                body,
-                "a,b,c=I[{base}],I[{}],I[{}];k=b+c*256;j=a+k*256;o={};",
-                base + 1,
-                base + 2,
-                perm[op as usize],
-            )
-            .unwrap();
-            body.push_str(&semantic_handler(op)?);
-        }
-        // Unused recipe ids intentionally advertise a different primitive
-        // sequence in the encrypted dictionary than the body below. Static
-        // recovery cannot trust every syntactically valid arm as ground
-        // truth; live ids are selected only by validated graph records.
-        let condition =
+        let entry_condition =
             structure.dispatch_condition_for("rid", recipe.id, program.target.is_luau());
-        recipe_arms.push((recipe.id, format!("{condition} then {body}")));
+        recipe_entries.push((
+            recipe.id,
+            format!("{entry_condition} then sid={};", chunks[0].2),
+        ));
+        for (chunk_index, &(start, length, stage)) in chunks.iter().enumerate() {
+            let mut body = String::new();
+            for index in start..start + length {
+                let op = recipe.execute_ops[index];
+                let base = 6 + index * 3;
+                write!(
+                    body,
+                    "a,b,c=I[{base}],I[{}],I[{}];k=b+c*256;j=a+k*256;o={};",
+                    base + 1,
+                    base + 2,
+                    perm[op as usize],
+                )
+                .unwrap();
+                body.push_str(&semantic_handler(op)?);
+            }
+            let exits_frame = matches!(
+                recipe.execute_ops[start + length - 1],
+                Opcode::Return | Opcode::TailCall
+            );
+            if !exits_frame {
+                if let Some(next) = chunks.get(chunk_index + 1) {
+                    write!(body, "sid={};", next.2).unwrap();
+                } else {
+                    write!(body, "sid={semantic_init};w={k_fetch};").unwrap();
+                }
+            }
+            let condition =
+                structure.dispatch_condition_for("sid", stage, program.target.is_luau());
+            fragment_arms.push((stage, format!("{condition} then {body}")));
+        }
     }
     let recipe_groups = (2 + structure.next_u64() % 3) as u8;
-    s.push_str(&grouped_recipe_chain(
-        &mut structure,
-        recipe_arms,
-        recipe_groups,
-        "rid",
-    ));
+    let fragment_groups = (2 + structure.next_u64() % 3) as u8;
+    let recipe_chain = grouped_recipe_chain(&mut structure, recipe_entries, recipe_groups, "rid");
+    let fragment_chain =
+        grouped_recipe_chain(&mut structure, fragment_arms, fragment_groups, "sid");
+    let init_condition = state_condition(&mut structure, "sid", semantic_init);
+    write!(
+        s,
+        "if {init_condition} then {recipe_chain}else {fragment_chain}end;"
+    )
+    .unwrap();
     if dispatch_first {
-        write!(
-            s,
-            " w={k_fetch};\n   elseif {fetch_branch}\n   else E()end;"
-        )
-        .unwrap();
+        write!(s, "\n   elseif {fetch_branch}\n   else E()end;").unwrap();
     } else {
-        write!(s, " w={k_fetch};\n   else E()end;").unwrap();
+        s.push_str("\n   else E()end;");
     }
     s.push_str("\n  end;end;end;return H");
     let forwards_varargs = program.prototypes[program.entry]
@@ -1334,7 +1398,7 @@ pub(crate) fn generate_from_semantic_image(
     generate_semantic(program, seed, semantic_image)
 }
 
-fn validation(op: Opcode) -> &'static str {
+pub(super) fn validation(op: Opcode) -> &'static str {
     use Opcode::*;
     match op {
         Jump => "j>0 and j<=65535",

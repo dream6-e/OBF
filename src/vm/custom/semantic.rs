@@ -2,7 +2,7 @@
 //!
 //! Public `.obf` files remain the canonical OBF v2/ISA2 format. Before a
 //! canonical program is embedded in a generated script, this module lowers
-//! its fixed one-word instructions into a private ISA5 wire image:
+//! its fixed one-word instructions into a private ISA6 wire image:
 //!
 //! * straight-line words are grouped into program-specific superoperators;
 //! * each superoperator has a random 16-bit recipe id, while every use site
@@ -10,9 +10,11 @@
 //! * successor labels are independently encoded by three-stage edge tokens;
 //! * reachable neutral bundles split real entry/CFG edges, and all records are
 //!   emitted in shuffled physical order rather than source/chunk order;
+//! * live dictionary descriptors are replaced by validation-equivalent opcode
+//!   sequences, decoupling wire schemas from the execution semantics;
 //! * sibling prototypes are seed-shuffled, Closure operands are rewritten, and
 //!   an unreachable synthetic prototype subtree breaks count/tree isomorphism;
-//! * unused recipe descriptors have deliberately mismatched execution bodies.
+//! * unused recipe descriptors also have deliberately mismatched bodies.
 //!
 //! The generated target validator reconstructs and validates the linked
 //! bundle graph before execution. This is still obfuscation, not a claim that
@@ -26,7 +28,7 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 5;
+pub(crate) const WIRE_ISA_VERSION: u32 = 6;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -63,11 +65,11 @@ pub(crate) struct EdgeTokenLayer {
 #[derive(Clone, Debug)]
 pub(crate) struct SemanticRecipe {
     pub id: u16,
-    /// Sequence advertised by the encrypted recipe dictionary and used for
-    /// operand decoding/validation.
-    pub ops: Vec<Opcode>,
-    /// Sequence emitted in the superoperator arm. It differs only for an
-    /// unreachable decoy recipe.
+    /// Validation-equivalent sequence advertised by the encrypted dictionary.
+    /// In ISA6 this is intentionally not semantic ground truth, even for live
+    /// recipes; it supplies only the operand forms and fail-closed bounds.
+    pub descriptor_ops: Vec<Opcode>,
+    /// Actual sequence emitted into the globally shuffled semantic fragments.
     pub execute_ops: Vec<Opcode>,
     pub live: bool,
 }
@@ -88,6 +90,9 @@ pub(crate) struct SemanticImage {
     pub reachable_decoy_bundles: usize,
     pub reachable_decoy_words: usize,
     pub neutral_decoy_recipe_ids: BTreeSet<u16>,
+    pub camouflaged_live_recipes: usize,
+    pub camouflaged_live_ops: usize,
+    pub live_recipe_ops: usize,
     pub prototype_order: Vec<usize>,
     pub decoy_prototypes: usize,
     pub shuffled_records: usize,
@@ -121,6 +126,90 @@ fn control(op: Opcode) -> bool {
         op,
         Opcode::Jump | Opcode::Test | Opcode::Return | Opcode::TailCall
     )
+}
+
+/// Exact target-validator/operand-form equivalence classes used for live
+/// descriptor camouflage. Control primitives intentionally remain singleton
+/// classes because their graph role is checked separately after record parse.
+pub(crate) fn descriptor_class(op: Opcode) -> u8 {
+    use Opcode::*;
+    match op {
+        Nil | NewTable | NewPack | IteratorPrepare | Freeze => 1,
+        NumberPrepare | NumberStep => 2,
+        Move | NewCell | ReadCell | WriteCell | Push | Extend | Not | Negate | Length
+        | IteratorNext | ToString => 3,
+        ReadUpvalue | WriteUpvalue => 4,
+        ReadGlobal | WriteGlobal => 5,
+        GetTable | SetTable | Method | Call | Add | Subtract | Multiply | Divide | FloorDivide
+        | Modulo | Power | Concat | Equal | Less | LessEqual | SetList | Export => 6,
+        _ => 16 + op as u8,
+    }
+}
+
+fn camouflage_descriptor_op(
+    op: Opcode,
+    target: Target,
+    random: &mut crate::random::Prng,
+) -> Opcode {
+    use Opcode::*;
+    const A_REG: &[Opcode] = &[Nil, NewTable, NewPack, IteratorPrepare, Freeze];
+    const A_WINDOW: &[Opcode] = &[NumberPrepare, NumberStep];
+    const AB_REG: &[Opcode] = &[
+        Move,
+        NewCell,
+        ReadCell,
+        WriteCell,
+        Push,
+        Extend,
+        Not,
+        Negate,
+        Length,
+        IteratorNext,
+        ToString,
+    ];
+    const UPVALUE: &[Opcode] = &[ReadUpvalue, WriteUpvalue];
+    const GLOBAL: &[Opcode] = &[ReadGlobal, WriteGlobal];
+    const ABC_REG: &[Opcode] = &[
+        GetTable,
+        SetTable,
+        Method,
+        Call,
+        Add,
+        Subtract,
+        Multiply,
+        Divide,
+        FloorDivide,
+        Modulo,
+        Power,
+        Concat,
+        Equal,
+        Less,
+        LessEqual,
+        SetList,
+        Export,
+    ];
+    let pool = match descriptor_class(op) {
+        1 => A_REG,
+        2 => A_WINDOW,
+        3 => AB_REG,
+        4 => UPVALUE,
+        5 => GLOBAL,
+        6 => ABC_REG,
+        _ => return op,
+    };
+    let candidates: Vec<Opcode> = pool
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != op && candidate.supported(target))
+        .collect();
+    if candidates.is_empty() {
+        return op;
+    }
+    let candidate = candidates[random.next_u64() as usize % candidates.len()];
+    debug_assert_eq!(descriptor_class(candidate), descriptor_class(op));
+    debug_assert_eq!(custom::encoding_form(candidate), custom::encoding_form(op));
+    debug_assert_eq!(control(candidate), control(op));
+    candidate
 }
 
 fn write_u16(out: &mut Vec<u8>, value: u16) {
@@ -594,7 +683,7 @@ fn plan_prototype(
         return Err(error("not every instruction belongs to a bundle"));
     }
     // Reserve four nonzero labels so every real prototype can receive the
-    // promised 2..=4-node neutral entry chain during ISA5 lowering.
+    // promised 2..=4-node neutral entry chain during semantic lowering.
     if temporary.len() > usize::from(u16::MAX) - 4 {
         return Err(error(
             "prototype leaves no private label space for neutral entry bundles",
@@ -871,8 +960,10 @@ fn encode_code(
     for index in dictionary {
         let recipe = &recipes[index];
         write_u16(&mut out, recipe.id);
-        out.push(u8::try_from(recipe.ops.len()).map_err(|_| error("recipe is too long"))?);
-        for (position, &op) in recipe.ops.iter().enumerate() {
+        out.push(
+            u8::try_from(recipe.descriptor_ops.len()).map_err(|_| error("recipe is too long"))?,
+        );
+        for (position, &op) in recipe.descriptor_ops.iter().enumerate() {
             out.push(encode_masked_opcode(op, recipe.id, position, image));
         }
     }
@@ -1089,9 +1180,30 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
     let decoys = add_decoy_recipes(&used_ops, &mut recipes_raw, &mut by_key, &mut random);
     let mut used_ids = BTreeSet::new();
     let mut recipes = Vec::with_capacity(recipes_raw.len());
-    for (ops, live) in recipes_raw {
+    let mut camouflaged_live_recipes = 0usize;
+    let mut camouflaged_live_ops = 0usize;
+    let mut live_recipe_ops = 0usize;
+    for (actual_ops, live) in recipes_raw {
         let id = random_nonzero_u16(&mut random, &mut used_ids);
-        let mut execute_ops = ops.clone();
+        let mut execute_ops = actual_ops.clone();
+        let descriptor_ops = if live {
+            let descriptor: Vec<Opcode> = actual_ops
+                .iter()
+                .copied()
+                .map(|op| camouflage_descriptor_op(op, program.target, &mut random))
+                .collect();
+            let changed = descriptor
+                .iter()
+                .zip(&actual_ops)
+                .filter(|(advertised, actual)| advertised != actual)
+                .count();
+            camouflaged_live_recipes += usize::from(changed > 0);
+            camouflaged_live_ops += changed;
+            live_recipe_ops += actual_ops.len();
+            descriptor
+        } else {
+            actual_ops.clone()
+        };
         if !live {
             let replacement = loop {
                 let candidate =
@@ -1102,8 +1214,8 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
             };
             if let Some(first) = execute_ops.first_mut() {
                 *first = replacement;
-                if *first == ops[0] {
-                    *first = if ops[0] == Opcode::Move {
+                if *first == descriptor_ops[0] {
+                    *first = if descriptor_ops[0] == Opcode::Move {
                         Opcode::Nil
                     } else {
                         Opcode::Move
@@ -1113,7 +1225,7 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         }
         recipes.push(SemanticRecipe {
             id,
-            ops,
+            descriptor_ops,
             execute_ops,
             live,
         });
@@ -1153,6 +1265,9 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         reachable_decoy_bundles,
         reachable_decoy_words,
         neutral_decoy_recipe_ids,
+        camouflaged_live_recipes,
+        camouflaged_live_ops,
+        live_recipe_ops,
         prototype_order,
         decoy_prototypes,
         shuffled_records,
