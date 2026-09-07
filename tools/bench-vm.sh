@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# ISA7 semantic-fragment + dynamic block-transport VM benchmark and size budget.
+# ISA8 bounded-LZW + semantic-fragment VM benchmark and size contracts.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) for the
-# checked-in goldens and enforces two hard gates:
-#   1. size budget  -- golden bytes <= documented cap (raise deliberately)
-#   2. smoke timing -- a single VM run must stay under the catastrophe bound
+# checked-in goldens and enforces three hard gates:
+#   1. size budget   -- golden bytes <= documented cap (raise deliberately)
+#   2. compression   -- golden bytes < its checked ISA7 predecessor
+#   3. smoke timing  -- a single VM run stays under the catastrophe bound
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -31,12 +32,17 @@ best_ms() { # <runner> <script>
     printf '%s' "$best"
 }
 
-check() { # <name> <vm> <src> <runner> <cap>
-    local size cap vm_ms native_ms
+check() { # <name> <vm> <src> <runner> <cap> <isa7-bytes>
+    local size cap isa7 vm_ms native_ms
     size=$(wc -c <"$2")
     cap=$5
+    isa7=$6
     if [[ $size -gt $cap ]]; then
         echo "[bench] error: $1 golden is ${size}B, over the ${cap}B budget" >&2
+        exit 1
+    fi
+    if [[ $size -ge $isa7 ]]; then
+        echo "[bench] error: $1 compressed golden is ${size}B, not below ISA7 ${isa7}B" >&2
         exit 1
     fi
     vm_ms=$(best_ms "$4" "$2")
@@ -59,6 +65,6 @@ check() { # <name> <vm> <src> <runner> <cap>
     exit 1
 }
 
-check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 85000
-check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 94000
+check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 85000 83640
+check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 94000 92116
 echo '[bench] PASS'

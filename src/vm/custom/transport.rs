@@ -143,13 +143,20 @@ pub(crate) fn embedded_outer_ciphertext(
         }
         let cipher = &stream[4..];
         let blocked = outer_cipher(cipher, &shares, perm_term(seed), &params);
-        let Ok(plain) =
+        let Ok(mut compressed) =
             decrypt_block_transport(&blocked, &shares, perm_term(seed), &block_params(seed))
         else {
             continue;
         };
+        if apply_compression_cipher(&mut compressed, &wrapper_keys(seed), &params).is_err() {
+            continue;
+        }
+        let Ok(plain) = decompress_bytecode(&compressed) else {
+            continue;
+        };
         // A segment order is accepted only after both transport ciphers, the
-        // dynamic block frame and the inner image Adler gate agree.
+        // dynamic block frame, inner stream, strict LZW frame and semantic
+        // image Adler gate agree.
         let recorded = plain
             .get(28..32)
             .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
@@ -169,9 +176,9 @@ pub(crate) fn embedded_outer_ciphertext(
     Ok(winners.pop().unwrap())
 }
 
-/// Extract the embedded payload image after removing the outer stream and
-/// validating/removing the block envelope. Semantic framing remains intact
-/// and the independent constant-pool layer remains encrypted.
+/// Extract the embedded payload after removing the outer stream and block
+/// envelope. The strict LZW frame remains present and its body remains
+/// protected by the independent inner stream.
 pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let cipher = embedded_outer_ciphertext(source, target, seed)?;
     let params = cipher_params(seed);
@@ -181,17 +188,13 @@ pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
     decrypt_block_transport(&blocked, &shares, permutation, &block_params(seed))
 }
 
-/// Verification helper: resolve the generated script's segmented payload and
-/// remove the outer stream, block envelope and constant-pool layer. The result
-/// is the private, seed-specific ISA7 semantic wire image; it intentionally
-/// does not equal the public canonical `.obf` bytes supplied to `emit`.
+/// Verification helper: resolve the generated script's segmented payload,
+/// remove both transport ciphers and the independent compressed-body stream,
+/// then strictly decompress it. The result is the private, seed-specific ISA8
+/// semantic wire image; it intentionally does not equal the public canonical
+/// `.obf` bytes supplied to `emit`.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let mut payload = extract_embedded(source, target, seed)?;
-    apply_constant_cipher(
-        &mut payload,
-        &wrapper_keys(seed),
-        target,
-        &cipher_params(seed),
-    )?;
-    Ok(payload)
+    apply_compression_cipher(&mut payload, &wrapper_keys(seed), &cipher_params(seed))?;
+    decompress_bytecode(&payload)
 }

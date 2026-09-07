@@ -617,6 +617,121 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
 }
 
 #[test]
+fn bounded_lzw_roundtrips_exactly_and_rejects_malformed_frames() {
+    let mut inputs = vec![
+        (0..460u32)
+            .map(|index| (index % 17) as u8)
+            .collect::<Vec<_>>(),
+        (0..16_401u32)
+            .map(|index| {
+                if index % 11 < 7 {
+                    (index % 32) as u8
+                } else {
+                    index.wrapping_mul(2_654_435_761).to_le_bytes()[3]
+                }
+            })
+            .collect(),
+    ];
+    for target in [Target::Lua51, Target::Luau] {
+        let data = custom::encode(
+            &crate::ir::compile("local function f(x)return x+1 end return f(41)", target).unwrap(),
+        )
+        .unwrap();
+        inputs.push(
+            semantic::encode(&custom::decode(&data, target).unwrap(), 735)
+                .unwrap()
+                .bytes,
+        );
+    }
+    for input in inputs {
+        let compressed = compress_bytecode(&input).unwrap();
+        assert!(compressed.len() < input.len());
+        assert_eq!(decompress_bytecode(&compressed).unwrap(), input);
+        for end in 0..compressed.len() {
+            assert!(decompress_bytecode(&compressed[..end]).is_err());
+        }
+        for index in 0..compressed.len() {
+            let mut damaged = compressed.clone();
+            damaged[index] ^= 1;
+            assert!(
+                decompress_bytecode(&damaged).is_err(),
+                "LZW corruption at byte {index} was accepted"
+            );
+        }
+    }
+    let mut random = crate::random::Prng::new(0x6c7a_775f_7261_7731);
+    let incompressible: Vec<u8> = (0..COMPRESSION_CHUNK)
+        .map(|_| random.next_u64().to_le_bytes()[0])
+        .collect();
+    assert!(compress_bytecode(&incompressible).is_err());
+
+    // Fuzz-like, structurally plausible envelopes exercise the bit reader and
+    // dictionary without relying only on immediate bad-magic rejection. A
+    // zero Adler value is impossible for non-empty output, so even a random
+    // stream that happens to decode to the exact bound must fail closed.
+    for _ in 0..256 {
+        let body_len = 1 + (random.next_u64() as usize % 256);
+        let padding = random.next_u64() as usize % 8;
+        let mut malformed = Vec::with_capacity(COMPRESSION_HEADER + body_len);
+        malformed.extend_from_slice(&COMPRESSION_MAGIC);
+        malformed.extend_from_slice(
+            &u32::try_from(COMPRESSION_HEADER + body_len + 1)
+                .unwrap()
+                .to_le_bytes(),
+        );
+        malformed.extend_from_slice(&u32::try_from(body_len * 8 - padding).unwrap().to_le_bytes());
+        malformed.extend_from_slice(&0u32.to_le_bytes());
+        malformed.extend((0..body_len).map(|_| random.next_u64().to_le_bytes()[0]));
+        assert!(decompress_bytecode(&malformed).is_err());
+    }
+
+    // Feed malformed compression frames through freshly recomputed inner,
+    // block and outer transports. This bypasses all upstream integrity gates
+    // on purpose and proves the generated Lua inverse itself still fails
+    // closed before the user chunk can print anything.
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("print('MUST_NOT_RUN')", target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let image = semantic::encode(&program, 735).unwrap();
+        let frame = compress_bytecode(&image.bytes).unwrap();
+        let mut corruptions = Vec::new();
+        let mut bad_checksum = frame.clone();
+        bad_checksum[12] ^= 1;
+        corruptions.push(bad_checksum);
+        let mut bad_body = frame;
+        bad_body[COMPRESSION_HEADER] ^= 1;
+        corruptions.push(bad_body);
+        for (kind, malformed) in corruptions.into_iter().enumerate() {
+            let raw = super::emit::generate_from_compression_frame(
+                &program,
+                735,
+                image.clone(),
+                malformed,
+            )
+            .unwrap();
+            let output = finalize(&raw, target, 735).unwrap();
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("invalid_compression.lua");
+            fs::write(&path, output).unwrap();
+            assert!(native::compile(target, &path).status.success());
+            let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+            let result = Command::new(native::root().join("toolchains/bin").join(runner))
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                !result.status.success(),
+                "{target} LZW corruption {kind} ran"
+            );
+            assert!(
+                result.stdout.is_empty(),
+                "{target} LZW corruption {kind} leaked output"
+            );
+        }
+    }
+}
+
+#[test]
 fn block_transport_roundtrips_rejects_every_byte_and_varies_by_seed() {
     let payload: Vec<u8> = (0..513u32)
         .map(|index| index.wrapping_mul(2_654_435_761).to_le_bytes()[3])
@@ -723,7 +838,9 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
             let semantic = wire(&data, target, seed);
             let shares = cipher_shares(&keys, &params);
             let pv = perm_term(seed);
-            let blocked_len = block_transport_len(semantic.len()).unwrap();
+            let compressed = compress_bytecode(&semantic).unwrap();
+            let compressed_header = compression_header(&compressed).unwrap();
+            let blocked_len = block_transport_len(compressed.len()).unwrap();
             let state = cipher_state(&shares, pv, blocked_len, params.mix);
             let block_keys = block_key_states(&shares, pv, blocked_len, &block_params(seed));
             assert_ne!(block_keys[0], block_keys[1]);
@@ -735,13 +852,7 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
                 state.to_string(),
                 block_keys[0].to_string(),
                 block_keys[1].to_string(),
-                constant_cipher_state(
-                    &keys,
-                    constant_cross_term(&semantic),
-                    semantic.len(),
-                    &params,
-                )
-                .to_string(),
+                compression_cipher_state(&keys, compressed_header, &params).to_string(),
             ];
             for secret in &secrets {
                 assert!(
@@ -776,72 +887,74 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
 }
 
 #[test]
-fn constant_pool_cipher_is_an_independent_second_layer() {
+fn compressed_body_cipher_is_an_independent_second_layer() {
     let source = "local s='OBF_UNIQUE_SECRET_7351' local n=3.25 print(s,n)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
-        let output = emit(&data, target, 735).unwrap();
-        let payload = extract_embedded(&output, target, 735).unwrap();
-        // Framing stays intact, but the image is no longer canonical:
-        // its constant pool is ciphertext and the Adler is patched.
-        assert_eq!(&payload[..4], b"OBF\x02");
-        assert_ne!(payload, data);
-        // With the outer stream and block frame removed, but not the
-        // independent constant cipher, neither secret is visible anywhere.
-        let secret = b"OBF_UNIQUE_SECRET_7351";
-        assert!(!payload.windows(secret.len()).any(|w| w == secret));
-        let number = 3.25f64.to_le_bytes();
-        assert!(!payload.windows(8).any(|w| w == number));
-        // Different seeds derive different constant keystreams.
-        let other = emit(&data, target, 736).unwrap();
-        let other = extract_embedded(&other, target, 736).unwrap();
-        assert_ne!(payload, other);
-        // Removing all three transport layers restores the private wire exactly.
+        let seed = 735;
+        let output = emit(&data, target, seed).unwrap();
+        let encrypted_frame = extract_embedded(&output, target, seed).unwrap();
+        let semantic = wire(&data, target, seed);
+        let plain_frame = compress_bytecode(&semantic).unwrap();
+        let header = compression_header(&encrypted_frame).unwrap();
+
+        // The bounded frame header remains available for allocation and key
+        // derivation, but every code bit is protected by the independent
+        // inner stream after outer and block transport have been removed.
         assert_eq!(
-            decrypt_embedded(&output, target, 735).unwrap(),
-            wire(&data, target, 735)
+            &encrypted_frame[..COMPRESSION_HEADER],
+            &plain_frame[..COMPRESSION_HEADER]
         );
+        assert_ne!(
+            &encrypted_frame[COMPRESSION_HEADER..],
+            &plain_frame[COMPRESSION_HEADER..]
+        );
+        assert_eq!(header.original_len, semantic.len());
+        assert!(encrypted_frame.len() < semantic.len());
+        let secret = b"OBF_UNIQUE_SECRET_7351";
+        assert!(!encrypted_frame.windows(secret.len()).any(|w| w == secret));
+        let number = 3.25f64.to_le_bytes();
+        assert!(!encrypted_frame.windows(8).any(|w| w == number));
+
+        let mut opened = encrypted_frame.clone();
+        apply_compression_cipher(&mut opened, &wrapper_keys(seed), &cipher_params(seed)).unwrap();
+        assert_eq!(opened, plain_frame);
+        assert_eq!(decompress_bytecode(&opened).unwrap(), semantic);
+        assert_eq!(decrypt_embedded(&output, target, seed).unwrap(), semantic);
+
+        // The same clear frame with a wrong inner key never yields partial or
+        // replacement bytes: strict bit parsing/checksum rejects it.
+        let mut wrong = encrypted_frame;
+        apply_compression_cipher(
+            &mut wrong,
+            &wrapper_keys(seed + 1),
+            &cipher_params(seed + 1),
+        )
+        .unwrap();
+        assert!(decompress_bytecode(&wrong).is_err());
     }
 }
 
 #[test]
-fn constant_cipher_scan_rejects_malformed_images() {
+fn compression_frame_is_seed_independent_but_its_inner_stream_is_not() {
     let data = compile("local a='const' return a", Target::Lua51).unwrap();
-    let ranges = constant_ranges(&data, Target::Lua51).unwrap();
-    assert!(!ranges.is_empty());
-    assert!(ranges.iter().all(|range| range.end <= data.len()));
-    let corrupted_magic = {
-        let mut bytes = data.clone();
-        bytes[0] = b'X';
-        bytes
-    };
-    let zeroed_prototypes = {
-        let mut bytes = data.clone();
-        bytes[16..20].copy_from_slice(&0u32.to_le_bytes());
-        bytes
-    };
-    let unknown_tag = {
-        // Proto header at 32: force nu=0/nk=1 so the first constant
-        // tag lands at 56, then make it an unknown tag.
-        let mut bytes = data.clone();
-        bytes[40..42].copy_from_slice(&0u16.to_le_bytes());
-        bytes[44..48].copy_from_slice(&1u32.to_le_bytes());
-        bytes[56] = 9;
-        bytes
-    };
-    let mut trailing = data.clone();
-    trailing.push(0);
-    for bytes in [
-        Vec::new(),
-        b"OBF".to_vec(),
-        corrupted_magic,
-        zeroed_prototypes,
-        unknown_tag,
-        trailing,
-        data[..data.len() - 1].to_vec(),
-        data[..32].to_vec(),
-    ] {
-        assert!(constant_ranges(&bytes, Target::Lua51).is_err());
+    let semantic = wire(&data, Target::Lua51, 735);
+    let plain = compress_bytecode(&semantic).unwrap();
+    for seed in [0, 1, 735, u64::MAX] {
+        let mut encrypted = plain.clone();
+        apply_compression_cipher(&mut encrypted, &wrapper_keys(seed), &cipher_params(seed))
+            .unwrap();
+        assert_eq!(
+            &encrypted[..COMPRESSION_HEADER],
+            &plain[..COMPRESSION_HEADER]
+        );
+        assert_ne!(
+            &encrypted[COMPRESSION_HEADER..],
+            &plain[COMPRESSION_HEADER..]
+        );
+        apply_compression_cipher(&mut encrypted, &wrapper_keys(seed), &cipher_params(seed))
+            .unwrap();
+        assert_eq!(encrypted, plain);
     }
 }
 
@@ -1006,7 +1119,7 @@ fn field_layout_is_fully_unanchored_with_separator_and_prelude_variants() {
                     starts.push(tokens[index + 1].text(&raw).to_owned());
                 }
             }
-            assert!((20..=22).contains(&starts.len()), "{target} seed {seed}");
+            assert!((21..=24).contains(&starts.len()), "{target} seed {seed}");
             let keys = wrapper_keys(seed);
             let interpreter_key = keys[4].to_string();
             entry_ranks.insert(starts.iter().position(|k| k.starts_with('"')).unwrap());
@@ -1300,54 +1413,64 @@ fn stages_are_flattened_into_seeded_state_machines() {
 
 #[test]
 fn decoder_splits_into_seeded_random_sections() {
-    // Random decoder sections: the monolithic decoder is flattened
-    // into a decrypt field, a seeded 2..4 cluster split of its six
-    // helper groups and a parse core -- sibling payload fields at
-    // random layout positions, wired through the entry in the fixed
-    // dependency order. The stream position stays an upvalue inside
-    // the reader cluster; the core checks it through the exported
-    // `pos` accessor.
+    // The transport inverse, bounded LZW stages, semantic readers and parse
+    // core are sibling payload fields at independently shuffled positions.
+    // Depending on the seed the bit reader is either its own field or fused
+    // with the LZW dictionary field; semantic readers independently use one or
+    // two fields. Entry wiring alone carries the dependency order.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let mut cluster_counts = BTreeSet::new();
+        let mut lzw_shapes = BTreeSet::new();
+        let mut reader_shapes = BTreeSet::new();
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Decrypt field and parse core keep their audited roles;
-            // between them 2..=4 randomly grouped helper fields.
+            let keys = wrapper_keys(seed);
             assert!(raw.contains(&format!(
-                "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF)",
-                wrapper_keys(seed)[1]
+                "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32)",
+                keys[1]
             )));
             assert!(raw.contains(&format!(
-                "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum)",
-                wrapper_keys(seed)[20]
+                "[{}]=function(C,ca,cb,LD,E,SB,NCH,TC,MF,X8,AD,L32)",
+                keys[23]
             )));
-            assert!(raw.contains("local pos=function()return bp end;"));
+            assert!(raw.contains(&format!("[{}]=function", keys[22])));
+            assert!(raw.contains(&format!(
+                "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,b8,b16,b32,take,str,pos,num)",
+                keys[20]
+            )));
+            assert!(raw.contains("function()return bp end"));
             assert!(!raw.contains("bp~=#B+1"));
-            let numeric = raw.matches("]=function(").count() - 1;
-            let clusters = numeric - 17;
-            assert!(
-                (2..=4).contains(&clusters),
-                "{target} seed {seed}: {clusters} decoder clusters"
-            );
-            cluster_counts.insert(clusters);
-            // Wiring order is the dependency chain: decrypt first, core
-            // last, every cluster field called exactly once.
-            let wiring_at = raw.find("local B=VMS[").expect("decoder wiring");
+
+            let split_lzw = raw.contains(&format!("[{}]=function", keys[21]));
+            let split_readers = raw.contains(&format!("[{}]=function", keys[17]));
+            lzw_shapes.insert(split_lzw);
+            reader_shapes.insert(split_readers);
+
+            // Wiring order must be block/outer inverse -> LZW helper(s) ->
+            // compression frame -> semantic reader(s) -> semantic core.
+            let wiring_at = raw.find("local C=VMS[").expect("transport wiring");
             let wiring_end = wiring_at + raw[wiring_at..].find("local P,np,entry=VMS[").unwrap();
             let wiring = &raw[wiring_at..wiring_end];
-            assert_eq!(wiring.matches("=VMS[").count(), clusters as usize + 1);
+            let lzw_at = wiring.find("local LD=VMS[").expect("LZW wiring");
+            let body_at = wiring.find("local B=VMS[").expect("frame wiring");
+            assert!(lzw_at < body_at);
+            if split_lzw {
+                assert!(wiring.find("local BR=VMS[").unwrap() < lzw_at);
+            } else {
+                assert!(!wiring.contains("local BR=VMS["));
+            }
+            assert_eq!(
+                wiring.matches("=VMS[").count(),
+                4 + usize::from(split_lzw) + usize::from(split_readers)
+            );
             let output = emit(&data, target, seed).unwrap();
             assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
-        assert!(
-            cluster_counts.len() >= 2,
-            "{target}: decoder split pinned ({cluster_counts:?})"
-        );
-        // The randomly split decoder still runs the program verbatim.
+        assert_eq!(lzw_shapes.len(), 2, "{target}: LZW split pinned");
+        assert_eq!(reader_shapes.len(), 2, "{target}: reader split pinned");
         let workspace = native::Workspace::new();
         let path = workspace.0.join("random_sections.lua");
         fs::write(&path, source).unwrap();
@@ -1839,6 +1962,7 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
     let mut layouts = std::collections::BTreeSet::new();
     let mut multipliers = std::collections::BTreeSet::new();
     let mut mixes = std::collections::BTreeSet::new();
+    let mut compression_shapes = std::collections::BTreeSet::new();
     for (target, fixture) in [
         (
             Target::Lua51,
@@ -1866,7 +1990,15 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
                     order.push(tokens[index + 1].text(&output).to_owned());
                 }
             }
-            assert!((19..=21).contains(&order.len()), "{target} seed {seed}");
+            assert!(
+                (20..=23).contains(&order.len()),
+                "{target} seed {seed}: {} fields",
+                order.len()
+            );
+            let keys = wrapper_keys(seed);
+            assert!(order.contains(&keys[22].to_string()));
+            assert!(order.contains(&keys[23].to_string()));
+            compression_shapes.insert(order.contains(&keys[21].to_string()));
             layouts.insert((format!("{target:?}"), order));
             for multiplier in [16_807u64, 48_271, 65_539] {
                 if output.contains(&format!("={multiplier}*"))
@@ -1890,6 +2022,11 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
     );
     assert_eq!(multipliers.len(), 3, "multiplier variety: {multipliers:?}");
     assert!(mixes.len() >= 3, "mixing constant variety: {mixes:?}");
+    assert_eq!(
+        compression_shapes.len(),
+        2,
+        "LZW helpers did not vary between two and three fields"
+    );
 }
 
 #[test]
@@ -1997,25 +2134,24 @@ fn opaque_true_false_branches_carry_real_but_unreachable_instructions() {
 
 #[test]
 fn generation_respects_the_documented_size_budget() {
-    // M7 size budget: the structural variants must not inflate a
-    // generated script beyond the documented caps (headroom over the
-    // current goldens; raise the caps deliberately, never silently --
-    // Semantic virtualization deliberately raised the old M7 ceilings for
-    // program-specific superhandlers. ISA6 keeps both token machines and
-    // reachable neutral CFG records, then adds live descriptor camouflage plus
-    // globally shuffled semantic fragments. The 85/94 kB caps deliberately
-    // account for the second routing dimension while retaining bounded
-    // headroom over both fixed-seed goldens.
-    for (target, fixture, budget) in [
+    // ISA8 keeps the existing 85/94 kB structural ceilings for seed diversity,
+    // and adds a stronger fixed-seed contract: each checked-in compressed
+    // golden must be strictly smaller than its ISA7 uncompressed predecessor.
+    // Raise neither comparison silently.
+    for (target, fixture, budget, golden_seed, isa7_size) in [
         (
             Target::Lua51,
             include_str!("../../../tests/fixtures/vm_lua51.lua"),
             85_000usize,
+            7001u64,
+            83_640usize,
         ),
         (
             Target::Luau,
             include_str!("../../../tests/fixtures/vm_luau.lua"),
             94_000usize,
+            7351u64,
+            92_116usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -2028,6 +2164,13 @@ fn generation_respects_the_documented_size_budget() {
                 budget
             );
         }
+        let golden = emit(&data, target, golden_seed).unwrap();
+        assert!(
+            golden.len() < isa7_size,
+            "{target} compressed golden {}B is not below ISA7 {}B",
+            golden.len(),
+            isa7_size
+        );
     }
 }
 
@@ -2232,28 +2375,25 @@ fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
 
 #[test]
 fn keystream_families_and_cross_stage_terms_couple_the_pipeline() {
-    // A2: each cipher layer independently draws one of three keystream
-    // primitive families (Lehmer / dual-Lehmer sum / mod-2^32 LCG on the
-    // top byte), so a static replay must identify the family before any
-    // keystream byte exists. B1: the payload seed mixes a term derived
-    // from the REBUILT renumbering table (forms field output) and the
-    // constant-layer seed mixes two framing bytes of the outer-DECRYPTED
-    // image -- stage outputs, not static constants.
+    // Each stream layer independently draws one of three arithmetic families
+    // (Lehmer / dual-Lehmer sum / mod-2^32 LCG). The outer seed binds the
+    // rebuilt opcode permutation, while the inner compressed-body seed binds
+    // all clear LZW header fields available only after block inversion.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let mut outer_families = BTreeSet::new();
-        let mut constant_families = BTreeSet::new();
+        let mut inner_families = BTreeSet::new();
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
             let params = cipher_params(seed);
             outer_families.insert(params.outer_stream.family);
-            constant_families.insert(params.constant_stream.family);
+            inner_families.insert(params.constant_stream.family);
             // The decrypt field runs its family step in the XOR loop.
             let dec_at = raw
-                .find("]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF)")
+                .find("]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32)")
                 .expect("decrypt field signature");
             let dec_end = dec_at
                 + raw[dec_at..]
@@ -2272,20 +2412,26 @@ fn keystream_families_and_cross_stage_terms_couple_the_pipeline() {
                 ),
                 _ => assert!(decrypt.contains("%4294967296")),
             }
-            // The constant cluster runs its own family inside KA.
-            let ka_at = raw.find("local KA=function()").expect("KA definition");
-            let ka_end = ka_at
-                + raw[ka_at..]
-                    .find(" end;")
-                    .unwrap_or_else(|| panic!("no end after KA, {target} seed {seed}"));
-            let ka = &raw[ka_at..ka_end];
+            // The independently shuffled compression-frame field runs the
+            // inner stream family before invoking bounded LZW.
+            let inner_open = format!(
+                "[{}]=function(C,ca,cb,LD,E,SB,NCH,TC,MF,X8,AD,L32)",
+                wrapper_keys(seed)[23]
+            );
+            let inner_at = raw.find(&inner_open).expect("inner stream field");
+            let inner_end = inner_at
+                + raw[inner_at..]
+                    .find("return B end")
+                    .unwrap_or_else(|| panic!("no inner field end, {target} seed {seed}"))
+                + "return B end".len();
+            let inner = &raw[inner_at..inner_end];
             match params.constant_stream.family {
-                0 => assert!(ka.contains(&format!("={}*", params.constant_stream.multiplier))),
+                0 => assert!(inner.contains(&format!("={}*", params.constant_stream.multiplier))),
                 1 => assert!(
-                    ka.contains(&format!("={}*", params.constant_stream.multiplier))
-                        && ka.contains(&format!("={}*", params.constant_stream.second))
+                    inner.contains(&format!("={}*", params.constant_stream.multiplier))
+                        && inner.contains(&format!("={}*", params.constant_stream.second))
                 ),
-                _ => assert!(ka.contains("%4294967296")),
+                _ => assert!(inner.contains("%4294967296")),
             }
             // B1 payload term: the entry derives pv from the rebuilt
             // renumbering table at the per-seed slots before decrypting,
@@ -2301,12 +2447,15 @@ fn keystream_families_and_cross_stage_terms_couple_the_pipeline() {
                 "pv must be derived before the decrypt call"
             );
             assert!(decrypt.contains("s1+s2+s3+pv+"));
-            // B1 constant term: two framing bytes of the decrypted image.
-            let ka2_at = raw
-                .find("local ka2=SB(B,33)*31+SB(B,#B);")
-                .expect("constant cross term");
-            assert!(dec_call < ka2_at, "ka2 must be read after outer decryption");
-            assert!(raw.contains("(ku+ka2+"), "constant seed mixes the term");
+            // The inner key is unavailable until the clear compression frame
+            // has emerged from the block layer and its bounded lengths,
+            // checksum and derived reset count have been parsed.
+            let body_call = raw
+                .find(&format!("local B=VMS[{}](C,", wrapper_keys(seed)[23]))
+                .expect("compression frame call");
+            assert!(dec_call < body_call);
+            assert!(inner.contains("cross=n*31+bits*17+(cs%65536)*7+MF(cs/65536)+cc*13"));
+            assert!(inner.contains("(ku+cross+"));
             // Family parameters rotate across seeds within each family.
             let output = emit(&data, target, seed).unwrap();
             assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
@@ -2316,8 +2465,8 @@ fn keystream_families_and_cross_stage_terms_couple_the_pipeline() {
             "{target}: outer keystream family pinned ({outer_families:?})"
         );
         assert!(
-            constant_families.len() >= 2,
-            "{target}: constant keystream family pinned ({constant_families:?})"
+            inner_families.len() >= 2,
+            "{target}: inner keystream family pinned ({inner_families:?})"
         );
         // The coupled pipeline still runs the program verbatim.
         let workspace = native::Workspace::new();

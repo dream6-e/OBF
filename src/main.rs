@@ -298,8 +298,9 @@ obf dump-ir --target <lua51|luau> [-o FILE] <input|->\n  \
 obf compile --target <lua51|luau> [-o FILE] <input|->\n  \
 obf wrap-bytecode --target <lua51|luau> [--seed N] [-o FILE] <input.obf|->\n  \
 obf inspect-bytecode --target <lua51|luau> <input|->\n\n\
-Default virtualize: AST -> IR -> OBF v2 (32-byte header, 7-bit varint instructions).\n\
-No external compiler, encryption, compression or randomized bytecode layout.\n\
+Default virtualize: AST -> IR -> OBF v2 -> private ISA8 register VM.\n\
+Canonical compile output has a 32-byte header and 7-bit varint instructions; no encryption or compression.\n\
+Generated VM scripts use bounded lossless LZW plus randomized private layout and transport streams.\n\
 compile emits binary bytecode; dump-ir emits typed register IR.\n\
 wrap-bytecode validates OBF v2 and emits its single-line register VM.\n\
 inspect-bytecode accepts OBF v2 and native target bytecode.\n\

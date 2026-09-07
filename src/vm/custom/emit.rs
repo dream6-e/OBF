@@ -16,15 +16,16 @@ pub(crate) fn generate(
     // replaced by five-stage context tokens; successors use independent
     // three-stage edge tokens. Live wire descriptors are validation-equivalent
     // camouflage rather than execution truth; the target-side parser accepts
-    // only this private ISA7 image.
+    // only this private ISA8 image.
     let semantic_image = semantic::encode(program, seed)?;
-    generate_semantic(program, seed, semantic_image)
+    generate_semantic(program, seed, semantic_image, None)
 }
 
 fn generate_semantic(
     program: &Program,
     seed: u64,
     semantic_image: semantic::SemanticImage,
+    compression_override: Option<Vec<u8>>,
 ) -> Result<String, Diagnostic> {
     // Whole-output wrapper, strictly:
     //   local x={};return setmetatable({...},x):<random letter>()
@@ -335,20 +336,24 @@ if d7+d8*65521~={fake_adler} then E()end;"
     for (_, statement) in &units {
         s.push_str(statement);
     }
+    // Shared exact-integer transport primitives. Reusing these in the outer,
+    // block, compression and semantic gates keeps the generated decoder small
+    // without relying on target-specific bit libraries.
+    s.push_str("local X8=function(a,b)local r=0;for j=0,7 do r=r+(a+b)%2*2^j;a=MF(a/2);b=MF(b/2)end;return r end;local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65521;y=(y+x)%65521 end;return x+y*65536 end;local L32=function(S,p)return SB(S,p)+SB(S,p+1)*256+SB(S,p+2)*65536+SB(S,p+3)*16777216 end;");
     let mut ret_order: Vec<&str> = vec![
         "SC", "Z", "U", "G", "E", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS", "NX",
-        "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS",
+        "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS", "X8", "AD", "L32",
     ];
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
     s.push_str(&format!("\nreturn {ret_names}\nend,"));
     // The decoder section receives the three audited probe shares (each probe
     // function already verified the environment and was called by the entry
-    // in seeded shuffled order), the two structural constant-cipher keys and
-    // the shared helpers. It combines the shares into the outer keystream
-    // seed, byte-decrypts the embedded blob, reverses and validates the
-    // independently scheduled block frame, then decrypts every constant
-    // record payload with its own keystream while parsing.
+    // in seeded shuffled order), the two structural inner-stream keys and the
+    // shared helpers. It combines the shares into the outer keystream seed,
+    // byte-decrypts the embedded blob, reverses and validates the independently
+    // scheduled block frame, decrypts the compression body, and strictly
+    // expands the bounded LZW frame before parsing.
     // Lehmer 48271 mod 2147483647 keeps every intermediate below 2^53, so the
     // Lua-side double arithmetic reproduces both Rust streams bit-for-bit.
     let shares = cipher_shares(&keys, &params);
@@ -358,19 +363,21 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // before calling the decrypt field).
     let pv = perm_term(seed);
     let pv_slots = perm_indices(seed);
-    // Second, independent cipher layer over the constant pool: every
-    // constant-record payload inside the embedded image (boolean value byte,
-    // number/integer 8 bytes, string length + content) is XORed with its own
-    // structurally derived keystream before the whole image enters the outer
-    // cipher, so constants stay encrypted even for an analyst who strips the
-    // outer layer. The Adler-32 is patched over the constant-encrypted
-    // image; the canonical `.obf` on disk stays plaintext and unchanged.
-    let mut payload = semantic_image.bytes.clone();
-    apply_constant_cipher(&mut payload, &keys, program.target, &params)?;
-    // Third transport layer: a versioned, dynamically keyed, chained 32-bit
-    // generalized Feistel envelope sits between the constant cipher and the
-    // outer stream. Its two large key states exist only after the audited
-    // shares, permutation term and padded frame length are available.
+    // Compress the complete private semantic image before any cipher. The
+    // bounded LZW frame is emitted only when it is strictly smaller and its
+    // body is then protected by the former constant-layer stream. Encrypting
+    // the compressed body (rather than randomizing constants before LZW)
+    // preserves compressibility while covering more than the old selective
+    // constant cipher. Public canonical `.obf` bytes remain unchanged.
+    let mut payload = match compression_override {
+        Some(frame) => frame,
+        None => compress_bytecode(&semantic_image.bytes)?,
+    };
+    apply_compression_cipher(&mut payload, &keys, &params)?;
+    // A versioned, dynamically keyed, chained 32-bit generalized Feistel
+    // envelope sits between the compressed inner stream and the outer stream.
+    // Its two large key states exist only after the audited shares,
+    // permutation term and padded frame length are available.
     let blocked = encrypt_block_transport(&payload, &shares, pv, &block)?;
     let encrypted = outer_cipher(&blocked, &shares, pv, &params);
     // Transport layer: the triply transformed image is base86-encoded (all
@@ -495,14 +502,12 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
         ),
     ];
     // Random decoder sections: the monolithic decoder is flattened into
-    // sibling payload fields -- a decrypt field, a seeded 2..4 cluster
-    // split of the six helper groups (byte-stream readers, double
-    // reconstructor, constant keystream, XOR core, encrypted readers,
-    // number family) and the parse core. Every field lands at a random
-    // layout position; the call order in the entry is the fixed
-    // dependency chain. `bp` stays an upvalue inside the reader cluster;
-    // the core's final position check goes through the exported `pos`
-    // accessor (a returned copy of the number would go stale).
+    // sibling payload fields -- outer/block decrypt, a seeded two- or
+    // three-field compression inverse, one or two ordinary semantic-reader
+    // clusters, and the parse core. Every field lands at a random layout
+    // position; entry wiring retains only the real dependency order. `bp`
+    // stays an upvalue inside its reader cluster; the core's final position
+    // check goes through exported `pos` (a returned number would go stale).
     // Flattened outer-decrypt machine: keystream XOR self-loop, rebuild
     // and size gate, finish -- state numbers and spellings per seed. All
     // data locals flow through the scratch table g[...] (per-seed keys),
@@ -535,16 +540,11 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
             false,
         ),
     };
-    let xor_step = format!(
-        "{st_step}local x=SB(B,i);local y={y_expr};local r=0;local p=1;\
-for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
-XB[i]=NCH(r);i=i+1;"
-    );
+    let xor_step = format!("{st_step}XB[i]=NCH(X8(SB(B,i),{y_expr}));i=i+1;");
     let block_decode = block_transport_decoder(&block);
     let mut decrypt_locals = vec![
-        "st", "XB", "i", "w", "x", "y", "r", "p", "q", "bk0", "bk1", "bdesc", "bcl", "bcr", "bo",
-        "cl", "cr", "bl", "br", "brk", "bf", "blo", "bhi", "BP", "bd", "bn", "bc", "bt", "bpad",
-        "bexpect", "bsa", "bsb",
+        "st", "XB", "i", "w", "bk0", "bk1", "bdesc", "bcl", "bcr", "bo", "cl", "cr", "bl", "br",
+        "brk", "bf", "blo", "bhi", "BP", "bd", "bn", "bc", "bt", "bpad", "bexpect",
     ];
     if sv_local {
         decrypt_locals.insert(1, "sv");
@@ -576,9 +576,13 @@ XB[i]=NCH(r);i=i+1;"
     );
     decrypt_text = slot_rewrite(&mut structure, &decrypt_text, &decrypt_locals);
     let decrypt_field = format!(
-        "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF)\nlocal g={{}};\n{decrypt_text}\nend,",
+        "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32)\nlocal g={{}};\n{decrypt_text}\nend,",
         keys[1]
     );
+    let split_lzw_helpers =
+        crate::random::Prng::new(seed ^ 0x6c7a_775f_7370_6c38).next_u64() % 2 == 0;
+    let (compression_fields, compression_wiring) =
+        compression_decoder_sections(&params, &keys, split_lzw_helpers);
     let g1 = r#"local bp=1;
 local b8=function()local v=SB(B,bp);if v==nil then E()end;bp=bp+1;return v end;
 local b16=function()local a,b=b8(),b8();return a+b*256 end;
@@ -587,96 +591,45 @@ local take=function(n)if n>#B-bp+1 then E()end;local v=SS(B,bp,bp+n-1);bp=bp+n;r
 local str=function()return take(b32())end;
 local pos=function()return bp end;"#
         .to_owned();
-    let g2 = r#"local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;"#
+    let g2 = r#"local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;local num=function()return fin(b32(),b32())end;"#
         .to_owned();
-    let mut ku_steps = String::new();
-    for _ in 0..params.constant_rounds {
-        ku_steps.push_str(&format!("ku={}*ku%2147483647;", params.constant));
-    }
-    // A2: the constant-pool keystream draws its own family; B1: the seed
-    // mixes ka2, two framing bytes the wiring reads off the outer-
-    // decrypted image (both outside every encrypted constant range), so
-    // this key cannot exist without a correct outer decryption.
-    let (kv_init, ka_step) = match params.constant_stream.family {
-        0 => (
-            String::new(),
-            format!(
-                "ks={}*ks%2147483647;return ks%256",
-                params.constant_stream.multiplier
-            ),
-        ),
-        1 => (
-            "local kv=1+(ks*7+31)%2147483646;".to_owned(),
-            format!(
-                "ks={}*ks%2147483647;kv={}*kv%2147483647;return (ks+kv)%2147483647%256",
-                params.constant_stream.multiplier, params.constant_stream.second
-            ),
-        ),
-        _ => (
-            String::new(),
-            format!(
-                "ks=({}*ks+{})%4294967296;return (ks-ks%16777216)/16777216",
-                params.constant_stream.second, params.constant_stream.add
-            ),
-        ),
-    };
-    let g3 = format!(
-        "local ku=(ca*{mix}+cb)%2147483647;{ku_steps}\nlocal ks=1+(ku+ka2+{mix}*#B)%2147483646;{kv_init}local KA=function(){ka_step} end;",
-        mix = params.mix,
-    );
-    let g4g5g6 = r#"local DX=function(u)local y=KA();local r=0;local w=1;for j=1,8 do local q=(u%2+y%2)%2;if q==1 then r=r+w end;u=(u-u%2)/2;y=(y-y%2)/2;w=w*2 end;return r end;
-local db8=function()return DX(b8())end;
-local db32=function()local p,q,r,t=db8(),db8(),db8(),db8();return p+q*256+r*65536+t*16777216 end;
-local dstr=function()local v=take(b32());local o={}for i=1,#v do o[i]=NCH(DX(SB(v,i)))end;return TC(o)end;
-local num=function()return fin(b32(),b32())end;
-local dnum=function()return fin(db32(),db32())end;"#
-        .to_owned();
-    let (g4, g5, g6) = (
-        g4g5g6[..g4g5g6.find("local db8").unwrap()].to_owned(),
-        g4g5g6[g4g5g6.find("local db8").unwrap()..g4g5g6.find("local num").unwrap()].to_owned(),
-        g4g5g6[g4g5g6.find("local num").unwrap()..].to_owned(),
-    );
-    // (params, exports, text) per helper group, in dependency order.
+    // The semantic parser now sees an exact decompressed ISA image, so its
+    // helpers are only ordinary bounded readers and the number reconstructor.
+    // The former constant-only decrypt closures are replaced by the stronger
+    // whole-compression-body stream in `compression_decoder_sections`.
     let groups: Vec<(&[&str], &[&str], String)> = vec![
         (
             &["B", "E", "SB", "SS"],
             &["b8", "b16", "b32", "take", "str", "pos"],
             g1,
         ),
-        (&["MF"], &["fin"], g2),
-        (&["B", "ca", "cb", "ka2"], &["KA"], g3),
-        (&["KA"], &["DX"], g4),
-        (
-            &["b8", "b32", "take", "SB", "NCH", "TC", "DX"],
-            &["db8", "db32", "dstr"],
-            g5,
-        ),
-        (&["fin", "b32", "db32"], &["num", "dnum"], g6),
+        (&["MF", "b32"], &["fin", "num"], g2),
     ];
-    let base_names = ["B", "E", "SB", "SS", "NCH", "TC", "MF", "ca", "cb", "ka2"];
-    let cluster_count = 2 + structure.next_u64() % 3;
+    let base_names = ["B", "E", "SB", "SS", "MF"];
+    let cluster_count = 1 + structure.next_u64() % 2;
     let mut bounds_set = std::collections::BTreeSet::new();
     while bounds_set.len() < (cluster_count - 1) as usize {
-        bounds_set.insert(1 + structure.next_u64() % 5);
+        bounds_set.insert(1);
     }
     let mut bounds: Vec<usize> = bounds_set.into_iter().map(|b| b as usize).collect();
     bounds.push(groups.len());
     let mut decoder_fields = vec![decrypt_field];
-    // B1 wiring: the forms field runs FIRST so the entry can derive the
-    // payload seed's permutation term from the rebuilt renumbering table
-    // (PT) before the decrypt call, and the wiring reads two framing
-    // bytes (ka2) off the outer-decrypted image for the constant-layer
-    // seed. Neither key can exist without the upstream stage's output.
+    decoder_fields.extend(compression_fields);
+    // The forms field runs first so the entry can derive the outer/block
+    // permutation term. Those layers expose only an inner-stream-encrypted
+    // LZW frame; the independently shuffled compression fields then decrypt,
+    // strictly expand and checksum it before any semantic reader is built.
     let mut decoder_wiring = format!(
         "local FMt,PT=VMS[{forms}](E,SB);\
 local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;\
-local B=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF);\
-local ka2=SB(B,33)*31+SB(B,#B);",
+local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32);\
+{compression_wiring}",
         forms = keys[13],
         i0 = pv_slots[0],
         i1 = pv_slots[1],
         i2 = pv_slots[2],
         decrypt = keys[1],
+        compression_wiring = compression_wiring,
     );
     let mut prior_exports: Vec<&str> = Vec::new();
     let mut start = 0usize;
@@ -706,15 +659,7 @@ local ka2=SB(B,33)*31+SB(B,#B);",
             params.join(","),
             exports.join(",")
         ));
-        let args = params
-            .iter()
-            .map(|name| match *name {
-                "ca" => keys[4].to_string(),
-                "cb" => keys[7].to_string(),
-                other => other.to_owned(),
-            })
-            .collect::<Vec<_>>()
-            .join(",");
+        let args = params.iter().copied().collect::<Vec<_>>().join(",");
         decoder_wiring.push_str(&format!(
             "\nlocal {}=VMS[{key}]({args});",
             exports.join(",")
@@ -736,8 +681,7 @@ local ka2=SB(B,33)*31+SB(B,#B);",
         r#"
 if b8()~=1 or b8()~=1 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
 local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa~={} then E()end;
-local check=b32();local sa,sb=1,0;for q=33,#B do sa=(sa+SB(B,q))%65521;sb=(sb+sa)%65521 end;
-if sa+sb*65536~=check then E()end;
+local check=b32();if AD(B,33,#B)~=check then E()end;
 "#,
         semantic::WIRE_ISA_VERSION
     )
@@ -764,10 +708,10 @@ if sa+sb*65536~=check then E()end;
     let pu = "local PU=function()\n for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
         .to_owned();
     let mut pk = String::from(
-        "local PK=function()\n for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;\n  if tag==0 then F.__obf_proto_k[j]=nil\n  elseif tag==1 then local v=db8();if v>1 then E()end;F.__obf_proto_k[j]=v==1\n  elseif tag==2 then F.__obf_proto_k[j]=dnum()\n  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=dstr()\n",
+        "local PK=function()\n for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;\n  if tag==0 then F.__obf_proto_k[j]=nil\n  elseif tag==1 then local v=b8();if v>1 then E()end;F.__obf_proto_k[j]=v==1\n  elseif tag==2 then F.__obf_proto_k[j]=num()\n  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=str()\n",
     );
     if program.target.is_luau() {
-        pk.push_str(r#"elseif tag==4 then local lo,hi=db32(),db32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
+        pk.push_str(r#"elseif tag==4 then local lo,hi=b32(),b32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
     }
     pk.push_str("else E()end end;\nend;\n");
     let mut defs = vec![ph, pu, pk];
@@ -814,11 +758,11 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
         ],
     );
     decoder_fields.push(format!(
-        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum)\nlocal g={{}};{core_text}end,",
+        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,b8,b16,b32,take,str,pos,num)\nlocal g={{}};{core_text}end,",
         keys[20]
     ));
     decoder_wiring.push_str(&format!(
-        "\nlocal P,np,entry=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,b8,b16,b32,take,pos,db8,db32,dstr,dnum);",
+        "\nlocal P,np,entry=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,AD,b8,b16,b32,take,str,pos,num);",
         keys[20]
     ));
     let f3_start = s.len();
@@ -1404,6 +1348,87 @@ end;
     Ok(s)
 }
 
+/// Build the strict Lua-side inverse of the bounded LZW frame. The bit-reader
+/// and dictionary stages are either separate sibling payload functions or one
+/// combined function according to the seed; the frame/cipher stage is always a
+/// third independently keyed field. The outer layout pass shuffles all of them
+/// among unrelated VM sections, so neither count nor physical position is a
+/// stable decoder signature.
+fn compression_decoder_sections(
+    params: &CipherParams,
+    keys: &[u64],
+    split_helpers: bool,
+) -> (Vec<String>, String) {
+    let bit_reader = r#"local BR=function(S,N)local p=0;local R=function(n)if p>N-n then E()end;local v=0;for j=0,n-1 do local q=p+j;v=v+MF(SB(S,MF(q/8)+1)/2^(q%8))%2*2^j end;p=p+n;return v end;return R,function()return p end end;"#;
+    let lzw_decoder = r#"local LD=function(S,N,L)local R,RP=BR(S,N);local O={};local total=0;while total<L do local lim=total+8192;if lim>L then lim=L end;local DP,ST={},{};local nx=256;local prev=nil;local pf=0;while total<lim do local t=R(1);local code;if t==1 then code=R(8);if code<32 then E()end else t=R(1);if t==1 then code=R(5)else if prev==nil then E()end;local w=0;local z=nx-256;while z>0 do w=w+1;z=MF(z/2)end;code=256+R(w)end end;if code>nx then E()end;local special=code==nx;if special then DP[nx]=prev*256+pf end;local sn=0;local cur=code;while cur>=256 do local z=DP[cur];sn=sn+1;ST[sn]=z%256;cur=MF(z/256)end;sn=sn+1;ST[sn]=cur;local first=cur;if not special and prev~=nil then DP[nx]=prev*256+first end;if prev~=nil then nx=nx+1 end;prev=code;pf=first;if total+sn>lim then E()end;for j=sn,1,-1 do total=total+1;O[total]=NCH(ST[j])end end end;if RP()~=N then E()end;return TC(O)end;"#;
+    let mut fields = Vec::new();
+    let wiring = if split_helpers {
+        fields.push(format!(
+            "[{}]=function(E,SB,MF){bit_reader}return BR end,",
+            keys[21]
+        ));
+        fields.push(format!(
+            "[{}]=function(E,SB,NCH,TC,MF,BR){lzw_decoder}return LD end,",
+            keys[22]
+        ));
+        format!(
+            "local BR=VMS[{}](E,SB,MF);local LD=VMS[{}](E,SB,NCH,TC,MF,BR);",
+            keys[21], keys[22]
+        )
+    } else {
+        fields.push(format!(
+            "[{}]=function(E,SB,NCH,TC,MF){bit_reader}{lzw_decoder}return LD end,",
+            keys[22]
+        ));
+        format!("local LD=VMS[{}](E,SB,NCH,TC,MF);", keys[22])
+    };
+
+    let mut ku_steps = String::new();
+    for _ in 0..params.constant_rounds {
+        let _ = write!(ku_steps, "ku={}*ku%2147483647;", params.constant);
+    }
+    let (kv_init, stream_step, stream_byte) = match params.constant_stream.family {
+        0 => (
+            String::new(),
+            format!("ks={}*ks%2147483647;", params.constant_stream.multiplier),
+            "ks%256".to_owned(),
+        ),
+        1 => (
+            "local kv=1+(ks*7+31)%2147483646;".to_owned(),
+            format!(
+                "ks={}*ks%2147483647;kv={}*kv%2147483647;",
+                params.constant_stream.multiplier, params.constant_stream.second
+            ),
+            "(ks+kv)%2147483647%256".to_owned(),
+        ),
+        _ => (
+            String::new(),
+            format!(
+                "ks=({}*ks+{})%4294967296;",
+                params.constant_stream.second, params.constant_stream.add
+            ),
+            "(ks-ks%16777216)/16777216".to_owned(),
+        ),
+    };
+    let core = format!(
+        r#"if #C<16 or L32(C,1)~=22501964 then E()end;local n=L32(C,5);local bits=L32(C,9);local cs=L32(C,13);local bl=MF((bits+7)/8);local cc=MF((n+8191)/8192);if n<1 or n>16777216 or bits<1 or bl~=#C-16 or #C>=n then E()end;local ku=(ca*{mix}+cb)%2147483647;{ku_steps}local cross=n*31+bits*17+(cs%65536)*7+MF(cs/65536)+cc*13;local ks=1+(ku+cross+{mix}*bl)%2147483646;{kv_init}local D={{}};for i=17,#C do {stream_step}D[#D+1]=NCH(X8(SB(C,i),{stream_byte}))end;D=TC(D);local pad=#D*8-bits;if pad>7 or pad>0 and MF(SB(D,#D)/2^(8-pad))~=0 then E()end;local B=LD(D,bits,n);if AD(B,1,#B)~=cs then E()end;return B"#,
+        mix = params.mix,
+        ku_steps = ku_steps,
+        kv_init = kv_init,
+        stream_step = stream_step,
+        stream_byte = stream_byte,
+    );
+    fields.push(format!(
+        "[{}]=function(C,ca,cb,LD,E,SB,NCH,TC,MF,X8,AD,L32){core} end,",
+        keys[23]
+    ));
+    let wiring = format!(
+        "{wiring}local B=VMS[{}](C,{},{},LD,E,SB,NCH,TC,MF,X8,AD,L32);",
+        keys[23], keys[4], keys[7]
+    );
+    (fields, wiring)
+}
+
 /// Lua-side inverse of `encrypt_block_transport`. Rounds are intentionally
 /// unrolled in reverse so no serialized round-key table exists; each subkey is
 /// derived from the two runtime-only key states and the current block index.
@@ -1481,14 +1506,10 @@ for bi=1,#B,4 do local cl=SB(B,bi)+SB(B,bi+1)*256;local cr=SB(B,bi+2)+SB(B,bi+3)
         source,
         "bl=(bl-bcl)%65536;br=(br-bcr)%65536;bo[#bo+1]=NCH(bl%256);bo[#bo+1]=NCH((bl-bl%256)/256);\
 bo[#bo+1]=NCH(br%256);bo[#bo+1]=NCH((br-br%256)/256);bcl,bcr=cl,cr end;\
-local BP=TC(bo);bo=nil;local bd=SB(BP,1)+SB(BP,2)*256+SB(BP,3)*65536+SB(BP,4)*16777216;\
-local bn=SB(BP,5)+SB(BP,6)*256+SB(BP,7)*65536+SB(BP,8)*16777216;\
-local bc=SB(BP,9)+SB(BP,10)*256+SB(BP,11)*65536+SB(BP,12)*16777216;\
-local bt=SB(BP,13)+SB(BP,14)*256+SB(BP,15)*65536+SB(BP,16)*16777216;\
+local BP=TC(bo);bo=nil;local bd=L32(BP,1);local bn=L32(BP,5);local bc=L32(BP,9);local bt=L32(BP,13);\
 local bpad=(4-(16+bn)%4)%4;if bn>16777216 or #BP~=16+bn+bpad or bd~=bdesc then E()end;\
 local bexpect=(bn+bd*257+(bk0%65536)*65536+(bk1%65536)*17+{cookie})%4294967296;if bc~=bexpect then E()end;\
-local bsa,bsb=1,0;for bj=17,16+bn do bsa=(bsa+SB(BP,bj))%65521;bsb=(bsb+bsa)%65521 end;\
-bexpect=(bsa+bsb*65536+bc*263+bd*31+(bk0%65536)*65536+bk1%65536+{tag})%4294967296;\
+bexpect=(AD(BP,17,16+bn)+bc*263+bd*31+(bk0%65536)*65536+bk1%65536+{tag})%4294967296;\
 if bt~=bexpect then E()end;for bj=1,bpad do if SB(BP,16+bn+bj)~=(bk0+bk1*bj+{padding})%256 then E()end end;\
 B=SS(BP,17,16+bn);BP=nil;",
         cookie = params.cookie_salt,
@@ -1505,7 +1526,18 @@ pub(crate) fn generate_from_semantic_image(
     semantic_image: semantic::SemanticImage,
 ) -> Result<String, Diagnostic> {
     custom::validate(program)?;
-    generate_semantic(program, seed, semantic_image)
+    generate_semantic(program, seed, semantic_image, None)
+}
+
+#[cfg(test)]
+pub(crate) fn generate_from_compression_frame(
+    program: &Program,
+    seed: u64,
+    semantic_image: semantic::SemanticImage,
+    frame: Vec<u8>,
+) -> Result<String, Diagnostic> {
+    custom::validate(program)?;
+    generate_semantic(program, seed, semantic_image, Some(frame))
 }
 
 pub(super) fn validation(op: Opcode) -> &'static str {

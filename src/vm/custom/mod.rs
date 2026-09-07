@@ -1,6 +1,6 @@
 //! Executable VM for AST-produced OBF v2 bytecode. Public `.obf` files keep
 //! the canonical opcode-plus-varint ISA2 format, but generated scripts lower
-//! that program into a private seed-specific ISA7 image: straight-line words
+//! that program into a private seed-specific ISA8 image: straight-line words
 //! become recipe superoperators, use sites carry operands plus random graph
 //! labels, three-stage successor tokens, and five-stage recipe tokens (not
 //! plaintext successors/opcodes/recipe ids). Reachable neutral bundles split
@@ -9,14 +9,16 @@
 //! 1..2-primitive fragments and globally shuffled. Records/sibling prototypes
 //! are shuffled, an unreachable synthetic subtree changes topology, and the
 //! target retains only tokens in its persistent code records. The semantic
-//! image is then constant-encrypted, wrapped in a versioned dynamically keyed
-//! 32-bit block transport, and finally protected by the outer byte stream.
+//! image is then losslessly compressed by bounded LZW; its code bits retain
+//! the existing independent inner stream before a versioned dynamically keyed
+//! 32-bit block transport and the outer byte stream.
 //! Primitive semantics still live in the two target opcode subfolders. The
 //! seed never changes public `.obf` bytes, but it does change the embedded
 //! semantic image as well as transport, layout, local, and private-field
 //! randomization.
 
 mod cipher;
+mod compress;
 mod emit;
 mod semantic;
 mod structure;
@@ -28,6 +30,7 @@ use crate::bytecode::custom::{self, Opcode, Program};
 use crate::{Diagnostic, Target};
 
 pub(crate) use cipher::*;
+pub(crate) use compress::*;
 pub(crate) use emit::generate;
 pub(crate) use structure::*;
 pub(crate) use transport::*;
