@@ -16,7 +16,7 @@ pub(crate) fn generate(
     // replaced by five-stage context tokens; successors use independent
     // three-stage edge tokens. Live wire descriptors are validation-equivalent
     // camouflage rather than execution truth; the target-side parser accepts
-    // only this private ISA6 image.
+    // only this private ISA7 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image)
 }
@@ -39,7 +39,8 @@ fn generate_semantic(
     // The embedded payload is byte-encrypted at generation time with a
     // seed-derived Lehmer keystream; the key is split into three shares, one
     // per probe function, and the entry calls them in seeded shuffled order
-    // before combining the shares and decrypting at runtime. The method call
+    // before combining the shares, reversing the outer stream and validating
+    // the intermediate block envelope at runtime. The method call
     // resolves the entry directly as an own key of the payload table,
     // receives (self) — or (self,...) when the chunk reads `...` — chains
     // the sections in order and returns the program result. The metatable
@@ -47,6 +48,7 @@ fn generate_semantic(
     let method = wrapper_method(program.target, seed);
     let keys = wrapper_keys(seed);
     let params = cipher_params(seed);
+    let block = block_params(seed);
     // Per-seed primitive renumbering: every canonical ISA slot maps to a
     // distinct byte used by operand validation and inside unrolled recipe
     // bodies. Semantic use sites contain no opcode byte; their random recipe
@@ -344,8 +346,9 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // function already verified the environment and was called by the entry
     // in seeded shuffled order), the two structural constant-cipher keys and
     // the shared helpers. It combines the shares into the outer keystream
-    // seed, byte-decrypts the embedded blob, then decrypts every constant
-    // record payload with the SECOND, independent keystream while parsing.
+    // seed, byte-decrypts the embedded blob, reverses and validates the
+    // independently scheduled block frame, then decrypts every constant
+    // record payload with its own keystream while parsing.
     // Lehmer 48271 mod 2147483647 keeps every intermediate below 2^53, so the
     // Lua-side double arithmetic reproduces both Rust streams bit-for-bit.
     let shares = cipher_shares(&keys, &params);
@@ -364,8 +367,13 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // image; the canonical `.obf` on disk stays plaintext and unchanged.
     let mut payload = semantic_image.bytes.clone();
     apply_constant_cipher(&mut payload, &keys, program.target, &params)?;
-    let encrypted = outer_cipher(&payload, &shares, pv, &params);
-    // Transport layer: the doubly encrypted image is base86-encoded (all
+    // Third transport layer: a versioned, dynamically keyed, chained 32-bit
+    // generalized Feistel envelope sits between the constant cipher and the
+    // outer stream. Its two large key states exist only after the audited
+    // shares, permutation term and padded frame length are available.
+    let blocked = encrypt_block_transport(&payload, &shares, pv, &block)?;
+    let encrypted = outer_cipher(&blocked, &shares, pv, &params);
+    // Transport layer: the triply transformed image is base86-encoded (all
     // printable alphabet characters, ~1.25 chars per byte instead of 4-char
     // decimal escapes) and split into three segments placed in seed-shuffled
     // payload-table functions. Each segment function re-runs the audited
@@ -532,7 +540,12 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
 for j=1,8 do local q=(x%2+y%2)%2;if q==1 then r=r+p end;x=(x-x%2)/2;y=(y-y%2)/2;p=p*2 end;\
 XB[i]=NCH(r);i=i+1;"
     );
-    let mut decrypt_locals = vec!["st", "XB", "i", "w", "x", "y", "r", "p", "q"];
+    let block_decode = block_transport_decoder(&block);
+    let mut decrypt_locals = vec![
+        "st", "XB", "i", "w", "x", "y", "r", "p", "q", "bk0", "bk1", "bdesc", "bcl", "bcr", "bo",
+        "cl", "cr", "bl", "br", "brk", "bf", "blo", "bhi", "BP", "bd", "bn", "bc", "bt", "bpad",
+        "bexpect", "bsa", "bsb",
+    ];
     if sv_local {
         decrypt_locals.insert(1, "sv");
     }
@@ -555,9 +568,9 @@ XB[i]=NCH(r);i=i+1;"
                 ),
                 (
                     d_gate,
-                    format!("B=TC(XB);XB=nil;if #B>16777216 then E()end;w={d_done};"),
+                    format!("B=TC(XB);XB=nil;if #B>16777232 then E()end;w={d_done};"),
                 ),
-                (d_done, "g=nil;return B;".to_owned()),
+                (d_done, format!("{block_decode}g=nil;return B;")),
             ],
         ),
     );
@@ -1045,7 +1058,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     write!(
         s,
         "[\"{method}\"]=function(VMS,...)\nlocal {names}=VMS[{}]();
-local c1=VMS[{}](E,{},{},DBG,GI,LS);local c2=VMS[{}](E,{},{},DBG,GI,LS);local c3=VMS[{}](E,{},{},DBG,GI,LS);
+local c{cn0}=VMS[{}](E,{},{},DBG,GI,LS);local c{cn1}=VMS[{}](E,{},{},DBG,GI,LS);local c{cn2}=VMS[{}](E,{},{},DBG,GI,LS);
 local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
 local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD,ED=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
@@ -1075,7 +1088,10 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[2],
         keys[3],
         keys[4],
-        names = ret_names
+        names = ret_names,
+        cn0 = probe_order[0] + 1,
+        cn1 = probe_order[1] + 1,
+        cn2 = probe_order[2] + 1,
     )
     .unwrap();
     write!(
@@ -1386,6 +1402,100 @@ end;
         ));
     }
     Ok(s)
+}
+
+/// Lua-side inverse of `encrypt_block_transport`. Rounds are intentionally
+/// unrolled in reverse so no serialized round-key table exists; each subkey is
+/// derived from the two runtime-only key states and the current block index.
+fn block_transport_decoder(params: &BlockParams) -> String {
+    let c0 = params.key_coefficients[0];
+    let c1 = params.key_coefficients[1];
+    let mut source = format!(
+        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;\
+local bk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;\
+local bk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;\
+local bdesc={version}+{rounds}*256+4*65536+(bk0+bk1+{descriptor})%256*16777216;\
+local bcl=(bk0+bk1*3+{iv0})%65536;local bcr=(bk1+bk0*5+{iv1})%65536;local bo={{}};\
+for bi=1,#B,4 do local cl=SB(B,bi)+SB(B,bi+1)*256;local cr=SB(B,bi+2)+SB(B,bi+3)*256;local bl,br=cl,cr;",
+        header = BLOCK_TRANSPORT_HEADER,
+        version = BLOCK_TRANSPORT_VERSION,
+        rounds = params.rounds.len(),
+        c00 = c0[0],
+        c01 = c0[1],
+        c02 = c0[2],
+        c03 = c0[3],
+        c04 = c0[4],
+        c10 = c1[0],
+        c11 = c1[1],
+        c12 = c1[2],
+        c13 = c1[3],
+        c14 = c1[4],
+        s0 = params.key_salts[0],
+        s1 = params.key_salts[1],
+        descriptor = params.descriptor_salt,
+        iv0 = params.iv_salts[0],
+        iv1 = params.iv_salts[1],
+    );
+    for round in params.rounds.iter().rev() {
+        let _ = write!(
+            source,
+            "brk=(bk0*{ka}+bk1*{kb}+{salt}+((bi-1)/4)*{position})%65536;",
+            ka = round.key_a,
+            kb = round.key_b,
+            salt = round.salt,
+            position = round.position,
+        );
+        match round.family {
+            0 => {
+                let _ = write!(
+                    source,
+                    "bf=(bl*bl+bl*{a}+brk+((bi-1)/4)*{b})%65536;",
+                    a = round.a,
+                    b = round.b,
+                );
+            }
+            1 => {
+                let _ = write!(
+                    source,
+                    "blo=bl%256;bhi=(bl-blo)/256;bf=(blo*{a}+bhi*{b}+blo*bhi*{c}+brk+((bi-1)/4)*{position})%65536;",
+                    a = round.a,
+                    b = round.b,
+                    c = round.c,
+                    position = round.position,
+                );
+            }
+            _ => {
+                let _ = write!(
+                    source,
+                    "bf=(bl*{a}+brk+((bi-1)/4)*{b})%65536;bf=(bf*bf+bf*{c}+brk+((bi-1)/4)*{position})%65536;",
+                    a = round.a,
+                    b = round.b,
+                    c = round.c,
+                    position = round.position,
+                );
+            }
+        }
+        source.push_str("bl,br=(br-bf)%65536,bl;");
+    }
+    let _ = write!(
+        source,
+        "bl=(bl-bcl)%65536;br=(br-bcr)%65536;bo[#bo+1]=NCH(bl%256);bo[#bo+1]=NCH((bl-bl%256)/256);\
+bo[#bo+1]=NCH(br%256);bo[#bo+1]=NCH((br-br%256)/256);bcl,bcr=cl,cr end;\
+local BP=TC(bo);bo=nil;local bd=SB(BP,1)+SB(BP,2)*256+SB(BP,3)*65536+SB(BP,4)*16777216;\
+local bn=SB(BP,5)+SB(BP,6)*256+SB(BP,7)*65536+SB(BP,8)*16777216;\
+local bc=SB(BP,9)+SB(BP,10)*256+SB(BP,11)*65536+SB(BP,12)*16777216;\
+local bt=SB(BP,13)+SB(BP,14)*256+SB(BP,15)*65536+SB(BP,16)*16777216;\
+local bpad=(4-(16+bn)%4)%4;if bn>16777216 or #BP~=16+bn+bpad or bd~=bdesc then E()end;\
+local bexpect=(bn+bd*257+(bk0%65536)*65536+(bk1%65536)*17+{cookie})%4294967296;if bc~=bexpect then E()end;\
+local bsa,bsb=1,0;for bj=17,16+bn do bsa=(bsa+SB(BP,bj))%65521;bsb=(bsb+bsa)%65521 end;\
+bexpect=(bsa+bsb*65536+bc*263+bd*31+(bk0%65536)*65536+bk1%65536+{tag})%4294967296;\
+if bt~=bexpect then E()end;for bj=1,bpad do if SB(BP,16+bn+bj)~=(bk0+bk1*bj+{padding})%256 then E()end end;\
+B=SS(BP,17,16+bn);BP=nil;",
+        cookie = params.cookie_salt,
+        tag = params.tag_salt,
+        padding = params.padding_salt,
+    );
+    source
 }
 
 #[cfg(test)]

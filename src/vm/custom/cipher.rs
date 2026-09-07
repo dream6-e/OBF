@@ -23,6 +23,42 @@ pub(crate) struct Keystream {
     state2: u64,
 }
 
+/// Versioned block-transport envelope layered between the constant-pool
+/// cipher and the outer byte stream. The public OBF format is unaffected.
+pub(crate) const BLOCK_TRANSPORT_VERSION: u64 = 1;
+pub(crate) const BLOCK_TRANSPORT_HEADER: usize = 16;
+
+/// One round of the custom 32-bit generalized Feistel network. No inverse of
+/// the round function itself is required; decryption walks the same rounds in
+/// reverse. The three function families are deliberately different arithmetic
+/// shapes, but all operations remain exact in a Lua double.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BlockRound {
+    pub(crate) family: u64,
+    pub(crate) a: u64,
+    pub(crate) b: u64,
+    pub(crate) c: u64,
+    pub(crate) position: u64,
+    pub(crate) key_a: u64,
+    pub(crate) key_b: u64,
+    pub(crate) salt: u64,
+}
+
+/// Per-seed block schedule. Only these algorithm parameters are emitted; the
+/// two key states are reconstructed at runtime from the three audited shares,
+/// the opcode-permutation term and the encrypted frame length.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BlockParams {
+    pub(crate) rounds: Vec<BlockRound>,
+    pub(crate) key_coefficients: [[u64; 5]; 2],
+    pub(crate) key_salts: [u64; 2],
+    pub(crate) iv_salts: [u64; 2],
+    pub(crate) descriptor_salt: u64,
+    pub(crate) cookie_salt: u64,
+    pub(crate) tag_salt: u64,
+    pub(crate) padding_salt: u64,
+}
+
 impl Keystream {
     pub(crate) fn new(params: StreamParams, state: u64) -> Self {
         // Dual-family second state derives from the first at run time on
@@ -118,6 +154,268 @@ pub(crate) fn cipher_params(seed: u64) -> CipherParams {
         ],
         constant_rounds: 9 + (random.next_u64() % 5) as u32,
     }
+}
+
+/// Seed-specific 7..=10-round block schedule. Every schedule contains all
+/// three round-function families, while order and coefficients vary. Keeping
+/// this on a dedicated random stream means future transport revisions do not
+/// silently perturb the existing byte/constant keystream parameters.
+pub(crate) fn block_params(seed: u64) -> BlockParams {
+    let mut random = crate::random::Prng::new(seed ^ 0x626c_6f63_6b37_7631);
+    let word = |random: &mut crate::random::Prng| 1 + random.next_u64() % 65_535;
+    let odd = |random: &mut crate::random::Prng| 3 + 2 * (random.next_u64() % 31);
+    let count = 7 + (random.next_u64() % 4) as usize;
+    let mut families: Vec<u64> = (0..count).map(|index| (index % 3) as u64).collect();
+    random.shuffle(&mut families);
+    let rounds = families
+        .into_iter()
+        .map(|family| BlockRound {
+            family,
+            a: word(&mut random),
+            b: word(&mut random),
+            c: word(&mut random),
+            position: word(&mut random),
+            key_a: word(&mut random),
+            key_b: word(&mut random),
+            salt: word(&mut random),
+        })
+        .collect();
+    let mut coefficients = [[0u64; 5]; 2];
+    for row in &mut coefficients {
+        for value in row {
+            *value = odd(&mut random);
+        }
+    }
+    BlockParams {
+        rounds,
+        key_coefficients: coefficients,
+        key_salts: [
+            random.next_u64() % 2_147_483_646,
+            random.next_u64() % 2_147_483_646,
+        ],
+        iv_salts: [word(&mut random), word(&mut random)],
+        descriptor_salt: word(&mut random),
+        cookie_salt: random.next_u64() % 4_294_967_296,
+        tag_salt: random.next_u64() % 4_294_967_296,
+        padding_salt: word(&mut random),
+    }
+}
+
+/// Padded ciphertext length for the private transport envelope. The sixteen
+/// encrypted framing bytes carry version/schedule, original length, a dynamic
+/// cookie and a keyed integrity tag.
+pub(crate) fn block_transport_len(payload_len: usize) -> Result<usize, Diagnostic> {
+    payload_len
+        .checked_add(BLOCK_TRANSPORT_HEADER + 3)
+        .map(|length| length / 4 * 4)
+        .ok_or_else(|| Diagnostic::new("block transport length overflow"))
+}
+
+/// Two large runtime key states. Values are kept modulo 2^31-1 rather than
+/// serialized as 16-bit words, so neither state appears as a literal; each
+/// round derives its own 16-bit subkey from both states.
+pub(crate) fn block_key_states(
+    shares: &[u64; 3],
+    perm_term: u64,
+    ciphertext_len: usize,
+    params: &BlockParams,
+) -> [u64; 2] {
+    let inputs = [
+        shares[0],
+        shares[1],
+        shares[2],
+        perm_term,
+        ciphertext_len as u64,
+    ];
+    let mut states = [0u64; 2];
+    for index in 0..2 {
+        let value = inputs
+            .iter()
+            .zip(params.key_coefficients[index])
+            .fold(params.key_salts[index], |sum, (&input, coefficient)| {
+                sum + input * coefficient
+            });
+        states[index] = 1 + value % 2_147_483_646;
+    }
+    states
+}
+
+fn block_descriptor(keys: [u64; 2], params: &BlockParams) -> u64 {
+    let high = (keys[0] + keys[1] + params.descriptor_salt) % 256;
+    BLOCK_TRANSPORT_VERSION + params.rounds.len() as u64 * 256 + 4 * 65_536 + high * 16_777_216
+}
+
+fn block_cookie(length: usize, descriptor: u64, keys: [u64; 2], params: &BlockParams) -> u64 {
+    (length as u64
+        + descriptor * 257
+        + (keys[0] % 65_536) * 65_536
+        + (keys[1] % 65_536) * 17
+        + params.cookie_salt)
+        % 4_294_967_296
+}
+
+fn block_tag(
+    payload: &[u8],
+    descriptor: u64,
+    cookie: u64,
+    keys: [u64; 2],
+    params: &BlockParams,
+) -> u64 {
+    (u64::from(custom::checksum(payload))
+        + cookie * 263
+        + descriptor * 31
+        + (keys[0] % 65_536) * 65_536
+        + keys[1] % 65_536
+        + params.tag_salt)
+        % 4_294_967_296
+}
+
+fn block_round_value(value: u64, keys: [u64; 2], block: u64, round: BlockRound) -> u64 {
+    let subkey =
+        (keys[0] * round.key_a + keys[1] * round.key_b + round.salt + block * round.position)
+            % 65_536;
+    match round.family {
+        0 => (value * value + value * round.a + subkey + block * round.b) % 65_536,
+        1 => {
+            let low = value % 256;
+            let high = (value - low) / 256;
+            (low * round.a
+                + high * round.b
+                + low * high * round.c
+                + subkey
+                + block * round.position)
+                % 65_536
+        }
+        _ => {
+            let first = (value * round.a + subkey + block * round.b) % 65_536;
+            (first * first + first * round.c + subkey + block * round.position) % 65_536
+        }
+    }
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&(value as u32).to_le_bytes());
+}
+
+/// Encrypt the constant-obscured semantic image into chained four-byte
+/// blocks. Addition modulo 2^16 is used instead of bit operators so the same
+/// generalized Feistel network runs on stock Lua 5.1 and Luau.
+pub(crate) fn encrypt_block_transport(
+    payload: &[u8],
+    shares: &[u64; 3],
+    perm_term: u64,
+    params: &BlockParams,
+) -> Result<Vec<u8>, Diagnostic> {
+    let total = block_transport_len(payload.len())?;
+    if payload.len() > 16_777_216 || total > 16_777_232 {
+        return Err(Diagnostic::new("block transport payload exceeds limit"));
+    }
+    let keys = block_key_states(shares, perm_term, total, params);
+    let descriptor = block_descriptor(keys, params);
+    let cookie = block_cookie(payload.len(), descriptor, keys, params);
+    let tag = block_tag(payload, descriptor, cookie, keys, params);
+    let mut frame = Vec::with_capacity(total);
+    push_u32(&mut frame, descriptor);
+    push_u32(&mut frame, payload.len() as u64);
+    push_u32(&mut frame, cookie);
+    push_u32(&mut frame, tag);
+    frame.extend_from_slice(payload);
+    let padding = total - frame.len();
+    for index in 1..=padding {
+        frame.push(((keys[0] + keys[1] * index as u64 + params.padding_salt) % 256) as u8);
+    }
+    debug_assert_eq!(frame.len(), total);
+
+    let mut chain_left = (keys[0] + keys[1] * 3 + params.iv_salts[0]) % 65_536;
+    let mut chain_right = (keys[1] + keys[0] * 5 + params.iv_salts[1]) % 65_536;
+    let mut out = Vec::with_capacity(total);
+    for (index, chunk) in frame.chunks_exact(4).enumerate() {
+        let mut left = (u64::from(u16::from_le_bytes([chunk[0], chunk[1]])) + chain_left) % 65_536;
+        let mut right =
+            (u64::from(u16::from_le_bytes([chunk[2], chunk[3]])) + chain_right) % 65_536;
+        for &round in &params.rounds {
+            let value = block_round_value(right, keys, index as u64, round);
+            (left, right) = (right, (left + value) % 65_536);
+        }
+        out.extend_from_slice(&(left as u16).to_le_bytes());
+        out.extend_from_slice(&(right as u16).to_le_bytes());
+        chain_left = left;
+        chain_right = right;
+    }
+    Ok(out)
+}
+
+/// Reverse the block envelope and verify version, round count, exact padded
+/// length, dynamic cookie, integrity tag and every padding byte before exposing
+/// the inner image. A wrong seed or any malformed frame is a Diagnostic.
+pub(crate) fn decrypt_block_transport(
+    ciphertext: &[u8],
+    shares: &[u64; 3],
+    perm_term: u64,
+    params: &BlockParams,
+) -> Result<Vec<u8>, Diagnostic> {
+    let bad = |message: &str| Diagnostic::new(format!("block transport: {message}"));
+    if ciphertext.len() < BLOCK_TRANSPORT_HEADER
+        || ciphertext.len() % 4 != 0
+        || ciphertext.len() > 16_777_232
+    {
+        return Err(bad("invalid ciphertext length"));
+    }
+    let keys = block_key_states(shares, perm_term, ciphertext.len(), params);
+    let mut chain_left = (keys[0] + keys[1] * 3 + params.iv_salts[0]) % 65_536;
+    let mut chain_right = (keys[1] + keys[0] * 5 + params.iv_salts[1]) % 65_536;
+    let mut frame = Vec::with_capacity(ciphertext.len());
+    for (index, chunk) in ciphertext.chunks_exact(4).enumerate() {
+        let cipher_left = u64::from(u16::from_le_bytes([chunk[0], chunk[1]]));
+        let cipher_right = u64::from(u16::from_le_bytes([chunk[2], chunk[3]]));
+        let mut left = cipher_left;
+        let mut right = cipher_right;
+        for &round in params.rounds.iter().rev() {
+            let old_right = left;
+            let value = block_round_value(old_right, keys, index as u64, round);
+            let old_left = (right + 65_536 - value) % 65_536;
+            left = old_left;
+            right = old_right;
+        }
+        left = (left + 65_536 - chain_left) % 65_536;
+        right = (right + 65_536 - chain_right) % 65_536;
+        frame.extend_from_slice(&(left as u16).to_le_bytes());
+        frame.extend_from_slice(&(right as u16).to_le_bytes());
+        chain_left = cipher_left;
+        chain_right = cipher_right;
+    }
+    let u32_at = |offset: usize| {
+        u64::from(u32::from_le_bytes(
+            frame[offset..offset + 4].try_into().unwrap(),
+        ))
+    };
+    let descriptor = u32_at(0);
+    let length = usize::try_from(u32_at(4)).map_err(|_| bad("payload length overflow"))?;
+    if length > 16_777_216
+        || block_transport_len(length).map_err(|_| bad("length overflow"))? != frame.len()
+    {
+        return Err(bad("framed length mismatch"));
+    }
+    if descriptor != block_descriptor(keys, params) {
+        return Err(bad("version or schedule mismatch"));
+    }
+    let cookie = u32_at(8);
+    if cookie != block_cookie(length, descriptor, keys, params) {
+        return Err(bad("dynamic cookie mismatch"));
+    }
+    let tag = u32_at(12);
+    let payload = frame[BLOCK_TRANSPORT_HEADER..BLOCK_TRANSPORT_HEADER + length].to_vec();
+    if tag != block_tag(&payload, descriptor, cookie, keys, params) {
+        return Err(bad("integrity tag mismatch"));
+    }
+    for (offset, &byte) in frame[BLOCK_TRANSPORT_HEADER + length..].iter().enumerate() {
+        let expected =
+            ((keys[0] + keys[1] * (offset as u64 + 1) + params.padding_salt) % 256) as u8;
+        if byte != expected {
+            return Err(bad("padding mismatch"));
+        }
+    }
+    Ok(payload)
 }
 
 /// Structural inputs each audited probe function receives from the entry:

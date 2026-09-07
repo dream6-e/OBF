@@ -1,6 +1,6 @@
 # OBF
 
-面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox 方向** 的 std-only Rust 工具链。默认 `virtualize` 已实现真正的 **AST → IR → 自定义 Bytecode → 寄存器 VM**：公开 `.obf` 固定 **32-byte Header**，指令操作数以 **7-bit varint** 序列化（小数值 1 byte，较大值 2~N bytes），并有独立常量/捕获/prototype。生成器不依赖原生 compiler，不用 `load/loadstring` 委托执行；原生后端只通过 `--backend native` 显式选择。`.obf` 文件保持明文 canonical ISA2、与 seed 无关；包装成脚本时先降为私有 seed-specific **ISA6 semantic image**：use-site 不带 opcode、稳定 recipe ID 或明文 successor，而是携带三阶段 edge token 与绑定动态后继的五阶段 recipe token。live dictionary 只公开与真实 primitive **编码形式、目标 validator 和控制类别严格等价**的伪 descriptor；真实 1~4 primitive recipe 被拆为 1~2 primitive fragment，recipe ID 只选随机入口 stage，全部 stage 再跨 recipe 全局打乱。每次 fetch 因而依次经过 edge、recipe 与独立 semantic-stage 三维分派。每个真实 prototype 的入口和抽样 CFG 边还会插入实际可达、实际执行的中性 bundle；record、兄弟 prototype 与 synthetic subtree 继续洗牌。随后才叠加 M6 双层传输混淆、base86 分段和最终一/两字母改名。该设计针对“dictionary 展开后逐 recipe 连续翻译”的静态恢复路径，但仍是可逆混淆，不宣称不可破解。
+面向 **Lua 5.1.5** 与 **Luau 0.735 / Roblox 方向** 的 std-only Rust 工具链。默认 `virtualize` 已实现真正的 **AST → IR → 自定义 Bytecode → 寄存器 VM**：公开 `.obf` 固定 **32-byte Header**，指令操作数以 **7-bit varint** 序列化（小数值 1 byte，较大值 2~N bytes），并有独立常量/捕获/prototype。生成器不依赖原生 compiler，不用 `load/loadstring` 委托执行；原生后端只通过 `--backend native` 显式选择。`.obf` 文件保持明文 canonical ISA2、与 seed 无关；包装成脚本时先降为私有 seed-specific **ISA7 semantic image**：use-site 不带 opcode、稳定 recipe ID 或明文 successor，而是携带三阶段 edge token 与绑定动态后继的五阶段 recipe token。live dictionary 只公开与真实 primitive **编码形式、目标 validator 和控制类别严格等价**的伪 descriptor；真实 1~4 primitive recipe 被拆为 1~2 primitive fragment，recipe ID 只选随机入口 stage，全部 stage 再跨 recipe 全局打乱。每次 fetch 因而依次经过 edge、recipe 与独立 semantic-stage 三维分派。每个真实 prototype 的入口和抽样 CFG 边还会插入实际可达、实际执行的中性 bundle；record、兄弟 prototype 与 synthetic subtree 继续洗牌。语义像随后依次经过常量池独立密钥流、动态双 key 的 32-bit 分组 transport v1、外层字节流，再做 base86 分段和最终一/两字母改名。该设计针对“dictionary 展开后逐 recipe 连续翻译”的静态恢复路径，但仍是可逆混淆，不宣称不可破解。
 
 新接手开发者请先阅读 [`项目交接总结.md`](项目交接总结.md)，其中集中记录架构、硬约束、测试门禁、常见陷阱和下一阶段优先级。
 
@@ -41,7 +41,7 @@ target/debug/obf virtualize --backend native --target lua51 --seed 123 -o script
 
 `--seed` 对 `minify`、`virtualize`、`wrap-bytecode` 有效，接受十进制或 `0x` 十六进制 `u64`。省略时每次生成新 seed，仅在 **stderr** 输出 `seed: N`，stdout 保持纯脚本；同源、同目标、同配置、同 seed 可逐字节复现。`compile` 输出 binary，`dump-ir` 输出可读 IR，二者不接受 seed；`--no-rename` 只用于 minify，`--backend` 只用于 virtualize。
 
-默认 AST/v2 路径的 seed **影响 ISA6 recipe ID/mask、live descriptor camouflage、semantic fragment 边界/入口/stage、三阶段 edge-token 与五阶段 recipe-token 参数、reachable neutral edge split、深层状态/谓词/死臂、label graph、record/prototype 顺序、最终 local/私有字段、包装键、密钥份额、探针调用顺序及嵌入密文**；公开 `.obf` 与 seed 无关，但解密后的私有 semantic image 随 seed 改变且同 seed 确定。不做压缩容器。显式 `--backend native` 另保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
+默认 AST/v2 路径的 seed **影响 ISA7 recipe ID/mask、live descriptor camouflage、semantic fragment 边界/入口/stage、三阶段 edge-token 与五阶段 recipe-token 参数、reachable neutral edge split、深层状态/谓词/死臂、label graph、record/prototype 顺序、最终 local/私有字段、包装键、密钥份额、分组轮数/轮族/静态参数/chaining 参数、探针调用顺序及嵌入密文**；公开 `.obf` 与 seed 无关，但解密后的私有 semantic image 随 seed 改变且同 seed 确定。不做压缩容器。显式 `--backend native` 另保留旧 OBF v1 的随机 opcode/dispatcher/数字写法。脚本输出均是单物理行；IR/inspect 报告和二进制文件不适用“脚本单行”的限制。随机短名不是加密，有限名称空间不保证任意两个 seed 都产生不同文本。
 
 ## AST 源码前端
 
@@ -98,11 +98,12 @@ target/debug/obf minify --target lua51 --no-rename -o script.min.lua script.lua
 source → 现有 AST / BindingId → typed register IR / basic blocks
        → 自定义指令选择 / 标签回填 → canonical OBF v2 / ISA2
        → seed semantic lowering（camouflaged descriptor + edge/recipe token + neutral graph）
-       → private ISA6（global semantic fragments）→ 目标端校验 / register VM
-       → 最终随机短名 / 单行化
+       → private ISA7（global semantic fragments）
+       → constant cipher → block transport v1 → outer stream → base86 三段
+       → 目标端逆序校验 / register VM → 最终随机短名 / 单行化
 ```
 
-这条链路**不调用原生 compiler，不存 native word，也不默默 fallback**。新 `ir::Module` 包含函数、常量、cell/upvalue 捕获和带符号后继的基本块；IR 的 branch 生成 `Test + Jump + Jump`。公开文件 Header 固定 **32 bytes**，含版本、目标、端序、宽度码、文件长度、prototype 数量、入口、ISA 版本和 Adler-32；canonical 指令流按 Form 写成 `[opcode][各字段 varint]`（A/AB/ABC/ABx/Ax，2~7 bytes）。`compile`/`inspect-bytecode`/`serialize` 仍遵守该公开 ISA2 规范；只有 `virtualize`/`wrap-bytecode` 在生成脚本内部把已验证 Program 重编码为 ISA6 camouflaged-recipe/edge-token graph。完整逐字段规范与 **49 条 primitive ISA** 见 [`自定义字节码.md`](自定义字节码.md)。
+这条链路**不调用原生 compiler，不存 native word，也不默默 fallback**。新 `ir::Module` 包含函数、常量、cell/upvalue 捕获和带符号后继的基本块；IR 的 branch 生成 `Test + Jump + Jump`。公开文件 Header 固定 **32 bytes**，含版本、目标、端序、宽度码、文件长度、prototype 数量、入口、ISA 版本和 Adler-32；canonical 指令流按 Form 写成 `[opcode][各字段 varint]`（A/AB/ABC/ABx/Ax，2~7 bytes）。`compile`/`inspect-bytecode`/`serialize` 仍遵守该公开 ISA2 规范；只有 `virtualize`/`wrap-bytecode` 在生成脚本内部把已验证 Program 重编码为 ISA7 camouflaged-recipe/edge-token graph，并包入 versioned block transport。完整逐字段规范与 **49 条 primitive ISA** 见 [`自定义字节码.md`](自定义字节码.md)。
 
 - Lua 5.1：46 个 `src/vm/opcode/lua51/c*.rs`；Luau：49 个 `src/vm/opcode/luau/c*.rs`。它们现在是 primitive 语义模板；生成器把程序的 1~4-op recipe 拆成 1~2-op fragments，经随机 `sid` continuation 执行，而不是在 use-site 上做固定 opcode→handler 或 recipe→连续 body 分派。
 - 每 frame 为寄存器文件；local 使用 heap cell，临时值为普通寄存器，闭包引用 cell。循环的新一轮/复用寄存器不会破坏逃逸闭包。
@@ -121,20 +122,20 @@ source → 现有 AST / BindingId → typed register IR / basic blocks
 
 Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`、`vm::custom::{compile,emit}`，以及默认 `vm::virtualize`。`inspect-bytecode` 自动区分 OBF v2 与原生 chunk；`wrap-bytecode` 可把已保存的 `.obf` 独立包装为 VM。
 
-所有 decoder、runtime、dispatcher、handler、静态方法适配器和执行尾部组装完后，自定义 VM 先缩短私有字段，再调用一次私有 `minify::finalize_vm` 统一随机 local、分号分隔和单行化；之后不追加代码。重解析复核绑定图、同域唯一性、名称长度和确实换名；双层解密后的内容须等于同一 Program/seed 确定性重编码出的 ISA6 semantic image，而不再等于输入 canonical `.obf`。生成器环境例外仍严格审计：`local G=(getfenv and getfenv(0))or _G`，加上三个 payload 密钥函数内**形状完全固定**的环境探针（Luau `debug and debug.info(loadstring,"s")` 结果须为 `"[C]"`；Lua 5.1 `debug and debug.getinfo(loadstring,"S")` 须 `what=="C"`）。探针不通过则静默中止、无任何输出；没有公开忽略反射的开关。
+所有 decoder、runtime、dispatcher、handler、静态方法适配器和执行尾部组装完后，自定义 VM 先缩短私有字段，再调用一次私有 `minify::finalize_vm` 统一随机 local、分号分隔和单行化；之后不追加代码。重解析复核绑定图、同域唯一性、名称长度和确实换名；逆序移除 outer stream、block transport 与 constant cipher 后的内容须等于同一 Program/seed 确定性重编码出的 ISA7 semantic image，而不再等于输入 canonical `.obf`。生成器环境例外仍严格审计：`local G=(getfenv and getfenv(1))or _G`，加上六个 payload 函数内**形状完全固定**的环境探针（三 share + 三 segment）（Luau `debug and debug.info(loadstring,"s")` 结果须为 `"[C]"`；Lua 5.1 `debug and debug.getinfo(loadstring,"S")` 须 `what=="C"`）。探针不通过则静默中止、无任何输出；没有公开忽略反射的开关。
 
 ### 私有 semantic image 与 payload 传输层
 
-- **ISA6 语义虚拟化（针对静态破解报告，第三阶段）**：`generate` 不再嵌入调用者传入的 canonical 指令 bytes，而是从已验证 `Program` 确定性构造 seed-specific image。ISA5 的 1~4 primitive recipe、三层 edge token、五层 recipe token、reachable neutral bundle、record/prototype 洗牌和 synthetic subtree 全部保留。ISA6 将 live recipe dictionary 改为伪 descriptor：只在 encoding Form、目标 operand validator 与 control/terminal graph class 完全相同的六类 family 内替换，测试要求超过三分之一 live recipe 且至少 45% live primitive 被 camouflage；真实执行序列只留在 emitter。每个多 primitive recipe 必定拆为多个 1~2 primitive fragment；3/4-op recipe 至少保留一个 2-op fused fragment。`rid` 分派只把控制交给随机三位入口 `sid`，所有 fragment 的 `sid` arm 跨 recipe 全局打乱并独立分成 2~4 组；只有 final fragment 回到 fetch，Return/TailCall 保持词法终止。持久 code record 仍不缓存明文后继、recipe ID 或 stage。
-- 生成时用 seed 派生的 **Lehmer 密钥流（48271 mod 2147483647）** 对上述 ISA6 image 逐字节 XOR，密文字节分布均匀（Shannon 熵 > 7.5 bits/byte，测试断言高于明文）；所有中间量 < 2^53，Lua 双精度与 Rust 逐位一致。
-- 密钥 **动态生成、零字面量**：三个份额不在脚本中存储，由每个探针函数在运行时从脚本自身结构（入口传入的 payload 表数字键对 `(a,b)`：`x=(a*31+b)%2147483647` 再叠 3/5/7 轮 `x=48271*x%2147483647` 步进）计算得出；探针通过后才计算并返回份额。
-- **常量池独立加密（第二层）**：嵌入镜像中每个常量记录的 payload（布尔值字节、数字/整数 8 字节、字符串内容）在外层加密之前，再用**另一把结构密钥**（不同 wrapper 键对 + 11 轮步进 + 长度混合）单独 XOR；字符串长度保留明文作框架元数据。剥掉外层密文后常量仍是密文；密钥同样零字面量。
-- **base86 传输层 + 分段打乱**：双重加密后的镜像整体 base86 编码（86 个可打印字符、约 1.25 字符/字节，比 4 字符十进制转义便宜得多），切成三段并按 seed 洗牌分放到三个 `[数字]=function` 分段函数；**每个分段函数先重跑 loadstring 原生探针再解码自己的分段**（连同份额探针共 6 个探针函数）。验证侧 `extract_embedded` 通过试全部 6 种段序 + 全镜像 Adler-32 找出唯一有效顺序——顺序本身不在脚本中存储。
-- **固定水印 `XXS:` + 隐藏式双函数检测**：base86 流解码后的前 4 字节固定为 `XXS:`（明文传输水印）。检测被拆成两个 payload 函数：一个通用的大端 4 字节打包器 + 一个不透明 u32 常数比较器——两个函数都不出现 "XXS:" 字样，脚本全文亦无该字符串（测试断言）；不匹配即静默中止。水印同时把“哪个段是流首段”钉死，加强段序判定。
-- **M7 结构随机化（不含外层包装变体）**：seed 驱动的等价结构变体进入默认路径——F3 primitive 校验按 `o`、ISA6 recipe 入口按 `rid`、semantic fragment 按 `sid` 形成三维 dispatch；各维独立拆为 2~4 个 grouped chain，每条比较随机取 `x==K`/`K==x`/`not(x~=K)`/`x-K==0`。整数边界与元方法分支也有独立等价变体。`tools/bench-vm.sh` 继续看护性能；descriptor camouflage 与 fragment routing 有意识用体积换去连续同构，当前硬预算为 **85,000/94,000 B**（Lua51/Luau），单次运行灾难阈值仍为 1500ms。
-- **不透明真假分支与三类 semantic camouflage**：入口方法体仍以恒真/恒假式包住实际链和不运行的真指令，F3 还保留不可能 primitive 值的死臂。ISA6 同时保留 graph-unreferenced poison recipe、两套 token decoder dead state、graph-referenced/executed neutral bundle，并新增**真实 live recipe 上的 validation-equivalent descriptor 谎报**。前两类仍可分别靠 reachability/中性效果分析过滤；live descriptor 不能按“未引用”删除，必须继续关联全局 fragment stage 才能恢复真实语义。
-- 入口按 **seed 洗牌的顺序**调用三个函数并传入各自的结构键对，decoder 段以 `1+(s1+s2+s3+31*#B)%2147483646`（混入密文长度）重建密钥流并继续 magic/Adler/ISA6 descriptor/edge/recipe-token/图结构校验；份额与密钥流初态的十进制串不出现在脚本任何位置（单元测试逐 seed 断言）。`.obf` 文件与 `compile` 输出保持明文 canonical、与 seed 无关；`vm::custom::decrypt_embedded` 现在返回解开两层后的**私有 ISA6 image**，用于和同 Program/seed 的 deterministic semantic re-encode 对照。
-- 这是提高静态分析成本的混淆层，**不是密码学加密**；密钥派生自 seed，不能抵御持有脚本的攻击者。
+- **ISA7 当前私有像（继承 ISA6 语义反同构）**：`generate` 不嵌入调用者传入的 canonical 指令 bytes，而从已验证 `Program` 确定性构造 seed-specific image。ISA6 的 validation-equivalent live descriptor、1~2 primitive global fragments、`rid→sid`、ISA5 的三层 edge token/五层 recipe token、reachable neutral bundle、record/prototype 洗牌和 synthetic subtree 全部保留；持久 code record 不缓存明文 successor、recipe ID 或 stage。ISA7 版本号同时钉住新的 transport 契约。
+- **常量池独立密钥流（内层）**：每个常量记录的 payload（布尔值字节、数字/整数 8 字节、字符串内容）先用独立结构密钥 XOR；字符串长度保留作可扫描框架元数据，并重算 semantic image 的 Adler-32。去掉后续 transport 后，常量仍是密文。
+- **动态双 key 的 32-bit block transport v1（中层）**：constant-encrypted image 先进入 16-byte frame（descriptor/version/round count/block width、原长、dynamic cookie、keyed integrity tag）并补 0~3 个逐位校验 padding byte，再按四字节块执行 7~10 轮 generalized Feistel。每个 seed 洗牌三类不同算术 round family，并改变轮数、全部静态轮参数、IV/chaining 参数；每轮 subkey 来自两个 31-bit key state 与 block index。两个最终 key state 不作为字面量保存，而由目标端在三个环境探针输出份额、重建 opcode permutation 项和 padded ciphertext 长度都可用后动态计算。
+- **外层字节密钥流**：block ciphertext 最后再走独立 seed-specific stream family（单 Lehmer、双 Lehmer和或 mod-2^32 LCG）逐字节 XOR。三个探针份额按 seed 洗牌的调用顺序产生，但回填到各自 canonical `c1/c2/c3` 槽；因此非对称 block-key 系数在 Rust 与 Lua 两端严格一致。所有算术中间量保持在 Lua double 可精确表示范围内。
+- **严格 fail-closed frame**：目标端必须依次通过 ciphertext 长度/4-byte 对齐、descriptor、原长与精确 padded length、dynamic cookie、payload tag 和每个 padding byte；任一错误都在 semantic parser 与用户代码之前无输出中止。Rust 测试逐 ciphertext byte 翻转并覆盖 wrong-share/wrong-permutation/wrong-seed/截断/扩展；双目标集成测试在保持 base86 合法且不触碰水印的情况下修改首/中/尾密文组，均须静默失败。
+- **base86 传输 + 分段打乱**：三层变换后的数据整体 base86 编码（86 个可打印字符、约 1.25 字符/byte），切成三段并按 seed 洗牌到三个 `[数字]=function`；每段先重跑原生 loadstring 探针。验证侧试全部 6 种段序，只有同时通过水印、outer inverse、block frame 和 inner Adler 的唯一顺序可接受。
+- **固定水印 `XXS:` + 隐藏式双函数检测**：base86 流前 4 byte 固定为 `XXS:`。检测拆为通用大端 packer 与不透明 u32 comparator，函数及脚本全文均不出现该字符串；不匹配即无输出中止。
+- **M7/ISA7 结构随机化**：F3 primitive 校验按 `o`、recipe 入口按 `rid`、semantic fragment 按 `sid` 形成三维 dispatch，各维独立拆成 2~4 个 grouped chain 并随机选择等价比较写法。入口真假不透明分支、graph-unreferenced poison recipe、token dead state、graph-referenced/executed neutral bundle 与 live descriptor camouflage 全部保留。硬体积预算仍为 **85,000/94,000 B**（Lua51/Luau），单次运行灾难阈值 1500ms。
+- `.obf` 与 `compile` 仍是明文 canonical ISA2、与 seed 无关；`extract_embedded` 去掉 outer 与 block 后返回 constant-encrypted ISA7 image，`decrypt_embedded` 再去掉 constant layer 后返回完整私有 ISA7 image，用于 deterministic semantic re-encode 对照。
+- 这些层只提高静态分析与篡改成本，**不是经安全证明的密码学加密或认证**；持有完整脚本的攻击者仍可模拟 decoder。它也不替代 ISA6 已实现的语义反同构，更不代表静态恢复问题已全部解决。
 
 **VM 私有字段也压缩为一/两字母**：`code`、`tags`、`parent`、`flags`、`shared`、`self`、`cached` 及原有短字段共 14 个，当前全部可分配为互不冲突的随机单字母。decoder、校验器、运行时、缓存和 opcode handler 的构造/读/写共用同一映射；同 seed 复现，使用独立随机流，不改变既有 local 名称或 bytecode。
 
@@ -150,8 +151,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 80,369 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 89,149 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 83,640 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 92,116 B |
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。本版优先完整可执行与格式清晰，不声称体积比旧 native backend 更小。
 
@@ -180,8 +181,8 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 1. 运行 Rust 全目标测试、rustfmt 与 debug/release 构建；
 2. 对原有 basic/AST/scope/reflection 语料保持双端源码/压缩的语法、运行、seed、反射保留和短名安全门禁；
 3. 检查原生 chunk，同时验证 OBF v2 Header、varint 指令流、截断、字节损坏、恶意结构、round-trip 与资源上限；
-4. 对 ISA6 fetch 在 ED/RD 动态解出 edge/recipe token 后做运行插桩，再按独立 `sid` fragment graph 展开真实 primitive 序列确认覆盖 **Lua51 46/46、Luau 49/49**；同时证明入口 neutral recipe 实际执行、未引用 poison recipe 不执行，并检查 live descriptor 谎报不弱于 45%；
-5. 编译/执行每份 VM seed 变体，确认单行、不委托 loadstring、没有生成器错误消息、所有显式 local 最后才改名，并验证双层解密结果等于同 Program/seed 的 deterministic semantic re-encode；
+4. 对 ISA7 fetch 在 ED/RD 动态解出 edge/recipe token 后做运行插桩，再按独立 `sid` fragment graph 展开真实 primitive 序列确认覆盖 **Lua51 46/46、Luau 49/49**；同时证明入口 neutral recipe 实际执行、未引用 poison recipe 不执行，并检查 live descriptor 谎报不弱于 45%；
+5. 编译/执行每份 VM seed 变体，确认单行、不委托 loadstring、没有生成器错误消息、所有显式 local 最后才改名，并验证 constant→block→outer 三层逆序结果等于同 Program/seed 的 deterministic semantic re-encode；
 6. 检查新目标目录的 46/49 个 handler 和旧兼容目录的 38/91 个 handler；
 7. 独立执行 `dump-ir → compile → inspect → wrap`，证明缺少原生 compiler 也能生成默认 VM；
 8. 比较 debug/release 的 binary 和 VM、默认虚拟化与独立 wrap、根目录 golden；
@@ -189,7 +190,7 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 10. 额外覆盖多返回值/nil、变量求值时机、闭包、循环、20k 尾调用、coroutine/回调、i64、导出模块、userdata NAMECALL、GC 及 CLI 失败不覆盖文件；
 11. `tests/semicolons.rs` 检查双目标语句分隔、必需空格、调用后缀、嵌套函数/类型/插值、字符串字节、已有分号、空块、非法源码、CLI/两 VM 后端；内部测试覆盖所有语料的边界完整性、改名偏移、幂等性和 10,000 相邻块；
 12. `tests/vm_parity.rs` 的 145 个生成式组合及应用式语料检查求值顺序、闭包身份、迭代器、捕获、返回值/模块和控制流；额外执行应用语料的 debug/release binary/VM 与原生 stdout 对照，检查修订 1 兼容性；
-13. `tests/private_fields.rs` 与私有字段内部测试检查 14 字段双射、单/双字母池、关键字/冲突/越界拒绝、marker-like 用户方法名、公开字段/导出保护、CLI/修订 1 包装，以及输入 `.obf` 仍 canonical、内嵌内容则严格为 ISA6 semantic image。
+13. `tests/private_fields.rs` 与私有字段内部测试检查 14 字段双射、单/双字母池、关键字/冲突/越界拒绝、marker-like 用户方法名、公开字段/导出保护、CLI/修订 1 包装，以及输入 `.obf` 仍 canonical、内嵌内容严格为 ISA7 semantic image；block 专项另检查 7~10 轮三 family schedule、key 零字面量、逐字节 corruption 与双目标 fail-closed。
 
 `tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
@@ -203,7 +204,9 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 2026-09-08 第二批将 private wire 提升为 **ISA5**：next/skip 改为 source/prototype/edge-kind 绑定的三阶段 token，新增 3-live/3-dead `ED`，validator 与每次 fetch 动态恢复后继且不缓存明文；每个真实 prototype 入口及抽样 CFG 边插入可达/可执行 neutral bundle。新增 edge-token 逆元与 64-context 差异、unknown successor fail-closed、neutral 实际执行/poison 不执行及双状态机密度回归。固定 seed golden 为 **71,084/78,081 B**，SHA-256 分别为 `d6bd86191a05ccd45cc5fd59634e2e5948a8b9837fd46c595a17cbe3023c7fef` / `a3ea405964c01727681d11e277a5bb8c7c6021be4ca47253a76b35dc21e26c71`；预算仍为 72,000/80,000 B。完整门禁 **PASS175（63 单元 + 112 集成）**；bench 为 Lua51 46 ms / 23.0x、Luau 62 ms / 20.7x。
 
-2026-09-08 第三批将 private wire 提升为 **ISA6**：live dictionary 不再自描述真实 primitive 序列，而是在严格相同 Form、validator 与控制类别的 family 内 seed-random camouflage；专项门要求超过三分之一 live recipe、至少 45% live op 的 descriptor 与执行语义不同。所有多 primitive recipe 被拆成 1~2 primitive fragments，`rid` 只路由随机入口 `sid`，fragment arms 跨 recipe 全局洗牌并形成独立 grouped dispatch；3/4-op recipe 保留随机 2-op fusion。固定 seed golden 为 **80,369/89,149 B**，SHA-256 分别为 `1be51fd30c946c4803d311b9c9cb3cbb7fbfe05b7d09826a5afc316209e06f78` / `3009575f7aef69b4ecfa331c09cfdc68fb0e9c4791efa3c8b88e0abf08508cfa`；预算有意识调整为 85,000/94,000 B。完整门禁 **PASS176（64 单元 + 112 集成）**；bench 为 Lua51 47 ms / 23.5x、Luau 64 ms / 21.3x。动态密钥/自定义分组加密、全局 prototype/function segment pool 与函数 inlining/outlining/reorder 仍属后续阶段。
+2026-09-08 第三批将 private wire 提升为 **ISA6**：live dictionary 不再自描述真实 primitive 序列，而是在严格相同 Form、validator 与控制类别的 family 内 seed-random camouflage；专项门要求超过三分之一 live recipe、至少 45% live op 的 descriptor 与执行语义不同。所有多 primitive recipe 被拆成 1~2 primitive fragments，`rid` 只路由随机入口 `sid`，fragment arms 跨 recipe 全局洗牌并形成独立 grouped dispatch；3/4-op recipe 保留随机 2-op fusion。固定 seed golden 为 **80,369/89,149 B**，SHA-256 分别为 `1be51fd30c946c4803d311b9c9cb3cbb7fbfe05b7d09826a5afc316209e06f78` / `3009575f7aef69b4ecfa331c09cfdc68fb0e9c4791efa3c8b88e0abf08508cfa`；预算有意识调整为 85,000/94,000 B。完整门禁 **PASS176（64 单元 + 112 集成）**；bench 为 Lua51 47 ms / 23.5x、Luau 64 ms / 21.3x。当时动态密钥/自定义分组加密仍属后续阶段。
+
+2026-09-08 第四批将 private wire 提升为 **ISA7** 并加入独立 **block transport v1**：constant-encrypted semantic image 先封入 16-byte 严格 frame，再进入 seed-specific 7~10 轮、三 family 的 32-bit generalized Feistel 与 ciphertext chaining，最后才走既有 outer stream。双 key state 由运行时探针份额、opcode permutation 项与 padded length 非对称派生，最终值零字面量；目标端校验 descriptor/version/round count/block width、原长、cookie、tag 与 padding 后才把 image 交给 parser。新增 direct roundtrip/wrong-seed/全 ciphertext 逐字节 corruption/schedule diversity/key non-leak 单元门，以及保持 base86 和水印有效的双目标首中尾密文 corruption 静默失败集成门。固定 seed golden 为 **83,640/92,116 B**，SHA-256 分别为 `499ebc32d10ba9543f233380aa20b894a4b921740bac4fc7e77e4e31e2f87afa` / `35c80e5e890c42a7b8f029aacab790d781cc8fcb672eeaffdb55b637c62e8607`；预算保持 85,000/94,000 B。完整门禁 **PASS178（65 单元 + 113 集成）**；bench 为 Lua51 58 ms / 29.0x、Luau 81 ms / 27.0x。该层仍是可逆混淆，不改变 ISA6 语义层威胁结论；全局 prototype/function segment pool 与函数 inlining/outlining/reorder 仍属后续阶段。
 
 2026-09-06 指令序列化改为 7-bit varint 后的完整矩阵 **PASS 151**（41 单元 + 110 集成）：此前 150 项全部保留，`custom_bytecode` 新增 1 项 varint codec 回归（canonical/非最小编码、字段上限、带外 code 字节数、尾随字节、varint 截断与逐 Word 语义拒绝）。文件内指令按 Form 列写成 `[opcode][字段 varint]`（2~7 bytes），prototype header 追加 `code_byte_count`（20→24 bytes），Header 宽度码改为 `0`；目标 decoder 校验后展开回定长 4-byte 指令串，fetch-loop/handler/ISA 编号完全不变。两份示例 bytecode 缩小 **19.7% / 20.4%**（6,879→5,525 / 8,257→6,575 B），脚本 33,316→29,356 / 34,066→28,729 B；ISA 修订 1/2 语义、46/49 执行覆盖、debug/release 一致性不变。
 
@@ -211,7 +214,7 @@ VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_lu
 
 ## 当前边界与后续工作
 
-默认 AST/IR/v2 register VM、独立 reader/encoder、完整 primitive ISA、私有 ISA6 camouflaged-descriptor/edge-token/fragment lowering、可达 neutral CFG split 与最终随机短名均已可运行。后续优先扩展真实业务语料、语义/压力差分、寄存器/pack 开销及宿主边界，并继续实现动态密钥/自定义分组加密、全局 prototype/function segment pool 及函数 inlining/outlining/reorder；不能把现有 recipe/fragment graph 描述成不可逆，也不应再以单纯增加传输加密替代反虚拟化结构改进。
+默认 AST/IR/v2 register VM、独立 reader/encoder、完整 primitive ISA、私有 ISA7 camouflaged-descriptor/edge-token/fragment lowering、可达 neutral CFG split、动态 block transport 与最终随机短名均已可运行。后续优先扩展真实业务语料、语义/压力差分、寄存器/pack 开销及宿主边界，并继续实现全局 prototype/function segment pool 与函数 inlining/outlining/reorder；不能把现有 recipe/fragment graph 或可逆 transport 描述成不可逆，也不应再以单纯增加传输加密替代反虚拟化结构改进。
 
 当前限制必须保留：不模拟原始 debug/环境反射与错误位置；消除已证明的死路径后，仍对可能跳过条件所用 local 初始化的 `repeat/continue` 保守拒绝；隐藏元表、GC/分配时机、含洞 table 的 `#` 和布局敏感遍历不属于完全等价保证，Roblox executor 尚未实机验证。原生所有优化相关的函数身份也尚未完整模拟。结构验证不是沙箱或任意输入的语义等价证明。详见 [`虚拟机兼容性.md`](虚拟机兼容性.md) 和 [`自定义字节码.md`](自定义字节码.md)。
 

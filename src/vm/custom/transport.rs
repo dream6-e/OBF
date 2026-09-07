@@ -104,8 +104,9 @@ pub(crate) fn segment_literals(source: &str, target: Target) -> Result<Vec<Vec<u
 }
 
 /// Reassemble the outer ciphertext of a generated VM script: try the six
-/// segment orders, base86-decode and outer-decrypt each, and accept the
-/// unique order whose plaintext image carries the magic and target byte.
+/// segment orders, base86-decode, remove the outer stream and validate the
+/// dynamic block frame, then accept the unique order whose inner image
+/// carries the magic and target byte.
 /// The order itself is derived nowhere -- it is validated, not stored.
 pub(crate) fn embedded_outer_ciphertext(
     source: &str,
@@ -141,15 +142,20 @@ pub(crate) fn embedded_outer_ciphertext(
             continue;
         }
         let cipher = &stream[4..];
-        let plain = outer_cipher(cipher, &shares, perm_term(seed), &params);
-        // Magic + target byte alone cannot discriminate orders that share
-        // the same first segment; the header Adler-32 over the whole image
-        // is order-sensitive end to end, so a winner is a fully valid frame.
+        let blocked = outer_cipher(cipher, &shares, perm_term(seed), &params);
+        let Ok(plain) =
+            decrypt_block_transport(&blocked, &shares, perm_term(seed), &block_params(seed))
+        else {
+            continue;
+        };
+        // A segment order is accepted only after both transport ciphers, the
+        // dynamic block frame and the inner image Adler gate agree.
         let recorded = plain
             .get(28..32)
             .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
         if plain.starts_with(b"OBF\x02")
-            && plain[4] == expected
+            && plain.get(4) == Some(&expected)
+            && plain.get(32..).is_some()
             && recorded == Some(custom::checksum(&plain[32..]))
         {
             winners.push(cipher.to_vec());
@@ -163,23 +169,22 @@ pub(crate) fn embedded_outer_ciphertext(
     Ok(winners.pop().unwrap())
 }
 
-/// Extract the embedded payload image of a generated VM script with the
-/// outer blob cipher removed: framing intact, constant pool still encrypted.
+/// Extract the embedded payload image after removing the outer stream and
+/// validating/removing the block envelope. Semantic framing remains intact
+/// and the independent constant-pool layer remains encrypted.
 pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let cipher = embedded_outer_ciphertext(source, target, seed)?;
     let params = cipher_params(seed);
-    Ok(outer_cipher(
-        &cipher,
-        &cipher_shares(&wrapper_keys(seed), &params),
-        perm_term(seed),
-        &params,
-    ))
+    let shares = cipher_shares(&wrapper_keys(seed), &params);
+    let permutation = perm_term(seed);
+    let blocked = outer_cipher(&cipher, &shares, permutation, &params);
+    decrypt_block_transport(&blocked, &shares, permutation, &block_params(seed))
 }
 
 /// Verification helper: resolve the generated script's segmented payload and
-/// remove both cipher layers. The result is the private, seed-specific ISA6
-/// semantic wire image; it intentionally does not equal the public canonical
-/// `.obf` bytes supplied to `emit`.
+/// remove the outer stream, block envelope and constant-pool layer. The result
+/// is the private, seed-specific ISA7 semantic wire image; it intentionally
+/// does not equal the public canonical `.obf` bytes supplied to `emit`.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let mut payload = extract_embedded(source, target, seed)?;
     apply_constant_cipher(

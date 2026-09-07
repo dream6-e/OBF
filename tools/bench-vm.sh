@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ISA6 camouflaged-descriptor/semantic-fragment VM benchmark and size budget.
+# ISA7 semantic-fragment + dynamic block-transport VM benchmark and size budget.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) for the
 # checked-in goldens and enforces two hard gates:

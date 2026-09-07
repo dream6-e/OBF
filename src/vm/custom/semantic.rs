@@ -2,7 +2,7 @@
 //!
 //! Public `.obf` files remain the canonical OBF v2/ISA2 format. Before a
 //! canonical program is embedded in a generated script, this module lowers
-//! its fixed one-word instructions into a private ISA6 wire image:
+//! its fixed one-word instructions into a private ISA7 wire image:
 //!
 //! * straight-line words are grouped into program-specific superoperators;
 //! * each superoperator has a random 16-bit recipe id, while every use site
@@ -28,7 +28,7 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 6;
+pub(crate) const WIRE_ISA_VERSION: u32 = 7;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -66,8 +66,8 @@ pub(crate) struct EdgeTokenLayer {
 pub(crate) struct SemanticRecipe {
     pub id: u16,
     /// Validation-equivalent sequence advertised by the encrypted dictionary.
-    /// In ISA6 this is intentionally not semantic ground truth, even for live
-    /// recipes; it supplies only the operand forms and fail-closed bounds.
+    /// Since ISA6 this is intentionally not semantic ground truth, even for
+    /// live recipes; it supplies only operand forms and fail-closed bounds.
     pub descriptor_ops: Vec<Opcode>,
     /// Actual sequence emitted into the globally shuffled semantic fragments.
     pub execute_ops: Vec<Opcode>,

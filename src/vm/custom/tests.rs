@@ -617,6 +617,90 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
 }
 
 #[test]
+fn block_transport_roundtrips_rejects_every_byte_and_varies_by_seed() {
+    let payload: Vec<u8> = (0..513u32)
+        .map(|index| index.wrapping_mul(2_654_435_761).to_le_bytes()[3])
+        .collect();
+    let mut schedules = BTreeSet::new();
+    let mut round_counts = BTreeSet::new();
+    let mut ciphertexts = BTreeSet::new();
+
+    for seed in 0..=15u64 {
+        let params = block_params(seed);
+        assert!((7..=10).contains(&params.rounds.len()));
+        let families: BTreeSet<_> = params.rounds.iter().map(|round| round.family).collect();
+        assert_eq!(families, BTreeSet::from([0, 1, 2]));
+        schedules.insert(format!("{params:?}"));
+        round_counts.insert(params.rounds.len());
+
+        let cipher = cipher_params(seed);
+        let shares = cipher_shares(&wrapper_keys(seed), &cipher);
+        let permutation = perm_term(seed);
+        let encrypted = encrypt_block_transport(&payload, &shares, permutation, &params).unwrap();
+        assert_eq!(encrypted.len(), block_transport_len(payload.len()).unwrap());
+        assert_eq!(encrypted.len() % 4, 0);
+        assert_eq!(
+            decrypt_block_transport(&encrypted, &shares, permutation, &params).unwrap(),
+            payload
+        );
+        ciphertexts.insert(encrypted);
+    }
+    assert!(schedules.len() >= 12, "insufficient schedule diversity");
+    assert!(round_counts.len() >= 3, "round count did not vary enough");
+    assert!(ciphertexts.len() >= 12, "ciphertext did not vary by seed");
+
+    // Every possible padding width, including an empty payload, has an exact
+    // framed length and round-trips through the same bounded validator.
+    let seed = 735u64;
+    let params = block_params(seed);
+    let cipher = cipher_params(seed);
+    let shares = cipher_shares(&wrapper_keys(seed), &cipher);
+    let permutation = perm_term(seed);
+    for length in 0..=19usize {
+        let plain: Vec<u8> = (0..length)
+            .map(|index| (index * 37 + length) as u8)
+            .collect();
+        let encrypted = encrypt_block_transport(&plain, &shares, permutation, &params).unwrap();
+        assert_eq!(encrypted.len(), (length + 16 + 3) / 4 * 4);
+        assert_eq!(
+            decrypt_block_transport(&encrypted, &shares, permutation, &params).unwrap(),
+            plain
+        );
+    }
+
+    let encrypted = encrypt_block_transport(&payload, &shares, permutation, &params).unwrap();
+    // Exhaustive single-byte corruption: header, payload, chaining and each
+    // padding position must all fail before an inner image is returned.
+    for index in 0..encrypted.len() {
+        let mut damaged = encrypted.clone();
+        damaged[index] ^= 1;
+        assert!(
+            decrypt_block_transport(&damaged, &shares, permutation, &params).is_err(),
+            "block corruption at byte {index} was accepted"
+        );
+    }
+    let mut wrong_shares = shares;
+    wrong_shares[0] ^= 1;
+    assert!(decrypt_block_transport(&encrypted, &wrong_shares, permutation, &params).is_err());
+    assert!(decrypt_block_transport(&encrypted, &shares, permutation + 1, &params).is_err());
+    assert!(
+        decrypt_block_transport(&encrypted, &shares, permutation, &block_params(seed + 1)).is_err()
+    );
+    assert!(decrypt_block_transport(&[], &shares, permutation, &params).is_err());
+    assert!(decrypt_block_transport(
+        &encrypted[..encrypted.len() - 1],
+        &shares,
+        permutation,
+        &params
+    )
+    .is_err());
+    let mut extended = encrypted.clone();
+    extended.extend_from_slice(&[0; 4]);
+    assert!(decrypt_block_transport(&extended, &shares, permutation, &params).is_err());
+    assert!(block_transport_len(usize::MAX).is_err());
+}
+
+#[test]
 fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
     // The shares and the combined keystream seed are COMPUTED at run
     // time from the script's own structure; none of them may appear as
@@ -639,13 +723,18 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
             let semantic = wire(&data, target, seed);
             let shares = cipher_shares(&keys, &params);
             let pv = perm_term(seed);
-            let state = cipher_state(&shares, pv, semantic.len(), params.mix);
+            let blocked_len = block_transport_len(semantic.len()).unwrap();
+            let state = cipher_state(&shares, pv, blocked_len, params.mix);
+            let block_keys = block_key_states(&shares, pv, blocked_len, &block_params(seed));
+            assert_ne!(block_keys[0], block_keys[1]);
             let secrets = [
                 shares[0].to_string(),
                 shares[1].to_string(),
                 shares[2].to_string(),
                 pv.to_string(),
                 state.to_string(),
+                block_keys[0].to_string(),
+                block_keys[1].to_string(),
                 constant_cipher_state(
                     &keys,
                     constant_cross_term(&semantic),
@@ -671,12 +760,16 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
                 );
             }
             // The derivation is structural: the same seed must still
-            // reproduce the exact same script, and decrypt back to the
-            // canonical bytes.
+            // reproduce the exact script and private wire image, while a
+            // wrong seed must fail the dynamic block frame.
             assert_eq!(emit(&data, target, seed).unwrap(), output);
             assert_eq!(
                 decrypt_embedded(&output, target, seed).unwrap(),
                 wire(&data, target, seed)
+            );
+            assert!(
+                decrypt_embedded(&output, target, seed.wrapping_add(1)).is_err(),
+                "{target} seed {seed}: wrong seed opened the block frame"
             );
         }
     }
@@ -693,8 +786,8 @@ fn constant_pool_cipher_is_an_independent_second_layer() {
         // its constant pool is ciphertext and the Adler is patched.
         assert_eq!(&payload[..4], b"OBF\x02");
         assert_ne!(payload, data);
-        // With only the outer blob cipher removed, neither the string
-        // constant nor the number constant is visible anywhere.
+        // With the outer stream and block frame removed, but not the
+        // independent constant cipher, neither secret is visible anywhere.
         let secret = b"OBF_UNIQUE_SECRET_7351";
         assert!(!payload.windows(secret.len()).any(|w| w == secret));
         let number = 3.25f64.to_le_bytes();
@@ -703,7 +796,7 @@ fn constant_pool_cipher_is_an_independent_second_layer() {
         let other = emit(&data, target, 736).unwrap();
         let other = extract_embedded(&other, target, 736).unwrap();
         assert_ne!(payload, other);
-        // Removing both layers restores the canonical bytes exactly.
+        // Removing all three transport layers restores the private wire exactly.
         assert_eq!(
             decrypt_embedded(&output, target, 735).unwrap(),
             wire(&data, target, 735)
@@ -1170,7 +1263,7 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert_eq!(raw.matches(fetch).count(), 1);
             let fetch_at = raw.find(fetch).unwrap();
             assert!(raw[fetch_at..].starts_with(fetch));
-            assert!(raw[fetch_at..fetch_at + 180].contains(";pc=next1;w="));
+            assert!(raw[fetch_at..raw.len().min(fetch_at + 180)].contains(";pc=next1;w="));
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {

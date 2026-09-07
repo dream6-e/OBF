@@ -416,57 +416,74 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
     }
 }
 
+fn base86_alphabet_byte(byte: u8) -> bool {
+    (35..=121).contains(&byte) && byte != 92
+}
+
+// Minimal string-literal scanner shared by the watermark and encrypted-frame
+// corruption tests. It returns double-quoted literals made only of base86
+// alphabet bytes; callers either identify the watermark group or keep the
+// three longest spans, which are the payload segments.
+fn segment_spans(source: &str) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            let mut end = index + 1;
+            let mut clean = true;
+            while end < bytes.len() && bytes[end] != b'"' {
+                if bytes[end] == b'\\' {
+                    clean = false;
+                    end += 2;
+                    continue;
+                }
+                end += 1;
+            }
+            if clean
+                && end < bytes.len()
+                && end - index - 1 >= 12
+                && bytes[index + 1..end]
+                    .iter()
+                    .all(|&byte| base86_alphabet_byte(byte))
+            {
+                spans.push((index + 1, end));
+            }
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
+    spans
+}
+
+fn base86_group_bytes(text: &str) -> [u8; 4] {
+    let mut value = 0u64;
+    for (index, byte) in text.as_bytes().iter().enumerate() {
+        let digit = u64::from(if *byte > 92 { byte - 36 } else { byte - 35 });
+        value += digit * 86u64.pow(index as u32);
+    }
+    let mut out = [0u8; 4];
+    for slot in &mut out {
+        *slot = (value % 256) as u8;
+        value /= 256;
+    }
+    out
+}
+
+fn adjacent_base86(byte: u8) -> u8 {
+    let alphabet: Vec<u8> = (35..=121).filter(|&value| value != 92).collect();
+    let index = alphabet.iter().position(|&value| value == byte).unwrap();
+    alphabet[if index + 1 < alphabet.len() {
+        index + 1
+    } else {
+        index - 1
+    }]
+}
+
 #[test]
 fn watermark_mismatch_aborts_silently_before_any_execution() {
     use std::process::Command;
-    fn alphabet(byte: u8) -> bool {
-        (35..=121).contains(&byte) && byte != 92
-    }
-    // Minimal string-literal scanner: spans of double-quoted literals whose
-    // entire content is base86-alphabet text.
-    fn segment_spans(source: &str) -> Vec<(usize, usize)> {
-        let bytes = source.as_bytes();
-        let mut spans = Vec::new();
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] == b'"' {
-                let mut end = index + 1;
-                let mut clean = true;
-                while end < bytes.len() && bytes[end] != b'"' {
-                    if bytes[end] == b'\\' {
-                        clean = false;
-                        end += 2;
-                        continue;
-                    }
-                    end += 1;
-                }
-                if clean
-                    && end < bytes.len()
-                    && end - index - 1 >= 12
-                    && bytes[index + 1..end].iter().all(|&byte| alphabet(byte))
-                {
-                    spans.push((index + 1, end));
-                }
-                index = end + 1;
-            } else {
-                index += 1;
-            }
-        }
-        spans
-    }
-    fn group_bytes(text: &str) -> [u8; 4] {
-        let mut value = 0u64;
-        for (index, byte) in text.as_bytes().iter().enumerate() {
-            let digit = u64::from(if *byte > 92 { byte - 36 } else { byte - 35 });
-            value += digit * 86u64.pow(index as u32);
-        }
-        let mut out = [0u8; 4];
-        for slot in &mut out {
-            *slot = (value % 256) as u8;
-            value /= 256;
-        }
-        out
-    }
     for target in [Target::Lua51, Target::Luau] {
         let bytes = obf::bytecode::custom::encode(
             &obf::ir::compile("print('MUST_NOT_RUN')", target).unwrap(),
@@ -480,15 +497,15 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
         // abort therefore proves the watermark check itself fired.
         let mut tampered = generated.clone();
         let mut flipped = false;
-        for (start, end) in segment_spans(&generated) {
-            if group_bytes(&generated[start..start + 5]) == *b"XXS:" {
+        for (start, _) in segment_spans(&generated) {
+            if base86_group_bytes(&generated[start..start + 5]) == *b"XXS:" {
                 for replacement in [b'#', b'$', b'%'] {
                     if replacement as u8 == generated.as_bytes()[start] {
                         continue;
                     }
                     let mut probe = tampered.clone();
                     probe.replace_range(start..start + 1, &(replacement as char).to_string());
-                    if group_bytes(&probe[start..start + 5]) != *b"XXS:" {
+                    if base86_group_bytes(&probe[start..start + 5]) != *b"XXS:" {
                         probe.replace_range(start..start + 1, &(replacement as char).to_string());
                         tampered = probe;
                         flipped = true;
@@ -520,6 +537,69 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
             } else {
                 assert!(output.stdout.is_empty(), "{target} {name}");
             }
+        }
+    }
+}
+
+#[test]
+fn block_transport_ciphertext_corruption_fails_closed_on_both_targets() {
+    use std::collections::BTreeSet;
+    use std::process::Command;
+
+    for target in [Target::Lua51, Target::Luau] {
+        let bytes = obf::bytecode::custom::encode(
+            &obf::ir::compile("print('MUST_NOT_RUN')", target).unwrap(),
+        )
+        .unwrap();
+        let generated = vm::custom::emit(&bytes, target, 735).unwrap();
+        let mut spans = segment_spans(&generated);
+        spans.sort_by_key(|&(start, end)| std::cmp::Reverse(end - start));
+        spans.truncate(3);
+        assert_eq!(spans.len(), 3, "{target}: payload segment count");
+
+        let stream_first = spans
+            .iter()
+            .position(|&(start, _)| base86_group_bytes(&generated[start..start + 5]) == *b"XXS:")
+            .unwrap_or_else(|| panic!("{target}: stream-first segment missing"));
+        let mut mutation_offsets = BTreeSet::new();
+        for (index, &(start, end)) in spans.iter().enumerate() {
+            // Leave the stream watermark's first group untouched. Every
+            // selected offset is the low digit of a complete base86 group;
+            // moving it to an adjacent alphabet digit keeps decoding valid
+            // and changes exactly one outer-ciphertext byte.
+            let data_start = start + if index == stream_first { 5 } else { 0 };
+            let full_groups = (end - data_start) / 5;
+            assert!(full_groups > 0, "{target}: empty ciphertext segment");
+            mutation_offsets.insert(data_start);
+            mutation_offsets.insert(data_start + (full_groups / 2) * 5);
+            mutation_offsets.insert(data_start + (full_groups - 1) * 5);
+        }
+
+        let workspace = Workspace::new();
+        let runner = support::root()
+            .join("toolchains/bin")
+            .join(if target.is_luau() { "luau" } else { "lua5.1" });
+        let control_path = workspace.0.join("block-control.lua");
+        fs::write(&control_path, &generated).unwrap();
+        let control = Command::new(&runner).arg(&control_path).output().unwrap();
+        assert!(control.status.success(), "{target}: control failed");
+        assert_eq!(control.stdout, b"MUST_NOT_RUN\n");
+
+        for (case, offset) in mutation_offsets.into_iter().enumerate() {
+            let mut damaged = generated.clone();
+            let replacement = adjacent_base86(generated.as_bytes()[offset]);
+            damaged.replace_range(offset..offset + 1, &(replacement as char).to_string());
+            let path = workspace.0.join(format!("block-corrupt-{case}.lua"));
+            fs::write(&path, damaged).unwrap();
+            let output = Command::new(&runner).arg(&path).output().unwrap();
+            assert!(
+                !output.status.success(),
+                "{target}: ciphertext corruption {case} ran"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{target}: ciphertext corruption {case} leaked output"
+            );
         }
     }
 }
