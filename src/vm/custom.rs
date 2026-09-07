@@ -45,8 +45,9 @@ pub(crate) fn generate(
     // functions under random numeric keys: [n1] host-capture prelude, [n2]
     // bytecode decoder (decrypts the embedded blob), [n3] operand validation,
     // [n4] runtime helpers, [n5..n7] environment-probing key-share functions,
-    // plus three split validator fields (form-table rebuild, varint decode,
-    // per-opcode bounds arms) hiding among the shuffle,
+    // plus three split validator fields (form-table and opcode-renumbering
+    // rebuild, varint decode, per-opcode bounds arms) hiding among the
+    // shuffle -- the dispatch numbering itself is re-shuffled per seed,
     // [n8] interpreter cluster, plus the entry method at a random letter key.
     // The embedded payload is byte-encrypted at generation time with a
     // seed-derived Lehmer keystream; the key is split into three shares, one
@@ -59,6 +60,18 @@ pub(crate) fn generate(
     let method = wrapper_method(program.target, seed);
     let keys = wrapper_keys(seed);
     let params = cipher_params(seed);
+    // Per-seed opcode renumbering: every canonical ISA slot is mapped to a
+    // fresh distinct byte value, so the dispatch chains of each generation
+    // run on a different numbering. The canonical numbering survives only
+    // inside the `.obf` file and the encrypted varint stream; the Lua side
+    // rebuilds the identical table from the packed string of the forms
+    // field and rewrites each opcode byte during validation expansion.
+    let perm = opcode_permutation(seed, 64);
+    let opcode_image: std::collections::BTreeSet<u8> = program
+        .opcodes()
+        .iter()
+        .map(|op| perm[(*op as u8) as usize])
+        .collect();
     // M7 structural randomization stream: per-handler dispatch comparison
     // variants (one of four equivalent forms, seeded), integer bound-check
     // variants in the decoder/validator, and metamethod dispatch branch
@@ -103,6 +116,7 @@ pub(crate) fn generate(
         2,
         program.target.is_luau(),
         &["ok=j%2==0;", "ok=a+b<511;", "ok=c<256;"],
+        &opcode_image,
     );
     let f5_decoys = decoy_arms(
         &mut structure,
@@ -113,6 +127,7 @@ pub(crate) fn generate(
             "R[a]=R[b][R[c]];pc=pc+4;",
             "k=j;R[a]=k;pc=pc+4;",
         ],
+        &opcode_image,
     );
     let (entry_head, entry_tail) = if entry_flip {
         (
@@ -379,18 +394,30 @@ for id=0,np-1 do
             Some(form) => (u64::from(form - 1) + forms_rot) % 86,
             None => (5 + forms_rot) % 86,
         };
-        let mut byte = 35u8 + packed as u8;
-        if byte >= 92 {
-            byte += 1;
-        }
-        forms_text.push(byte as char);
+        forms_text.push(pack86(packed as u8));
     }
+    // The per-seed opcode renumbering rides along as a second packed
+    // string: two base86 chars per canonical slot (value%86, value/86).
+    let mut perm_text = String::new();
+    for slot in 0..64u8 {
+        let value = perm[slot as usize];
+        perm_text.push(pack86(value % 86));
+        perm_text.push(pack86(value / 86));
+    }
+    // A `~` marker byte prefixes both packed strings: it is outside the
+    // base86 alphabet, so the payload-segment audit (which collects the
+    // three longest alphabet-only literals) never mistakes them for
+    // transport segments however small the program is.
     let forms_field = format!(
-        "[{key}]=function(E,SB)local t={{}};local S=\"{text}\";for i=1,#S do local b=SB(S,i);\
-if b==92 or b<35 or b>121 then E()end;if b>92 then b=b-1 end;t[i-1]=(b-35-{rot})%86+1 end;return t;end,",
+        "[{key}]=function(E,SB)local t={{}};local p={{}};local S=\"~{text}\";for i=2,#S do local b=SB(S,i);\
+if b==92 or b<35 or b>121 then E()end;if b>92 then b=b-1 end;t[i-2]=(b-35-{rot})%86+1 end;\
+local U=\"~{renum}\";for i=2,#U,2 do local x=SB(U,i);local y=SB(U,i+1);\
+if x==92 or x<35 or x>121 or y==92 or y<35 or y>121 then E()end;\
+if x>92 then x=x-1 end;if y>92 then y=y-1 end;p[(i-2)/2]=x-35+(y-35)*86 end;return t,p;end,",
         key = keys[13],
         text = forms_text,
         rot = forms_rot,
+        renum = perm_text,
     );
     // Both Rust and target decoders validate operands before any execution.
     // The 7-bit varint stream is decoded by this field's returned closure
@@ -422,7 +449,10 @@ return o,a,b,c,p end;\nend,",
         .map(|op| {
             format!(
                 "{} then ok={};",
-                structure.dispatch_condition(u64::from(*op as u8) as u16, program.target.is_luau()),
+                structure.dispatch_condition(
+                    u64::from(perm[(*op as u8) as usize]) as u16,
+                    program.target.is_luau()
+                ),
                 validation(*op)
             )
         })
@@ -447,19 +477,19 @@ if not ok then E()end;return true end;\nend,",
     // The validator field itself shrinks to the loop: per instruction it
     // calls the decoder field's closure, re-derives the packed operands and
     // hands everything to the bounds-arms closure.
-    write!(s, "[{}]=function(P,np,SB,E,NCH,TC,dec,vld)\n", keys[2]).unwrap();
+    write!(s, "[{}]=function(P,np,SB,E,NCH,TC,dec,vld,PT)\n", keys[2]).unwrap();
     s.push_str(
         "for id=0,np-1 do local F=P[id];local CD=F.__obf_proto_code;local p=1;local XB={};\
 for at=0,F.__obf_proto_nc-1 do local o,a,b,c,p2=dec(CD,p);p=p2;local k=b+c*256;local j=a+k*256;\
-if not vld(o,a,b,c,j,k,at,F,P,id)then E()end;XB[at+1]=NCH(o,a,b,c);end;\
+if not vld(PT[o],a,b,c,j,k,at,F,P,id)then E()end;XB[at+1]=NCH(PT[o],a,b,c);end;\
 if p~=#CD+1 then E()end;F.__obf_proto_code=TC(XB);local last=SB(F.__obf_proto_code,#F.__obf_proto_code-3);",
     );
     write!(
         s,
         "if last~={} and last~={} and last~={} then E()end;end;",
-        Opcode::Jump as u8,
-        Opcode::Return as u8,
-        Opcode::TailCall as u8
+        perm[Opcode::Jump as usize],
+        perm[Opcode::Return as usize],
+        perm[Opcode::TailCall as usize]
     )
     .unwrap();
     s.push_str("\nend,");
@@ -542,7 +572,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});
 local Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal FMt=VMS[{}](E,SB);local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,NCH,TC,dec,vld);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal FMt,PT=VMS[{}](E,SB);local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nVMS[{}](P,np,SB,E,NCH,TC,dec,vld,PT);
 local CV,SV,Lookup=VMS[{}](TY,E);
 local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
@@ -623,7 +653,10 @@ H=function(fid,args,ups)
             .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
         f5_arms.push(format!(
             "{} then {}",
-            structure.dispatch_condition(u64::from(op as u8) as u16, program.target.is_luau()),
+            structure.dispatch_condition(
+                u64::from(perm[(op as u8) as usize]) as u16,
+                program.target.is_luau()
+            ),
             code
         ));
     }
@@ -723,27 +756,62 @@ fn opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
 }
 
 /// M7 unreachable decoy arms for the F3/F5 dispatch chains: `elseif o==K`
-/// (in the chain's current comparison spelling) with opcode numbers in
-/// 200..=254. Real opcodes never exceed 63 and F3 rejects unknown opcodes
-/// through the FM table before dispatch, so these arms are dead by
-/// construction while carrying real, plausible instructions.
+/// (in the chain's current comparison spelling) with byte values drawn
+/// from outside the per-seed opcode image. The expanded instruction
+/// stream only ever carries renumbered values of real opcodes, so these
+/// arms are dead by construction while carrying real, plausible
+/// instructions.
 fn decoy_arms(
     structure: &mut crate::random::Prng,
     count: usize,
     luau: bool,
     bodies: &[&str],
+    image: &std::collections::BTreeSet<u8>,
 ) -> Vec<String> {
     let mut used = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     while used.len() < count {
-        let opcode = 200 + structure.next_u64() % 55;
-        if used.insert(opcode) {
-            let body = bodies[(structure.next_u64() % bodies.len() as u64) as usize];
-            let condition = structure.dispatch_condition(opcode as u16, luau);
-            out.push(format!("{condition} then {body}"));
-        }
+        let opcode = loop {
+            let value = (structure.next_u64() % 256) as u8;
+            if !image.contains(&value) && used.insert(value) {
+                break value;
+            }
+        };
+        let body = bodies[(structure.next_u64() % bodies.len() as u64) as usize];
+        let condition = structure.dispatch_condition(u16::from(opcode), luau);
+        out.push(format!("{condition} then {body}"));
     }
     out
+}
+
+/// Per-seed opcode renumbering: an injective map from the 64 canonical ISA
+/// slots to byte values 0..=255, drawn by rejection sampling from a
+/// seed-salted stream. Both sides derive it identically: the generator
+/// renumbers every dispatch/bounds arm and the termination check, the
+/// target rebuilds the table from the packed base86 string (two chars per
+/// slot, see the forms field) and rewrites each opcode byte while
+/// expanding the validated varint stream.
+fn opcode_permutation(seed: u64, slots: u8) -> Vec<u8> {
+    let mut random = crate::random::Prng::new(seed ^ 0x6f70_636f_6465_7333);
+    let mut taken = std::collections::BTreeSet::new();
+    (0..slots)
+        .map(|_| loop {
+            let value = (random.next_u64() % 256) as u8;
+            if taken.insert(value) {
+                return value;
+            }
+        })
+        .collect()
+}
+
+/// One base86 digit (0..=85) as the backslash-free printable char shared
+/// by the packed strings of the forms field.
+fn pack86(digit: u8) -> char {
+    let mut byte = 35 + digit;
+    if byte >= 92 {
+        byte += 1;
+    }
+    byte as char
 }
 
 /// M7 structural variant: one of three exactly equivalent integer bound
@@ -1270,11 +1338,22 @@ mod tests {
         let path = work.0.join("coverage.lua");
         fs::write(&path, output).unwrap();
         let stdout = native::compile_and_run(target, &path);
+        // The probe records renumbered dispatch values; translate them back
+        // through the inverse of this seed's opcode permutation.
+        let perm = opcode_permutation(735, 64);
+        let inverse: std::collections::BTreeMap<u8, u8> = perm
+            .iter()
+            .enumerate()
+            .map(|(slot, value)| (*value, slot as u8))
+            .collect();
         String::from_utf8(stdout)
             .unwrap()
             .lines()
             .filter_map(|line| line.strip_prefix("opcode:"))
-            .map(|id| Opcode::from_byte(id.parse().unwrap()).unwrap())
+            .map(|id| {
+                Opcode::from_byte(inverse[&id.parse::<u8>().unwrap()])
+                    .expect("probed value outside the permutation image")
+            })
             .collect()
     }
 
@@ -1820,6 +1899,69 @@ mod tests {
     }
 
     #[test]
+    fn opcode_dispatch_numbers_are_renumbered_per_seed() {
+        // Per-seed opcode renumbering: the canonical ISA numbering stays in
+        // the `.obf` file and the embedded varint stream, but the script's
+        // dispatch chains run on a per-seed shuffled numbering rebuilt from
+        // the packed base86 string. Across seeds the numbering must differ;
+        // within a seed it must be a reproducible injection whose packed
+        // form round-trips, and the program must still run unchanged.
+        let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+        for target in [Target::Lua51, Target::Luau] {
+            let data = compile(source, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let mut numberings = BTreeSet::new();
+            for seed in [0u64, 1, 2, 3, 735, u64::MAX] {
+                let perm = opcode_permutation(seed, 64);
+                assert_eq!(opcode_permutation(seed, 64), perm);
+                let distinct: BTreeSet<u8> = perm.iter().copied().collect();
+                assert_eq!(distinct.len(), perm.len(), "not injective");
+                // Renumbered dispatch values must leave the canonical range
+                // 0..=63 for real opcodes, so no generation runs on the
+                // public canonical numbering.
+                let renumbered_real: BTreeSet<u8> = program
+                    .opcodes()
+                    .iter()
+                    .map(|op| perm[(*op as u8) as usize])
+                    .collect();
+                assert!(
+                    renumbered_real.iter().any(|value| *value > 63),
+                    "{target} seed {seed}: dispatch numbering still canonical"
+                );
+                assert!(numberings.insert(perm.clone()));
+                // The packed renumbering string decodes back to the same
+                // permutation the generator used for its arms.
+                let raw = generate(&data, &program, seed).unwrap();
+                let at = raw.find("local U=\"").expect("packed renumbering string");
+                let start = at + "local U=\"".len();
+                let end = raw[start..].find('"').expect("unterminated") + start;
+                let packed = &raw[start..end];
+                assert_eq!(packed.len(), 129);
+                assert_eq!(packed.as_bytes()[0], b'~');
+                for slot in 0..64usize {
+                    let x = packed.as_bytes()[1 + slot * 2];
+                    let y = packed.as_bytes()[2 + slot * 2];
+                    let dx = (if x > 92 { x - 1 } else { x }) - 35;
+                    let dy = (if y > 92 { y - 1 } else { y }) - 35;
+                    assert_eq!(u8::from(dx + dy * 86), perm[slot]);
+                }
+                // Differential: the embedded payload is untouched canonical
+                // bytecode regardless of the renumbering.
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(blob(&output, target, seed), data);
+            }
+            assert_eq!(numberings.len(), 6, "{target}: identical renumberings");
+            // The renumbered dispatch still executes the program verbatim.
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("renumbered.lua");
+            fs::write(&path, source).unwrap();
+            let expected = native::compile_and_run(target, &path);
+            fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+            assert_eq!(expected, native::compile_and_run(target, &path));
+        }
+    }
+
+    #[test]
     fn operand_features_are_split_into_separate_shuffled_fields() {
         // The operand-form map (`[0]=3,[1]=4,...` sequential-key literal),
         // the varint reader with its `if f==1 elseif f==2 ...` shape chain
@@ -1838,7 +1980,10 @@ mod tests {
                 assert!(raw.contains(&format!("[{}]=function(E,SB)", keys[13])));
                 assert!(raw.contains(&format!("[{}]=function(E,SB,FM)", keys[14])));
                 assert!(raw.contains(&format!("[{}]=function(E)", keys[15])));
-                assert!(raw.contains(&format!("[{}]=function(P,np,SB,E,NCH,TC,dec,vld)", keys[2])));
+                assert!(raw.contains(&format!(
+                    "[{}]=function(P,np,SB,E,NCH,TC,dec,vld,PT)",
+                    keys[2]
+                )));
                 assert!(raw.contains(&format!("VMS[{}](E,SB)", keys[13])));
                 // The packed form string is the only short `local S="..."`
                 // in the raw script (segment fields carry long base86
