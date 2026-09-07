@@ -847,12 +847,10 @@ fn core_logic_flows_through_scratch_table_slots() {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
             // Slotted fields: decrypt, three segments, forms, decode,
-            // validate, parse core, the validation loop and SETUP.
+            // validate, parse core, the validation loop and SETUP --
+            // exactly ten scratch tables, no silent opt-outs.
             let tables = raw.matches("local g={};").count();
-            assert!(
-                (8..=10).contains(&tables),
-                "{target} seed {seed}: {tables} scratch tables"
-            );
+            assert_eq!(tables, 10, "{target} seed {seed}: {tables} scratch tables");
             // Finish-style fields clear the table before returning.
             let clears = raw.matches("g=nil;").count();
             assert_eq!(clears, 6, "{target} seed {seed}: {clears} clears");
@@ -1027,11 +1025,13 @@ fn dispatch_chains_split_into_seeded_subchains() {
         let mut topologies = BTreeSet::new();
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
-            // Bounds chain: inside the vld closure, before the ok check.
+            // Bounds chain: inside the vld closure, up to its final gate
+            // (the verdict local itself is a scratch slot now, so anchor
+            // on the gate's shape rather than a spelled-out name).
             let vld_at = raw
                 .find("return function(o,a,b,c,j,k,at,F,P,id)")
                 .expect("bounds closure");
-            let vld_end = vld_at + raw[vld_at..].find("if not ok then E()end;").unwrap();
+            let vld_end = vld_at + raw[vld_at..].find("E()end;return true").unwrap();
             let bounds = &raw[vld_at..vld_end];
             // Interpreter chain: from the fetch line to the H return.
             // Anchor on the hoisted fetch locals: with the

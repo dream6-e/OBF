@@ -792,11 +792,18 @@ return o,a,b,c,p end;\nend,",
         .collect();
     f3_arms.extend(f3_decoys);
     let f3_groups = (2 + structure.next_u64() % 3) as u8;
-    let validate_field = format!(
-        "[{key}]=function(E)\nreturn function(o,a,b,c,j,k,at,F,P,id)local ok=false;{chain}\
-if not ok then E()end;return true end;\nend,",
-        key = keys[15],
+    let validate_body = format!(
+        "local ok=false;{chain}if not ok then E()end;return true",
         chain = grouped_chain(&mut structure, f3_arms, f3_groups, "o"),
+    );
+    // The bounds verdict itself flows through a scratch slot: the arms
+    // write g[key] instead of a named local (the table is per-call, no
+    // clearing needed -- the closure returns immediately after the gate).
+    let validate_body = slot_rewrite(&mut structure, &validate_body, &["ok"]);
+    let validate_field = format!(
+        "[{key}]=function(E)\nreturn function(o,a,b,c,j,k,at,F,P,id)local g={{}};{body} end;\nend,",
+        key = keys[15],
+        body = validate_body,
     );
     // The validator field itself shrinks to the loop: per instruction it
     // calls the decoder field's closure, re-derives the packed operands and
