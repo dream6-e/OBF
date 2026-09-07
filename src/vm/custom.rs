@@ -143,25 +143,51 @@ pub(crate) fn generate(
     let mut s = String::from("local x={};return setmetatable({");
     let header_end = s.len();
     write!(s, "[{}]=function()\n", keys[0]).unwrap();
-    s.push_str(
-        r#"
-local SC=select;local Z=function(...)return{n=SC('#',...),...}end;
-local U=unpack or table.unpack;local G=(getfenv and getfenv(0))or _G;local E=error;
-local SB,SS,SF=string.byte,string.sub,string.format;
-local NCH,TC=string.char,table.concat;
-local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetatable,setmetatable,rawget,rawequal;
-"#,
-    );
+    // Prelude-order variants: the host-capture statements are independent
+    // (the only dependency is Z reading SC), so the definition order, the
+    // return order and the entry destructuring order are separately seeded
+    // shuffles. The return list keeps every name on both targets; IF/Freeze
+    // still read as nil globals on Lua 5.1.
+    let mut units: Vec<(&str, &str)> = vec![
+        ("SC", "local SC=select;"),
+        (
+            "Z",
+            "local Z=function(...)return{n=SC('#',...),...}end;",
+        ),
+        ("U", "local U=unpack or table.unpack;"),
+        ("G", "local G=(getfenv and getfenv(0))or _G;"),
+        ("E", "local E=error;"),
+        (
+            "SB",
+            "local SB,SS,SF=string.byte,string.sub,string.format;",
+        ),
+        ("NCH", "local NCH,TC=string.char,table.concat;"),
+        (
+            "MF",
+            "local MF,TN,TY,TS,NX,MT,SM,RG,RE=math.floor,tonumber,type,tostring,next,getmetatable,setmetatable,rawget,rawequal;",
+        ),
+    ];
     if program.target.is_luau() {
-        s.push_str("local IF=integer and integer.fromstring;local Freeze=table.freeze;");
+        units.push(("IF", "local IF=integer and integer.fromstring;"));
+        units.push(("Freeze", "local Freeze=table.freeze;"));
     }
-    // Section functions thread state through parameters/returns; the mutually
-    // recursive Call/Make/H cluster stays together in one section function.
-    s.push_str(if program.target.is_luau() {
-        "\nreturn SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze\nend,"
-    } else {
-        "\nreturn SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze\nend,"
-    });
+    structure.shuffle(&mut units);
+    let sc_at = units.iter().position(|(name, _)| *name == "SC").unwrap();
+    let z_at = units.iter().position(|(name, _)| *name == "Z").unwrap();
+    if z_at < sc_at {
+        units.swap(z_at, sc_at);
+    }
+    s.push('\n');
+    for (_, statement) in &units {
+        s.push_str(statement);
+    }
+    let mut ret_order: Vec<&str> = vec![
+        "SC", "Z", "U", "G", "E", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS", "NX",
+        "MT", "SM", "RG", "RE", "IF", "Freeze",
+    ];
+    structure.shuffle(&mut ret_order);
+    let ret_names = ret_order.join(",");
+    s.push_str(&format!("\nreturn {ret_names}\nend,"));
     // The decoder section receives the three audited probe shares (each probe
     // function already verified the environment and was called by the entry
     // in seeded shuffled order), the two structural constant-cipher keys and
@@ -562,7 +588,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     s.push_str("\nreturn CV,SV,Lookup\nend,");
     write!(
         s,
-        "[\"{method}\"]=function(VMS,...)\nlocal SC,Z,U,G,E,SB,SS,SF,NCH,TC,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze=VMS[{}]();
+        "[\"{method}\"]=function(VMS,...)\nlocal {names}=VMS[{}]();
 local c1=VMS[{}](E,{},{});local c2=VMS[{}](E,{},{});local c3=VMS[{}](E,{},{});
 local Y1=VMS[{}](E,SB,NCH,TC);local Y2=VMS[{}](E,SB,NCH,TC);local Y3=VMS[{}](E,SB,NCH,TC);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
@@ -593,7 +619,8 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[15],
         keys[2],
         keys[3],
-        keys[4]
+        keys[4],
+        names = ret_names
     )
     .unwrap();
     write!(
@@ -613,6 +640,12 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
             &format!("return U(result,1,result.n)\n{entry_tail}\nend,"),
         );
     }
+    // Resolved after the opaque wrap: its replacements insert text inside
+    // the entry field, so any index recorded before them would drift. The
+    // opener text is unique, so locate it instead.
+    let f5_start = s
+        .rfind(&format!("[{}]=function(SC,Z,U,G,E,", keys[4]))
+        .expect("interpreter field anchor");
     s.push_str(
         r#"
 local W=SM({},{__mode='kv'});local H;local Make;
@@ -665,9 +698,11 @@ H=function(fid,args,ups)
         .code
         .iter()
         .any(|word| matches!(word.opcode(), Ok(Opcode::Varargs)));
+    s.push_str("\nend");
+    let tail_start = s.len();
     write!(
         s,
-        "\nend}},x):{method}({})",
+        "}},x):{method}({})",
         if forwards_varargs { "..." } else { "" }
     )
     .unwrap();
@@ -680,6 +715,12 @@ H=function(fid,args,ups)
     let entry_start = s
         .rfind(&format!("[\"{method}\"]=function(VMS,...)"))
         .expect("entry field anchor");
+    // Full-field unanchoring: the entry and interpreter fields leave the
+    // fixed tail too; all seventeen payload fields shuffle together and the
+    // file ends with the bare wrapper close.
+    let entry_chunk = s[entry_start..f5_start].to_owned();
+    let f5_chunk = s[f5_start..tail_start].to_owned();
+    let tail = s[tail_start..].to_owned();
     let mut fields: Vec<String> = vec![
         s[header_end..f2_start].to_owned(),
         s[f2_start..f3_start].to_owned(),
@@ -690,12 +731,34 @@ H=function(fid,args,ups)
     fields.extend(segment_fields);
     fields.extend(watermark_fields);
     fields.extend([forms_field, decode_field, validate_field]);
+    fields.extend([entry_chunk, f5_chunk]);
     structure.shuffle(&mut fields);
     let mut out = s[..header_end].to_owned();
     for field in &fields {
-        out.push_str(field);
+        // Field-separator variant: `,` and `;` are interchangeable field
+        // separators, and a trailing one before `}` is equally legal; the
+        // choice is drawn per field from the structure stream.
+        let (body, suffix) = if let Some(stripped) = field.strip_suffix(",\n") {
+            (stripped, "\n")
+        } else if let Some(stripped) = field.strip_suffix(',') {
+            (stripped, "")
+        } else {
+            (field.as_str(), "")
+        };
+        assert!(
+            body.ends_with("end"),
+            "field does not end in end; tail: {:?}",
+            &body[body.len().saturating_sub(60)..]
+        );
+        out.push_str(body);
+        out.push(if structure.next_u64() % 2 == 0 {
+            ','
+        } else {
+            ';'
+        });
+        out.push_str(suffix);
     }
-    out.push_str(&s[entry_start..]);
+    out.push_str(&tail);
     s = out;
     if s.len() > crate::lexer::MAX_SOURCE_BYTES {
         return Err(Diagnostic::new(
@@ -1948,6 +2011,92 @@ mod tests {
             userdata_seen == [true, true],
             "userdata guard orders: {userdata_seen:?}"
         );
+    }
+
+    #[test]
+    fn field_layout_is_fully_unanchored_with_separator_and_prelude_variants() {
+        // No payload field keeps a fixed file position: the entry and the
+        // interpreter fields shuffle with everything else, each field's
+        // separator is independently `,` or `;`, and the prelude's capture
+        // statements (plus the return/destructure order) reshuffle per seed.
+        let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+        for target in [Target::Lua51, Target::Luau] {
+            let data = compile(source, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let mut entry_ranks = BTreeSet::new();
+            let mut interpreter_ranks = BTreeSet::new();
+            let mut first_statements = BTreeSet::new();
+            let mut semicolon_outputs = 0usize;
+            for seed in 0..=11u64 {
+                let raw = generate(&data, &program, seed).unwrap();
+                assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+                // Ranks among all seventeen field starts (sixteen numeric
+                // plus the entry method).
+                let tokens = crate::lexer::lex(&raw, target).unwrap();
+                let mut starts = Vec::new();
+                for index in 0..tokens.len().saturating_sub(4) {
+                    if tokens[index].text(&raw) == "["
+                        && tokens[index + 2].text(&raw) == "]"
+                        && tokens[index + 3].text(&raw) == "="
+                        && tokens[index + 4].text(&raw) == "function"
+                    {
+                        starts.push(tokens[index + 1].text(&raw).to_owned());
+                    }
+                }
+                assert_eq!(starts.len(), 17, "{target} seed {seed}");
+                let keys = wrapper_keys(seed);
+                let interpreter_key = keys[4].to_string();
+                entry_ranks.insert(starts.iter().position(|k| k.starts_with('"')).unwrap());
+                interpreter_ranks
+                    .insert(starts.iter().position(|k| *k == interpreter_key).unwrap());
+                // The interpreter is never pinned to the last slot by
+                // construction alone; across seeds it must move.
+                if raw.contains("end;[") || raw.contains("end;\n[") || raw.contains("end;}") {
+                    semicolon_outputs += 1;
+                }
+                // Prelude: the first capture statement after the field
+                // opener varies, and SC always precedes its only dependent.
+                let prelude_at = raw
+                    .find(&format!("[{}]=function()", keys[0]))
+                    .expect("prelude opener");
+                let rest = &raw[prelude_at..];
+                let local_at = rest.find("local ").expect("first capture");
+                let name = rest[local_at + "local ".len()..].split('=').next().unwrap();
+                first_statements.insert(name.to_owned());
+                let sc_at = raw.find("local SC=select").expect("SC capture");
+                let z_at = raw
+                    .find("local Z=function(...)return{n=SC(")
+                    .expect("Z capture");
+                assert!(sc_at < z_at, "{target} seed {seed}: Z before SC");
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(blob(&output, target, seed), data);
+            }
+            assert!(
+                entry_ranks.len() >= 4,
+                "{target}: entry pinned, {} ranks",
+                entry_ranks.len()
+            );
+            assert!(
+                interpreter_ranks.len() >= 4,
+                "{target}: interpreter pinned, {} ranks",
+                interpreter_ranks.len()
+            );
+            assert!(
+                first_statements.len() >= 3,
+                "{target}: prelude order pinned"
+            );
+            assert!(
+                semicolon_outputs >= 10,
+                "{target}: separators do not vary ({semicolon_outputs}/12)"
+            );
+            // The fully shuffled layout still runs the program verbatim.
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("unanchored.lua");
+            fs::write(&path, source).unwrap();
+            let expected = native::compile_and_run(target, &path);
+            fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+            assert_eq!(expected, native::compile_and_run(target, &path));
+        }
     }
 
     #[test]
