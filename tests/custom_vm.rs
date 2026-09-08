@@ -374,10 +374,11 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
         let runner = support::root()
             .join("toolchains/bin")
             .join(if target.is_luau() { "luau" } else { "lua5.1" });
-        // Tamper with the host so `loadstring` is no longer the native C
-        // function the audited probes require; the VM must abort with no
-        // output before decrypting or running anything.
-        let (tampered, control) = if target.is_luau() {
+        // Two independent fail-closed checks: replacing loadstring breaks the
+        // canonical environment probes, while changing only the first three
+        // source transcripts leaves the later segment gates valid but derives
+        // wrong payload shares. Neither path may reach user output.
+        let (tampered, wrong_witness, control) = if target.is_luau() {
             let mut level = 1;
             while generated.contains(&format!("]{}]", "=".repeat(level))) {
                 level += 1;
@@ -389,6 +390,12 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
                     "local e=setmetatable({{}},{{__index=_G}}) e.loadstring=function()end \
                      local f=assert(loadstring({inline})) setfenv(f,e) f() print('SHOULD_NOT_RUN')"
                 ),
+                format!(
+                    "local oi=debug.info local n=0 local d={{}} for k,v in pairs(debug)do d[k]=v end \
+                     d.info=function(...)n=n+1 local v=oi(...)if n<=3 then return '[HOOK]'end return v end \
+                     local e=setmetatable({{debug=d}},{{__index=_G}}) local f=assert(loadstring({inline})) \
+                     setfenv(f,e) f() print('SHOULD_NOT_RUN')"
+                ),
                 format!("local f=assert(loadstring({inline})) f()"),
             )
         } else {
@@ -397,12 +404,21 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
                 format!(
                     "loadstring=function()end local f=assert(loadfile('{path}')) f() print('SHOULD_NOT_RUN')"
                 ),
+                format!(
+                    "local oi=debug.getinfo local n=0 local d={{}} for k,v in pairs(debug)do d[k]=v end \
+                     d.getinfo=function(...)n=n+1 local v=oi(...)if n<=3 then local c={{}} \
+                     for k,x in pairs(v)do c[k]=x end c.source='=[HOOK]' return c end return v end \
+                     local e=setmetatable({{debug=d}},{{__index=_G}}) local f=assert(loadfile('{path}')) \
+                     setfenv(f,e) f() print('SHOULD_NOT_RUN')"
+                ),
                 format!("local f=assert(loadfile('{path}')) f()"),
             )
         };
-        for (name, source, expect_success) in
-            [("control", control, true), ("tampered", tampered, false)]
-        {
+        for (name, source, expect_success) in [
+            ("control", control, true),
+            ("tampered", tampered, false),
+            ("wrong-witness", wrong_witness, false),
+        ] {
             let path = workspace.0.join(format!("{name}.lua"));
             fs::write(&path, source).unwrap();
             let output = Command::new(&runner).arg(&path).output().unwrap();

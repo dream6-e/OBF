@@ -426,12 +426,27 @@ pub(crate) fn cipher_probe_inputs(keys: &[u64]) -> [(u64, u64); 3] {
     [(keys[0], keys[4]), (keys[2], keys[3]), (keys[5], keys[6])]
 }
 
-/// Three key shares for the payload cipher, each COMPUTED at run time inside
-/// one audited probe function from its structural input pair: mix 31*a+b,
-/// then 3/5/7 Lehmer rounds (one more pair of rounds per probe). No share
-/// literal exists anywhere in the generated script; the Rust cipher runs the
-/// identical derivation.
-pub(crate) fn cipher_shares(keys: &[u64], params: &CipherParams) -> [u64; 3] {
+/// Canonical runtime transcript produced by the target's loadstring source
+/// probe. The generated VM computes this number from the *returned* string;
+/// this helper merely supplies the matching transcript while encrypting the
+/// payload. It is not emitted as a literal.
+pub(crate) fn runtime_probe_witness(target: Target) -> u64 {
+    let source: &[u8] = if target.is_luau() { b"[C]" } else { b"=[C]" };
+    source.iter().fold(0u64, |state, &byte| {
+        (state * 257 + u64::from(byte)) % 2_147_483_647
+    })
+}
+
+/// Three key shares for the payload cipher. Unlike the old structural-only
+/// schedule, every share now absorbs the transcript returned by an audited
+/// target-runtime probe after its seeded Lehmer rounds. Rust encrypts against
+/// the canonical transcript; Lua must execute (or faithfully simulate) the
+/// probe to reconstruct matching shares.
+pub(crate) fn cipher_shares_with_witnesses(
+    keys: &[u64],
+    params: &CipherParams,
+    witnesses: [u64; 3],
+) -> [u64; 3] {
     let inputs = cipher_probe_inputs(keys);
     let mut shares = [0u64; 3];
     for (index, share) in shares.iter_mut().enumerate() {
@@ -440,9 +455,23 @@ pub(crate) fn cipher_shares(keys: &[u64], params: &CipherParams) -> [u64; 3] {
         for _ in 0..params.probe_rounds[index] {
             state = params.outer * state % 2_147_483_647;
         }
-        *share = state;
+        *share = 1 + (state + witnesses[index] * params.mix) % 2_147_483_646;
     }
     shares
+}
+
+pub(crate) fn cipher_shares(keys: &[u64], params: &CipherParams, target: Target) -> [u64; 3] {
+    cipher_shares_with_witnesses(keys, params, [runtime_probe_witness(target); 3])
+}
+
+/// Mask used by the interpreter's fetch/dispatch state machine. The even
+/// modulus preserves the parity change caused by a one-step witness mutation;
+/// that bit selects between two disjoint physical state pairs. Because every
+/// reconstructed share absorbs its live probe transcript, concrete states and
+/// critical branches depend on runtime data rather than a seed-only constant.
+#[cfg(test)]
+pub(crate) fn runtime_control_mask(shares: &[u64; 3]) -> u64 {
+    shares.iter().sum::<u64>() % 65_520
 }
 
 /// Combined keystream seed: the three dynamically computed shares, the

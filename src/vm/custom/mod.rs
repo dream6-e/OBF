@@ -1,6 +1,6 @@
 //! Executable VM for AST-produced OBF v2 bytecode. Public `.obf` files keep
 //! the canonical opcode-plus-varint ISA2 format, but generated scripts lower
-//! that program into a private seed-specific ISA9 image: straight-line words
+//! that program into a private seed-specific ISA10 image: straight-line words
 //! become recipe superoperators, use sites carry operands plus random graph
 //! labels, three-stage successor tokens, and five-stage recipe tokens (not
 //! plaintext successors/opcodes/recipe ids). Reachable neutral bundles split
@@ -13,7 +13,10 @@
 //! subtree changes topology, and persistent code records retain only tokens. The semantic
 //! image is then losslessly compressed by bounded LZW; its code bits retain
 //! the existing independent inner stream before a versioned dynamically keyed
-//! 32-bit block transport and the outer byte stream.
+//! 32-bit block transport and the outer byte stream. ISA10 binds every payload
+//! key share to the live debug-source transcript and uses the reconstructed
+//! share-mask parity to select one of two fetch/dispatch state pairs before
+//! masking their concrete representation.
 //! Primitive semantics still live in the two target opcode subfolders. The
 //! seed never changes public `.obf` bytes, but it does change the embedded
 //! semantic image as well as transport, layout, local, and private-field

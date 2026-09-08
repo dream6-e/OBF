@@ -2,7 +2,7 @@
 //!
 //! Public `.obf` files remain the canonical OBF v2/ISA2 format. Before a
 //! canonical program is embedded in a generated script, this module lowers
-//! its fixed one-word instructions into a private ISA9 wire image:
+//! its fixed one-word instructions into a private ISA10 wire image:
 //!
 //! * straight-line words are grouped into program-specific superoperators;
 //! * each superoperator has a random 16-bit recipe id, while every use site
@@ -31,7 +31,7 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 9;
+pub(crate) const WIRE_ISA_VERSION: u32 = 10;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -1069,14 +1069,16 @@ fn owners_are_interleaved(segments: &[CodeSegment]) -> bool {
     false
 }
 
-/// Context used by the compact ISA9 segment graph. Reusing one full-width
+/// Context used by the compact segment graph (introduced in ISA9 and retained
+/// by ISA10). Reusing one full-width
 /// recipe-token layer keeps the segment links seed-coupled without adding a
 /// self-describing key block to the wire image.
 fn segment_parameters(image: &SemanticImage) -> (u16, u16) {
     (image.token_layers[0].add, image.token_layers[0].multiplier)
 }
 
-/// Every prototype has exactly two non-empty nodes in this ISA9 batch. Their
+/// Every prototype has exactly two non-empty nodes in the retained segment
+/// graph. Their
 /// boundary is seed- and owner-dependent; it is never serialized as a plain
 /// offset. `context` is in 0..=65535, so the result is always in 1..code_len.
 pub(crate) fn code_segment_split(code_len: usize, owner: u16, image: &SemanticImage) -> usize {

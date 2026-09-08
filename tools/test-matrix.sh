@@ -4,6 +4,22 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+# Permanent maintainability gate: implementation source files above 80 KiB
+# must be split without changing generated output. Checked-in generated Lua
+# artifacts are outputs, not obfuscator implementation source.
+SOURCE_LIMIT=$((80 * 1024))
+oversized=0
+while IFS= read -r -d '' file; do
+    bytes=$(wc -c <"$file")
+    if [[ $bytes -gt $SOURCE_LIMIT ]]; then
+        printf 'error: implementation source %s is %sB (limit %sB); split it first\n' \
+            "$file" "$bytes" "$SOURCE_LIMIT" >&2
+        oversized=1
+    fi
+done < <(find src -type f -name '*.rs' -print0)
+[[ $oversized -eq 0 ]] || exit 1
+printf '[matrix] source-file ceiling: every src/**/*.rs <= %sB\n' "$SOURCE_LIMIT"
+
 if [[ -n "${OBF_CARGO:-}" ]]; then
     CARGO=$OBF_CARGO
 elif [[ -x "$ROOT/.toolchains/rust-1.88.0/bin/cargo" ]]; then

@@ -115,7 +115,7 @@ pub(crate) fn embedded_outer_ciphertext(
 ) -> Result<Vec<u8>, Diagnostic> {
     let segments = segment_literals(source, target)?;
     let params = cipher_params(seed);
-    let shares = cipher_shares(&wrapper_keys(seed), &params);
+    let shares = cipher_shares(&wrapper_keys(seed), &params, target);
     let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
     let permutations = [
         [0usize, 1, 2],
@@ -182,7 +182,7 @@ pub(crate) fn embedded_outer_ciphertext(
 pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let cipher = embedded_outer_ciphertext(source, target, seed)?;
     let params = cipher_params(seed);
-    let shares = cipher_shares(&wrapper_keys(seed), &params);
+    let shares = cipher_shares(&wrapper_keys(seed), &params, target);
     let permutation = perm_term(seed);
     let blocked = outer_cipher(&cipher, &shares, permutation, &params);
     decrypt_block_transport(&blocked, &shares, permutation, &block_params(seed))
@@ -190,7 +190,7 @@ pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
 
 /// Verification helper: resolve the generated script's segmented payload,
 /// remove both transport ciphers and the independent compressed-body stream,
-/// then strictly decompress it. The result is the private, seed-specific ISA9
+/// then strictly decompress it. The result is the private, seed-specific ISA10
 /// semantic wire image; it intentionally does not equal the public canonical
 /// `.obf` bytes supplied to `emit`.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {

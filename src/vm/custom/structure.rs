@@ -258,6 +258,52 @@ pub(crate) fn state_condition(
     }
 }
 
+/// Runtime-masked state representation used where a static state number must
+/// not be enough to resolve a control-flow edge. Both assignment and every
+/// comparison retain the mask expression; there is no removable one-time
+/// guard in front of an otherwise ordinary state machine.
+pub(crate) fn masked_state_value(value: u16, mask: &str) -> String {
+    format!("({value}+{mask})%65521")
+}
+
+pub(crate) fn masked_state_condition(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    mask: &str,
+    value: u16,
+) -> String {
+    let represented = masked_state_value(value, mask);
+    match structure.next_u64() % 4 {
+        0 => format!("{var}=={represented}"),
+        1 => format!("{represented}=={var}"),
+        2 => format!("not({var}~={represented})"),
+        _ => format!("{var}-{represented}==0"),
+    }
+}
+
+/// Select one of two disjoint physical state pairs from a runtime mask bit.
+/// This makes the concrete transition -- not merely a common translation of
+/// an otherwise static state -- depend on the reconstructed probe shares.
+pub(crate) fn selected_masked_state_value(first: u16, second: u16, mask: &str) -> String {
+    format!(
+        "({mask}%2==0 and {} or {})",
+        masked_state_value(first, mask),
+        masked_state_value(second, mask)
+    )
+}
+
+pub(crate) fn selected_masked_state_condition(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    mask: &str,
+    first: u16,
+    second: u16,
+) -> String {
+    let first = masked_state_condition(structure, var, mask, first);
+    let second = masked_state_condition(structure, var, mask, second);
+    format!("(({mask}%2==0 and {first})or({mask}%2~=0 and {second}))")
+}
+
 /// A flattened state machine: `while true do if <c1> then B1 elseif <c2>
 /// then B2 ... else E()end end;` with the branch bodies supplied by the
 /// caller and both the textual branch order and every condition spelling

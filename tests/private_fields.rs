@@ -6,7 +6,7 @@ use std::process::Command;
 use support::{compile_and_run, success, Workspace};
 
 const LONG_FIELDS: &[&str] = &[
-    "code", "tags", "parent", "flags", "shared", "self", "cached",
+    "code", "tags", "parent", "flags", "shared", "self", "cached", "control",
 ];
 
 fn embedded(source: &str, target: Target, seed: u64) -> Vec<u8> {
@@ -21,7 +21,7 @@ fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
     assert_eq!(&image[..4], b"OBF\x02");
     assert_eq!(image[4], if target.is_luau() { 0x75 } else { 0x51 });
     assert_eq!(image[6], 1, "generated scripts require private encoding 1");
-    assert_eq!(u32::from_le_bytes(image[24..28].try_into().unwrap()), 9);
+    assert_eq!(u32::from_le_bytes(image[24..28].try_into().unwrap()), 10);
 }
 
 fn assert_private_names_hidden(output: &str, target: Target) {
@@ -49,10 +49,10 @@ fn assert_private_names_hidden(output: &str, target: Target) {
 #[test]
 fn prototype_field_shortening_preserves_bytecode_public_keys_and_runtime_output() {
     let source = r#"
-        local user={code='code',tags='tags',parent=3,flags=4,shared=5,self=6,cached=7,__obf_proto_code=8}
+        local user={code='code',tags='tags',parent=3,flags=4,shared=5,self=6,cached=7,control=8,__obf_proto_code=9,__obf_proto_control=10}
         local alias=user alias.flags=alias.flags+1
-        local value='code tags parent flags shared self cached \000\255'
-        print(user.code,user['tags'],alias.parent,user.flags,user.shared,user.self,user.cached,user.__obf_proto_code,#value,string.byte(value,-1))
+        local value='code tags parent flags shared self cached control \000\255'
+        print(user.code,user['tags'],alias.parent,user.flags,user.shared,user.self,user.cached,user.control,user.__obf_proto_code,user.__obf_proto_control,#value,string.byte(value,-1))
         local function capture(delta)return function()user.flags=user.flags+delta return user.flags,nil,user.code end end
         print(capture(2)())
         local called=setmetatable({}, {__call=function(_,x)return x+1 end,__index=function(_,key)return key end})
@@ -81,9 +81,9 @@ fn prototype_field_shortening_preserves_bytecode_public_keys_and_runtime_output(
 #[test]
 fn ordinary_minification_does_not_opt_user_fields_into_the_private_schema() {
     let source = r#"
-        local record={code='code',tags='tags',parent=3,flags=4,shared=5,self=6,cached=7,__obf_proto_code=8}
+        local record={code='code',tags='tags',parent=3,flags=4,shared=5,self=6,cached=7,control=8,__obf_proto_code=9,__obf_proto_control=10}
         local alias=record alias.code=alias.tags
-        print(record.code,record.tags,record.parent,record.flags,record.shared,record.self,record.cached,record.__obf_proto_code)
+        print(record.code,record.tags,record.parent,record.flags,record.shared,record.self,record.cached,record.control,record.__obf_proto_code,record.__obf_proto_control)
     "#;
     let work = Workspace::new();
     let path = work.0.join("public.lua");
@@ -98,6 +98,7 @@ fn ordinary_minification_does_not_opt_user_fields_into_the_private_schema() {
                 assert!(output.contains(&format!(".{name}")));
             }
             assert!(output.contains(".__obf_proto_code"));
+            assert!(output.contains(".__obf_proto_control"));
             fs::write(&path, output).unwrap();
             assert_eq!(compile_and_run(target, &path), expected);
         }
@@ -111,10 +112,10 @@ fn static_userdata_namecalls_with_public_or_marker_like_names_are_not_rewritten(
         getmetatable(object).__namecall=function(self,value,...)
             assert(self==object) return value,select('#',...),...
         end
-        print(object:code(1,nil,2)) print(object:tags(3,nil,4))
-        print(object:__obf_proto_code(5,nil,6)) print(object:__obf_proto_typo(7,nil,8))
-        local tableObject={code=function(self,value)return value+1 end,__obf_proto_tags=function(self,value)return value+2 end}
-        print(tableObject:code(9),tableObject:__obf_proto_tags(10))
+        print(object:code(1,nil,2)) print(object:tags(3,nil,4)) print(object:control(5,nil,6))
+        print(object:__obf_proto_code(7,nil,8)) print(object:__obf_proto_control(9,nil,10)) print(object:__obf_proto_typo(11,nil,12))
+        local tableObject={code=function(self,value)return value+1 end,__obf_proto_tags=function(self,value)return value+2 end,__obf_proto_control=function(self,value)return value+3 end}
+        print(tableObject:code(13),tableObject:__obf_proto_tags(14),tableObject:__obf_proto_control(15))
     "#;
     let work = Workspace::new();
     let path = work.0.join("methods.luau");
@@ -126,8 +127,10 @@ fn static_userdata_namecalls_with_public_or_marker_like_names_are_not_rewritten(
         for method in [
             "code",
             "tags",
+            "control",
             "__obf_proto_code",
             "__obf_proto_tags",
+            "__obf_proto_control",
             "__obf_proto_typo",
         ] {
             assert!(output.contains(&format!(":{method}(")), "{method}");

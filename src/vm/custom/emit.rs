@@ -16,7 +16,7 @@ pub(crate) fn generate(
     // replaced by five-stage context tokens; successors use independent
     // three-stage edge tokens. Live wire descriptors are validation-equivalent
     // camouflage rather than execution truth; the target-side parser accepts
-    // only this private ISA9 image.
+    // only this private ISA10 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image, None)
 }
@@ -347,16 +347,16 @@ if d7+d8*65521~={fake_adler} then E()end;"
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
     s.push_str(&format!("\nreturn {ret_names}\nend,"));
-    // The decoder section receives the three audited probe shares (each probe
-    // function already verified the environment and was called by the entry
-    // in seeded shuffled order), the two structural inner-stream keys and the
+    // The decoder section receives the three runtime-witness-bound probe
+    // shares (called by the entry in seeded shuffled order), the two
+    // structural inner-stream keys and the
     // shared helpers. It combines the shares into the outer keystream seed,
     // byte-decrypts the embedded blob, reverses and validates the independently
     // scheduled block frame, decrypts the compression body, and strictly
     // expands the bounded LZW frame before parsing.
     // Lehmer 48271 mod 2147483647 keeps every intermediate below 2^53, so the
     // Lua-side double arithmetic reproduces both Rust streams bit-for-bit.
-    let shares = cipher_shares(&keys, &params);
+    let shares = cipher_shares(&keys, &params, program.target);
     // B1: the payload seed additionally carries the permutation term,
     // computed on both ends from the rebuilt renumbering table at three
     // per-seed slots (the entry derives it from the forms field's output
@@ -969,20 +969,22 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
             s.push_str("local Lookup=function(object,key)return object[key]end;");
         }
     }
-    // Three audited probe functions: each verifies a distinct environment
-    // invariant of its host (native `loadstring` visible through the debug
-    // library) BEFORE contributing its key share; a failed probe aborts with
-    // no output. The entry calls the three functions in seeded shuffled
-    // order; the decoder section combines the shares into the keystream.
+    // Three audited key-probe functions: each consumes the target runtime's
+    // debug-source transcript for `loadstring`, folds returned bytes into its
+    // share after the seeded rounds, and returns no standalone witness. A
+    // malformed transcript faults closed; a well-shaped but wrong transcript
+    // derives wrong outer/block keys and fails their strict gates. The entry
+    // calls the functions in seeded shuffled order.
     // Shuffled CALL order of the three probe functions (indices 0..=2 into
     // keys[5..8] / probe_inputs / shares).
     let mut probe_order = [0usize, 1, 2];
     crate::random::Prng::new(seed ^ 0x6f72_6433_6873_7663).shuffle(&mut probe_order);
     // Structural inputs per probe: pairs of payload-table numeric keys the
     // entry passes positionally. The Rust cipher derives the exact same
-    // shares from the exact same pairs, so no share -- and no keystream
-    // state -- is ever stored in the script: each probe computes its share
-    // at run time, after its environment check, in plain double arithmetic.
+    // shares from the exact same pairs, so no share or final keystream state
+    // exists as a script literal: each probe computes its transient share at
+    // run time after consuming its environment transcript, using exact double
+    // arithmetic.
     let probe_inputs = cipher_probe_inputs(&keys);
     let mut probe_fields = Vec::new();
     for (index, _) in shares.iter().enumerate() {
@@ -990,16 +992,17 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         for _ in 0..params.probe_rounds[index] {
             steps.push_str(&format!("x={}*x%2147483647;", params.outer));
         }
-        let mut field = format!("[{}]=function(E,a,b,DB,GI,LS)local A=", keys[5 + index]);
+        let mut field = format!("[{}]=function(SB,a,b,DB,GI,LS)local A=", keys[5 + index]);
         if program.target.is_luau() {
-            field.push_str("DB and GI(LS,\"s\");if A~=\"[C]\" then E()end;");
+            field.push_str("DB and GI(LS,\"s\");");
         } else {
-            field.push_str("DB and GI(LS,\"S\");if not(A and A.what==\"C\")then E()end;");
+            field.push_str("DB and GI(LS,\"S\");A=A and A.source;");
         }
         let _ = write!(
             field,
-            "local x=(a*{}+b)%2147483647;{steps}return x;end,",
-            params.mix
+            "local x=(a*{}+b)%2147483647;{steps}a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%2147483647;b=b+1 end;return 1+(x+a*{})%2147483646;end,",
+            params.mix,
+            params.mix,
         );
         probe_fields.push(field);
     }
@@ -1010,10 +1013,10 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     write!(
         s,
         "[\"{method}\"]=function(VMS,...)\nlocal {names}=VMS[{}]();
-local c{cn0}=VMS[{}](E,{},{},DBG,GI,LS);local c{cn1}=VMS[{}](E,{},{},DBG,GI,LS);local c{cn2}=VMS[{}](E,{},{},DBG,GI,LS);
+local c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS);local c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS);local c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS);
 local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD,ED=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});P.__obf_proto_control=(c1+c2+c3)%65520;\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD,ED=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
 local CV,SV,Lookup=VMS[{}](TY,E);
 local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
@@ -1172,18 +1175,22 @@ end;
         .collect();
     debug_assert_eq!(state_cursor, fragment_count);
 
-    let fsv = state_values(&mut structure, 2);
-    let (k_fetch, k_disp) = (fsv[0], fsv[1]);
-    let c_fetch = state_condition(&mut structure, "w", k_fetch);
-    let c_disp = state_condition(&mut structure, "w", k_disp);
+    let fsv = state_values(&mut structure, 4);
+    let (k_fetch, k_disp, k_fetch_alt, k_disp_alt) = (fsv[0], fsv[1], fsv[2], fsv[3]);
+    let control_mask = "P.__obf_proto_control";
+    let c_fetch =
+        selected_masked_state_condition(&mut structure, "w", control_mask, k_fetch, k_fetch_alt);
+    let c_disp =
+        selected_masked_state_condition(&mut structure, "w", control_mask, k_disp, k_disp_alt);
+    let v_fetch = selected_masked_state_value(k_fetch, k_fetch_alt, control_mask);
+    let v_disp = selected_masked_state_value(k_disp, k_disp_alt, control_mask);
     let dispatch_first = structure.next_u64() % 2 == 0;
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);sid={semantic_init};pc=next1;w={k_disp};"
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);sid={semantic_init};pc=next1;w={v_disp};"
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,o,a,b,c,k,j;local w={k_fetch};\n  while true do\n   {machine_open}",
-        k_fetch = k_fetch,
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,o,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {
@@ -1242,7 +1249,7 @@ end;
                 if let Some(next) = chunks.get(chunk_index + 1) {
                     write!(body, "sid={};", next.2).unwrap();
                 } else {
-                    write!(body, "sid={semantic_init};w={k_fetch};").unwrap();
+                    write!(body, "sid={semantic_init};").unwrap();
                 }
             }
             let condition =
@@ -1258,7 +1265,7 @@ end;
     let init_condition = state_condition(&mut structure, "sid", semantic_init);
     write!(
         s,
-        "if {init_condition} then {recipe_chain}else {fragment_chain}end;"
+        "if {init_condition} then {recipe_chain}else {fragment_chain}end;if {init_condition} then w={v_fetch};end;"
     )
     .unwrap();
     if dispatch_first {

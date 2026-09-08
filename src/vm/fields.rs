@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 pub(super) const PREFIX: &str = "__obf_proto_";
 pub(super) const PROTOTYPE_FIELDS: &[&str] = &[
     "k", "tags", "u", "parent", "m", "p", "flags", "nu", "nk", "nc", "shared", "self", "code",
-    "cached",
+    "cached", "control",
 ];
 
 fn error(message: &str) -> Diagnostic {
@@ -133,7 +133,7 @@ mod tests {
                 );
                 for (before, after) in &mapping {
                     assert_ne!(*before, after);
-                    assert_eq!(after.len(), 1); // all 14 current fields fit
+                    assert_eq!(after.len(), 1); // all 15 current fields fit
                     assert!(after.bytes().all(|b| b.is_ascii_lowercase()));
                     assert!(!lexer::is_keyword(after, target));
                 }
@@ -255,7 +255,7 @@ mod tests {
                         text
                     };
                     // Includes every local/global spelling, punctuation and
-                    // literal: only the 14 private schema names can differ.
+                    // literal: only the private schema names can differ.
                     assert_eq!(
                         expected,
                         right.text(&output),
@@ -285,7 +285,8 @@ mod tests {
                     "concat",
                     "info",
                     "getinfo",
-                    "what"
+                    "what",
+                    "source"
                 ])));
             }
         }
