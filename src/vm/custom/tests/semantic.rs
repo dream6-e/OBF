@@ -368,7 +368,7 @@ fn global_function_segment_pool_is_decoder_coupled_interleaved_and_exact() {
             assert_eq!(image.segment_next_ids.len(), image.code_segments);
             physical_orders.insert(image.segment_physical_ids.clone());
 
-            let (layouts, segments) = semantic_layouts(&image);
+            let (layouts, _captures, _constants, segments) = semantic_pool_layouts(&image);
             assert_eq!(segments.len(), image.code_segments);
             assert_eq!(layouts.len(), image.prototype_order.len());
             assert_eq!(image.segment_root_ids.len(), layouts.len());
@@ -1457,3 +1457,131 @@ fn field_order_permutations_decouple_parser_from_canonical_layout() {
         assert_eq!(expected, native::compile_and_run(target, &path));
     }
 }
+
+#[test]
+fn pool_token_helpers_mirror_segment_masking() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("print(1)", target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 735, u64::MAX] {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            for wire_slot in [1u16, 2, 917, u16::MAX] {
+                for (owner, slot, payload) in
+                    [(0u16, 0u16, 0u16), (1, 2, 1022), (255, 256, 65535), (32767, 65535, 42)]
+                {
+                    let owner_token =
+                        super::semantic::encode_pool_owner(owner, wire_slot, &image);
+                    assert_eq!(
+                        super::semantic::decode_pool_owner(owner_token, wire_slot, &image),
+                        owner
+                    );
+                    let slot_token =
+                        super::semantic::encode_pool_slot(slot, owner, wire_slot, &image);
+                    assert_eq!(
+                        super::semantic::decode_pool_slot(slot_token, owner, wire_slot, &image),
+                        slot
+                    );
+                    let payload_token =
+                        super::semantic::encode_pool_payload(payload, slot, owner, &image);
+                    assert_eq!(
+                        super::semantic::decode_pool_payload(payload_token, slot, owner, &image),
+                        payload
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pool_field_profiles_cover_all_six_orders() {
+    let mut combos = BTreeSet::new();
+    let mut saw_plain = false;
+    let mut saw_flipped = false;
+    for seed in 0..64u64 {
+        let field = field_layout(seed);
+        combos.insert((field.pool_mul, field.pool_add));
+        if field.pools_flipped {
+            saw_flipped = true;
+        } else {
+            saw_plain = true;
+        }
+        // The pool multiplier is coprime to 6, so one period covers every
+        // quotient and every anonymous-slot permutation exactly once.
+        let mut slots = BTreeSet::new();
+        for physical_slot in 1..=6usize {
+            assert!(field.pool_quotient(physical_slot) < 6);
+            assert!(slots.insert(field.pool_field_slots(physical_slot)));
+        }
+    }
+    assert!(combos.len() >= 6, "pool key variety: {combos:?}");
+    assert!(saw_plain && saw_flipped, "pool order never flips");
+}
+
+#[test]
+fn wire_isa_version_is_14() {
+    assert_eq!(
+        super::semantic::WIRE_ISA_VERSION,
+        14,
+        "pooled capture/constant images require ISA14"
+    );
+}
+
+#[test]
+fn generated_parser_reads_global_capture_constant_pools() {
+    let mut plain = None;
+    let mut flipped = None;
+    for seed in 0..64u64 {
+        if field_layout(seed).pools_flipped {
+            flipped.get_or_insert(seed);
+        } else {
+            plain.get_or_insert(seed);
+        }
+    }
+    let (plain, flipped) = (plain.unwrap(), flipped.unwrap());
+    assert_ne!(plain, flipped);
+    for target in [Target::Lua51, Target::Luau] {
+        for seed in [plain, flipped] {
+            let data = compile(
+                "local x=1;local function f()return x end print(f())",
+                target,
+            )
+            .unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let raw = generate(&data, &program, seed).unwrap();
+            for marker in [
+                "local TU,TK=0,0;",
+                "for slot=1,TU do",
+                "for slot=1,TK do",
+                "local rec=UT[j]",
+                "local rec=KT[j]",
+            ] {
+                assert!(
+                    raw.contains(marker),
+                    "{target} seed {seed}: missing pool marker {marker}"
+                );
+            }
+        }
+        // Textual branch order is seed-shuffled, so flipped-order agreement
+        // between encoder and parser is proven behaviorally: the flipped
+        // seed must execute exactly like the native script on both targets.
+        let data = compile(
+            "local x=1;local function f()return x end print(f())",
+            target,
+        )
+        .unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let raw = generate(&data, &program, flipped).unwrap();
+        let output = finalize(&raw, target, flipped).unwrap();
+        let work = native::Workspace::new();
+        let path = work.0.join(if target.is_luau() {
+            "flipped_pools.luau"
+        } else {
+            "flipped_pools.lua"
+        });
+        fs::write(&path, output).unwrap();
+        let stdout = native::compile_and_run(target, &path);
+        assert_eq!(stdout, b"1\n", "{target}: flipped pools misbehave");
+    }
+}
+

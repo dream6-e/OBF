@@ -246,134 +246,8 @@ struct SemanticSegmentLayout {
     next: usize,
     payload: std::ops::Range<usize>,
 }
-
-fn semantic_layouts(
-    image: &super::semantic::SemanticImage,
-) -> (Vec<SemanticPrototypeLayout>, Vec<SemanticSegmentLayout>) {
-    let bytes = &image.bytes;
-    let field = image.field_layout;
-    let meta = field.metadata_positions();
-    let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
-    let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-    let prototypes = u32_at(16) as usize;
-    let mut position = 32usize;
-    let mut layouts = Vec::with_capacity(prototypes);
-    for _ in 0..prototypes {
-        let header = position;
-        let captures = usize::from(u16_at(header + meta.captures));
-        let segment_count = 2;
-        let root_token_position = header + meta.root;
-        let root_token = u16_at(root_token_position);
-        let constants = u32_at(header + meta.constants) as usize;
-        let records = u32_at(header + meta.records) as usize;
-        let code_len = u32_at(header + meta.code_len) as usize;
-        position = header + 24 + captures * 2;
-        for _ in 0..constants {
-            let tag = bytes[position];
-            position += 1;
-            position += match tag {
-                0 => 0,
-                1 => 1,
-                2 | 4 => 8,
-                3 | 5 => {
-                    let len = u32_at(position) as usize;
-                    4 + len
-                }
-                _ => panic!("unknown constant tag in generated semantic image"),
-            };
-        }
-        layouts.push(SemanticPrototypeLayout {
-            header,
-            code_positions: Vec::with_capacity(code_len),
-            code_len,
-            records,
-            segment_count,
-            root_token,
-            root_token_position,
-        });
-    }
-    let mut segments = Vec::with_capacity(prototypes * 2);
-    for physical_slot in 1..=prototypes * 2 {
-        // Segment tokens are anonymous same-width slots; the per-segment
-        // factorial profile reassigns their meaning.
-        let slots = field.segment_field_slots(physical_slot);
-        let base = position;
-        let id_token_position = base + slots[0] * 2;
-        let owner_token_position = base + slots[1] * 2;
-        let next_token_position = base + slots[2] * 2;
-        position = base + 6;
-        let token = u16_at(id_token_position);
-        let id = usize::from(super::semantic::decode_segment_id(
-            token,
-            physical_slot as u16,
-            image,
-        ));
-        assert!((1..=prototypes * 2).contains(&id));
-        let owner = (id - 1) / 2;
-        let owner_token = u16_at(owner_token_position);
-        assert_eq!(
-            usize::from(super::semantic::decode_segment_owner(
-                owner_token,
-                id as u16,
-                physical_slot as u16,
-                image,
-            )),
-            owner
-        );
-        let next_token = u16_at(next_token_position);
-        let next = usize::from(super::semantic::decode_segment_next(
-            next_token,
-            id as u16,
-            owner as u16,
-            image,
-        ));
-        let part = (id - 1) % 2;
-        let split =
-            super::semantic::code_segment_split(layouts[owner].code_len, owner as u16, image);
-        let length = if part == 0 {
-            split
-        } else {
-            layouts[owner].code_len - split
-        };
-        let payload = position..position + length;
-        position += length;
-        segments.push(SemanticSegmentLayout {
-            physical_slot,
-            id_token_position,
-            id,
-            owner_token_position,
-            owner,
-            next_token_position,
-            next,
-            payload,
-        });
-    }
-    assert_eq!(position, bytes.len());
-    let by_id = segments
-        .iter()
-        .map(|segment| (segment.id, segment))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(by_id.len(), segments.len());
-    for (owner, layout) in layouts.iter_mut().enumerate() {
-        let mut id = usize::from(super::semantic::decode_segment_root(
-            layout.root_token,
-            owner as u16,
-            image,
-        ));
-        for _ in 0..layout.segment_count {
-            let segment = by_id[&id];
-            assert_eq!(segment.owner, owner);
-            layout.code_positions.extend(segment.payload.clone());
-            id = segment.next;
-        }
-        assert_eq!(id, 0);
-        assert_eq!(layout.code_positions.len(), layout.code_len);
-    }
-    (layouts, segments)
-}
-
 fn semantic_code(image: &super::semantic::SemanticImage, prototype: usize) -> Vec<u8> {
-    let layout = &semantic_layouts(image).0[prototype];
+    let layout = &semantic_pool_layouts(image).0[prototype];
     layout
         .code_positions
         .iter()
@@ -386,7 +260,7 @@ fn mutate_semantic_code(
     prototype: usize,
     mutate: impl FnOnce(&mut [u8]),
 ) -> super::semantic::SemanticImage {
-    let layout = semantic_layouts(image).0.remove(prototype);
+    let layout = semantic_pool_layouts(image).0.remove(prototype);
     let mut code = layout
         .code_positions
         .iter()
@@ -411,7 +285,7 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         let data = compile("print('MUST_NOT_RUN')", target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 735).unwrap();
-        let first_layout = semantic_layouts(&image).0.remove(0);
+        let first_layout = semantic_pool_layouts(&image).0.remove(0);
         let code_len = first_layout.code_len;
         let records = first_layout.records;
         let code_bytes = semantic_code(&image, 0);
@@ -582,7 +456,7 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
         .iter()
         .position(|old| *old == old_child)
         .expect("real child missing after semantic reorder");
-    let (layouts, segments) = semantic_layouts(&image);
+    let (layouts, pool_captures, _constants, segments) = semantic_pool_layouts(&image);
     let meta = image.field_layout.metadata_positions();
     let child = layouts[child_id].header;
     assert!(child + 26 <= image.bytes.len());
@@ -601,11 +475,29 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
     let mut bad = image.clone();
     bad.bytes[child + meta.flags] |= 0x80; // unknown prototype flag
     corruptions.push(bad);
+    let child_record = pool_captures
+        .iter()
+        .find(|record| record.owner == child_id)
+        .expect("child prototype must own a pooled capture");
     let mut bad = image.clone();
-    bad.bytes[child + 24] = 3; // unknown capture tag
+    let bad_tag = super::semantic::encode_pool_payload(
+        3,
+        child_record.slot as u16,
+        child_record.owner as u16,
+        &image,
+    );
+    bad.bytes[child_record.token_positions[2]..child_record.token_positions[2] + 2]
+        .copy_from_slice(&bad_tag.to_le_bytes()); // unknown pooled capture tag
     corruptions.push(bad);
     let mut bad = image.clone();
-    bad.bytes[child + 25] = 255; // capture index outside parent frame
+    let index_overflow = super::semantic::encode_pool_payload(
+        256 * 4,
+        child_record.slot as u16,
+        child_record.owner as u16,
+        &image,
+    );
+    bad.bytes[child_record.token_positions[2]..child_record.token_positions[2] + 2]
+        .copy_from_slice(&index_overflow.to_le_bytes()); // pooled capture index overflow
     corruptions.push(bad);
     let mut bad = image.clone();
     let terminal_root = super::semantic::encode_segment_root(2, 0, &image);
@@ -685,7 +577,7 @@ fn target_decoder_rejects_every_global_segment_graph_corruption_on_both_targets(
         let data = compile("print('MUST_NOT_RUN')", target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 917).unwrap();
-        let (layouts, segments) = semantic_layouts(&image);
+        let (layouts, _captures, _constants, segments) = semantic_pool_layouts(&image);
         assert!(layouts.len() >= 2 && segments.len() >= 4);
         let root = segments
             .iter()
@@ -931,7 +823,7 @@ fn target_decoder_rejects_field_order_confusion_on_both_targets() {
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 735).unwrap();
         let field = image.field_layout;
-        let (layouts, segments) = semantic_layouts(&image);
+        let (layouts, _captures, _constants, segments) = semantic_pool_layouts(&image);
         let code_bytes = semantic_code(&image, 0);
         let recipes = u16::from_le_bytes(code_bytes[..2].try_into().unwrap()) as usize;
         let len_offset = if field.dict_flipped { 0 } else { 2 };
@@ -1035,5 +927,727 @@ fn target_decoder_rejects_field_order_confusion_on_both_targets() {
             assert!(!result.status.success(), "{target} {kind} ran");
             assert!(result.stdout.is_empty(), "{target} {kind} leaked output");
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PooledCaptureLayout {
+    physical_slot: usize,
+    token_positions: [usize; 3],
+    owner: usize,
+    slot: usize,
+    tag: u8,
+    index: u8,
+}
+
+#[derive(Clone, Debug)]
+struct PooledConstantLayout {
+    physical_slot: usize,
+    token_positions: [usize; 3],
+    owner: usize,
+    index: usize,
+    tag: u16,
+    payload: std::ops::Range<usize>,
+}
+
+/// Parse one global capture pool at `position`: `total` records of three
+/// anonymous u16 slots ([owner, slot, payload]) under the per-record pool
+/// factorial profile. Returns the records and the first unconsumed offset.
+fn parse_capture_pool(
+    image: &super::semantic::SemanticImage,
+    layouts: &[SemanticPrototypeLayout],
+    capture_total: usize,
+    position: usize,
+) -> (Vec<PooledCaptureLayout>, usize) {
+    let bytes = &image.bytes;
+    let field = image.field_layout;
+    let meta = field.metadata_positions();
+    let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+    let mut position = position;
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(capture_total.min(bytes.len())); // cap: counts are untrusted until the wire lands;
+    for physical_slot in 1..=capture_total {
+        let slots = field.pool_field_slots(physical_slot);
+        let base = position;
+        let owner_position = base + slots[0] * 2;
+        let slot_position = base + slots[1] * 2;
+        let payload_position = base + slots[2] * 2;
+        position = base + 6;
+        let wire_slot = physical_slot as u16;
+        let owner = usize::from(super::semantic::decode_pool_owner(
+            u16_at(owner_position),
+            wire_slot,
+            image,
+        ));
+        assert!(
+            owner < layouts.len(),
+            "capture pool record {physical_slot}: owner {owner} out of range"
+        );
+        let slot = usize::from(super::semantic::decode_pool_slot(
+            u16_at(slot_position),
+            owner as u16,
+            wire_slot,
+            image,
+        ));
+        let owner_captures =
+            usize::from(u16_at(layouts[owner].header + meta.captures));
+        assert!(
+            slot < owner_captures,
+            "capture pool record {physical_slot}: slot {slot} outside owner {owner} nu={owner_captures}"
+        );
+        let payload = super::semantic::decode_pool_payload(
+            u16_at(payload_position),
+            slot as u16,
+            owner as u16,
+            image,
+        );
+        let tag = (payload % 4) as u8;
+        assert!(
+            tag <= 2,
+            "capture pool record {physical_slot}: bad tag {tag}"
+        );
+        assert!(
+            payload / 4 <= 255,
+            "capture pool record {physical_slot}: index overflow"
+        );
+        let index = (payload / 4) as u8;
+        assert!(
+            seen.insert((owner, slot)),
+            "duplicate capture pool record ({owner},{slot})"
+        );
+        out.push(PooledCaptureLayout {
+            physical_slot,
+            token_positions: [owner_position, slot_position, payload_position],
+            owner,
+            slot,
+            tag,
+            index,
+        });
+    }
+    (out, position)
+}
+
+/// Parse one global constant pool at `position`: `total` records of a
+/// three-slot u16 token header ([owner, index, tag]) plus the tag-dependent
+/// value payload. Returns the records and the first unconsumed offset.
+fn parse_constant_pool(
+    image: &super::semantic::SemanticImage,
+    layouts: &[SemanticPrototypeLayout],
+    constant_total: usize,
+    position: usize,
+) -> (Vec<PooledConstantLayout>, usize) {
+    let bytes = &image.bytes;
+    let field = image.field_layout;
+    let meta = field.metadata_positions();
+    let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+    let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let mut position = position;
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(constant_total.min(bytes.len())); // cap: counts are untrusted until the wire lands;
+    for physical_slot in 1..=constant_total {
+        let slots = field.pool_field_slots(physical_slot);
+        let base = position;
+        let owner_position = base + slots[0] * 2;
+        let index_position = base + slots[1] * 2;
+        let tag_position = base + slots[2] * 2;
+        position = base + 6;
+        let wire_slot = physical_slot as u16;
+        let owner = usize::from(super::semantic::decode_pool_owner(
+            u16_at(owner_position),
+            wire_slot,
+            image,
+        ));
+        assert!(
+            owner < layouts.len(),
+            "constant pool record {physical_slot}: owner {owner} out of range"
+        );
+        let index = usize::from(super::semantic::decode_pool_slot(
+            u16_at(index_position),
+            owner as u16,
+            wire_slot,
+            image,
+        ));
+        let owner_constants =
+            u32_at(layouts[owner].header + meta.constants) as usize;
+        assert!(
+            index < owner_constants,
+            "constant pool record {physical_slot}: index {index} outside owner {owner} nk={owner_constants}"
+        );
+        let tag = super::semantic::decode_pool_payload(
+            u16_at(tag_position),
+            index as u16,
+            owner as u16,
+            image,
+        );
+        assert!(
+            tag <= 5,
+            "constant pool record {physical_slot}: bad tag {tag}"
+        );
+        let payload_start = position;
+        position += match tag {
+            0 => 0,
+            1 => 1,
+            2 | 4 => 8,
+            3 | 5 => {
+                let len = u32_at(position) as usize;
+                4 + len
+            }
+            _ => unreachable!("tag range was checked above"),
+        };
+        assert!(
+            seen.insert((owner, index)),
+            "duplicate constant pool record ({owner},{index})"
+        );
+        out.push(PooledConstantLayout {
+            physical_slot,
+            token_positions: [owner_position, index_position, tag_position],
+            owner,
+            index,
+            tag,
+            payload: payload_start..position,
+        });
+    }
+    (out, position)
+}
+
+/// ISA14 wire walker: contiguous 24-byte headers (captures/constants live
+/// only in the global pools now), then the capture and constant pools in
+/// `pools_flipped` order, then the segment graph. Exact consumption of every
+/// byte is asserted, exactly like the segment walker it extends.
+fn semantic_pool_layouts(
+    image: &super::semantic::SemanticImage,
+) -> (
+    Vec<SemanticPrototypeLayout>,
+    Vec<PooledCaptureLayout>,
+    Vec<PooledConstantLayout>,
+    Vec<SemanticSegmentLayout>,
+) {
+    let bytes = &image.bytes;
+    let field = image.field_layout;
+    let meta = field.metadata_positions();
+    let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+    let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let prototypes = u32_at(16) as usize;
+    let mut position = 32usize;
+    let mut layouts = Vec::with_capacity(prototypes);
+    let mut capture_total = 0usize;
+    let mut constant_total = 0usize;
+    for _ in 0..prototypes {
+        let header = position;
+        let captures = usize::from(u16_at(header + meta.captures));
+        let segment_count = 2;
+        let root_token_position = header + meta.root;
+        let root_token = u16_at(root_token_position);
+        let constants = u32_at(header + meta.constants) as usize;
+        let records = u32_at(header + meta.records) as usize;
+        let code_len = u32_at(header + meta.code_len) as usize;
+        capture_total += captures;
+        constant_total += constants;
+        position = header + 24;
+        layouts.push(SemanticPrototypeLayout {
+            header,
+            code_positions: Vec::with_capacity(code_len.min(bytes.len())),
+            code_len,
+            records,
+            segment_count,
+            root_token,
+            root_token_position,
+        });
+    }
+    let (captures, constants, mut position) = if field.pools_flipped {
+        let (constants, position) =
+            parse_constant_pool(image, &layouts, constant_total, position);
+        let (captures, position) =
+            parse_capture_pool(image, &layouts, capture_total, position);
+        (captures, constants, position)
+    } else {
+        let (captures, position) =
+            parse_capture_pool(image, &layouts, capture_total, position);
+        let (constants, position) =
+            parse_constant_pool(image, &layouts, constant_total, position);
+        (captures, constants, position)
+    };
+    let mut segments = Vec::with_capacity(prototypes * 2);
+    for physical_slot in 1..=prototypes * 2 {
+        // Segment tokens are anonymous same-width slots; the per-segment
+        // factorial profile reassigns their meaning.
+        let slots = field.segment_field_slots(physical_slot);
+        let base = position;
+        let id_token_position = base + slots[0] * 2;
+        let owner_token_position = base + slots[1] * 2;
+        let next_token_position = base + slots[2] * 2;
+        position = base + 6;
+        let token = u16_at(id_token_position);
+        let id = usize::from(super::semantic::decode_segment_id(
+            token,
+            physical_slot as u16,
+            image,
+        ));
+        assert!((1..=prototypes * 2).contains(&id));
+        let owner = (id - 1) / 2;
+        let owner_token = u16_at(owner_token_position);
+        assert_eq!(
+            usize::from(super::semantic::decode_segment_owner(
+                owner_token,
+                id as u16,
+                physical_slot as u16,
+                image,
+            )),
+            owner
+        );
+        let next_token = u16_at(next_token_position);
+        let next = usize::from(super::semantic::decode_segment_next(
+            next_token,
+            id as u16,
+            owner as u16,
+            image,
+        ));
+        let part = (id - 1) % 2;
+        let split =
+            super::semantic::code_segment_split(layouts[owner].code_len, owner as u16, image);
+        let length = if part == 0 {
+            split
+        } else {
+            layouts[owner].code_len - split
+        };
+        let payload = position..position + length;
+        position += length;
+        segments.push(SemanticSegmentLayout {
+            physical_slot,
+            id_token_position,
+            id,
+            owner_token_position,
+            owner,
+            next_token_position,
+            next,
+            payload,
+        });
+    }
+    assert_eq!(position, bytes.len());
+    let by_id = segments
+        .iter()
+        .map(|segment| (segment.id, segment))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(by_id.len(), segments.len());
+    for (owner, layout) in layouts.iter_mut().enumerate() {
+        let mut id = usize::from(super::semantic::decode_segment_root(
+            layout.root_token,
+            owner as u16,
+            image,
+        ));
+        for _ in 0..layout.segment_count {
+            let segment = by_id[&id];
+            assert_eq!(segment.owner, owner);
+            layout.code_positions.extend(segment.payload.clone());
+            id = segment.next;
+        }
+        assert_eq!(id, 0);
+        assert_eq!(layout.code_positions.len(), layout.code_len);
+    }
+    (layouts, captures, constants, segments)
+}
+
+#[test]
+fn capture_constant_pools_exist_in_wire_image() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(
+            "local function f(n)if n>0 then return f(n-1)end return n end print(f(2))",
+            target,
+        )
+        .unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 735] {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            let (layouts, captures, constants, segments) = semantic_pool_layouts(&image);
+            let meta = image.field_layout.metadata_positions();
+            let bytes = &image.bytes;
+            let u16_at =
+                |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+            let u32_at =
+                |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            let expected_captures: usize = layouts
+                .iter()
+                .map(|layout| usize::from(u16_at(layout.header + meta.captures)))
+                .sum();
+            let expected_constants: usize = layouts
+                .iter()
+                .map(|layout| u32_at(layout.header + meta.constants) as usize)
+                .sum();
+            assert_eq!(
+                captures.len(),
+                expected_captures,
+                "{target} seed {seed}: capture pool total"
+            );
+            assert!(
+                expected_captures > 0,
+                "fixture must exercise the capture pool"
+            );
+            assert_eq!(
+                constants.len(),
+                expected_constants,
+                "{target} seed {seed}: constant pool total"
+            );
+            for (owner, layout) in layouts.iter().enumerate() {
+                let nu = usize::from(u16_at(layout.header + meta.captures));
+                let owned: BTreeSet<usize> = captures
+                    .iter()
+                    .filter(|record| record.owner == owner)
+                    .map(|record| record.slot)
+                    .collect();
+                assert_eq!(
+                    owned,
+                    (0..nu).collect::<BTreeSet<_>>(),
+                    "{target} seed {seed}: owner {owner} capture coverage"
+                );
+                let nk = u32_at(layout.header + meta.constants) as usize;
+                let kowned: BTreeSet<usize> = constants
+                    .iter()
+                    .filter(|record| record.owner == owner)
+                    .map(|record| record.index)
+                    .collect();
+                assert_eq!(
+                    kowned,
+                    (0..nk).collect::<BTreeSet<_>>(),
+                    "{target} seed {seed}: owner {owner} constant coverage"
+                );
+                // Pooled values match canonical ground truth. Decoy owners
+                // (past the canonical prototype count) carry no captures and
+                // only synthetic constants, so they are skipped here.
+                let old = image.prototype_order[owner];
+                if old >= program.prototypes.len() {
+                    assert_eq!(nu, 0, "decoy owner {owner} must not capture");
+                    continue;
+                }
+                for record in captures.iter().filter(|record| record.owner == owner) {
+                    let (tag, index) = match program.prototypes[old].captures[record.slot] {
+                        ir::Capture::Local(register) => (0, register),
+                        ir::Capture::Upvalue(upvalue) => (1, upvalue),
+                        ir::Capture::RecursiveLocal(register) => (2, register),
+                    };
+                    assert_eq!(record.tag, tag, "{target} seed {seed}: capture tag");
+                    assert_eq!(
+                        usize::from(record.index),
+                        usize::from(index),
+                        "{target} seed {seed}: capture index"
+                    );
+                }
+                for record in constants.iter().filter(|record| record.owner == owner) {
+                    let expected = match program.prototypes[old].constants[record.index] {
+                        ir::Constant::Nil => 0,
+                        ir::Constant::Boolean(_) => 1,
+                        ir::Constant::Number(_) => 2,
+                        ir::Constant::String(_) => 3,
+                        ir::Constant::Integer(_) => 4,
+                        ir::Constant::Method(_) => 5,
+                    };
+                    assert_eq!(record.tag, expected, "{target} seed {seed}: constant tag");
+                }
+            }
+            assert_eq!(segments.len(), layouts.len() * 2);
+        }
+    }
+}
+
+#[test]
+fn pools_shuffle_across_seeds_and_interleave() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(
+            "local function f(n)if n>0 then return f(n-1)+g(n-1) else return 1 end end local function g(n)if n>0 then return g(n-1)+f(n-1) else return 2 end end print(f(3),g(3))",
+            target,
+        )
+        .unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let canonical_captures: usize = program
+            .prototypes
+            .iter()
+            .map(|prototype| prototype.captures.len())
+            .sum();
+        let canonical_constants: usize = program
+            .prototypes
+            .iter()
+            .map(|prototype| prototype.constants.len())
+            .sum();
+        assert!(canonical_captures >= 3, "fixture needs a shufflable pool");
+        let mut capture_orders = BTreeSet::new();
+        let mut constant_orders = BTreeSet::new();
+        for seed in [0u64, 1, 2, 3, 735, u64::MAX] {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            // Decoys never capture; at most the trailing decoy adds one
+            // synthetic numeric constant.
+            assert_eq!(
+                image.capture_pool_owners.len(),
+                canonical_captures,
+                "{target} seed {seed}: capture pool total"
+            );
+            assert!(
+                (canonical_constants..=canonical_constants + 1)
+                    .contains(&image.constant_pool_owners.len()),
+                "{target} seed {seed}: constant pool total"
+            );
+            assert!(image.pools_interleaved, "{target} seed {seed}: interleave flag");
+            capture_orders.insert(
+                image
+                    .capture_pool_owners
+                    .iter()
+                    .zip(&image.capture_pool_slots)
+                    .map(|(&owner, &slot)| (owner, slot))
+                    .collect::<Vec<_>>(),
+            );
+            constant_orders.insert(
+                image
+                    .constant_pool_owners
+                    .iter()
+                    .zip(&image.constant_pool_indices)
+                    .map(|(&owner, &index)| (owner, index))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert!(
+            capture_orders.len() >= 2,
+            "{target}: capture pool order pinned across seeds"
+        );
+        assert!(
+            constant_orders.len() >= 2,
+            "{target}: constant pool order pinned across seeds"
+        );
+    }
+}
+
+#[test]
+fn target_decoder_rejects_every_pool_corruption_on_both_targets() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(
+            "local c=true;local function f(n)if n>0 then return f(n-1)+g(n-1) elseif c then return 1 else return 0 end end local function g(n)if n>0 then return g(n-1)+f(n-1) else return 2 end end print(f(2),g(2),'MUST_NOT_RUN')",
+            target,
+        )
+        .unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let image = super::semantic::encode(&program, 917).unwrap();
+        let (layouts, captures, constants, _) = semantic_pool_layouts(&image);
+        assert!(captures.len() >= 2 && constants.len() >= 4);
+        let meta = image.field_layout.metadata_positions();
+        let u16_at = |offset: usize| {
+            u16::from_le_bytes(image.bytes[offset..offset + 2].try_into().unwrap())
+        };
+        let u32_at = |offset: usize| {
+            u32::from_le_bytes(image.bytes[offset..offset + 4].try_into().unwrap())
+        };
+        let owner_nu =
+            |owner: usize| usize::from(u16_at(layouts[owner].header + meta.captures));
+        let owner_nk =
+            |owner: usize| u32_at(layouts[owner].header + meta.constants) as usize;
+        let mut corruptions = Vec::new();
+
+        // Duplicate capture slot (also leaves the overwritten slot missing).
+        let (first, second) = (&captures[0], &captures[1]);
+        let mut bad = image.clone();
+        let slot = second.physical_slot as u16;
+        let owner_token =
+            super::semantic::encode_pool_owner(first.owner as u16, slot, &image);
+        bad.bytes[second.token_positions[0]..second.token_positions[0] + 2]
+            .copy_from_slice(&owner_token.to_le_bytes());
+        let slot_token = super::semantic::encode_pool_slot(
+            first.slot as u16,
+            first.owner as u16,
+            slot,
+            &image,
+        );
+        bad.bytes[second.token_positions[1]..second.token_positions[1] + 2]
+            .copy_from_slice(&slot_token.to_le_bytes());
+        corruptions.push(("duplicate-capture-slot", bad));
+
+        let record = &captures[0];
+        let wire_slot = record.physical_slot as u16;
+        let owner = record.owner as u16;
+
+        let mut bad = image.clone();
+        let out_of_range_owner = super::semantic::encode_pool_owner(
+            layouts.len() as u16,
+            wire_slot,
+            &image,
+        );
+        bad.bytes[record.token_positions[0]..record.token_positions[0] + 2]
+            .copy_from_slice(&out_of_range_owner.to_le_bytes());
+        corruptions.push(("capture-owner-out-of-range", bad));
+
+        let mut bad = image.clone();
+        let out_of_range_slot = super::semantic::encode_pool_slot(
+            owner_nu(record.owner) as u16,
+            owner,
+            wire_slot,
+            &image,
+        );
+        bad.bytes[record.token_positions[1]..record.token_positions[1] + 2]
+            .copy_from_slice(&out_of_range_slot.to_le_bytes());
+        corruptions.push(("capture-slot-out-of-range", bad));
+
+        let mut bad = image.clone();
+        let bad_tag = super::semantic::encode_pool_payload(3, record.slot as u16, owner, &image);
+        bad.bytes[record.token_positions[2]..record.token_positions[2] + 2]
+            .copy_from_slice(&bad_tag.to_le_bytes());
+        corruptions.push(("capture-bad-tag", bad));
+
+        let mut bad = image.clone();
+        let index_overflow =
+            super::semantic::encode_pool_payload(256 * 4, record.slot as u16, owner, &image);
+        bad.bytes[record.token_positions[2]..record.token_positions[2] + 2]
+            .copy_from_slice(&index_overflow.to_le_bytes());
+        corruptions.push(("capture-index-overflow", bad));
+
+        // Tag/index pair the pool reader accepts but the per-prototype
+        // upvalue wiring must refuse: tag 1 with an index at the parent's
+        // capture-count boundary.
+        let parent_record = captures
+            .iter()
+            .find(|record| record.owner != 0)
+            .expect("fixture must capture into a child prototype");
+        let parent = u32_at(layouts[parent_record.owner].header + meta.parent) as usize;
+        let parent_nu = owner_nu(parent);
+        let mut bad = image.clone();
+        let parent_violation = super::semantic::encode_pool_payload(
+            1 + parent_nu as u16 * 4,
+            parent_record.slot as u16,
+            parent_record.owner as u16,
+            &image,
+        );
+        bad.bytes[parent_record.token_positions[2]..parent_record.token_positions[2] + 2]
+            .copy_from_slice(&parent_violation.to_le_bytes());
+        corruptions.push(("capture-parent-violation", bad));
+
+        // Duplicate constant index (also leaves the overwritten index missing).
+        let (first, second) = (&constants[0], &constants[1]);
+        let mut bad = image.clone();
+        let slot = second.physical_slot as u16;
+        let owner_token =
+            super::semantic::encode_pool_owner(first.owner as u16, slot, &image);
+        bad.bytes[second.token_positions[0]..second.token_positions[0] + 2]
+            .copy_from_slice(&owner_token.to_le_bytes());
+        let index_token = super::semantic::encode_pool_slot(
+            first.index as u16,
+            first.owner as u16,
+            slot,
+            &image,
+        );
+        bad.bytes[second.token_positions[1]..second.token_positions[1] + 2]
+            .copy_from_slice(&index_token.to_le_bytes());
+        corruptions.push(("duplicate-constant-index", bad));
+
+        let record = &constants[0];
+        let wire_slot = record.physical_slot as u16;
+        let owner = record.owner as u16;
+
+        let mut bad = image.clone();
+        let out_of_range_owner = super::semantic::encode_pool_owner(
+            layouts.len() as u16,
+            wire_slot,
+            &image,
+        );
+        bad.bytes[record.token_positions[0]..record.token_positions[0] + 2]
+            .copy_from_slice(&out_of_range_owner.to_le_bytes());
+        corruptions.push(("constant-owner-out-of-range", bad));
+
+        let mut bad = image.clone();
+        let out_of_range_index = super::semantic::encode_pool_slot(
+            owner_nk(record.owner) as u16,
+            owner,
+            wire_slot,
+            &image,
+        );
+        bad.bytes[record.token_positions[1]..record.token_positions[1] + 2]
+            .copy_from_slice(&out_of_range_index.to_le_bytes());
+        corruptions.push(("constant-index-out-of-range", bad));
+
+        let mut bad = image.clone();
+        let bad_tag =
+            super::semantic::encode_pool_payload(6, record.index as u16, owner, &image);
+        bad.bytes[record.token_positions[2]..record.token_positions[2] + 2]
+            .copy_from_slice(&bad_tag.to_le_bytes());
+        corruptions.push(("constant-bad-tag", bad));
+
+        let boolean = constants
+            .iter()
+            .find(|record| record.tag == 1)
+            .expect("fixture must contain a boolean constant");
+        assert_eq!(boolean.payload.len(), 1);
+        let mut bad = image.clone();
+        bad.bytes[boolean.payload.start] = 2; // boolean value outside 0..=1
+        corruptions.push(("constant-bool-overflow", bad));
+
+        if !target.is_luau() {
+            // Tag 4 (64-bit integer) has no reader on Lua 5.1.
+            let mut bad = image.clone();
+            let tag4 = super::semantic::encode_pool_payload(
+                4,
+                record.index as u16,
+                owner,
+                &image,
+            );
+            bad.bytes[record.token_positions[2]..record.token_positions[2] + 2]
+                .copy_from_slice(&tag4.to_le_bytes());
+            corruptions.push(("constant-tag4-on-lua51", bad));
+        }
+
+        // A removed pool record shifts every later byte; the fixed pool
+        // counts plus the trailing exact-consumption check must refuse it.
+        let mut bad = image.clone();
+        let base = *captures[0].token_positions.iter().min().unwrap();
+        bad.bytes.drain(base..base + 6);
+        let length = bad.bytes.len() as u32;
+        bad.bytes[12..16].copy_from_slice(&length.to_le_bytes());
+        corruptions.push(("removed-pool-record", bad));
+
+        let mut bad = image.clone();
+        bad.bytes.push(0); // global pools have an unconsumed trailing byte
+        let length = bad.bytes.len() as u32;
+        bad.bytes[12..16].copy_from_slice(&length.to_le_bytes());
+        corruptions.push(("trailing", bad));
+
+        for (kind, mut bad) in corruptions {
+            repair_semantic_checksum(&mut bad.bytes);
+            let raw = super::emit::generate_from_semantic_image(&program, 917, bad).unwrap();
+            let output = finalize(&raw, target, 917).unwrap();
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join(if target.is_luau() {
+                "invalid_pools.luau"
+            } else {
+                "invalid_pools.lua"
+            });
+            fs::write(&path, output).unwrap();
+            assert!(
+                native::compile(target, &path).status.success(),
+                "{target} {kind}"
+            );
+            let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+            let result = Command::new(native::root().join("toolchains/bin").join(runner))
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(!result.status.success(), "{target} {kind} ran");
+            assert!(result.stdout.is_empty(), "{target} {kind} leaked output");
+        }
+    }
+}
+
+#[test]
+fn empty_capture_pool_roundtrips_on_both_targets() {
+    for target in [Target::Lua51, Target::Luau] {
+        let source = "print('POOL_OK',40+2)";
+        let data = compile(source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let image = super::semantic::encode(&program, 917).unwrap();
+        let (_, captures, constants, _) = semantic_pool_layouts(&image);
+        assert!(captures.is_empty(), "{target}: expected an empty capture pool");
+        assert!(!constants.is_empty(), "{target}: fixture must pool constants");
+        let raw = generate(&data, &program, 917).unwrap();
+        let output = finalize(&raw, target, 917).unwrap();
+        let work = native::Workspace::new();
+        let path = work.0.join(if target.is_luau() {
+            "empty_pool.luau"
+        } else {
+            "empty_pool.lua"
+        });
+        fs::write(&path, output).unwrap();
+        let stdout = native::compile_and_run(target, &path);
+        assert_eq!(stdout, b"POOL_OK\t42\n", "{target}: pooled output mismatch");
     }
 }

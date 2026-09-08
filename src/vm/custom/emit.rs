@@ -79,6 +79,46 @@ fn dataflow_chunk_ranges(
     Ok(ranges)
 }
 
+/// Global capture/constant pool readers (ISA14). Each pool loop runs
+/// exactly its validated total (`TU`/`TK`, accumulated from header
+/// metadata), and decodes three anonymous u16 slots per record under the
+/// per-record pool factorial profile. Every record is range-checked
+/// (owner, slot/index), duplicate-checked, and stored into `CU`/`CK`
+/// for the per-prototype slicers. Pool order follows the per-image flip
+/// bit the encoder mirrors.
+fn pool_loops_lua(
+    field_order: FieldLayout,
+    pool_add: u16,
+    pool_multiplier: u16,
+    target: Target,
+) -> (String, String) {
+    let capture = format!(
+        "CU={{}};for slot=1,TU do {pool_decode}local owner=(st[sont[1]]-slot*{pm}-{pa})%65536;if owner>=np then E()end;local sl=(st[sont[2]]-owner*{pm}-slot-{pa})%65536;local OW=P[owner];if sl>=OW.__obf_proto_nu then E()end;local pay=(st[sont[3]]-sl*{pm}-owner-{pa})%65536;local tg=pay%4;local ix=(pay-tg)/4;if tg>2 or ix>255 then E()end;local T=CU[owner];if T==nil then T={{}};CU[owner]=T end;if T[sl]~=nil then E()end;T[sl]={{tg,ix}} end;",
+        pool_decode = field_order.pool_decode_lua(),
+        pm = pool_multiplier,
+        pa = pool_add,
+    );
+    // Tag 4 (64-bit integer) exists only on Luau; on Lua 5.1 the
+    // trailing `else E()end` rejects it at pool time.
+    let tag4 = if target.is_luau() {
+        " elseif tg==4 then local lo4,hi4=b32(),b32();if not IF then E()end;val=IF(SF('%08x%08x',hi4,lo4),16);if val==nil then E()end;"
+    } else {
+        ""
+    };
+    let constant = format!(
+        "CK={{}};for slot=1,TK do {pool_decode}local owner=(st[sont[1]]-slot*{pm}-{pa})%65536;if owner>=np then E()end;local ix=(st[sont[2]]-owner*{pm}-slot-{pa})%65536;local OW=P[owner];if ix>=OW.__obf_proto_nk then E()end;local tg=(st[sont[3]]-ix*{pm}-owner-{pa})%65536;local val;if tg==0 then val=nil elseif tg==1 then val=b8();if val>1 then E()end;val=val==1 elseif tg==2 then val=num() elseif tg==3 or tg==5 then val=str(){tag4} else E()end;local T=CK[owner];if T==nil then T={{}};CK[owner]=T end;if T[ix]~=nil then E()end;T[ix]={{tg,val}} end;",
+        pool_decode = field_order.pool_decode_lua(),
+        pm = pool_multiplier,
+        pa = pool_add,
+        tag4 = tag4,
+    );
+    if field_order.pools_flipped {
+        (constant, capture)
+    } else {
+        (capture, constant)
+    }
+}
+
 pub(crate) fn generate(
     _bytecode: &[u8],
     program: &Program,
@@ -715,12 +755,15 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     // Flattened parse core: the per-prototype stages are split into local
     // functions -- header read/validate (PH), upvalue wiring (PU), constant
     // pool (PK) -- whose definition order shuffles per seed, driven by a
-    // seeded state machine (next/header -> upvalues -> constants -> commit
-    // metadata -> advance). Its finish state reads the one global shuffled
-    // code-segment graph, validates masked ids/owners/roots/next links and
-    // exact coverage, then reconstructs each stream before semantic parsing.
+    // seeded state machine (next/header+commit -> pool A -> pool B ->
+    // slice -> finish). The pool states read the two global shuffled
+    // pools (captures/constants, order baked per image) into CU/CK tables;
+    // the slice state wires each prototype from those tables; the finish
+    // state reads the one global shuffled code-segment graph, validates
+    // masked ids/owners/roots/next links and exact coverage, then
+    // reconstructs each stream before semantic parsing.
     let csv = state_values(&mut structure, 5);
-    let (c_next, c_up, c_konst, c_code, c_fin) = (csv[0], csv[1], csv[2], csv[3], csv[4]);
+    let (c_next, c_pool_a, c_pool_b, c_slice, c_fin) = (csv[0], csv[1], csv[2], csv[3], csv[4]);
     let mut ph = format!(
         "local PH=function()\n local F={{__obf_proto_k={{}},__obf_proto_tags={{}},__obf_proto_u={{}}}};{}\n",
         field_order.metadata_reads_lua()
@@ -734,15 +777,12 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
         ph.push_str("if F.__obf_proto_shared then E()end;");
     }
     ph.push_str("\n return F,VMCS,RT\nend;\n");
-    let pu = "local PU=function()\n for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
+    let pu = "local PU=function()\n local UT=CU[id];if UT==nil then UT={} end;for j=0,F.__obf_proto_nu-1 do local rec=UT[j];if not rec then E()end;local tag,index=rec[1],rec[2];local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
         .to_owned();
     let mut pk = String::from(
-        "local PK=function()\n for j=0,F.__obf_proto_nk-1 do local tag=b8();F.__obf_proto_tags[j]=tag;\n  if tag==0 then F.__obf_proto_k[j]=nil\n  elseif tag==1 then local v=b8();if v>1 then E()end;F.__obf_proto_k[j]=v==1\n  elseif tag==2 then F.__obf_proto_k[j]=num()\n  elseif tag==3 or tag==5 then F.__obf_proto_k[j]=str()\n",
+        "local PK=function()\n local KT=CK[id];if KT==nil then KT={} end;for j=0,F.__obf_proto_nk-1 do local rec=KT[j];if not rec then E()end;local tg=rec[1];if tg>5 then E()end;F.__obf_proto_tags[j]=tg;F.__obf_proto_k[j]=rec[2] end;",
     );
-    if program.target.is_luau() {
-        pk.push_str(r#"elseif tag==4 then local lo,hi=b32(),b32();if not IF then E()end;local v=IF(SF('%08x%08x',hi,lo),16);if v==nil then E()end;F.__obf_proto_k[j]=v;"#);
-    }
-    pk.push_str("else E()end end;\nend;\n");
+    pk.push_str("\nend;\n");
     let mut defs = vec![ph, pu, pk];
     structure.shuffle(&mut defs);
     core_text.push('\n');
@@ -750,10 +790,14 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
         core_text.push_str(definition);
     }
     core_text.push_str(&format!(
-        "local P={{}};local work=0;local id=0;local w={c_next};\n"
+        "local P={{}};local work=0;local id=0;local TU,TK=0,0;local w={c_next};\n"
     ));
     let segment_add = semantic_image.token_layers[0].add;
     let segment_multiplier = semantic_image.token_layers[0].multiplier;
+    let pool_add = semantic_image.token_layers[1].add;
+    let pool_multiplier = semantic_image.token_layers[1].multiplier;
+    let (pool_first, pool_second) =
+        pool_loops_lua(field_order, pool_add, pool_multiplier, program.target);
     core_text.push_str(&state_machine(
         &mut structure,
         "w",
@@ -761,17 +805,20 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
             (
                 c_next,
                 format!(
-                    "if id>=np then w={c_fin} else F,VMCS,RT=PH();\
-work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;w={c_up}; end;"
+                    "if id>=np then w={c_pool_a} else F,VMCS,RT=PH();TU=TU+F.__obf_proto_nu;TK=TK+F.__obf_proto_nk;work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;F.__obf_proto_code={{VMCS,RT}};P[id]=F;id=id+1;w={c_next}; end;"
                 ),
             ),
-            (c_up, format!("PU();w={c_konst};")),
-            (c_konst, format!("PK();w={c_code};")),
             (
-                c_code,
-                format!(
-                    "F.__obf_proto_code={{VMCS,RT}};P[id]=F;id=id+1;w={c_next};"
-                ),
+                c_pool_a,
+                format!("{pool_first}w={c_pool_b};"),
+            ),
+            (
+                c_pool_b,
+                format!("{pool_second}w={c_slice};"),
+            ),
+            (
+                c_slice,
+                format!("for fid=0,np-1 do id=fid;F=P[id];PU();PK() end;w={c_fin};"),
             ),
             (
                 c_fin,
@@ -788,7 +835,7 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
         &core_text,
         &[
             "P", "work", "id", "w", "np", "entry", "isa", "check", "sa", "sb", "F", "VMCS", "RT",
-            "legacy", "tag", "index", "parent", "v", "lo", "hi",
+            "legacy", "tag", "index", "parent", "v", "lo", "hi", "CU", "CK",
         ],
     );
     decoder_fields.push(format!(

@@ -31,7 +31,7 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 13;
+pub(crate) const WIRE_ISA_VERSION: u32 = 14;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -107,6 +107,11 @@ pub(crate) struct SemanticImage {
     pub segment_next_ids: Vec<usize>,
     pub segment_root_ids: Vec<usize>,
     pub segments_interleaved: bool,
+    pub capture_pool_owners: Vec<usize>,
+    pub capture_pool_slots: Vec<usize>,
+    pub constant_pool_owners: Vec<usize>,
+    pub constant_pool_indices: Vec<usize>,
+    pub pools_interleaved: bool,
     pub referenced_recipe_ids: BTreeSet<u16>,
 }
 
@@ -134,6 +139,35 @@ struct CodeSegment {
     owner: u16,
     next: u16,
     bytes: Vec<u8>,
+}
+
+/// One capture record in the global capture pool: the owning prototype,
+/// the capture slot within that owner, and the (tag, index) value.
+#[derive(Clone, Debug)]
+struct PooledCapture {
+    owner: u16,
+    slot: u16,
+    tag: u8,
+    index: u8,
+}
+
+/// One constant record in the global constant pool: the owning
+/// prototype, the constant index within that owner, and the value.
+#[derive(Clone, Debug)]
+struct PooledConstant {
+    owner: u16,
+    index: u16,
+    constant: Constant,
+}
+
+/// Physical pool layout published for the verification harness.
+#[derive(Clone, Debug)]
+struct PoolPhysicalLayout {
+    capture_owners: Vec<usize>,
+    capture_slots: Vec<usize>,
+    constant_owners: Vec<usize>,
+    constant_indices: Vec<usize>,
+    interleaved: bool,
 }
 
 fn error(message: impl Into<String>) -> Diagnostic {
@@ -1172,6 +1206,81 @@ pub(crate) fn decode_segment_next(token: u16, id: u16, owner: u16, image: &Seman
         .wrapping_sub(add)
 }
 
+/// Masking context for the global capture/constant pools (ISA14). Uses
+/// recipe-token layer 1 while segments use layer 0; the recipe chain
+/// itself passes through all layers, so layer sharing with distinct
+/// slot/owner/index contexts is the established precedent.
+fn pool_parameters(image: &SemanticImage) -> (u16, u16) {
+    (image.token_layers[1].add, image.token_layers[1].multiplier)
+}
+
+/// Capture records carry [owner, slot, payload] and constant records
+/// carry [owner, index, tag] in three anonymous factorial-profiled u16
+/// slots. The constant index reuses the slot formula and the constant
+/// tag reuses the payload formula with the index as the id-like context.
+pub(crate) fn encode_pool_owner(owner: u16, physical_slot: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = pool_parameters(image);
+    owner
+        .wrapping_add(add)
+        .wrapping_add(physical_slot.wrapping_mul(multiplier))
+}
+
+#[cfg(test)]
+pub(crate) fn decode_pool_owner(token: u16, physical_slot: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = pool_parameters(image);
+    token
+        .wrapping_sub(physical_slot.wrapping_mul(multiplier))
+        .wrapping_sub(add)
+}
+
+pub(crate) fn encode_pool_slot(
+    slot: u16,
+    owner: u16,
+    physical_slot: u16,
+    image: &SemanticImage,
+) -> u16 {
+    let (add, multiplier) = pool_parameters(image);
+    slot.wrapping_add(add)
+        .wrapping_add(owner.wrapping_mul(multiplier))
+        .wrapping_add(physical_slot)
+}
+
+#[cfg(test)]
+pub(crate) fn decode_pool_slot(
+    token: u16,
+    owner: u16,
+    physical_slot: u16,
+    image: &SemanticImage,
+) -> u16 {
+    let (add, multiplier) = pool_parameters(image);
+    token
+        .wrapping_sub(owner.wrapping_mul(multiplier))
+        .wrapping_sub(physical_slot)
+        .wrapping_sub(add)
+}
+
+pub(crate) fn encode_pool_payload(
+    payload: u16,
+    slot: u16,
+    owner: u16,
+    image: &SemanticImage,
+) -> u16 {
+    let (add, multiplier) = pool_parameters(image);
+    payload
+        .wrapping_add(add)
+        .wrapping_add(slot.wrapping_mul(multiplier))
+        .wrapping_add(owner)
+}
+
+#[cfg(test)]
+pub(crate) fn decode_pool_payload(token: u16, slot: u16, owner: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = pool_parameters(image);
+    token
+        .wrapping_sub(slot.wrapping_mul(multiplier))
+        .wrapping_sub(owner)
+        .wrapping_sub(add)
+}
+
 /// Build one globally shuffled graph rather than serializing code after each
 /// prototype. Odd ids are roots and even ids are terminal nodes. Every record
 /// carries independently checked id, owner, and next tokens; roots and split
@@ -1228,6 +1337,185 @@ fn build_code_segment_pool(
     Err(error("failed to interleave global code segment pool"))
 }
 
+/// Owner-interleave check shared by the capture and constant pools. A pool
+/// with fewer than two owners, or in which no owner appears twice, cannot
+/// exhibit grouping, so every shuffle is acceptable there; only pools with
+/// a repeated owner must show an owner that reappears after another closed.
+/// (The segment pool never hits the all-singleton case: every owner owns
+/// exactly two nodes.)
+fn pool_owners_are_interleaved(owners: &[u16]) -> bool {
+    let distinct = owners.iter().collect::<BTreeSet<_>>().len();
+    if distinct < 2 || distinct == owners.len() {
+        return true;
+    }
+    let mut closed = BTreeSet::new();
+    let mut previous = None;
+    for &owner in owners {
+        if previous != Some(owner) {
+            if let Some(done) = previous {
+                closed.insert(done);
+            }
+            if closed.contains(&owner) {
+                return true;
+            }
+            previous = Some(owner);
+        }
+    }
+    false
+}
+
+/// Build one globally shuffled capture pool. Every prototype captures
+/// become anonymous (owner, slot, tag, index) records; physical order is
+/// independent of owner and slot order. Multi-owner pools of three or
+/// more records must interleave owners (the segment-pool rule).
+fn build_capture_pool(
+    plans: &[PrototypePlan],
+    _image: &SemanticImage,
+    random: &mut crate::random::Prng,
+) -> Result<Vec<PooledCapture>, Diagnostic> {
+    if plans.len() > usize::from(u16::MAX) {
+        return Err(error("too many prototypes for the capture pool"));
+    }
+    let mut pool = Vec::new();
+    for (owner, plan) in plans.iter().enumerate() {
+        let owner = u16::try_from(owner)
+            .map_err(|_| error("prototype id exceeds capture pool owner range"))?;
+        for (slot, capture) in plan.prototype.captures.iter().enumerate() {
+            let (tag, index) = match *capture {
+                Capture::Local(register) => (0, register),
+                Capture::Upvalue(upvalue) => (1, upvalue),
+                Capture::RecursiveLocal(register) => (2, register),
+            };
+            let slot = u16::try_from(slot).map_err(|_| error("capture slot overflow"))?;
+            let index = u8::try_from(index).map_err(|_| error("capture index overflow"))?;
+            pool.push(PooledCapture {
+                owner,
+                slot,
+                tag,
+                index,
+            });
+        }
+    }
+    // A full-record shuffle makes physical order independent of owner
+    // and slot order. Reject the rare owner-grouped permutation rather
+    // than silently weakening the global-pool invariant.
+    for _ in 0..64 {
+        random.shuffle(&mut pool);
+        let owners: Vec<u16> = pool.iter().map(|record| record.owner).collect();
+        if pool_owners_are_interleaved(&owners) {
+            return Ok(pool);
+        }
+    }
+    Err(error("failed to interleave global capture pool"))
+}
+
+/// Build one globally shuffled constant pool. Every prototype constants
+/// become anonymous (owner, index, value) records; physical order is
+/// independent of owner and index order. Interleaving follows the same
+/// rule as the capture pool.
+fn build_constant_pool(
+    plans: &[PrototypePlan],
+    _image: &SemanticImage,
+    random: &mut crate::random::Prng,
+) -> Result<Vec<PooledConstant>, Diagnostic> {
+    if plans.len() > usize::from(u16::MAX) {
+        return Err(error("too many prototypes for the constant pool"));
+    }
+    let mut pool = Vec::new();
+    for (owner, plan) in plans.iter().enumerate() {
+        let owner = u16::try_from(owner)
+            .map_err(|_| error("prototype id exceeds constant pool owner range"))?;
+        for (index, constant) in plan.prototype.constants.iter().enumerate() {
+            let index = u16::try_from(index).map_err(|_| error("constant index overflow"))?;
+            pool.push(PooledConstant {
+                owner,
+                index,
+                constant: constant.clone(),
+            });
+        }
+    }
+    for _ in 0..64 {
+        random.shuffle(&mut pool);
+        let owners: Vec<u16> = pool.iter().map(|record| record.owner).collect();
+        if pool_owners_are_interleaved(&owners) {
+            return Ok(pool);
+        }
+    }
+    Err(error("failed to interleave global constant pool"))
+}
+
+/// Serialize one global capture pool: fixed 6-byte records of three
+/// anonymous u16 slots ([owner, slot, payload]) under the per-record pool
+/// factorial profile. `payload` packs the 2-bit tag and the 8-bit index
+/// as `tag + index * 4`, so every value fits the u16 token.
+fn write_capture_pool(
+    out: &mut Vec<u8>,
+    pool: &[PooledCapture],
+    image: &SemanticImage,
+) -> Result<(), Diagnostic> {
+    for (slot, record) in pool.iter().enumerate() {
+        let physical_slot =
+            u16::try_from(slot + 1).map_err(|_| error("capture pool slot exceeds u16 range"))?;
+        let payload = u16::from(record.tag) + u16::from(record.index) * 4;
+        let tokens = [
+            encode_pool_owner(record.owner, physical_slot, image),
+            encode_pool_slot(record.slot, record.owner, physical_slot, image),
+            encode_pool_payload(payload, record.slot, record.owner, image),
+        ];
+        // Per-record token order from the same factorial profile the pool
+        // reader recomputes from its 1-based physical slot.
+        for token_slot in image.field_layout.pool_slot_fields(slot + 1) {
+            write_u16(out, tokens[token_slot]);
+        }
+        if out.len() > custom::MAX_BYTES {
+            return Err(error("image exceeds size limit"));
+        }
+    }
+    Ok(())
+}
+
+/// Serialize one global constant pool: a 6-byte token header ([owner,
+/// index, tag]) plus the tag-dependent value payload. The tag travels
+/// only in the masked token; the payload carries no tag byte.
+fn write_constant_pool(
+    out: &mut Vec<u8>,
+    pool: &[PooledConstant],
+    image: &SemanticImage,
+) -> Result<(), Diagnostic> {
+    for (slot, record) in pool.iter().enumerate() {
+        let physical_slot =
+            u16::try_from(slot + 1).map_err(|_| error("constant pool slot exceeds u16 range"))?;
+        let tag = match &record.constant {
+            Constant::Nil => 0,
+            Constant::Boolean(_) => 1,
+            Constant::Number(_) => 2,
+            Constant::String(_) => 3,
+            Constant::Integer(_) => 4,
+            Constant::Method(_) => 5,
+        };
+        let tokens = [
+            encode_pool_owner(record.owner, physical_slot, image),
+            encode_pool_slot(record.index, record.owner, physical_slot, image),
+            encode_pool_payload(tag, record.index, record.owner, image),
+        ];
+        for token_slot in image.field_layout.pool_slot_fields(slot + 1) {
+            write_u16(out, tokens[token_slot]);
+        }
+        match &record.constant {
+            Constant::Nil => {}
+            Constant::Boolean(value) => out.push(u8::from(*value)),
+            Constant::Number(bits) => out.extend_from_slice(&bits.to_le_bytes()),
+            Constant::String(value) => write_bytes(out, value)?,
+            Constant::Integer(value) => out.extend_from_slice(&value.to_le_bytes()),
+            Constant::Method(value) => write_bytes(out, value.as_bytes())?,
+        }
+        if out.len() > custom::MAX_BYTES {
+            return Err(error("image exceeds size limit"));
+        }
+    }
+    Ok(())
+}
+
 fn serialize(
     plans: &[PrototypePlan],
     image: &SemanticImage,
@@ -1243,6 +1531,7 @@ fn serialize(
         Vec<usize>,
         Vec<usize>,
         bool,
+        PoolPhysicalLayout,
     ),
     Diagnostic,
 > {
@@ -1274,6 +1563,27 @@ fn serialize(
         .iter()
         .map(|segment| usize::from(segment.next))
         .collect::<Vec<_>>();
+    let capture_pool = build_capture_pool(plans, image, random)?;
+    let constant_pool = build_constant_pool(plans, image, random)?;
+    let pool_layout = PoolPhysicalLayout {
+        capture_owners: capture_pool
+            .iter()
+            .map(|record| usize::from(record.owner))
+            .collect(),
+        capture_slots: capture_pool
+            .iter()
+            .map(|record| usize::from(record.slot))
+            .collect(),
+        constant_owners: constant_pool
+            .iter()
+            .map(|record| usize::from(record.owner))
+            .collect(),
+        constant_indices: constant_pool
+            .iter()
+            .map(|record| usize::from(record.index))
+            .collect(),
+        interleaved: true,
+    };
     let root_ids = (0..plans.len()).map(|owner| owner * 2 + 1).collect();
     let mut out = Vec::from(*b"OBF\x02");
     out.extend_from_slice(&[
@@ -1325,40 +1635,22 @@ fn serialize(
         out.extend_from_slice(&wide[usize::from(layout.meta_u32[1])].to_le_bytes());
         out.extend_from_slice(&wide[usize::from(layout.meta_u32[2])].to_le_bytes());
         out.extend_from_slice(&wide[usize::from(layout.meta_u32[3])].to_le_bytes());
-        for capture in &prototype.captures {
-            let (tag, index) = match *capture {
-                Capture::Local(register) => (0, register),
-                Capture::Upvalue(upvalue) => (1, upvalue),
-                Capture::RecursiveLocal(register) => (2, register),
-            };
-            let index = u8::try_from(index).map_err(|_| error("capture index overflow"))?;
-            out.extend_from_slice(&[tag, index]);
-        }
-        for constant in &prototype.constants {
-            match constant {
-                Constant::Nil => out.push(0),
-                Constant::Boolean(value) => out.extend_from_slice(&[1, u8::from(*value)]),
-                Constant::Number(bits) => {
-                    out.push(2);
-                    out.extend_from_slice(&bits.to_le_bytes());
-                }
-                Constant::String(value) => {
-                    out.push(3);
-                    write_bytes(&mut out, value)?;
-                }
-                Constant::Integer(value) => {
-                    out.push(4);
-                    out.extend_from_slice(&value.to_le_bytes());
-                }
-                Constant::Method(value) => {
-                    out.push(5);
-                    write_bytes(&mut out, value.as_bytes())?;
-                }
-            }
-        }
+        // ISA14: captures and constants live only in the global pools
+        // written below; headers carry just the 24 metadata bytes.
         if out.len() > custom::MAX_BYTES {
             return Err(error("image exceeds size limit"));
         }
+    }
+    // ISA14 global pools: captures and constants live only here, each
+    // record carrying masked owner/index tokens under a per-record
+    // factorial profile. Pool order follows the per-image flip bit the
+    // generated parser mirrors.
+    if image.field_layout.pools_flipped {
+        write_constant_pool(&mut out, &constant_pool, image)?;
+        write_capture_pool(&mut out, &capture_pool, image)?;
+    } else {
+        write_capture_pool(&mut out, &capture_pool, image)?;
+        write_constant_pool(&mut out, &constant_pool, image)?;
     }
     for (slot, segment) in segments.iter().enumerate() {
         let physical_slot = u16::try_from(slot + 1)
@@ -1390,6 +1682,7 @@ fn serialize(
         next_ids,
         root_ids,
         segments_interleaved,
+        pool_layout,
     ))
 }
 
@@ -1544,6 +1837,11 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         segment_next_ids: Vec::new(),
         segment_root_ids: Vec::new(),
         segments_interleaved: false,
+        capture_pool_owners: Vec::new(),
+        capture_pool_slots: Vec::new(),
+        constant_pool_owners: Vec::new(),
+        constant_pool_indices: Vec::new(),
+        pools_interleaved: false,
         referenced_recipe_ids,
     };
     let (
@@ -1554,6 +1852,7 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         next_ids,
         root_ids,
         segments_interleaved,
+        pool_layout,
     ) = serialize(&plans, &image, &decoys, program.target, &mut random)?;
     image.bytes = bytes;
     image.code_segments = physical_owners.len();
@@ -1563,5 +1862,10 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
     image.segment_next_ids = next_ids;
     image.segment_root_ids = root_ids;
     image.segments_interleaved = segments_interleaved;
+    image.capture_pool_owners = pool_layout.capture_owners;
+    image.capture_pool_slots = pool_layout.capture_slots;
+    image.constant_pool_owners = pool_layout.constant_owners;
+    image.constant_pool_indices = pool_layout.constant_indices;
+    image.pools_interleaved = pool_layout.interleaved;
     Ok(image)
 }

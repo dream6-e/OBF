@@ -444,6 +444,9 @@ pub(crate) fn fuse_dataflow_pair(
 ///   decoded by an identical factorial routine on both ends;
 /// * segment tokens (3 x u16) use a per-segment permutation computed from
 ///   `(physical_slot * multiplier + add) % 6`;
+/// * pooled capture/constant tokens (3 x u16) use a per-record permutation
+///   computed from `(pool_slot * multiplier + add) % 6` with pool-specific
+///   keys, so neither global pool keeps a canonical field order;
 /// * dictionary entry headers ([rid:u16, len:u8] vs [len:u8, rid:u8]), the
 ///   prototype metadata width groups (u32 x 4, u16 x 3, u8 x 2) and the
 ///   in-memory record tuple slots are per-image permutations baked into the
@@ -459,6 +462,9 @@ pub(crate) struct FieldLayout {
     pub(crate) segment_mul: u8,
     pub(crate) segment_add: u8,
     pub(crate) dict_flipped: bool,
+    pub(crate) pool_mul: u8,
+    pub(crate) pool_add: u8,
+    pub(crate) pools_flipped: bool,
     /// u32 metadata field at each wire slot: 0=parent, 1=nk, 2=nc, 3=codelen.
     pub(crate) meta_u32: [u8; 4],
     /// u16 metadata field at each wire slot: 0=registers, 1=nu, 2=root.
@@ -471,6 +477,7 @@ pub(crate) struct FieldLayout {
 
 pub(crate) const FIELD_RECORD_ORDERS: usize = 24;
 pub(crate) const FIELD_SEGMENT_ORDERS: usize = 6;
+pub(crate) const FIELD_POOL_ORDERS: usize = 6;
 
 /// Byte offsets of prototype metadata fields under an [`FieldLayout`].
 #[cfg(test)]
@@ -506,6 +513,11 @@ pub(crate) fn field_layout(seed: u64) -> FieldLayout {
         segment_mul: [1u8, 5][(random.next_u64() % 2) as usize],
         segment_add: (random.next_u64() % FIELD_SEGMENT_ORDERS as u64) as u8,
         dict_flipped: random.next_u64() % 2 == 1,
+        // ISA14 pool draws stay last: every earlier draw (and every
+        // pre-existing layout value) is unchanged.
+        pool_mul: [1u8, 5][(random.next_u64() % 2) as usize],
+        pool_add: (random.next_u64() % FIELD_POOL_ORDERS as u64) as u8,
+        pools_flipped: random.next_u64() % 2 == 1,
         meta_u32,
         meta_u16,
         meta_u8,
@@ -551,6 +563,15 @@ impl FieldLayout {
         debug_assert!(physical_slot >= 1);
         (physical_slot * usize::from(self.segment_mul) + usize::from(self.segment_add))
             % FIELD_SEGMENT_ORDERS
+    }
+
+    /// Pool-slot quotient shared by both global capture/constant pools.
+    /// Each pool numbers its own records from 1; the two position spaces
+    /// are independent, exactly like the segment pool slot space.
+    pub(crate) fn pool_quotient(self, physical_slot: usize) -> usize {
+        debug_assert!(physical_slot >= 1);
+        (physical_slot * usize::from(self.pool_mul) + usize::from(self.pool_add))
+            % FIELD_POOL_ORDERS
     }
 
     /// Byte offsets (relative to the 24-byte header start) of each metadata
@@ -610,9 +631,27 @@ impl FieldLayout {
         [inverted[0], inverted[1], inverted[2]]
     }
 
+    /// Wire-slot position of each pool token ([owner, slot, payload]).
+    /// `physical_slot` is the Lua-visible 1-based pool position within
+    /// its own pool. Consumed only by the verification harness.
+    #[cfg(test)]
+    pub(crate) fn pool_field_slots(self, physical_slot: usize) -> [usize; 3] {
+        let order = factorial_field_at_slot(self.pool_quotient(physical_slot), 3);
+        let inverted = invert_order(&order);
+        [inverted[0], inverted[1], inverted[2]]
+    }
+
     /// Token index at each segment wire slot, in slot order.
     pub(crate) fn segment_slot_fields(self, physical_slot: usize) -> [usize; 3] {
         let order = factorial_field_at_slot(self.segment_quotient(physical_slot), 3);
+        [order[0], order[1], order[2]]
+    }
+
+    /// Token index at each pool wire slot, in slot order. Shared by the
+    /// capture pool ([owner, slot, payload]) and the constant pool
+    /// ([owner, index, tag]); both records carry three anonymous u16 slots.
+    pub(crate) fn pool_slot_fields(self, physical_slot: usize) -> [usize; 3] {
+        let order = factorial_field_at_slot(self.pool_quotient(physical_slot), 3);
         [order[0], order[1], order[2]]
     }
 
@@ -697,6 +736,19 @@ impl FieldLayout {
             "local tk1,tk2,tk3=b16(),b16(),b16();local sq=(slot*{mul}+{add})%6;local sd1=(sq-sq%2)/2;local sd2=sq%2;local srem={{0,1,2}};local six={{sd1,sd2,0}};local skey={{0,0,0}};for sk=1,3 do local sw=six[sk];local scn=0;for sj=1,3 do if srem[sj]>=0 then if scn==sw then skey[sk]=srem[sj];srem[sj]=-1;break end;scn=scn+1 end end end;local st={{tk1,tk2,tk3}};local sont={{0,0,0}};for sk=1,3 do sont[skey[sk]+1]=sk end;",
             mul = self.segment_mul,
             add = self.segment_add,
+        )
+    }
+
+    /// Per-record pool-token decode. Emits `sont[1..3]`, the 1-based wire
+    /// slot of [owner, slot, payload]. The generated pool loops reuse the
+    /// exact segment-profile variable names (`slot`, `st`, `skey`, `sont`),
+    /// so both pools and the segment graph share one textual shape with
+    /// pool-specific baked keys.
+    pub(crate) fn pool_decode_lua(self) -> String {
+        format!(
+            "local tk1,tk2,tk3=b16(),b16(),b16();local sq=(slot*{mul}+{add})%6;local sd1=(sq-sq%2)/2;local sd2=sq%2;local srem={{0,1,2}};local six={{sd1,sd2,0}};local skey={{0,0,0}};for sk=1,3 do local sw=six[sk];local scn=0;for sj=1,3 do if srem[sj]>=0 then if scn==sw then skey[sk]=srem[sj];srem[sj]=-1;break end;scn=scn+1 end end end;local st={{tk1,tk2,tk3}};local sont={{0,0,0}};for sk=1,3 do sont[skey[sk]+1]=sk end;",
+            mul = self.pool_mul,
+            add = self.pool_add,
         )
     }
 }
