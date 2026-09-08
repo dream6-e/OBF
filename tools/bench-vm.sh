@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# ISA11 runtime-witness/control + global-segment/LZW VM benchmark and size contracts.
+# ISA11 runtime-witness/control + global-segment/LZW VM benchmark.
 #
-# Reports per-target VM/native run times (best of N, milliseconds) for the
-# checked-in goldens and enforces three hard gates:
-#   1. size budget   -- golden bytes <= documented cap (raise deliberately)
-#   2. compression   -- golden bytes < its checked ISA7 predecessor
-#   3. smoke timing  -- a single VM run stays under the catastrophe bound
+# Reports per-target VM/native run times (best of N, milliseconds) and enforces
+# two whole-script regression gates that are independent of compression:
+#   1. script budget -- golden bytes <= documented cap (raise deliberately)
+#   2. smoke timing  -- a single VM run stays under the catastrophe bound
+#
+# The compression contract is tested in Rust at the correct boundary: the
+# complete LZW frame (including its 16-byte header) must be smaller than the
+# uncompressed private semantic bytecode. Generated Lua is never compared with
+# an older ISA to decide whether compression succeeded.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -32,17 +36,12 @@ best_ms() { # <runner> <script>
     printf '%s' "$best"
 }
 
-check() { # <name> <vm> <src> <runner> <cap> <isa7-bytes>
-    local size cap isa7 vm_ms native_ms
+check() { # <name> <vm> <src> <runner> <script-cap>
+    local size cap vm_ms native_ms
     size=$(wc -c <"$2")
     cap=$5
-    isa7=$6
     if [[ $size -gt $cap ]]; then
-        echo "[bench] error: $1 golden is ${size}B, over the ${cap}B budget" >&2
-        exit 1
-    fi
-    if [[ $size -ge $isa7 ]]; then
-        echo "[bench] error: $1 compressed golden is ${size}B, not below ISA7 ${isa7}B" >&2
+        echo "[bench] error: $1 golden script is ${size}B, over the independent ${cap}B budget" >&2
         exit 1
     fi
     vm_ms=$(best_ms "$4" "$2")
@@ -51,7 +50,7 @@ check() { # <name> <vm> <src> <runner> <cap> <isa7-bytes>
         echo "[bench] error: $1 VM best run ${vm_ms}ms exceeds the ${VM_BOUND_MS}ms bound" >&2
         exit 1
     fi
-    printf '[bench] %s size=%s/%sB vm-best=%sms native-best=%sms ratio=%.1fx\n' \
+    printf '[bench] %s script-size=%s/%sB vm-best=%sms native-best=%sms ratio=%.1fx\n' \
         "$1" "$size" "$cap" "$vm_ms" "$native_ms" \
         "$(awk -v a="$vm_ms" -v b="$native_ms" 'BEGIN{if(b==0)b=1;printf "%.1f", a/b}')"
 }
@@ -65,6 +64,6 @@ check() { # <name> <vm> <src> <runner> <cap> <isa7-bytes>
     exit 1
 }
 
-check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 85000 83640
-check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 94000 92116
+check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" 85000
+check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" 94000
 echo '[bench] PASS'

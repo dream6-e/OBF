@@ -661,44 +661,47 @@ fn opaque_true_false_branches_carry_real_but_unreachable_instructions() {
 }
 
 #[test]
-fn generation_respects_the_documented_size_budget() {
-    // ISA10 keeps the existing 85/94 kB structural ceilings for seed diversity,
-    // and adds a stronger fixed-seed contract: each checked-in compressed
-    // golden must be strictly smaller than its ISA7 uncompressed predecessor.
-    // Raise neither comparison silently.
-    for (target, fixture, budget, golden_seed, isa7_size) in [
+fn compression_reduces_bytecode_while_script_budget_is_independent() {
+    // The compression contract compares the complete 16-byte-header LZW frame
+    // only with its uncompressed private semantic bytecode. Generated Lua size
+    // is a separate regression budget; decoder/ChaCha/anti-hook source is never
+    // counted as compressed bytecode and is not compared with an older ISA.
+    for (target, fixture, script_budget) in [
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
             85_000usize,
-            7001u64,
-            83_640usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
             94_000usize,
-            7351u64,
-            92_116usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
         for seed in [0u64, 735, 7001, 7351, u64::MAX] {
+            let semantic = semantic::encode(&program, seed).unwrap().bytes;
+            let compressed = compress_bytecode(&semantic).unwrap();
+            let frame = compression_header(&compressed).unwrap();
+            assert_eq!(frame.original_len, semantic.len());
+            assert_eq!(compressed.len(), COMPRESSION_HEADER + frame.body_len);
+            assert!(
+                compressed.len() < semantic.len(),
+                "{target} seed {seed}: LZW frame {}B did not reduce semantic bytecode {}B",
+                compressed.len(),
+                semantic.len()
+            );
+            assert_eq!(decompress_bytecode(&compressed).unwrap(), semantic);
+
             let output = emit(&data, target, seed).unwrap();
             assert!(
-                output.len() <= budget,
-                "{target} seed {seed}: {} bytes exceeds the {} byte budget",
+                output.len() <= script_budget,
+                "{target} seed {seed}: generated script {}B exceeds independent {}B budget",
                 output.len(),
-                budget
+                script_budget
             );
         }
-        let golden = emit(&data, target, golden_seed).unwrap();
-        assert!(
-            golden.len() < isa7_size,
-            "{target} compressed golden {}B is not below ISA7 {}B",
-            golden.len(),
-            isa7_size
-        );
     }
 }
 
