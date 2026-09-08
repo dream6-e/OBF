@@ -63,6 +63,10 @@ fn generate_semantic(
     // semantic fragments use four result-binding orders and never publish the
     // actual opcode number.
     let operand_abi = operand_layout(seed);
+    // ISA12-B independently lowers each logical register reference through a
+    // frame-local per-prototype mapper. The target derives this affine profile
+    // from `fid`; it never embeds a 256-entry register permutation table.
+    let register_abi = register_layout(seed);
     let primitive_ops: std::collections::BTreeSet<Opcode> = semantic_image
         .recipes
         .iter()
@@ -1026,6 +1030,7 @@ local W=SM({},{__mode='kv'});local H;local Make;
 "#,
     );
     s.push_str(call_body);
+    s.push_str(&register_abi.factory_lua());
     s.push_str(
         r#"
 Make=function(id,up)
@@ -1038,11 +1043,11 @@ Make=function(id,up)
  if F.__obf_proto_shared and not cached then F.__obf_proto_cached=fn end;return fn
 end;
 local SETUP=function(fid,args)
- local F=P[fid];local R={};local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
+ local F=P[fid];local R={};local RX=RK(fid);local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
  local va2={};va2.n=nn;for i=1,nn do va2[i]=args[F.__obf_proto_p+i]end;
- for i=0,F.__obf_proto_p-1 do R[i]={args[i+1]}end;
- if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[F.__obf_proto_p][1]=vv end end;
- return F,R,va2,nn
+ for i=0,F.__obf_proto_p-1 do R[RX(i)]={args[i+1]}end;
+ if MF(F.__obf_proto_flags/2)%2==1 then R[RX(F.__obf_proto_p)]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[RX(F.__obf_proto_p)][1]=vv end end;
+ return F,R,va2,RX,nn
 end;
 "#);
     // SETUP-only scratch slots: the frame registers F/R keep their locals
@@ -1050,11 +1055,11 @@ end;
     // single slot), but SETUP's own intermediates flow through g[key].
     {
         let original = r#"local SETUP=function(fid,args)
- local F=P[fid];local R={};local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
+ local F=P[fid];local R={};local RX=RK(fid);local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
  local va2={};va2.n=nn;for i=1,nn do va2[i]=args[F.__obf_proto_p+i]end;
- for i=0,F.__obf_proto_p-1 do R[i]={args[i+1]}end;
- if MF(F.__obf_proto_flags/2)%2==1 then R[F.__obf_proto_p]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[F.__obf_proto_p][1]=vv end end;
- return F,R,va2,nn
+ for i=0,F.__obf_proto_p-1 do R[RX(i)]={args[i+1]}end;
+ if MF(F.__obf_proto_flags/2)%2==1 then R[RX(F.__obf_proto_p)]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[RX(F.__obf_proto_p)][1]=vv end end;
+ return F,R,va2,RX,nn
 end;
 "#;
         let slotted = original.to_owned();
@@ -1132,7 +1137,7 @@ end;
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va,RX=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {
@@ -1143,11 +1148,12 @@ end;
     let semantic_handler = |op: Opcode| -> Result<String, Diagnostic> {
         let raw = crate::vm::opcode::custom(program.target, op)
             .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
-        Ok(match op {
+        let adapted = match op {
             Opcode::Jump => raw.replace("pc=j*4+1;", "pc=j;"),
             Opcode::Test => raw.replace("pc=pc+4", "pc=skip1"),
             _ => raw.to_owned(),
-        })
+        };
+        lower_register_accesses(&adapted, program.target)
     };
     let mut recipe_entries: Vec<(u16, String)> = Vec::new();
     let mut fragment_arms: Vec<(u16, String)> = Vec::new();

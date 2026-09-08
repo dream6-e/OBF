@@ -35,6 +35,50 @@ fn basic_ast_ir_bytecode_register_vm_executes_on_both_targets() {
 }
 
 #[test]
+fn register_abi_preserves_cells_captures_callbacks_loops_and_tailcalls() {
+    let common = r#"
+        local function make(seed)
+            local cell=seed
+            return function(delta,callback)
+                local before=cell
+                cell=cell+delta
+                return callback(before,cell)
+            end
+        end
+        local function callback(a,b)return a*100+b end
+        local function tailcall(fn,value,cb)return fn(value,cb)end
+        local fn=make(10)
+        local total=0
+        for i=1,5 do total=total+i end
+        do local cleared1,cleared2,cleared3=1,2,3 total=total+cleared1+cleared2+cleared3 end
+        print(tailcall(fn,2,callback),tailcall(fn,3,callback),total)
+    "#;
+    for target in [Target::Lua51, Target::Luau] {
+        differential(common, target);
+    }
+    differential(
+        r#"
+        local function legacy(a,...)
+            local first,n=arg[1],arg.n
+            return function()return a,first,n end
+        end
+        local read=legacy(9,'x',nil,'z') print(read())
+        "#,
+        Target::Lua51,
+    );
+    differential(
+        r#"
+        local function modern(a,...)
+            local rest={...} local n=select('#',...)
+            return function()return a,rest[1],n end
+        end
+        local read=modern(9,'x',nil,'z') print(read())
+        "#,
+        Target::Luau,
+    );
+}
+
+#[test]
 fn existing_full_vm_corpora_execute_without_native_compilation() {
     differential(include_str!("fixtures/vm_lua51.lua"), Target::Lua51);
     differential(include_str!("fixtures/vm_luau.lua"), Target::Luau);

@@ -966,7 +966,7 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local PH=function()"));
             assert!(raw.contains("local PU=function()"));
             assert!(raw.contains("local PK=function()"));
-            assert!(raw.contains("local F,R,va=SETUP(fid,args);"));
+            assert!(raw.contains("local F,R,va,RX=SETUP(fid,args);"));
             // Graph fetch dynamically derives successors and the recipe id,
             // then routes that id into the random semantic fragment pool.
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);

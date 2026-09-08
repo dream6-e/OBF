@@ -19,8 +19,11 @@
 //! fail-closed runtime attestation, then adds a per-prototype heterogeneous
 //! operand ABI: decoded operands use one of four physical record layouts,
 //! independently rotated and placed in a sparse lane, while fragment bindings
-//! vary and no actual-opcode marker is emitted. Share parity also selects one
-//! of two fetch/dispatch state pairs before masking their concrete representation.
+//! vary and no actual-opcode marker is emitted. ISA12-B also derives a unique
+//! register ABI for every private prototype: frame setup and every primitive
+//! access map logical registers through one of four 257-key bank shapes without
+//! embedding a complete permutation table. Share parity also selects one of two
+//! fetch/dispatch state pairs before masking their concrete representation.
 //! Primitive semantics still live in the two target opcode subfolders. The
 //! seed never changes public `.obf` bytes, but it does change the embedded
 //! semantic image as well as transport, layout, local, and private-field

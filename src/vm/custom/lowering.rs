@@ -1,3 +1,6 @@
+use crate::lexer::TokenKind;
+use crate::{Diagnostic, Target};
+
 /// ISA12's per-prototype operand ABI. The three independently affine profile
 /// components use pairwise-coprime moduli whose product is 32,772, so every one
 /// of the at-most 32,767 private prototype ids receives a distinct
@@ -115,4 +118,145 @@ pub(crate) fn operand_binding_lua(operation: usize, form: usize) -> String {
         "{}=OG(fid,I,{operation},{form});",
         operand_binding_lhs(form)
     )
+}
+
+/// ISA12-B's private register ABI. The profile moduli are pairwise coprime and
+/// have a 130,556-id product, so the complete 32,767-prototype private range has
+/// no repeated (family, stride, shift) tuple. Each family maps the 256 logical
+/// register ids injectively into one of four disjoint 257-key physical banks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RegisterLayout {
+    pub(crate) family_multiplier: u8,
+    pub(crate) family_add: u8,
+    pub(crate) stride_multiplier: u8,
+    pub(crate) stride_add: u8,
+    pub(crate) shift_multiplier: u16,
+    pub(crate) shift_add: u16,
+}
+
+pub(crate) const REGISTER_LAYOUT_FAMILIES: usize = 4;
+pub(crate) const REGISTER_LAYOUT_STRIDES: usize = 127;
+pub(crate) const REGISTER_LAYOUT_SHIFTS: usize = 257;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_LOGICAL_SLOTS: usize = 256;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_PHYSICAL_SLOTS: usize =
+    REGISTER_LAYOUT_FAMILIES * REGISTER_LAYOUT_SHIFTS;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_PRIVATE_PROTOTYPE_LIMIT: usize = 32_767;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_UNIQUE_SPAN: usize =
+    REGISTER_LAYOUT_FAMILIES * REGISTER_LAYOUT_STRIDES * REGISTER_LAYOUT_SHIFTS;
+
+pub(crate) fn register_layout(seed: u64) -> RegisterLayout {
+    let mut random = crate::random::Prng::new(seed ^ 0x7265_6769_7374_6572);
+    RegisterLayout {
+        family_multiplier: [1, 3][(random.next_u64() % 2) as usize],
+        family_add: (random.next_u64() % REGISTER_LAYOUT_FAMILIES as u64) as u8,
+        // 127 and 257 are prime, so all non-zero multipliers are invertible.
+        stride_multiplier: (1 + random.next_u64() % 126) as u8,
+        stride_add: (random.next_u64() % REGISTER_LAYOUT_STRIDES as u64) as u8,
+        shift_multiplier: (1 + random.next_u64() % 256) as u16,
+        shift_add: (random.next_u64() % REGISTER_LAYOUT_SHIFTS as u64) as u16,
+    }
+}
+
+impl RegisterLayout {
+    #[cfg(test)]
+    pub(crate) fn profile(self, prototype: usize) -> (usize, usize, usize) {
+        (
+            (prototype * usize::from(self.family_multiplier) + usize::from(self.family_add))
+                % REGISTER_LAYOUT_FAMILIES,
+            (prototype * usize::from(self.stride_multiplier) + usize::from(self.stride_add))
+                % REGISTER_LAYOUT_STRIDES,
+            (prototype * usize::from(self.shift_multiplier) + usize::from(self.shift_add))
+                % REGISTER_LAYOUT_SHIFTS,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn physical_key(self, prototype: usize, register: usize) -> usize {
+        debug_assert!(register < REGISTER_LAYOUT_LOGICAL_SLOTS);
+        let (family, stride, shift) = self.profile(prototype);
+        let multiplier = 1 + stride * 2;
+        let offset = match family {
+            0 => (register * multiplier + shift) % REGISTER_LAYOUT_SHIFTS,
+            1 => {
+                REGISTER_LAYOUT_SHIFTS
+                    - 1
+                    - (register * multiplier + shift) % REGISTER_LAYOUT_SHIFTS
+            }
+            2 => {
+                ((REGISTER_LAYOUT_LOGICAL_SLOTS - 1 - register) * multiplier + shift)
+                    % REGISTER_LAYOUT_SHIFTS
+            }
+            3 => {
+                (((register + shift) % REGISTER_LAYOUT_SHIFTS) * multiplier + stride)
+                    % REGISTER_LAYOUT_SHIFTS
+            }
+            _ => unreachable!(),
+        };
+        family * REGISTER_LAYOUT_SHIFTS + offset
+    }
+
+    /// Build a frame-local logical-register mapper. Computing the profile once
+    /// per frame avoids repeating its affine derivation at every register use;
+    /// selecting one of four closure bodies also gives the families distinct
+    /// target-side shapes without storing an explicit register permutation.
+    pub(crate) fn factory_lua(self) -> String {
+        format!(
+            "local RK=function(fid)local rf=(fid*{fm}+{fa})%4;local rs=(fid*{sm}+{sa})%127;local rt=(fid*{tm}+{ta})%257;local m=1+rs*2;local base=rf*257;if rf==0 then return function(r)return base+(r*m+rt)%257 end elseif rf==1 then return function(r)return base+256-(r*m+rt)%257 end elseif rf==2 then return function(r)return base+((255-r)*m+rt)%257 end else return function(r)return base+(((r+rt)%257)*m+rs)%257 end end end;",
+            fm = self.family_multiplier,
+            fa = self.family_add,
+            sm = self.stride_multiplier,
+            sa = self.stride_add,
+            tm = self.shift_multiplier,
+            ta = self.shift_add,
+        )
+    }
+}
+
+/// Rewrite only the generated primitive template's register table accesses.
+/// `R[index]` becomes `R[RX(index)]`, including range-loop and capture-derived
+/// indices. Token spans, rather than global text replacement, protect strings
+/// such as Luau metamethod names and diagnose an unbalanced generated template.
+pub(crate) fn lower_register_accesses(source: &str, target: Target) -> Result<String, Diagnostic> {
+    let tokens = crate::lexer::lex(source, target)?;
+    let mut insertions: Vec<(usize, &'static str)> = Vec::new();
+    for index in 0..tokens.len().saturating_sub(1) {
+        if tokens[index].kind != TokenKind::Identifier
+            || tokens[index].text(source) != "R"
+            || tokens[index + 1].text(source) != "["
+        {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut close = None;
+        for token in &tokens[index + 1..] {
+            match token.text(source) {
+                "[" => depth += 1,
+                "]" => {
+                    depth = depth.checked_sub(1).ok_or_else(|| {
+                        Diagnostic::new("generated register access has an unmatched bracket")
+                    })?;
+                    if depth == 0 {
+                        close = Some(token.span.start);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.ok_or_else(|| {
+            Diagnostic::new("generated register access is missing its closing bracket")
+        })?;
+        insertions.push((tokens[index + 1].span.end, "RX("));
+        insertions.push((close, ")"));
+    }
+    insertions.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut output = source.to_owned();
+    for (offset, text) in insertions.into_iter().rev() {
+        output.insert_str(offset, text);
+    }
+    Ok(output)
 }

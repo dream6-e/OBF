@@ -589,6 +589,132 @@ fn per_prototype_operand_abi_breaks_the_static_slot_handler_bridge() {
 }
 
 #[test]
+fn per_prototype_register_abi_lowers_every_primitive_access() {
+    // ISA12-B removes the second image-wide bridge left after operand
+    // lowering: primitive bodies no longer index one canonical logical R
+    // table. The profile is derived once per frame and contains no 256-entry
+    // permutation table.
+    let mut seed_profiles = BTreeSet::new();
+    for seed in [0u64, 1, 2, 3, 735, 7001, 7351, u64::MAX] {
+        let abi = register_layout(seed);
+        seed_profiles.insert(format!("{abi:?}"));
+        assert!(REGISTER_LAYOUT_UNIQUE_SPAN >= REGISTER_LAYOUT_PRIVATE_PROTOTYPE_LIMIT);
+        assert_eq!(
+            (0..REGISTER_LAYOUT_PRIVATE_PROTOTYPE_LIMIT)
+                .map(|prototype| abi.profile(prototype))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            REGISTER_LAYOUT_PRIVATE_PROTOTYPE_LIMIT,
+            "seed {seed}: full-range register profiles collided"
+        );
+        assert_eq!(
+            (0..REGISTER_LAYOUT_PRIVATE_PROTOTYPE_LIMIT)
+                .map(|prototype| {
+                    (
+                        abi.physical_key(prototype, 0),
+                        abi.physical_key(prototype, 1),
+                    )
+                })
+                .collect::<BTreeSet<_>>()
+                .len(),
+            REGISTER_LAYOUT_PRIVATE_PROTOTYPE_LIMIT,
+            "seed {seed}: full-range physical register mappings repeated"
+        );
+        assert_eq!(
+            (0..REGISTER_LAYOUT_FAMILIES)
+                .map(|prototype| abi.profile(prototype).0)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            REGISTER_LAYOUT_FAMILIES,
+            "seed {seed}: register layout families are not reached"
+        );
+        for prototype in [0usize, 1, 2, 3, 126, 256, 4096, 32_766] {
+            let physical = (0..REGISTER_LAYOUT_LOGICAL_SLOTS)
+                .map(|register| abi.physical_key(prototype, register))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                physical.len(),
+                REGISTER_LAYOUT_LOGICAL_SLOTS,
+                "seed {seed} prototype {prototype}: physical register collision"
+            );
+            assert!(physical
+                .iter()
+                .all(|&key| key < REGISTER_LAYOUT_PHYSICAL_SLOTS));
+        }
+        let factory = abi.factory_lua();
+        assert!(factory.len() < 700);
+        assert!(!factory.contains('{'), "register map table was embedded");
+        assert_eq!(factory.matches("return function(r)").count(), 4);
+    }
+    assert!(seed_profiles.len() >= 6, "register ABI parameters are seed-pinned");
+
+    for target in [Target::Lua51, Target::Luau] {
+        for &op in Opcode::ALL.iter().filter(|op| op.supported(target)) {
+            let handler = crate::vm::opcode::custom(target, op).unwrap();
+            let lowered = lower_register_accesses(handler, target).unwrap();
+            let source_accesses = crate::lexer::lex(handler, target)
+                .unwrap()
+                .windows(2)
+                .filter(|tokens| tokens[0].text(handler) == "R" && tokens[1].text(handler) == "[")
+                .count();
+            let lowered_tokens = crate::lexer::lex(&lowered, target).unwrap();
+            let lowered_accesses = lowered_tokens
+                .windows(4)
+                .filter(|tokens| {
+                    tokens[0].text(&lowered) == "R"
+                        && tokens[1].text(&lowered) == "["
+                        && tokens[2].text(&lowered) == "RX"
+                        && tokens[3].text(&lowered) == "("
+                })
+                .count();
+            let all_register_accesses = lowered_tokens
+                .windows(2)
+                .filter(|tokens| {
+                    tokens[0].text(&lowered) == "R" && tokens[1].text(&lowered) == "["
+                })
+                .count();
+            assert_eq!(
+                lowered_accesses, source_accesses,
+                "{target} {}: register accesses were not all lowered",
+                op.name()
+            );
+            assert_eq!(all_register_accesses, lowered_accesses);
+        }
+        let special = "R[a+1]=R[b+2];R[d[2]]=R[i]";
+        assert_eq!(
+            lower_register_accesses(special, target).unwrap(),
+            "R[RX(a+1)]=R[RX(b+2)];R[RX(d[2])]=R[RX(i)]"
+        );
+        assert_eq!(
+            lower_register_accesses("local s='R[a]';R[a]=1", target).unwrap(),
+            "local s='R[a]';R[RX(a)]=1"
+        );
+        assert!(lower_register_accesses("R[a", target).is_err());
+
+        let fixture = match target {
+            Target::Lua51 => include_str!("../../../../tests/fixtures/vm_lua51.lua"),
+            Target::Luau => include_str!("../../../../tests/fixtures/vm_luau.lua"),
+        };
+        let data = compile(fixture, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 735, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert_eq!(raw.matches("local RK=function(fid)").count(), 1);
+            assert_eq!(raw.matches("local RX=RK(fid)").count(), 1);
+            assert!(raw.contains("local F,R,va,RX=SETUP(fid,args);"));
+            assert!(raw.matches("R[RX(").count() > 30);
+            for old in ["R[a]", "R[b]", "R[c]", "R[i]", "R[d[2]]"] {
+                assert!(
+                    !raw.contains(old),
+                    "{target} seed {seed}: canonical register surface {old} survived"
+                );
+            }
+            assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+        }
+    }
+}
+
+#[test]
 fn full_code_randomization_layout_and_cipher_vary_per_seed() {
     // Full code randomization: payload fields (including every
     // decryption/probe/segment function) are emitted in a seeded
