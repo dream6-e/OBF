@@ -74,14 +74,17 @@ fn execute_recipe_ids(
     let raw = generate(data, &program, 735).unwrap();
     // Instrument the real graph fetch BEFORE the same final whole-output
     // naming/audit pass. This observes ids only after both edge and recipe
-    // token machines have run.
-    let fetch_probe =
-        "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);";
-    assert_eq!(raw.matches(fetch_probe).count(), 1);
+    // token machines have run. Tuple slots follow the per-image field order.
+    let tuple = super::lowering::field_layout(735).tuple_slots();
+    let fetch_probe = format!(
+        "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);",
+        tuple[1], tuple[2], tuple[0]
+    );
+    assert_eq!(raw.matches(&fetch_probe).count(), 1);
     let raw = raw
         .replace(
-            fetch_probe,
-            "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);Probe[rid]=true;",
+            &fetch_probe,
+            &format!("{fetch_probe}Probe[rid]=true;"),
         )
         .replace(
         "return U(result,1,result.n)",
@@ -248,6 +251,8 @@ fn semantic_layouts(
     image: &super::semantic::SemanticImage,
 ) -> (Vec<SemanticPrototypeLayout>, Vec<SemanticSegmentLayout>) {
     let bytes = &image.bytes;
+    let field = image.field_layout;
+    let meta = field.metadata_positions();
     let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
     let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     let prototypes = u32_at(16) as usize;
@@ -255,13 +260,13 @@ fn semantic_layouts(
     let mut layouts = Vec::with_capacity(prototypes);
     for _ in 0..prototypes {
         let header = position;
-        let captures = usize::from(u16_at(header + 8));
+        let captures = usize::from(u16_at(header + meta.captures));
         let segment_count = 2;
-        let root_token_position = header + 10;
+        let root_token_position = header + meta.root;
         let root_token = u16_at(root_token_position);
-        let constants = u32_at(header + 12) as usize;
-        let records = u32_at(header + 16) as usize;
-        let code_len = u32_at(header + 20) as usize;
+        let constants = u32_at(header + meta.constants) as usize;
+        let records = u32_at(header + meta.records) as usize;
+        let code_len = u32_at(header + meta.code_len) as usize;
         position = header + 24 + captures * 2;
         for _ in 0..constants {
             let tag = bytes[position];
@@ -289,9 +294,15 @@ fn semantic_layouts(
     }
     let mut segments = Vec::with_capacity(prototypes * 2);
     for physical_slot in 1..=prototypes * 2 {
-        let id_token_position = position;
-        let token = u16_at(position);
-        position += 2;
+        // Segment tokens are anonymous same-width slots; the per-segment
+        // factorial profile reassigns their meaning.
+        let slots = field.segment_field_slots(physical_slot);
+        let base = position;
+        let id_token_position = base + slots[0] * 2;
+        let owner_token_position = base + slots[1] * 2;
+        let next_token_position = base + slots[2] * 2;
+        position = base + 6;
+        let token = u16_at(id_token_position);
         let id = usize::from(super::semantic::decode_segment_id(
             token,
             physical_slot as u16,
@@ -299,9 +310,7 @@ fn semantic_layouts(
         ));
         assert!((1..=prototypes * 2).contains(&id));
         let owner = (id - 1) / 2;
-        let owner_token_position = position;
-        let owner_token = u16_at(position);
-        position += 2;
+        let owner_token = u16_at(owner_token_position);
         assert_eq!(
             usize::from(super::semantic::decode_segment_owner(
                 owner_token,
@@ -311,9 +320,7 @@ fn semantic_layouts(
             )),
             owner
         );
-        let next_token_position = position;
-        let next_token = u16_at(position);
-        position += 2;
+        let next_token = u16_at(next_token_position);
         let next = usize::from(super::semantic::decode_segment_next(
             next_token,
             id as u16,
@@ -411,21 +418,32 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         assert!(code_len > 20 && records > 0);
         let recipes = u16::from_le_bytes(code_bytes[..2].try_into().unwrap()) as usize;
         assert!(recipes >= 2);
+        let field = image.field_layout;
+        let flipped = field.dict_flipped;
         let mut cursor = 2;
         let first_recipe = cursor;
         let mut dictionary = BTreeSet::new();
         for _ in 0..recipes {
-            dictionary.insert(u16::from_le_bytes(
-                code_bytes[cursor..cursor + 2].try_into().unwrap(),
-            ));
-            let len = usize::from(code_bytes[cursor + 2]);
+            let (rid, len) = if flipped {
+                (
+                    u16::from_le_bytes(code_bytes[cursor + 1..cursor + 3].try_into().unwrap()),
+                    usize::from(code_bytes[cursor]),
+                )
+            } else {
+                (
+                    u16::from_le_bytes(code_bytes[cursor..cursor + 2].try_into().unwrap()),
+                    usize::from(code_bytes[cursor + 2]),
+                )
+            };
+            dictionary.insert(rid);
             assert!((1..=4).contains(&len));
             cursor += 3 + len;
         }
         let start_label = cursor;
         let first_record = start_label + 2;
         assert!(first_record + 8 <= code_len);
-        let second_recipe = first_recipe + 3 + usize::from(code_bytes[first_recipe + 2]);
+        let first_len = usize::from(code_bytes[first_recipe + if flipped { 0 } else { 2 }]);
+        let second_recipe = first_recipe + 3 + first_len;
         let recipe_operands: std::collections::BTreeMap<u16, usize> = image
             .recipes
             .iter()
@@ -442,30 +460,19 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
                 (recipe.id, operands)
             })
             .collect();
+        // Record header slots follow the per-prototype factorial profile.
+        let record_slots = field.record_field_slots(0);
+        let slot_at = |base: usize, slot: usize| {
+            u16::from_le_bytes(code_bytes[base + slot * 2..base + slot * 2 + 2].try_into().unwrap())
+        };
         let mut record_cursor = first_record;
         let mut record_labels = BTreeSet::new();
         for _ in 0..records {
-            let label = u16::from_le_bytes(
-                code_bytes[record_cursor..record_cursor + 2]
-                    .try_into()
-                    .unwrap(),
-            );
+            let label = slot_at(record_cursor, record_slots[0]);
             record_labels.insert(label);
-            let next_token = u16::from_le_bytes(
-                code_bytes[record_cursor + 2..record_cursor + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            let skip_token = u16::from_le_bytes(
-                code_bytes[record_cursor + 4..record_cursor + 6]
-                    .try_into()
-                    .unwrap(),
-            );
-            let recipe_token = u16::from_le_bytes(
-                code_bytes[record_cursor + 6..record_cursor + 8]
-                    .try_into()
-                    .unwrap(),
-            );
+            let next_token = slot_at(record_cursor, record_slots[1]);
+            let skip_token = slot_at(record_cursor, record_slots[2]);
+            let recipe_token = slot_at(record_cursor, record_slots[3]);
             let next =
                 super::semantic::decode_edge_token(next_token, label, 0, 0, &image.edge_layers);
             let skip =
@@ -488,44 +495,37 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         }
         assert_eq!(record_cursor, code_len);
 
+        let len_offset = if flipped { 0 } else { 2 };
+        let rid_offset = if flipped { 1 } else { 0 };
         let mut corruptions = Vec::new();
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
-            code[first_recipe + 2] = 0; // empty recipe
+            code[first_recipe + len_offset] = 0; // empty recipe
         }));
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
-            let duplicate = code[first_recipe..first_recipe + 2].to_vec();
-            code[second_recipe..second_recipe + 2].copy_from_slice(&duplicate); // duplicate id
+            let duplicate = code[first_recipe + rid_offset..first_recipe + rid_offset + 2].to_vec();
+            code[second_recipe + rid_offset..second_recipe + rid_offset + 2]
+                .copy_from_slice(&duplicate); // duplicate id
         }));
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
             code[start_label..start_label + 2].fill(0); // null entry label
         }));
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
-            code[first_record..first_record + 2].fill(0); // null record label
+            let at = first_record + record_slots[0] * 2;
+            code[at..at + 2].fill(0); // null record label
         }));
-        let label = u16::from_le_bytes(
-            code_bytes[first_record..first_record + 2]
-                .try_into()
-                .unwrap(),
-        );
+        let label = slot_at(first_record, record_slots[0]);
         let unknown_label = (1..=u16::MAX)
             .find(|label| !record_labels.contains(label))
             .unwrap();
         let edge_token =
             super::semantic::encode_edge_token(unknown_label, label, 0, 0, &image.edge_layers);
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
-            code[first_record + 2..first_record + 4].copy_from_slice(&edge_token.to_le_bytes());
+            let at = first_record + record_slots[1] * 2;
+            code[at..at + 2].copy_from_slice(&edge_token.to_le_bytes());
             // decoded successor is absent
         }));
-        let next_token = u16::from_le_bytes(
-            code_bytes[first_record + 2..first_record + 4]
-                .try_into()
-                .unwrap(),
-        );
-        let skip_token = u16::from_le_bytes(
-            code_bytes[first_record + 4..first_record + 6]
-                .try_into()
-                .unwrap(),
-        );
+        let next_token = slot_at(first_record, record_slots[1]);
+        let skip_token = slot_at(first_record, record_slots[2]);
         let next = super::semantic::decode_edge_token(next_token, label, 0, 0, &image.edge_layers);
         let skip = super::semantic::decode_edge_token(skip_token, label, 0, 1, &image.edge_layers);
         let unknown = (1..=u16::MAX).find(|id| !dictionary.contains(id)).unwrap();
@@ -538,7 +538,8 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
             &image.token_layers,
         );
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
-            code[first_record + 6..first_record + 8].copy_from_slice(&token.to_le_bytes());
+            let at = first_record + record_slots[3] * 2;
+            code[at..at + 2].copy_from_slice(&token.to_le_bytes());
         }));
 
         for (kind, mut bad) in corruptions.into_iter().enumerate() {
@@ -582,20 +583,23 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
         .position(|old| *old == old_child)
         .expect("real child missing after semantic reorder");
     let (layouts, segments) = semantic_layouts(&image);
+    let meta = image.field_layout.metadata_positions();
     let child = layouts[child_id].header;
     assert!(child + 26 <= image.bytes.len());
-    let captures = u16::from_le_bytes(image.bytes[child + 8..child + 10].try_into().unwrap());
+    let captures =
+        u16::from_le_bytes(image.bytes[child + meta.captures..child + meta.captures + 2].try_into().unwrap());
     assert!(captures > 0, "fixture must exercise capture metadata");
 
     let mut corruptions = Vec::new();
     let mut bad = image.clone();
-    bad.bytes[32..36].copy_from_slice(&0u32.to_le_bytes()); // root has a parent
+    bad.bytes[32 + meta.parent..36 + meta.parent].copy_from_slice(&0u32.to_le_bytes()); // root has a parent
     corruptions.push(bad);
     let mut bad = image.clone();
-    bad.bytes[child..child + 4].copy_from_slice(&u32::MAX.to_le_bytes()); // child lacks parent
+    bad.bytes[child + meta.parent..child + meta.parent + 4]
+        .copy_from_slice(&u32::MAX.to_le_bytes()); // child lacks parent
     corruptions.push(bad);
     let mut bad = image.clone();
-    bad.bytes[child + 7] |= 0x80; // unknown prototype flag
+    bad.bytes[child + meta.flags] |= 0x80; // unknown prototype flag
     corruptions.push(bad);
     let mut bad = image.clone();
     bad.bytes[child + 24] = 3; // unknown capture tag
@@ -754,7 +758,8 @@ fn target_decoder_rejects_every_global_segment_graph_corruption_on_both_targets(
 
         let mut bad = image.clone();
         let wrong_total = (layouts[0].code_len as u32 + 1).to_le_bytes();
-        bad.bytes[layouts[0].header + 20..layouts[0].header + 24].copy_from_slice(&wrong_total);
+        let total_at = layouts[0].header + image.field_layout.metadata_positions().code_len;
+        bad.bytes[total_at..total_at + 4].copy_from_slice(&wrong_total);
         corruptions.push(("wrong-total-length", bad));
 
         let mut bad = image.clone();
@@ -911,6 +916,124 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
             let expected = native::compile_and_run(target, &path);
             fs::write(&path, &output).unwrap();
             assert_eq!(expected, native::compile_and_run(target, &path));
+        }
+    }
+}
+
+#[test]
+fn target_decoder_rejects_field_order_confusion_on_both_targets() {
+    // ISA13 fail-closed invariant: wire structures are anonymous fixed-width
+    // slots, so any cross-slot confusion must trip a label/token/operand/
+    // count gate before user code runs. Each corruption below swaps or
+    // reinterprets same-width fields, then repairs only the outer checksum.
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("print('MUST_NOT_RUN')", target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let image = super::semantic::encode(&program, 735).unwrap();
+        let field = image.field_layout;
+        let (layouts, segments) = semantic_layouts(&image);
+        let code_bytes = semantic_code(&image, 0);
+        let recipes = u16::from_le_bytes(code_bytes[..2].try_into().unwrap()) as usize;
+        let len_offset = if field.dict_flipped { 0 } else { 2 };
+        let mut cursor = 2usize;
+        for _ in 0..recipes {
+            let len = usize::from(code_bytes[cursor + len_offset]);
+            assert!((1..=4).contains(&len));
+            cursor += 3 + len;
+        }
+        let first_record = cursor + 2;
+        let record_slots = field.record_field_slots(0);
+        let slot_value = |base: usize, slot: usize| {
+            u16::from_le_bytes(code_bytes[base + slot * 2..base + slot * 2 + 2].try_into().unwrap())
+        };
+
+        let mut corruptions: Vec<(&str, super::semantic::SemanticImage)> = Vec::new();
+        // 1. Record header: swap two same-width slots of the first record.
+        let pair = [(0usize, 1usize), (0, 3), (1, 2)]
+            .into_iter()
+            .find(|&(a, b)| {
+                slot_value(first_record, record_slots[a]) != slot_value(first_record, record_slots[b])
+            })
+            .expect("record slots must differ for a real swap");
+        corruptions.push((
+            "record-slot-swap",
+            mutate_semantic_code(&image, 0, |code| {
+                let (x, y) = (record_slots[pair.0] * 2, record_slots[pair.1] * 2);
+                for offset in 0..2 {
+                    code.swap(first_record + x + offset, first_record + y + offset);
+                }
+            }),
+        ));
+        // 2. Segment pool: swap the id and owner tokens of one record.
+        {
+            assert_ne!(
+                image.bytes[segments[0].id_token_position..segments[0].id_token_position + 2],
+                image.bytes[segments[0].owner_token_position..segments[0].owner_token_position + 2],
+                "segment tokens must differ for a real swap"
+            );
+            let mut bad = image.clone();
+            for offset in 0..2 {
+                bad.bytes.swap(
+                    segments[0].id_token_position + offset,
+                    segments[0].owner_token_position + offset,
+                );
+            }
+            corruptions.push(("segment-token-swap", bad));
+        }
+        // 3. Dictionary entry: reverse the 3-byte header of one entry.
+        {
+            let mut at = 2usize;
+            for _ in 0..recipes {
+                let len = usize::from(code_bytes[at + len_offset]);
+                let header = &code_bytes[at..at + 3];
+                if header != [header[2], header[1], header[0]] {
+                    break;
+                }
+                at += 3 + len;
+            }
+            assert!(at < first_record - 2, "no non-palindromic dictionary header");
+            corruptions.push((
+                "dictionary-header-reversal",
+                mutate_semantic_code(&image, 0, |code| {
+                    code[at..at + 3].reverse();
+                }),
+            ));
+        }
+        // 4. Metadata: swap the parent and code-length u32 slots of the entry.
+        {
+            let meta = field.metadata_positions();
+            let header = layouts[0].header;
+            assert_eq!(header, 32);
+            assert_ne!(
+                image.bytes[header + meta.parent..header + meta.parent + 4],
+                image.bytes[header + meta.code_len..header + meta.code_len + 4],
+                "entry parent must differ from its code length"
+            );
+            let mut bad = image.clone();
+            for offset in 0..4 {
+                bad.bytes.swap(header + meta.parent + offset, header + meta.code_len + offset);
+            }
+            corruptions.push(("metadata-slot-swap", bad));
+        }
+
+        for (kind, mut bad) in corruptions {
+            repair_semantic_checksum(&mut bad.bytes);
+            let raw = super::emit::generate_from_semantic_image(&program, 735, bad).unwrap();
+            let output = finalize(&raw, target, 735).unwrap();
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join("invalid_field_order.lua");
+            fs::write(&path, output).unwrap();
+            assert!(
+                native::compile(target, &path).status.success(),
+                "{target} {kind}: corrupted script must still compile"
+            );
+            let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+            let result = Command::new(native::root().join("toolchains/bin").join(runner))
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(!result.status.success(), "{target} {kind} ran");
+            assert!(result.stdout.is_empty(), "{target} {kind} leaked output");
         }
     }
 }

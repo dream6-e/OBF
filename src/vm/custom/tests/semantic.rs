@@ -1261,3 +1261,199 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
         assert_eq!(expected, native::compile_and_run(target, &path));
     }
 }
+
+#[test]
+fn field_order_permutations_decouple_parser_from_canonical_layout() {
+    // ISA13 removes the last image-wide field-order conventions: the record
+    // header is no longer `label,next,skip,recipe` everywhere, segment tokens
+    // are no longer `id,owner,next` everywhere, and dictionary/metadata/tuple
+    // orders vary per seed. Fixed-width slot reads stay in place; only the
+    // semantic assignment permutes, recomputed from (id, seed-profile).
+    for q in 0..FIELD_RECORD_ORDERS {
+        let mut order = factorial_field_at_slot(q, 4);
+        order.sort_unstable();
+        assert_eq!(order, vec![0, 1, 2, 3], "record quotient {q} is not a permutation");
+    }
+    assert_eq!(
+        (0..FIELD_RECORD_ORDERS)
+            .map(|q| factorial_field_at_slot(q, 4))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        FIELD_RECORD_ORDERS,
+        "record factorial decode collides"
+    );
+    assert_eq!(
+        (0..FIELD_SEGMENT_ORDERS)
+            .map(|q| factorial_field_at_slot(q, 3))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        FIELD_SEGMENT_ORDERS,
+        "segment factorial decode collides"
+    );
+    let seeds: Vec<u64> = (0..12).collect();
+    let mut dict_orders = BTreeSet::new();
+    let mut meta_u32_orders = BTreeSet::new();
+    let mut meta_u16_orders = BTreeSet::new();
+    let mut meta_u8_orders = BTreeSet::new();
+    let mut tuple_orders = BTreeSet::new();
+    for seed in seeds {
+        let field = field_layout(seed);
+        // Coprime multipliers make the affine quotients bijective, so a pid
+        // sweep covers every record order and a slot sweep every segment order.
+        assert_eq!(
+            (0..FIELD_RECORD_ORDERS)
+                .map(|prototype| field.record_quotient(prototype))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            FIELD_RECORD_ORDERS,
+            "seed {seed}: record quotients do not cover all 24 orders"
+        );
+        assert_eq!(
+            (1..=FIELD_SEGMENT_ORDERS)
+                .map(|slot| field.segment_quotient(slot))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            FIELD_SEGMENT_ORDERS,
+            "seed {seed}: segment quotients do not cover all 6 orders"
+        );
+        assert_eq!(
+            (0..FIELD_RECORD_ORDERS)
+                .map(|prototype| field.record_field_slots(prototype))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            FIELD_RECORD_ORDERS,
+            "seed {seed}: record slot maps collided"
+        );
+        dict_orders.insert(field.dict_flipped);
+        meta_u32_orders.insert(field.meta_u32);
+        meta_u16_orders.insert(field.meta_u16);
+        meta_u8_orders.insert(field.meta_u8);
+        tuple_orders.insert(field.tuple);
+    }
+    assert_eq!(dict_orders.len(), 2, "dictionary header order pinned");
+    assert_eq!(meta_u8_orders.len(), 2, "metadata u8 order pinned");
+    assert!(meta_u16_orders.len() >= 4, "metadata u16 orders pinned");
+    assert!(tuple_orders.len() >= 4, "tuple slot orders pinned");
+    assert!(meta_u32_orders.len() >= 8, "metadata u32 orders pinned");
+
+    for target in [Target::Lua51, Target::Luau] {
+        let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
+        let data = compile(source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut emitted_tuples = BTreeSet::new();
+        let mut emitted_meta = BTreeSet::new();
+        for seed in [0u64, 1, 735, u64::MAX] {
+            let image = semantic::encode(&program, seed).unwrap();
+            let field = field_layout(seed);
+            assert_eq!(image.field_layout, field);
+            let raw = generate(&data, &program, seed).unwrap();
+            assert_eq!(generate(&data, &program, seed).unwrap(), raw);
+            // The canonical record slot-assignment anchor is gone for good:
+            // every prototype recomputes its own order.
+            assert!(!raw.contains("local label,nextToken,skipToken,token=D16(),D16(),D16(),D16()"));
+            // Baked per-image orders must match the seed layout exactly, and
+            // must vary across seeds rather than pinning one textual order.
+            let tuple_text = field.tuple_construct_lua();
+            assert_eq!(raw.matches(&tuple_text).count(), 1, "{target} seed {seed}: tuple");
+            emitted_tuples.insert(tuple_text);
+            // PH locals are slot-rewritten (`F` -> `g[key]`), but the marked
+            // read suffixes survive: verify the marked reads follow the
+            // per-image width-group permutations (RT/VMCS are unmarked).
+            let read_order = |markers: &[&str], reader: &str| -> Vec<String> {
+                let mut found: Vec<(usize, String)> = markers
+                    .iter()
+                    .map(|marker| {
+                        let needle = format!("{marker}={reader}()");
+                        let at = raw.find(&needle).unwrap_or_else(|| {
+                            panic!("{target} seed {seed}: missing metadata read {needle}")
+                        });
+                        (at, (*marker).to_owned())
+                    })
+                    .collect();
+                found.sort_unstable();
+                found.into_iter().map(|(_, marker)| marker).collect()
+            };
+            let wide_names = [
+                "__obf_proto_parent",
+                "__obf_proto_nk",
+                "__obf_proto_nc",
+            ];
+            // meta_u32 field 3 is the unmarked VMCS read; drop it from the
+            // expected marked subsequence.
+            let expected_wide: Vec<String> = field
+                .meta_u32
+                .iter()
+                .filter(|&&slot| slot < 3)
+                .map(|&slot| wide_names[usize::from(slot)].to_owned())
+                .collect();
+            assert_eq!(
+                read_order(&wide_names, "b32"),
+                expected_wide,
+                "{target} seed {seed}: metadata u32 order"
+            );
+            let medium_names = ["__obf_proto_m", "__obf_proto_nu"];
+            let expected_medium: Vec<String> = field
+                .meta_u16
+                .iter()
+                .filter(|&&slot| slot < 2)
+                .map(|&slot| medium_names[usize::from(slot)].to_owned())
+                .collect();
+            assert_eq!(
+                read_order(&medium_names, "b16"),
+                expected_medium,
+                "{target} seed {seed}: metadata u16 order"
+            );
+            let narrow_names = ["__obf_proto_p", "__obf_proto_flags"];
+            let expected_narrow: Vec<String> = field
+                .meta_u8
+                .iter()
+                .map(|&slot| narrow_names[usize::from(slot)].to_owned())
+                .collect();
+            assert_eq!(
+                read_order(&narrow_names, "b8"),
+                expected_narrow,
+                "{target} seed {seed}: metadata u8 order"
+            );
+            emitted_meta.insert(format!("{expected_wide:?}{expected_medium:?}{expected_narrow:?}"));
+            // The dictionary head shares the slot-rewritten validator field,
+            // so match the read order at the loop head instead of full text.
+            let z_at = raw
+                .find("for z=1,nr do ")
+                .unwrap_or_else(|| panic!("{target} seed {seed}: dictionary loop missing"));
+            let window = &raw[z_at..z_at + 64];
+            if field.dict_flipped {
+                assert!(
+                    window.starts_with("for z=1,nr do local n=SB("),
+                    "{target} seed {seed}: dictionary head"
+                );
+            } else {
+                assert!(
+                    window.starts_with("for z=1,nr do local rid=D16();"),
+                    "{target} seed {seed}: dictionary head"
+                );
+            }
+            // Per-prototype/per-segment factorial profiles recompute the maps.
+            assert!(raw.contains("local fq=(id*"));
+            assert!(raw.contains("ford[fky[fk]+1]=fk"));
+            assert!(raw.contains("local sq=(slot*"));
+            assert!(raw.contains("sont[skey[sk]+1]=sk"));
+            let tuple = field_layout(seed).tuple_slots();
+            let fetch = format!(
+                "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);",
+                tuple[1], tuple[2], tuple[0]
+            );
+            assert_eq!(raw.matches(&fetch).count(), 1, "{target} seed {seed}: fetch disagrees");
+            // Encoder and generated parser still agree byte for byte.
+            let output = emit(&data, target, seed).unwrap();
+            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
+        }
+        assert!(emitted_tuples.len() >= 2, "{target}: tuple order pinned across seeds");
+        assert!(emitted_meta.len() >= 2, "{target}: metadata order pinned across seeds");
+        let workspace = native::Workspace::new();
+        let path = workspace.0.join("field_order.lua");
+        fs::write(&path, source).unwrap();
+        let expected = native::compile_and_run(target, &path);
+        fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
+        assert_eq!(expected, native::compile_and_run(target, &path));
+    }
+}

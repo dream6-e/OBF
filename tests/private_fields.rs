@@ -21,7 +21,11 @@ fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
     assert_eq!(&image[..4], b"OBF\x02");
     assert_eq!(image[4], if target.is_luau() { 0x75 } else { 0x51 });
     assert_eq!(image[6], 1, "generated scripts require private encoding 1");
-    assert_eq!(u32::from_le_bytes(image[24..28].try_into().unwrap()), 12);
+    assert_eq!(
+        u32::from_le_bytes(image[24..28].try_into().unwrap()),
+        13,
+        "generated scripts require private ISA13 field-order images"
+    );
 }
 
 fn assert_private_names_hidden(output: &str, target: Target) {

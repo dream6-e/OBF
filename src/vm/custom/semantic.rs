@@ -2,7 +2,7 @@
 //!
 //! Public `.obf` files remain the canonical OBF v2/ISA2 format. Before a
 //! canonical program is embedded in a generated script, this module lowers
-//! its fixed one-word instructions into a private ISA12 wire image:
+//! its fixed one-word instructions into a private ISA13 wire image:
 //!
 //! * straight-line words are grouped into program-specific superoperators;
 //! * each superoperator has a random 16-bit recipe id, while every use site
@@ -31,7 +31,7 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 12;
+pub(crate) const WIRE_ISA_VERSION: u32 = 13;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -87,6 +87,7 @@ pub(crate) struct SemanticImage {
     pub mask_salt: u16,
     pub token_layers: [RecipeTokenLayer; RECIPE_TOKEN_STAGES],
     pub edge_layers: [EdgeTokenLayer; EDGE_TOKEN_STAGES],
+    pub field_layout: FieldLayout,
     pub canonical_words: usize,
     pub bundles: usize,
     pub bundled_words: usize,
@@ -977,18 +978,27 @@ fn encode_code(
     );
     for index in dictionary {
         let recipe = &recipes[index];
-        write_u16(&mut out, recipe.id);
-        out.push(
-            u8::try_from(recipe.descriptor_ops.len()).map_err(|_| error("recipe is too long"))?,
-        );
+        let length =
+            u8::try_from(recipe.descriptor_ops.len()).map_err(|_| error("recipe is too long"))?;
+        // ISA13 de-documents the entry header: the per-image order is baked
+        // into the generated parser, so only one order is visible per script.
+        if image.field_layout.dict_flipped {
+            out.push(length);
+            write_u16(&mut out, recipe.id);
+        } else {
+            write_u16(&mut out, recipe.id);
+            out.push(length);
+        }
         for (position, &op) in recipe.descriptor_ops.iter().enumerate() {
             out.push(encode_masked_opcode(op, recipe.id, position, image));
         }
     }
     write_u16(&mut out, plan.start);
+    let record_order = image
+        .field_layout
+        .record_slot_fields(usize::from(prototype_id));
     for &index in &plan.physical {
         let bundle = &plan.bundles[index];
-        write_u16(&mut out, bundle.label);
         let next_token = encode_edge_token(
             bundle.next,
             bundle.label,
@@ -1023,8 +1033,6 @@ fn encode_code(
             ),
             bundle.skip
         );
-        write_u16(&mut out, next_token);
-        write_u16(&mut out, skip_token);
         let token = encode_recipe_token(
             recipes[bundle.recipe].id,
             bundle.label,
@@ -1044,7 +1052,12 @@ fn encode_code(
             ),
             recipes[bundle.recipe].id
         );
-        write_u16(&mut out, token);
+        // Fixed-width slots stay in place; the per-prototype field assignment
+        // is recomputed from the same factorial profile by the Lua parser.
+        let fields = [bundle.label, next_token, skip_token, token];
+        for slot in record_order {
+            write_u16(&mut out, fields[slot]);
+        }
         for &word in &bundle.words {
             write_operands(&mut out, word)?;
         }
@@ -1070,7 +1083,7 @@ fn owners_are_interleaved(segments: &[CodeSegment]) -> bool {
 }
 
 /// Context used by the compact segment graph (introduced in ISA9 and retained
-/// by ISA12). Reusing one full-width
+/// by ISA13). Reusing one full-width
 /// recipe-token layer keeps the segment links seed-coupled without adding a
 /// self-describing key block to the wire image.
 fn segment_parameters(image: &SemanticImage) -> (u16, u16) {
@@ -1281,28 +1294,37 @@ fn serialize(
     for (prototype_id, plan) in plans.iter().enumerate() {
         let prototype = &plan.prototype;
         let code_len = code_lengths[prototype_id];
-        out.extend_from_slice(
-            &prototype
-                .parent
-                .map_or(u32::MAX, |parent| parent as u32)
-                .to_le_bytes(),
-        );
-        write_u16(&mut out, prototype.registers);
-        out.extend_from_slice(&[prototype.parameters, prototype.flags]);
-        write_u16(
-            &mut out,
-            u16::try_from(prototype.captures.len()).map_err(|_| error("too many captures"))?,
-        );
         let owner = u16::try_from(prototype_id)
             .map_err(|_| error("prototype id exceeds segment owner range"))?;
         let root = owner
             .checked_mul(2)
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| error("segment root id overflow"))?;
-        write_u16(&mut out, encode_segment_root(root, owner, image));
-        write_u32(&mut out, prototype.constants.len())?;
-        write_u32(&mut out, plan.bundles.len())?;
-        write_u32(&mut out, code_len)?;
+        // ISA13 keeps the 24-byte shape and the wire read sequence, but the
+        // field assigned to each same-width slot follows the per-image
+        // metadata permutation. The generated PH mirrors this assignment.
+        let wide = [
+            prototype.parent.map_or(u32::MAX, |parent| parent as u32),
+            u32::try_from(prototype.constants.len()).map_err(|_| error("too many constants"))?,
+            u32::try_from(plan.bundles.len()).map_err(|_| error("too many bundles"))?,
+            u32::try_from(code_len).map_err(|_| error("code length overflow"))?,
+        ];
+        let medium = [
+            prototype.registers,
+            u16::try_from(prototype.captures.len()).map_err(|_| error("too many captures"))?,
+            encode_segment_root(root, owner, image),
+        ];
+        let narrow = [prototype.parameters, prototype.flags];
+        let layout = &image.field_layout;
+        out.extend_from_slice(&wide[usize::from(layout.meta_u32[0])].to_le_bytes());
+        write_u16(&mut out, medium[usize::from(layout.meta_u16[0])]);
+        out.push(narrow[usize::from(layout.meta_u8[0])]);
+        out.push(narrow[usize::from(layout.meta_u8[1])]);
+        write_u16(&mut out, medium[usize::from(layout.meta_u16[1])]);
+        write_u16(&mut out, medium[usize::from(layout.meta_u16[2])]);
+        out.extend_from_slice(&wide[usize::from(layout.meta_u32[1])].to_le_bytes());
+        out.extend_from_slice(&wide[usize::from(layout.meta_u32[2])].to_le_bytes());
+        out.extend_from_slice(&wide[usize::from(layout.meta_u32[3])].to_le_bytes());
         for capture in &prototype.captures {
             let (tag, index) = match *capture {
                 Capture::Local(register) => (0, register),
@@ -1341,18 +1363,16 @@ fn serialize(
     for (slot, segment) in segments.iter().enumerate() {
         let physical_slot = u16::try_from(slot + 1)
             .map_err(|_| error("segment physical slot exceeds u16 range"))?;
-        write_u16(
-            &mut out,
+        let tokens = [
             encode_segment_id(segment.id, physical_slot, image),
-        );
-        write_u16(
-            &mut out,
             encode_segment_owner(segment.owner, segment.id, physical_slot, image),
-        );
-        write_u16(
-            &mut out,
             encode_segment_next(segment.next, segment.id, segment.owner, image),
-        );
+        ];
+        // Per-segment token order from the same factorial profile the pool
+        // reader recomputes from its 1-based physical slot.
+        for token_slot in image.field_layout.segment_slot_fields(slot + 1) {
+            write_u16(&mut out, tokens[token_slot]);
+        }
         out.extend_from_slice(&segment.bytes);
         if out.len() > custom::MAX_BYTES {
             return Err(error("image exceeds size limit"));
@@ -1504,6 +1524,7 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         mask_salt: (random.next_u64() % 64) as u16,
         token_layers,
         edge_layers,
+        field_layout: field_layout(seed),
         canonical_words,
         bundles,
         bundled_words,

@@ -93,7 +93,7 @@ pub(crate) fn generate(
     // replaced by five-stage context tokens; successors use independent
     // three-stage edge tokens. Live wire descriptors are validation-equivalent
     // camouflage rather than execution truth; the target-side parser accepts
-    // only this private ISA12 image.
+    // only this private ISA13 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image, None)
 }
@@ -144,6 +144,12 @@ fn generate_semantic(
     // frame-local per-prototype mapper. The target derives this affine profile
     // from `fid`; it never embeds a 256-entry register permutation table.
     let register_abi = register_layout(seed);
+    // ISA13 de-documents parser field order. Record slots use a per-prototype
+    // factorial profile recomputed from the prototype id; segment tokens use a
+    // per-segment profile recomputed from the physical slot. Dictionary,
+    // metadata and tuple orders are per-image permutations baked into the
+    // generated parser text below.
+    let field_order = field_layout(seed);
     let primitive_ops: std::collections::BTreeSet<Opcode> = semantic_image
         .recipes
         .iter()
@@ -715,11 +721,12 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     // exact coverage, then reconstructs each stream before semantic parsing.
     let csv = state_values(&mut structure, 5);
     let (c_next, c_up, c_konst, c_code, c_fin) = (csv[0], csv[1], csv[2], csv[3], csv[4]);
-    let mut ph = String::from(
-        "local PH=function()\n local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();\n",
+    let mut ph = format!(
+        "local PH=function()\n local F={{__obf_proto_k={{}},__obf_proto_tags={{}},__obf_proto_u={{}}}};{}\n",
+        field_order.metadata_reads_lua()
     );
     ph.push_str(
-        " local RT=b16();F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();\n if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<4 or VMCS>16777216 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
+        " if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<4 or VMCS>16777216 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
     );
     if program.target.is_luau() {
         ph.push_str("if legacy~=0 then E()end;");
@@ -769,7 +776,8 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
             (
                 c_fin,
                 format!(
-                    "local Q={{}};local SN=np*2;for slot=1,SN do local sid=(b16()-slot*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or Q[sid]then E()end;local owner=MF((sid-1)/2);local claimed=(b16()-sid*{segment_multiplier}-slot-{segment_add})%65536;if claimed~=owner then E()end;local part=(sid-1)%2;local SP=P[owner].__obf_proto_code;local nxt=(b16()-sid*{segment_multiplier}-owner-{segment_add})%65536;local split=1+MF((SP[1]-1)*(({segment_add}+owner*{segment_multiplier})%65536)/65536);local n=part==0 and split or SP[1]-split;Q[sid]={{owner,nxt,take(n)}}end;if pos()~=#B+1 then E()end;local used={{}};local roots={{}};for owner=0,np-1 do local SP=P[owner].__obf_proto_code;local sid=(SP[2]-owner*{segment_multiplier}-{segment_add})%65536;if sid~=owner*2+1 or roots[sid]then E()end;roots[sid]=1;local code='';for count=1,2 do local S=Q[sid];if not S or S[1]~=owner or used[sid]then E()end;used[sid]=1;code=code..S[3];sid=S[2]end;if sid~=0 or #code~=SP[1]then E()end;SP[2]=code end;for sid=1,SN do if not used[sid]then E()end end;B=nil;break;"
+                    "local Q={{}};local SN=np*2;for slot=1,SN do {segment_decode}local sid=(st[sont[1]]-slot*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or Q[sid]then E()end;local owner=MF((sid-1)/2);local claimed=(st[sont[2]]-sid*{segment_multiplier}-slot-{segment_add})%65536;if claimed~=owner then E()end;local part=(sid-1)%2;local SP=P[owner].__obf_proto_code;local nxt=(st[sont[3]]-sid*{segment_multiplier}-owner-{segment_add})%65536;local split=1+MF((SP[1]-1)*(({segment_add}+owner*{segment_multiplier})%65536)/65536);local n=part==0 and split or SP[1]-split;Q[sid]={{owner,nxt,take(n)}}end;if pos()~=#B+1 then E()end;local used={{}};local roots={{}};for owner=0,np-1 do local SP=P[owner].__obf_proto_code;local sid=(SP[2]-owner*{segment_multiplier}-{segment_add})%65536;if sid~=owner*2+1 or roots[sid]then E()end;roots[sid]=1;local code='';for count=1,2 do local S=Q[sid];if not S or S[1]~=owner or used[sid]then E()end;used[sid]=1;code=code..S[3];sid=S[2]end;if sid~=0 or #code~=SP[1]then E()end;SP[2]=code end;for sid=1,SN do if not used[sid]then E()end end;B=nil;break;",
+                    segment_decode = field_order.segment_decode_lua(),
                 ),
             ),
         ],
@@ -909,7 +917,8 @@ return a,b,c,p end;\nend,",
     // segment graph (masked root/id/next, owner, count, total and coverage) and
     // reconstructed each exact code image. Every stream begins with a masked
     // recipe dictionary and random entry label. Records
-    // then carry (label,next-token,skip-token,recipe-token) plus operand-only
+    // then carry four anonymous u16 slots (label, next/skip edge tokens and
+    // recipe token in per-prototype factorial order) plus operand-only
     // varints. Shared three/five-stage nested state machines resolve edge and
     // recipe tokens from graph/prototype context both here and on every runtime
     // fetch. The persistent table retains only tokens. The validator builds a
@@ -919,27 +928,28 @@ return a,b,c,p end;\nend,",
     write!(s, "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX)\n", keys[2]).unwrap();
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
     let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
+    let tuple_slots = field_order.tuple_slots();
     let semantic_validator = format!(
         r#"{edge_decoder}{recipe_decoder}{operand_getter}
 for id=0,np-1 do
- local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;{operand_profile}
+ local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;{operand_profile}{field_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
  local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};
- for z=1,nr do local rid=D16();local n=SB(CD,p);p=p+1;if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
+ for z=1,nr do {dict_head}if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
   local q={{}};for qi=0,n-1 do local raw=SB(CD,p);p=p+1;if raw==nil then E()end;
    local op=(raw-(rid*{mask_mul}+qi*{mask_add}+{mask_salt})%64)%64;
    if op>48 or FM[op]==nil or qi<n-1 and (op==44 or op==45 or op==46 or op==47)then E()end;q[qi+1]=op;
   end;RM[rid]=q;
  end;
  local start=D16();local code={{}};
- for at=0,F.__obf_proto_nc-1 do local label,nextToken,skipToken,token=D16(),D16(),D16(),D16();local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
-  if label==0 or code[label]~=nil or recipe==nil then E()end;local I={{token,nextToken,skipToken,PT[recipe[#recipe]],#recipe}};
+ for at=0,F.__obf_proto_nc-1 do {record_head}local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
+  if label==0 or code[label]~=nil or recipe==nil then E()end;{tuple_construct}
   for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local k=b+c*256;local j=a+k*256;
    if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
   end;code[label]=I;
  end;
  if p~=#CD+1 or start==0 or code[start]==nil then E()end;
- for label,I in NX,code do local next1=ED(I[2],label,id,0);local skip=ED(I[3],label,id,1);local last=I[4];local n=I[5];local a,b,c,k,j=OG(id,I,n,0);
+ for label,I in NX,code do local next1=ED(I[{tuple_next}],label,id,0);local skip=ED(I[{tuple_skip}],label,id,1);local last=I[4];local n=I[5];local a,b,c,k,j=OG(id,I,n,0);
   if last=={jump} then if next1~=0 or skip~=0 or code[j]==nil then E()end
   elseif last=={ret} or last=={tail} then if next1~=0 or skip~=0 then E()end
   elseif last=={test} then if code[next1]==nil or code[skip]==nil then E()end
@@ -951,6 +961,12 @@ end;return RD,ED,OG;"#,
         mask_salt = semantic_image.mask_salt,
         operand_getter = operand_abi.getter_lua(),
         operand_profile = operand_abi.parser_profile_lua(),
+        field_profile = field_order.record_profile_lua(),
+        dict_head = field_order.dictionary_head_lua(),
+        record_head = FieldLayout::record_head_lua(),
+        tuple_construct = field_order.tuple_construct_lua(),
+        tuple_next = tuple_slots[1],
+        tuple_skip = tuple_slots[2],
         operand_store = OperandLayout::parser_store_lua(),
         jump = perm[Opcode::Jump as usize],
         test = perm[Opcode::Test as usize],
@@ -1219,7 +1235,10 @@ end;
     let v_disp = selected_masked_state_value(k_disp, k_disp_alt, control_mask);
     let dispatch_first = structure.next_u64() % 2 == 0;
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);sid={semantic_init};pc=next1;w={v_disp};"
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);sid={semantic_init};pc=next1;w={v_disp};",
+        tuple_next = tuple_slots[1],
+        tuple_skip = tuple_slots[2],
+        tuple_token = tuple_slots[0],
     );
     write!(
         s,

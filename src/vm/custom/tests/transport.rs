@@ -1000,11 +1000,16 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local F,R,va,RX,RF=SETUP(fid,args);"));
             // Graph fetch dynamically derives successors and the recipe id,
             // then routes that id into the random semantic fragment pool.
+            // Tuple slots follow the per-image field order.
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
-            let fetch = "next1=ED(I[2],pc,fid,0);skip1=ED(I[3],pc,fid,1);rid=RD(I[1],pc,next1,skip1,fid);sid=";
-            assert_eq!(raw.matches(fetch).count(), 1);
-            let fetch_at = raw.find(fetch).unwrap();
-            assert!(raw[fetch_at..].starts_with(fetch));
+            let tuple = super::lowering::field_layout(seed).tuple_slots();
+            let fetch = format!(
+                "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);sid=",
+                tuple[1], tuple[2], tuple[0]
+            );
+            assert_eq!(raw.matches(&fetch).count(), 1);
+            let fetch_at = raw.find(&fetch).unwrap();
+            assert!(raw[fetch_at..].starts_with(&fetch));
             assert!(raw[fetch_at..raw.len().min(fetch_at + 180)].contains(";pc=next1;w="));
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();

@@ -1,6 +1,6 @@
 //! Executable VM for AST-produced OBF v2 bytecode. Public `.obf` files keep
 //! the canonical opcode-plus-varint ISA2 format, but generated scripts lower
-//! that program into a private seed-specific ISA12 image: straight-line words
+//! that program into a private seed-specific ISA13 image: straight-line words
 //! become recipe superoperators, use sites carry operands plus random graph
 //! labels, three-stage successor tokens, and five-stage recipe tokens (not
 //! plaintext successors/opcodes/recipe ids). Reachable neutral bundles split
@@ -20,17 +20,17 @@
 //! by an inner ChaCha8 domain, sealed in strict transport frame v2, and
 //! protected again by a disjoint outer ChaCha8 domain. Word-XOR/rotate,
 //! quarter-round, block, stream/KDF and anti-hook code are independent shuffled
-//! fields. ISA12 retains ISA11's live source-witness key schedule and
-//! fail-closed runtime attestation, then adds a per-prototype heterogeneous
-//! operand ABI: decoded operands use one of four physical record layouts,
-//! independently rotated and placed in a sparse lane, while fragment bindings
-//! vary and no actual-opcode marker is emitted. ISA12-B also derives a unique
-//! register ABI for every private prototype: frame setup and every primitive
-//! access map logical registers through one of four 257-key bank shapes without
-//! embedding a complete permutation table. ISA12-C couples its fused-read
-//! predicate to those four frame families and replaces the entry's stable
-//! linear stage wiring with a six-state shuffled graph; all inverses and graph
-//! dependencies remain client-visible and reversible. Share parity also selects
+//! fields. ISA13 retains ISA11's live source-witness key schedule and
+//! fail-closed runtime attestation, the ISA12 per-prototype heterogeneous
+//! operand ABI (four physical record layouts, rotation, sparse lane, varied
+//! fragment bindings, no actual-opcode marker), the ISA12-B register ABI
+//! (four 257-key bank shapes, no complete permutation table) and the ISA12-C
+//! carried-value fusion plus six-state entry graph. ISA13 additionally
+//! de-documents parser field order: record headers use a per-prototype
+//! factorial slot permutation, segment tokens a per-segment one, while
+//! dictionary, metadata and tuple orders are per-image permutations baked
+//! into the generated parser. All inverses and graph dependencies remain
+//! client-visible and reversible. Share parity also selects
 //! one of two fetch/dispatch state pairs before masking their representation.
 //! Primitive semantics still live in the two target opcode subfolders. The
 //! seed never changes public `.obf` bytes, but it does change the embedded
