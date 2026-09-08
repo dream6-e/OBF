@@ -2,6 +2,83 @@ use super::*;
 
 use std::fmt::Write as _;
 
+fn semantic_handler_source(target: Target, op: Opcode) -> Result<String, Diagnostic> {
+    let raw = crate::vm::opcode::custom(target, op)
+        .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
+    Ok(match op {
+        Opcode::Jump => raw.replace("pc=j*4+1;", "pc=j;"),
+        Opcode::Test => raw.replace("pc=pc+4", "pc=skip1"),
+        _ => raw.to_owned(),
+    })
+}
+
+fn dataflow_chunk_ranges(
+    ops: &[Opcode],
+    target: Target,
+    structure: &mut crate::random::Prng,
+    cache: &mut std::collections::BTreeMap<(Opcode, Opcode), bool>,
+) -> Result<Vec<(usize, usize)>, Diagnostic> {
+    if ops.len() <= 1 {
+        return Ok(vec![(0, ops.len())]);
+    }
+    let mut capable = vec![false; ops.len() - 1];
+    for index in 0..ops.len() - 1 {
+        let pair = (ops[index], ops[index + 1]);
+        capable[index] = if let Some(&capable) = cache.get(&pair) {
+            capable
+        } else {
+            let first = semantic_handler_source(target, pair.0)?;
+            let second = semantic_handler_source(target, pair.1)?;
+            let capable =
+                lowering::fuse_dataflow_pair(pair.0, &first, pair.1, &second, target)?.is_some();
+            cache.insert(pair, capable);
+            capable
+        };
+    }
+
+    // Enumerate the tiny path matching (recipes contain at most four ops),
+    // retain every maximum-cardinality non-overlapping fusion, then use the
+    // structure stream only to select among equivalent maxima. A 2-op chunk
+    // therefore always means a real carried-value fusion; unsupported pairs
+    // remain separate single fragments rather than reverting to textual
+    // handler concatenation.
+    let mut best = 0u32;
+    let mut masks = Vec::new();
+    for mask in 0usize..(1usize << capable.len()) {
+        if mask & (mask << 1) != 0 {
+            continue;
+        }
+        if capable
+            .iter()
+            .enumerate()
+            .any(|(index, capable)| mask & (1 << index) != 0 && !capable)
+        {
+            continue;
+        }
+        let count = mask.count_ones();
+        if count > best {
+            best = count;
+            masks.clear();
+        }
+        if count == best {
+            masks.push(mask);
+        }
+    }
+    let mask = masks[(structure.next_u64() % masks.len() as u64) as usize];
+    let mut ranges = Vec::new();
+    let mut index = 0usize;
+    while index < ops.len() {
+        if index + 1 < ops.len() && mask & (1 << index) != 0 {
+            ranges.push((index, 2));
+            index += 2;
+        } else {
+            ranges.push((index, 1));
+            index += 1;
+        }
+    }
+    Ok(ranges)
+}
+
 pub(crate) fn generate(
     _bytecode: &[u8],
     program: &Program,
@@ -952,21 +1029,32 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         );
         probe_fields.push(field);
     }
-    // Entry method: chains the section functions in order, then runs the
-    // program. IF/Freeze bind to nil on Lua 5.1 (20 prelude results); unused
-    // parameters of target-specific sections accept nil the same way.
+    // ISA12-C entry stage graph. The dependency order remains strict, but the
+    // former top-level decode -> decrypt -> decompress -> parse -> validate ->
+    // execute statement chain is no longer a stable textual anchor. Six
+    // seeded states are emitted in shuffled branch order with varied equality
+    // spellings. Only the narrow stage outputs survive across iterations;
+    // decoder helpers remain local to their state. This is a bounded entry
+    // de-self-documenting measure, not a claim that the shipped inverses or
+    // dependency graph are secret.
     s.push_str("\nreturn CV,SV,Lookup\nend,");
-    write!(
-        s,
-        "[\"{method}\"]=function(VMS,...)\nlocal {names}=VMS[{}]();
-local c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS);local c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS);local c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS);
-local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
-local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});P.__obf_proto_control=(c1+c2+c3)%65520;\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD,ED,OG=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
-local CV,SV,Lookup=VMS[{}](TY,E);
-local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG);
-local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
-        keys[0],
+    let mut decoder_stage = decoder_wiring.replacen("local FMt,PT=", "FMt,PT=", 1);
+    decoder_stage = decoder_stage.replacen("local P,np,entry=", "P,np,entry=", 1);
+    if decoder_stage.contains("local FMt,PT=") || decoder_stage.contains("local P,np,entry=") {
+        return Err(Diagnostic::new("entry decoder stage export rewrite failed"));
+    }
+    let entry_states = state_values(&mut structure, 6);
+    let (e_prelude, e_probe, e_segments, e_decode, e_bind, e_run) = (
+        entry_states[0],
+        entry_states[1],
+        entry_states[2],
+        entry_states[3],
+        entry_states[4],
+        entry_states[5],
+    );
+    let prelude_stage = format!("{ret_names}=VMS[{}]();es={e_probe};", keys[0]);
+    let probe_stage = format!(
+        "c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS);c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS);c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS);es={e_segments};",
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
         probe_inputs[probe_order[0]].1,
@@ -976,23 +1064,42 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[5 + probe_order[2]],
         probe_inputs[probe_order[2]].0,
         probe_inputs[probe_order[2]].1,
+        cn0 = probe_order[0] + 1,
+        cn1 = probe_order[1] + 1,
+        cn2 = probe_order[2] + 1,
+    );
+    let segment_stage = format!(
+        "Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);es={e_decode};",
         keys[8 + hold[0]],
         keys[8 + hold[1]],
         keys[8 + hold[2]],
         keys[11],
         keys[12],
-        keys[1],
-        keys[4],
-        keys[7],
-        keys[14],
-        keys[15],
-        keys[2],
-        keys[3],
-        keys[4],
-        names = ret_names,
-        cn0 = probe_order[0] + 1,
-        cn1 = probe_order[1] + 1,
-        cn2 = probe_order[2] + 1,
+    );
+    let decode_stage = format!("{decoder_stage}es={e_bind};");
+    let bind_stage = format!(
+        "P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);RD,ED,OG=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        keys[14], keys[15], keys[2], keys[3],
+    );
+    let run_stage = format!(
+        "local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
+        keys[4]
+    );
+    let entry_machine = state_machine(
+        &mut structure,
+        "es",
+        vec![
+            (e_prelude, prelude_stage),
+            (e_probe, probe_stage),
+            (e_segments, segment_stage),
+            (e_decode, decode_stage),
+            (e_bind, bind_stage),
+            (e_run, run_stage),
+        ],
+    );
+    write!(
+        s,
+        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,RD,ED,OG,CV,SV,Lookup;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
     )
     .unwrap();
     write!(
@@ -1001,26 +1108,7 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[4]
     )
     .unwrap();
-    // Swap the monolithic decoder call for the random-section wiring.
-    let old_decoder_line = format!(
-        "local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});",
-        keys[1], keys[4], keys[7]
-    );
-    s = s.replacen(&old_decoder_line, &decoder_wiring, 1);
-    // M7: wrap the just-emitted entry body in an opaque branch. The live
-    // side carries the real chain; the dead side carries real-looking,
-    // never-executing instructions behind a constant contradiction.
-    {
-        let head_anchor = format!("[\"{method}\"]=function(VMS,...)\n");
-        let head_wrapped = format!("[\"{method}\"]=function(VMS,...){entry_head}\n");
-        s = s.replacen(&head_anchor, &head_wrapped, 1).replace(
-            "return U(result,1,result.n)\nend,",
-            &format!("return U(result,1,result.n)\n{entry_tail}\nend,"),
-        );
-    }
-    // Resolved after the opaque wrap: its replacements insert text inside
-    // the entry field, so any index recorded before them would drift. The
-    // opener text is unique, so locate it instead.
+    // Resolve after the opaque-wrapped entry graph; its length is now final.
     let f5_start = s
         .rfind(&format!("[{}]=function(SC,Z,U,G,E,", keys[4]))
         .expect("interpreter field anchor");
@@ -1043,11 +1131,11 @@ Make=function(id,up)
  if F.__obf_proto_shared and not cached then F.__obf_proto_cached=fn end;return fn
 end;
 local SETUP=function(fid,args)
- local F=P[fid];local R={};local RX=RK(fid);local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
+ local F=P[fid];local R={};local RX,RF=RK(fid,R);local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
  local va2={};va2.n=nn;for i=1,nn do va2[i]=args[F.__obf_proto_p+i]end;
  for i=0,F.__obf_proto_p-1 do R[RX(i)]={args[i+1]}end;
  if MF(F.__obf_proto_flags/2)%2==1 then R[RX(F.__obf_proto_p)]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[RX(F.__obf_proto_p)][1]=vv end end;
- return F,R,va2,RX,nn
+ return F,R,va2,RX,RF,nn
 end;
 "#);
     // SETUP-only scratch slots: the frame registers F/R keep their locals
@@ -1055,11 +1143,11 @@ end;
     // single slot), but SETUP's own intermediates flow through g[key].
     {
         let original = r#"local SETUP=function(fid,args)
- local F=P[fid];local R={};local RX=RK(fid);local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
+ local F=P[fid];local R={};local RX,RF=RK(fid,R);local nn=args.n-F.__obf_proto_p;if nn<0 then nn=0 end;
  local va2={};va2.n=nn;for i=1,nn do va2[i]=args[F.__obf_proto_p+i]end;
  for i=0,F.__obf_proto_p-1 do R[RX(i)]={args[i+1]}end;
  if MF(F.__obf_proto_flags/2)%2==1 then R[RX(F.__obf_proto_p)]={};if MF(F.__obf_proto_flags/4)%2==1 then local vv={};vv.n=nn;for i=1,nn do vv[i]=va2[i]end;R[RX(F.__obf_proto_p)][1]=vv end end;
- return F,R,va2,RX,nn
+ return F,R,va2,RX,RF,nn
 end;
 "#;
         let slotted = original.to_owned();
@@ -1075,28 +1163,26 @@ end;
     // record's two edge tokens through ED and its context token through RD.
     // ED has three live/three dead states; RD has five real states, 4..5 nested
     // opaque guards per state, and five dense dead states before dispatch.
-    // Reachable neutral bundles split entries and selected CFG edges. ISA6
-    // additionally advertises validation-equivalent (not truthful) live
-    // descriptors and splits each multi-primitive recipe into 1..2-primitive
-    // fragments. Random stage ids and a globally shuffled stage dispatch keep
-    // one recipe's actual handler text from remaining contiguous. Control
-    // primitives stay in the final fragment, preserving return/tail-call/break
-    // lexical behavior in this loop.
+    // Reachable neutral bundles split entries and selected CFG edges. ISA12-C
+    // keeps random global fragment states but replaces the old "two raw
+    // handlers in one arm" convention with maximum non-overlapping, structurally
+    // safe carried-value pairs. Every selected 2-op range is true dataflow
+    // fusion; unsupported pairs are emitted as separate one-op fragments.
+    // Control primitives stay single, preserving return/tail-call/break lexical
+    // behavior in this loop.
     let mut chunk_ranges: Vec<Vec<(usize, usize)>> = Vec::new();
     let mut fragment_count = 0usize;
+    let mut fusion_capabilities = std::collections::BTreeMap::new();
     for recipe in &semantic_image.recipes {
-        let ranges = match recipe.execute_ops.len() {
-            1 => vec![(0, 1)],
-            2 => vec![(0, 1), (1, 1)],
-            3 if structure.next_u64() % 2 == 0 => vec![(0, 1), (1, 2)],
-            3 => vec![(0, 2), (2, 1)],
-            4 => match structure.next_u64() % 3 {
-                0 => vec![(0, 2), (2, 2)],
-                1 => vec![(0, 1), (1, 1), (2, 2)],
-                _ => vec![(0, 2), (2, 1), (3, 1)],
-            },
-            _ => return Err(Diagnostic::new("invalid semantic recipe length")),
-        };
+        if !(1..=semantic::MAX_BUNDLE_WORDS).contains(&recipe.execute_ops.len()) {
+            return Err(Diagnostic::new("invalid semantic recipe length"));
+        }
+        let ranges = dataflow_chunk_ranges(
+            &recipe.execute_ops,
+            program.target,
+            &mut structure,
+            &mut fusion_capabilities,
+        )?;
         fragment_count += ranges.len();
         chunk_ranges.push(ranges);
     }
@@ -1137,7 +1223,7 @@ end;
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va,RX=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {
@@ -1146,14 +1232,10 @@ end;
     )
     .unwrap();
     let semantic_handler = |op: Opcode| -> Result<String, Diagnostic> {
-        let raw = crate::vm::opcode::custom(program.target, op)
-            .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
-        let adapted = match op {
-            Opcode::Jump => raw.replace("pc=j*4+1;", "pc=j;"),
-            Opcode::Test => raw.replace("pc=pc+4", "pc=skip1"),
-            _ => raw.to_owned(),
-        };
-        lower_register_accesses(&adapted, program.target)
+        lower_register_accesses(
+            &semantic_handler_source(program.target, op)?,
+            program.target,
+        )
     };
     let mut recipe_entries: Vec<(u16, String)> = Vec::new();
     let mut fragment_arms: Vec<(u16, String)> = Vec::new();
@@ -1180,16 +1262,54 @@ end;
         ));
         for (chunk_index, &(start, length, stage)) in chunks.iter().enumerate() {
             let mut body = String::new();
-            for index in start..start + length {
-                let op = recipe.execute_ops[index];
+            if length == 1 {
+                let op = recipe.execute_ops[start];
                 if binding_cursor == binding_forms.len() {
                     structure.shuffle(&mut binding_forms);
                     binding_cursor = 0;
                 }
                 let form = binding_forms[binding_cursor];
                 binding_cursor += 1;
-                body.push_str(&operand_binding_lua(index + 1, form));
+                body.push_str(&operand_binding_lua(start + 1, form));
                 body.push_str(&semantic_handler(op)?);
+            } else if length == 2 {
+                let first_op = recipe.execute_ops[start];
+                let second_op = recipe.execute_ops[start + 1];
+                let first_source = semantic_handler_source(program.target, first_op)?;
+                let second_source = semantic_handler_source(program.target, second_op)?;
+                let fusion = lowering::fuse_dataflow_pair(
+                    first_op,
+                    &first_source,
+                    second_op,
+                    &second_source,
+                    program.target,
+                )?
+                .ok_or_else(|| {
+                    Diagnostic::new("planned semantic dataflow fusion is not lowerable")
+                })?;
+                if fusion.forwarded_reads == 0 {
+                    return Err(Diagnostic::new(
+                        "semantic dataflow fusion carries no consumer reads",
+                    ));
+                }
+                if binding_cursor == binding_forms.len() {
+                    structure.shuffle(&mut binding_forms);
+                    binding_cursor = 0;
+                }
+                let first_form = binding_forms[binding_cursor];
+                binding_cursor += 1;
+                body.push_str(&operand_binding_lua(start + 1, first_form));
+                body.push_str(&fusion.producer);
+                if binding_cursor == binding_forms.len() {
+                    structure.shuffle(&mut binding_forms);
+                    binding_cursor = 0;
+                }
+                let second_form = binding_forms[binding_cursor];
+                binding_cursor += 1;
+                body.push_str(&operand_binding_lua(start + 2, second_form));
+                body.push_str(&fusion.consumer);
+            } else {
+                return Err(Diagnostic::new("invalid semantic fragment width"));
             }
             let exits_frame = matches!(
                 recipe.execute_ops[start + length - 1],

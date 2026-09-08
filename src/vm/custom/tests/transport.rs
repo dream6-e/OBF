@@ -116,10 +116,22 @@ fn bounded_lzw_roundtrips_exactly_and_rejects_malformed_frames() {
 #[test]
 fn chacha8_matches_published_vector_and_roundtrips_both_domains() {
     let expected = [
-        0x2fef_003e, 0xd640_5f89, 0xe8b8_5b7f, 0xa1a5_091f,
-        0xc30e_842c, 0x3b7f_9ace, 0x88e1_1b18, 0x1e1a_71ef,
-        0x72e1_4c98, 0x416f_21b9, 0x6753_449f, 0x1956_6d45,
-        0xa342_4a31, 0x01b0_86da, 0xb8fd_7b38, 0x42fe_0c0e,
+        0x2fef_003e,
+        0xd640_5f89,
+        0xe8b8_5b7f,
+        0xa1a5_091f,
+        0xc30e_842c,
+        0x3b7f_9ace,
+        0x88e1_1b18,
+        0x1e1a_71ef,
+        0x72e1_4c98,
+        0x416f_21b9,
+        0x6753_449f,
+        0x1956_6d45,
+        0xa342_4a31,
+        0x01b0_86da,
+        0xb8fd_7b38,
+        0x42fe_0c0e,
     ];
     assert_eq!(chacha8_block([0; 8], 0, [0; 3]), expected);
 
@@ -206,7 +218,11 @@ fn frame_v2_roundtrips_and_rejects_every_outer_ciphertext_byte() {
         .collect();
     let mut frames = BTreeSet::new();
     for seed in 0..=15u64 {
-        let target = if seed % 2 == 0 { Target::Lua51 } else { Target::Luau };
+        let target = if seed % 2 == 0 {
+            Target::Lua51
+        } else {
+            Target::Luau
+        };
         let cipher = cipher_params(seed);
         let shares = cipher_shares(&wrapper_keys(seed), &cipher, target);
         let permutation = perm_term(seed);
@@ -238,13 +254,7 @@ fn frame_v2_roundtrips_and_rejects_every_outer_ciphertext_byte() {
             runtime_attestation(target).wrapping_add(1),
             &chacha,
         );
-        assert!(open_transport_frame(
-            &wrong_attestation,
-            &shares,
-            permutation,
-            &params,
-        )
-        .is_err());
+        assert!(open_transport_frame(&wrong_attestation, &shares, permutation, &params,).is_err());
         for index in 0..encrypted.len() {
             let mut damaged = encrypted.clone();
             damaged[index] ^= 1;
@@ -266,7 +276,9 @@ fn frame_v2_roundtrips_and_rejects_every_outer_ciphertext_byte() {
         wrong[0] ^= 1;
         assert!(open_transport_frame(&frame, &wrong, permutation, &params).is_err());
         assert!(open_transport_frame(&frame, &shares, permutation + 1, &params).is_err());
-        assert!(open_transport_frame(&frame, &shares, permutation, &frame_params(seed + 1)).is_err());
+        assert!(
+            open_transport_frame(&frame, &shares, permutation, &frame_params(seed + 1)).is_err()
+        );
     }
     assert!(frames.len() >= 12);
 
@@ -276,10 +288,15 @@ fn frame_v2_roundtrips_and_rejects_every_outer_ciphertext_byte() {
     let permutation = perm_term(seed);
     let params = frame_params(seed);
     for length in 0..=19usize {
-        let plain: Vec<u8> = (0..length).map(|index| (index * 37 + length) as u8).collect();
+        let plain: Vec<u8> = (0..length)
+            .map(|index| (index * 37 + length) as u8)
+            .collect();
         let frame = seal_transport_frame(&plain, &shares, permutation, &params).unwrap();
         assert_eq!(frame.len(), (length + 16 + 3) / 4 * 4);
-        assert_eq!(open_transport_frame(&frame, &shares, permutation, &params).unwrap(), plain);
+        assert_eq!(
+            open_transport_frame(&frame, &shares, permutation, &params).unwrap(),
+            plain
+        );
     }
     assert!(open_transport_frame(&[], &shares, permutation, &params).is_err());
     assert!(transport_frame_len(usize::MAX).is_err());
@@ -305,14 +322,12 @@ fn runtime_probe_witness_is_required_by_every_share_and_control_mask() {
             let mask = runtime_control_mask(&shares);
             let permutation = perm_term(seed);
             let framing = frame_params(seed);
-            let encrypted =
-                seal_transport_frame(&payload, &shares, permutation, &framing).unwrap();
+            let encrypted = seal_transport_frame(&payload, &shares, permutation, &framing).unwrap();
 
             for changed in 0..3 {
                 let mut wrong_witnesses = witnesses;
                 wrong_witnesses[changed] += 1;
-                let wrong =
-                    cipher_shares_with_witnesses(&keys, &cipher, wrong_witnesses);
+                let wrong = cipher_shares_with_witnesses(&keys, &cipher, wrong_witnesses);
                 for index in 0..3 {
                     assert_eq!(
                         wrong[index] != shares[index],
@@ -339,8 +354,7 @@ fn runtime_probe_witness_is_required_by_every_share_and_control_mask() {
 #[test]
 fn emitted_probe_transcript_masks_interpreter_control_states() {
     let source = "local function f(x)return x+3 end print(f(4),f(9))";
-    let transcript =
-        "a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%2147483647;b=b+1 end";
+    let transcript = "a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%2147483647;b=b+1 end";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
@@ -433,8 +447,20 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
                 outer.counter.to_string(),
                 inner.counter.to_string(),
             ];
-            secrets.extend(outer.key.into_iter().chain(inner.key).map(|word| word.to_string()));
-            secrets.extend(outer.nonce.into_iter().chain(inner.nonce).map(|word| word.to_string()));
+            secrets.extend(
+                outer
+                    .key
+                    .into_iter()
+                    .chain(inner.key)
+                    .map(|word| word.to_string()),
+            );
+            secrets.extend(
+                outer
+                    .nonce
+                    .into_iter()
+                    .chain(inner.nonce)
+                    .map(|word| word.to_string()),
+            );
             for secret in &secrets {
                 assert!(
                     !output.contains(secret.as_str()),
@@ -941,8 +967,9 @@ fn core_logic_flows_through_scratch_table_slots() {
 #[test]
 fn stages_are_flattened_into_seeded_state_machines() {
     // Control-flow flattening remains on the base86 segments, parse core,
-    // interpreter and contextual token decoders. ChaCha8 itself is instead
-    // decomposed into independently shuffled algorithmic functions.
+    // interpreter and contextual token decoders. ISA12-C also moves the
+    // top-level decode/decrypt/decompress/parse/execute wiring into a six-state
+    // entry graph. ChaCha8 itself remains decomposed into shuffled functions.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
@@ -951,9 +978,13 @@ fn stages_are_flattened_into_seeded_state_machines() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Eight machines: three segments, parse core, interpreter
-            // fetch/dispatch, and the shared recipe/edge token machines.
-            assert_eq!(raw.matches("while true do").count(), 8);
+            // Nine machines: entry graph, three segments, parse core,
+            // interpreter fetch/dispatch, and shared recipe/edge token machines.
+            assert_eq!(raw.matches("while true do").count(), 9);
+            assert!(!raw.contains("local FMt,PT=VMS["));
+            assert!(!raw.contains("local P,np,entry=VMS["));
+            assert_eq!(raw.matches("FMt,PT=VMS[").count(), 1);
+            assert_eq!(raw.matches("P,np,entry=VMS[").count(), 1);
             assert_eq!(raw.matches("local RD=function(v,l,n,s,f)").count(), 1);
             assert_eq!(raw.matches("local ED=function(v,l,f,ek)").count(), 1);
             assert!(
@@ -966,7 +997,7 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local PH=function()"));
             assert!(raw.contains("local PU=function()"));
             assert!(raw.contains("local PK=function()"));
-            assert!(raw.contains("local F,R,va,RX=SETUP(fid,args);"));
+            assert!(raw.contains("local F,R,va,RX,RF=SETUP(fid,args);"));
             // Graph fetch dynamically derives successors and the recipe id,
             // then routes that id into the random semantic fragment pool.
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
@@ -1050,7 +1081,7 @@ fn decoder_splits_into_seeded_random_sections() {
             // Wiring order must be block/outer inverse -> LZW helper(s) ->
             // compression frame -> semantic reader(s) -> semantic core.
             let wiring_at = raw.find("local C=VMS[").expect("transport wiring");
-            let wiring_end = wiring_at + raw[wiring_at..].find("local P,np,entry=VMS[").unwrap();
+            let wiring_end = wiring_at + raw[wiring_at..].find("P,np,entry=VMS[").unwrap();
             let wiring = &raw[wiring_at..wiring_end];
             let lzw_at = wiring.find("local LD=VMS[").expect("LZW wiring");
             let body_at = wiring.find("local B=VMS[").expect("frame wiring");

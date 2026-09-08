@@ -6,8 +6,13 @@
 //! plaintext successors/opcodes/recipe ids). Reachable neutral bundles split
 //! every real entry and sampled CFG edges. Live dictionary descriptors are
 //! validation-equivalent camouflage; actual semantics are split into random-id
-//! 1..2-primitive fragments and globally shuffled. Each prototype code image is
-//! additionally split into a masked two-node id/owner/next chain; every node is
+//! 1..2-primitive fragments and globally shuffled. ISA12-C permits a 2-op
+//! fragment only when token analysis can turn it into a real carried-value
+//! dataflow pair: the first result is evaluated once and every safe read in the
+//! second primitive goes through a frame-family forwarding closure. Unsupported
+//! or control pairs remain single fragments rather than concatenated handlers.
+//! Each prototype code image is additionally split into a masked two-node
+//! id/owner/next chain; every node is
 //! shuffled through one cross-prototype pool and fully validated before user
 //! execution. Records/sibling prototypes are shuffled, an unreachable synthetic
 //! subtree changes topology, and persistent code records retain only tokens.
@@ -22,8 +27,11 @@
 //! vary and no actual-opcode marker is emitted. ISA12-B also derives a unique
 //! register ABI for every private prototype: frame setup and every primitive
 //! access map logical registers through one of four 257-key bank shapes without
-//! embedding a complete permutation table. Share parity also selects one of two
-//! fetch/dispatch state pairs before masking their concrete representation.
+//! embedding a complete permutation table. ISA12-C couples its fused-read
+//! predicate to those four frame families and replaces the entry's stable
+//! linear stage wiring with a six-state shuffled graph; all inverses and graph
+//! dependencies remain client-visible and reversible. Share parity also selects
+//! one of two fetch/dispatch state pairs before masking their representation.
 //! Primitive semantics still live in the two target opcode subfolders. The
 //! seed never changes public `.obf` bytes, but it does change the embedded
 //! semantic image as well as transport, layout, local, and private-field

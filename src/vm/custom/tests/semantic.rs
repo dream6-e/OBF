@@ -567,11 +567,7 @@ fn per_prototype_operand_abi_breaks_the_static_slot_handler_bridge() {
                 );
             }
             let permutation = opcode_permutation(seed, 64);
-            for op in image
-                .recipes
-                .iter()
-                .flat_map(|recipe| &recipe.execute_ops)
-            {
+            for op in image.recipes.iter().flat_map(|recipe| &recipe.execute_ops) {
                 assert!(
                     !raw.contains(&format!(";o={};", permutation[*op as usize])),
                     "{target} seed {seed}: actual opcode marker survived"
@@ -642,11 +638,20 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
                 .all(|&key| key < REGISTER_LAYOUT_PHYSICAL_SLOTS));
         }
         let factory = abi.factory_lua();
-        assert!(factory.len() < 700);
+        assert!(factory.len() < 1_300);
         assert!(!factory.contains('{'), "register map table was embedded");
-        assert_eq!(factory.matches("return function(r)").count(), 4);
+        assert_eq!(factory.matches("RX=function(r)").count(), 4);
+        assert_eq!(factory.matches("RF=function(q,k,v)").count(), 4);
+        assert!(factory.contains("if q==k then return v"));
+        assert!(factory.contains("if q~=k then return R[RX(q)]"));
+        assert!(factory.contains("if p==RX(k)then return v"));
+        assert!(factory.contains("if (q+rt)%257==(k+rt)%257 then return v"));
+        assert!(factory.contains("return RX,RF"));
     }
-    assert!(seed_profiles.len() >= 6, "register ABI parameters are seed-pinned");
+    assert!(
+        seed_profiles.len() >= 6,
+        "register ABI parameters are seed-pinned"
+    );
 
     for target in [Target::Lua51, Target::Luau] {
         for &op in Opcode::ALL.iter().filter(|op| op.supported(target)) {
@@ -669,12 +674,11 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
                 .count();
             let all_register_accesses = lowered_tokens
                 .windows(2)
-                .filter(|tokens| {
-                    tokens[0].text(&lowered) == "R" && tokens[1].text(&lowered) == "["
-                })
+                .filter(|tokens| tokens[0].text(&lowered) == "R" && tokens[1].text(&lowered) == "[")
                 .count();
             assert_eq!(
-                lowered_accesses, source_accesses,
+                lowered_accesses,
+                source_accesses,
                 "{target} {}: register accesses were not all lowered",
                 op.name()
             );
@@ -699,9 +703,9 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
         let program = custom::decode(&data, target).unwrap();
         for seed in [0u64, 735, u64::MAX] {
             let raw = generate(&data, &program, seed).unwrap();
-            assert_eq!(raw.matches("local RK=function(fid)").count(), 1);
-            assert_eq!(raw.matches("local RX=RK(fid)").count(), 1);
-            assert!(raw.contains("local F,R,va,RX=SETUP(fid,args);"));
+            assert_eq!(raw.matches("local RK=function(fid,R)").count(), 1);
+            assert_eq!(raw.matches("local RX,RF=RK(fid,R)").count(), 1);
+            assert!(raw.contains("local F,R,va,RX,RF=SETUP(fid,args);"));
             assert!(raw.matches("R[RX(").count() > 30);
             for old in ["R[a]", "R[b]", "R[c]", "R[i]", "R[d[2]]"] {
                 assert!(
@@ -711,6 +715,67 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
             }
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
         }
+    }
+}
+
+#[test]
+fn carried_value_fusion_rewrites_both_primitive_boundaries() {
+    // ISA12-C does not call two concatenated plaintext handlers "fusion".
+    // A supported pair must materialize the first result once, keep its
+    // logical destination, and route every second-primitive read through RF.
+    // RF has an explicit value argument, so false/nil are not lost through a
+    // Lua and/or selector. Control and multi-write shapes remain single.
+    for target in [Target::Lua51, Target::Luau] {
+        let constant = crate::vm::opcode::custom(target, Opcode::Constant).unwrap();
+        let not = crate::vm::opcode::custom(target, Opcode::Not).unwrap();
+        let fusion = fuse_dataflow_pair(Opcode::Constant, constant, Opcode::Not, not, target)
+            .unwrap()
+            .expect("constant -> not should fuse");
+        assert_eq!(fusion.forwarded_reads, 1);
+        assert!(fusion
+            .producer
+            .starts_with("local __obf_fl=a;local __obf_fk=RX(__obf_fl);local __obf_fv="));
+        assert!(fusion.producer.ends_with("R[__obf_fk]=__obf_fv;"));
+        assert!(!fusion.producer.contains("R[RX(a)]=F."));
+        assert_eq!(fusion.consumer, "R[RX(a)]=not RF(b,__obf_fl,__obf_fv);");
+
+        let set_table = crate::vm::opcode::custom(target, Opcode::SetTable).unwrap();
+        let table_fusion = fuse_dataflow_pair(
+            Opcode::NewTable,
+            crate::vm::opcode::custom(target, Opcode::NewTable).unwrap(),
+            Opcode::SetTable,
+            set_table,
+            target,
+        )
+        .unwrap()
+        .expect("new-table -> set-table should fuse");
+        assert_eq!(table_fusion.forwarded_reads, 3);
+        assert_eq!(
+            table_fusion.consumer.matches(",__obf_fl,__obf_fv)").count(),
+            3
+        );
+        assert!(!table_fusion.consumer.contains("R[a]"));
+        assert!(!table_fusion.consumer.contains("R[b]"));
+        assert!(!table_fusion.consumer.contains("R[c]"));
+
+        assert!(fuse_dataflow_pair(
+            Opcode::Clear,
+            crate::vm::opcode::custom(target, Opcode::Clear).unwrap(),
+            Opcode::Move,
+            crate::vm::opcode::custom(target, Opcode::Move).unwrap(),
+            target,
+        )
+        .unwrap()
+        .is_none());
+        assert!(fuse_dataflow_pair(
+            Opcode::Constant,
+            constant,
+            Opcode::Return,
+            crate::vm::opcode::custom(target, Opcode::Return).unwrap(),
+            target,
+        )
+        .unwrap()
+        .is_none());
     }
 }
 
@@ -1091,41 +1156,39 @@ fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
             decoy_id_sets.insert(decoys.iter().map(|recipe| recipe.id).collect::<Vec<_>>());
 
             // Every id has one entry route, but actual semantics live in a
-            // globally shuffled fragment pool. All multi-op recipes are split;
-            // 3/4-op recipes also retain at least one fused two-op fragment.
+            // globally shuffled fragment pool. A two-op fragment now exists
+            // only when its first result can be carried into reads performed
+            // by the second primitive; unsupported neighbors remain singles.
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
             let fragments: usize = (0..OPERAND_BINDING_FORMS)
                 .map(|form| {
-                    raw.matches(&format!(
-                        "then {}=OG(fid,I,",
-                        operand_binding_lhs(form)
-                    ))
-                    .count()
+                    raw.matches(&format!("then {}=OG(fid,I,", operand_binding_lhs(form)))
+                        .count()
                 })
                 .sum();
-            let multi = image
-                .recipes
-                .iter()
-                .filter(|recipe| recipe.execute_ops.len() > 1)
-                .count();
+            let fusions = raw.matches("local __obf_fl=a;").count();
+            let forwarded_reads = raw.matches(",__obf_fl,__obf_fv)").count();
             let operations: usize = image
                 .recipes
                 .iter()
                 .map(|recipe| recipe.execute_ops.len())
                 .sum();
             assert_eq!(raw.matches("=OG(fid,I,").count(), operations);
-            assert!(fragments >= image.recipes.len() + multi);
-            assert!(fragments <= operations);
-            if image
-                .recipes
-                .iter()
-                .any(|recipe| recipe.execute_ops.len() >= 3)
-            {
-                assert!(fragments < operations, "no fused fragment was emitted");
-            }
+            assert_eq!(
+                fragments + fusions,
+                operations,
+                "{target} seed {seed}: every fused fragment must replace exactly two primitive boundaries"
+            );
+            assert!(
+                fusions > 8,
+                "{target} seed {seed}: only {fusions} fusions could all belong to four poison recipes"
+            );
+            assert!(forwarded_reads >= fusions);
             assert!((2..=4).contains(&raw.matches("sid%").count()));
             let output = emit(&data, target, seed).unwrap();
+            assert!(!output.contains("__obf_fl"));
+            assert!(!output.contains("__obf_fv"));
             assert_eq!(blob(&output, target, seed), image.bytes);
         }
         assert!(
@@ -1157,7 +1220,10 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
             assert!(raw.contains(&format!("[{}]=function(MF,X8)", keys[CHACHA_WORD_FIELD])));
             assert!(raw.contains(&format!("[{}]=function(X,R)", keys[CHACHA_QUARTER_FIELD])));
             assert!(raw.contains(&format!("[{}]=function(Q)", keys[CHACHA_BLOCK_FIELD])));
-            assert!(raw.contains(&format!("[{}]=function(B,s1,s2,s3,pv,ctx,d,aw,CB", keys[CHACHA_STREAM_FIELD])));
+            assert!(raw.contains(&format!(
+                "[{}]=function(B,s1,s2,s3,pv,ctx,d,aw,CB",
+                keys[CHACHA_STREAM_FIELD]
+            )));
             assert!(raw.contains(&format!("[{}]=function(AH,CC,CB,X8", keys[ANTI_HOOK_FIELD])));
             assert!(raw.contains("1634760805,857760878,2036477234,1797285236"));
             assert!(raw.contains("for i=1,4 do Q(x,1,5,9,13)"));

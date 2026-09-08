@@ -35,7 +35,7 @@ pub(crate) const WIRE_ISA_VERSION: u32 = 12;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
-const MAX_BUNDLE_WORDS: usize = 4;
+pub(crate) const MAX_BUNDLE_WORDS: usize = 4;
 const DECOY_RECIPES: usize = 4;
 
 /// One reversible stage of the context-dependent record-token transform.

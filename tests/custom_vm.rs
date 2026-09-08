@@ -79,6 +79,63 @@ fn register_abi_preserves_cells_captures_callbacks_loops_and_tailcalls() {
 }
 
 #[test]
+fn fused_dataflow_preserves_nil_false_aliasing_metamethods_and_errors() {
+    let source = r#"
+        local function truth(v)
+            local first=v
+            local second=not first
+            local third=not second
+            return first,second,third
+        end
+        local a,b,c=truth(nil) print('nil',a,b,c)
+        local d,e,f=truth(false) print('false',d,e,f)
+
+        local tableValue={value=4}
+        local alias=tableValue
+        alias.value=alias.value+3
+        local copied=alias
+        print('alias',tableValue.value,copied==tableValue)
+
+        local events=''
+        local mt={}
+        mt.__add=function(left,right)
+            events=events..left.value..':'..right.value..';'
+            return setmetatable({value=left.value+right.value},mt)
+        end
+        local left=setmetatable({value=2},mt)
+        local middle=left+setmetatable({value=3},mt)
+        local result=middle+setmetatable({value=5},mt)
+        print('meta',result.value,events)
+
+        local state=10
+        local function bump()state=state+1 return state end
+        local ordered=state+bump()
+        print('order',ordered,state)
+
+        local function capture(value)
+            return function(nextValue)
+                local before=value
+                value=nextValue
+                return before,not value
+            end
+        end
+        local closure=capture(false)
+        print('cell',closure(nil))
+        print('cell',closure(false))
+
+        local ok=pcall(function()
+            local bad=nil
+            local forwarded=bad
+            return forwarded+1
+        end)
+        print('error',ok)
+    "#;
+    for target in [Target::Lua51, Target::Luau] {
+        differential(source, target);
+    }
+}
+
+#[test]
 fn existing_full_vm_corpora_execute_without_native_compilation() {
     differential(include_str!("fixtures/vm_lua51.lua"), Target::Lua51);
     differential(include_str!("fixtures/vm_luau.lua"), Target::Luau);
