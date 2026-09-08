@@ -497,6 +497,7 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
     let mut multipliers = std::collections::BTreeSet::new();
     let mut mixes = std::collections::BTreeSet::new();
     let mut compression_shapes = std::collections::BTreeSet::new();
+    let mut chacha_schedules = std::collections::BTreeSet::new();
     for (target, fixture) in [
         (
             Target::Lua51,
@@ -525,7 +526,7 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
                 }
             }
             assert!(
-                (20..=23).contains(&order.len()),
+                (25..=28).contains(&order.len()),
                 "{target} seed {seed}: {} fields",
                 order.len()
             );
@@ -534,18 +535,10 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
             assert!(order.contains(&keys[23].to_string()));
             compression_shapes.insert(order.contains(&keys[21].to_string()));
             layouts.insert((format!("{target:?}"), order));
-            for multiplier in [16_807u64, 48_271, 65_539] {
-                if output.contains(&format!("={multiplier}*"))
-                    || output.contains(&format!("*{multiplier}*"))
-                {
-                    multipliers.insert(multiplier);
-                }
-            }
-            for mix in [31u64, 33, 37, 41] {
-                if output.contains(&format!("{mix}*#")) {
-                    mixes.insert(mix);
-                }
-            }
+            let cipher = cipher_params(seed);
+            multipliers.insert(cipher.outer);
+            mixes.insert(cipher.mix);
+            chacha_schedules.insert(format!("{:?}", chacha_params(seed)));
         }
     }
     // 24 outputs (12 seeds x 2 targets) must not share layouts.
@@ -556,6 +549,7 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
     );
     assert_eq!(multipliers.len(), 3, "multiplier variety: {multipliers:?}");
     assert!(mixes.len() >= 3, "mixing constant variety: {mixes:?}");
+    assert!(chacha_schedules.len() >= 10, "ChaCha8 schedule variety");
     assert_eq!(
         compression_shapes.len(),
         2,
@@ -908,103 +902,52 @@ fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
 }
 
 #[test]
-fn keystream_families_and_cross_stage_terms_couple_the_pipeline() {
-    // Each stream layer independently draws one of three arithmetic families
-    // (Lehmer / dual-Lehmer sum / mod-2^32 LCG). The outer seed binds the
-    // rebuilt opcode permutation, while the inner compressed-body seed binds
-    // all clear LZW header fields available only after block inversion.
+fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let mut outer_families = BTreeSet::new();
-        let mut inner_families = BTreeSet::new();
+        let mut schedules = BTreeSet::new();
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            let params = cipher_params(seed);
-            outer_families.insert(params.outer_stream.family);
-            inner_families.insert(params.constant_stream.family);
-            // The decrypt field runs its family step in the XOR loop.
-            let dec_at = raw
-                .find("]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32)")
-                .expect("decrypt field signature");
-            let dec_end = dec_at
-                + raw[dec_at..]
-                    .find("\nend")
-                    .unwrap_or_else(|| panic!("no end after decrypt field, {target} seed {seed}"))
-                + 4;
-            let decrypt = &raw[dec_at..dec_end];
-            match params.outer_stream.family {
-                0 => assert!(
-                    decrypt.contains(&format!("={}*", params.outer_stream.multiplier))
-                        && decrypt.contains("%2147483647")
-                ),
-                1 => assert!(
-                    decrypt.contains(&format!("={}*", params.outer_stream.multiplier))
-                        && decrypt.contains(&format!("={}*", params.outer_stream.second))
-                ),
-                _ => assert!(decrypt.contains("%4294967296")),
-            }
-            // The independently shuffled compression-frame field runs the
-            // inner stream family before invoking bounded LZW.
-            let inner_open = format!(
-                "[{}]=function(C,ca,cb,LD,E,SB,NCH,TC,MF,X8,AD,L32)",
-                wrapper_keys(seed)[23]
-            );
-            let inner_at = raw.find(&inner_open).expect("inner stream field");
-            let inner_end = inner_at
-                + raw[inner_at..]
-                    .find("return B end")
-                    .unwrap_or_else(|| panic!("no inner field end, {target} seed {seed}"))
-                + "return B end".len();
-            let inner = &raw[inner_at..inner_end];
-            match params.constant_stream.family {
-                0 => assert!(inner.contains(&format!("={}*", params.constant_stream.multiplier))),
-                1 => assert!(
-                    inner.contains(&format!("={}*", params.constant_stream.multiplier))
-                        && inner.contains(&format!("={}*", params.constant_stream.second))
-                ),
-                _ => assert!(inner.contains("%4294967296")),
-            }
-            // B1 payload term: the entry derives pv from the rebuilt
-            // renumbering table at the per-seed slots before decrypting,
-            // and the decrypt seed adds it to the three probe shares.
+            schedules.insert(format!("{:?}", chacha_params(seed)));
+            let keys = wrapper_keys(seed);
+            assert!(raw.contains(&format!("[{}]=function(MF,X8)", keys[CHACHA_WORD_FIELD])));
+            assert!(raw.contains(&format!("[{}]=function(X,R)", keys[CHACHA_QUARTER_FIELD])));
+            assert!(raw.contains(&format!("[{}]=function(Q)", keys[CHACHA_BLOCK_FIELD])));
+            assert!(raw.contains(&format!("[{}]=function(B,s1,s2,s3,pv,ctx,d,aw,CB", keys[CHACHA_STREAM_FIELD])));
+            assert!(raw.contains(&format!("[{}]=function(AH,CC,CB,X8", keys[ANTI_HOOK_FIELD])));
+            assert!(raw.contains("1634760805,857760878,2036477234,1797285236"));
+            assert!(raw.contains("for i=1,4 do Q(x,1,5,9,13)"));
+            assert!(raw.contains("Z[1]~=804192318"));
+            assert_eq!(raw.matches("local aw=AH(AH,CC,CB,X8").count(), 2);
+
             let [i0, i1, i2] = perm_indices(seed);
             let pv_line = format!("local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;");
             let pv_at = raw.find(&pv_line).expect("entry permutation term");
-            let dec_call = raw
-                .find("c1,c2,c3,pv,E,SB")
-                .expect("decrypt call passes pv");
-            assert!(
-                pv_at < dec_call,
-                "pv must be derived before the decrypt call"
-            );
-            assert!(decrypt.contains("s1+s2+s3+pv+"));
-            // The inner key is unavailable until the clear compression frame
-            // has emerged from the block layer and its bounded lengths,
-            // checksum and derived reset count have been parsed.
-            let body_call = raw
-                .find(&format!("local B=VMS[{}](C,", wrapper_keys(seed)[23]))
-                .expect("compression frame call");
-            assert!(dec_call < body_call);
-            assert!(inner.contains("cross=n*31+bits*17+(cs%65536)*7+MF(cs/65536)+cc*13"));
-            assert!(inner.contains("(ku+cross+"));
-            // Family parameters rotate across seeds within each family.
+            let outer_call = raw
+                .find("c1,c2,c3,pv,CC,AH,CB,E,SB")
+                .expect("outer ChaCha8 call passes dynamic inputs");
+            assert!(pv_at < outer_call);
+            let inner_call = raw
+                .find(&format!("local B=VMS[{}](C,c1,c2,c3,pv,CC,AH,CB", keys[23]))
+                .expect("inner ChaCha8 call");
+            assert!(outer_call < inner_call);
+            assert!(raw.contains("ctx=(n*31+bits*17+cs*7+cc*13+bl)%4294967296"));
+            assert!(raw.contains("ctx*d)%4294967296"));
+            assert!(raw.contains("q=d==1 and"));
+            if target.is_luau() {
+                assert!(raw.contains(r#"if A~="[C]" or B~="[C]""#));
+            } else {
+                assert!(raw.contains(r#"A.what=="C" and B.what=="C""#));
+            }
             let output = emit(&data, target, seed).unwrap();
             assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
-        assert!(
-            outer_families.len() >= 2,
-            "{target}: outer keystream family pinned ({outer_families:?})"
-        );
-        assert!(
-            inner_families.len() >= 2,
-            "{target}: inner keystream family pinned ({inner_families:?})"
-        );
-        // The coupled pipeline still runs the program verbatim.
+        assert!(schedules.len() >= 10, "{target}: ChaCha salts pinned");
         let workspace = native::Workspace::new();
-        let path = workspace.0.join("family_coupled.lua");
+        let path = workspace.0.join("chacha_coupled.lua");
         fs::write(&path, source).unwrap();
         let expected = native::compile_and_run(target, &path);
         fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();

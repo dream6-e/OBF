@@ -1,6 +1,6 @@
 //! Executable VM for AST-produced OBF v2 bytecode. Public `.obf` files keep
 //! the canonical opcode-plus-varint ISA2 format, but generated scripts lower
-//! that program into a private seed-specific ISA10 image: straight-line words
+//! that program into a private seed-specific ISA11 image: straight-line words
 //! become recipe superoperators, use sites carry operands plus random graph
 //! labels, three-stage successor tokens, and five-stage recipe tokens (not
 //! plaintext successors/opcodes/recipe ids). Reachable neutral bundles split
@@ -10,18 +10,20 @@
 //! additionally split into a masked two-node id/owner/next chain; every node is
 //! shuffled through one cross-prototype pool and fully validated before user
 //! execution. Records/sibling prototypes are shuffled, an unreachable synthetic
-//! subtree changes topology, and persistent code records retain only tokens. The semantic
-//! image is then losslessly compressed by bounded LZW; its code bits retain
-//! the existing independent inner stream before a versioned dynamically keyed
-//! 32-bit block transport and the outer byte stream. ISA10 binds every payload
-//! key share to the live debug-source transcript and uses the reconstructed
-//! share-mask parity to select one of two fetch/dispatch state pairs before
-//! masking their concrete representation.
+//! subtree changes topology, and persistent code records retain only tokens.
+//! The semantic image is then losslessly compressed by bounded LZW, protected
+//! by an inner ChaCha8 domain, sealed in strict transport frame v2, and
+//! protected again by a disjoint outer ChaCha8 domain. Word-XOR/rotate,
+//! quarter-round, block, stream/KDF and anti-hook code are independent shuffled
+//! fields. ISA11 binds every key schedule to live source witnesses plus a
+//! fail-closed runtime attestation; share parity also selects one of two
+//! fetch/dispatch state pairs before masking their concrete representation.
 //! Primitive semantics still live in the two target opcode subfolders. The
 //! seed never changes public `.obf` bytes, but it does change the embedded
 //! semantic image as well as transport, layout, local, and private-field
 //! randomization.
 
+mod chacha;
 mod cipher;
 mod compress;
 mod emit;
@@ -34,6 +36,7 @@ mod transport;
 use crate::bytecode::custom::{self, Opcode, Program};
 use crate::{Diagnostic, Target};
 
+pub(crate) use chacha::*;
 pub(crate) use cipher::*;
 pub(crate) use compress::*;
 pub(crate) use emit::generate;

@@ -15,13 +15,13 @@ pub(crate) fn wrapper_method(target: Target, seed: u64) -> String {
 }
 
 /// Distinct random numeric keys for every payload-table section, including
-/// the seed-variable split LZW decoder fields. Separate seeded stream; same
-/// reproducibility guarantees as the method name.
+/// seed-variable LZW fields and five split ChaCha8/anti-hook fields. Separate
+/// seeded stream; same reproducibility guarantees as the method name.
 pub(crate) fn wrapper_keys(seed: u64) -> Vec<u64> {
     let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
     let mut used = std::collections::BTreeSet::new();
     let mut keys = Vec::new();
-    while keys.len() < 24 {
+    while keys.len() < 29 {
         let key = 100 + random.next_u64() % 9900;
         if used.insert(key) {
             keys.push(key);

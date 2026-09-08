@@ -103,11 +103,10 @@ pub(crate) fn segment_literals(source: &str, target: Target) -> Result<Vec<Vec<u
     Ok(candidates)
 }
 
-/// Reassemble the outer ciphertext of a generated VM script: try the six
-/// segment orders, base86-decode, remove the outer stream and validate the
-/// dynamic block frame, then accept the unique order whose inner image
-/// carries the magic and target byte.
-/// The order itself is derived nowhere -- it is validated, not stored.
+/// Reassemble the outer ciphertext: try all six segment orders, base86-decode,
+/// apply the outer ChaCha8 domain, authenticate frame v2, apply the independent
+/// inner domain and accept only the unique strict LZW/semantic image. Segment
+/// order is validated rather than stored.
 pub(crate) fn embedded_outer_ciphertext(
     source: &str,
     target: Target,
@@ -115,7 +114,10 @@ pub(crate) fn embedded_outer_ciphertext(
 ) -> Result<Vec<u8>, Diagnostic> {
     let segments = segment_literals(source, target)?;
     let params = cipher_params(seed);
+    let chacha = chacha_params(seed);
+    let frame_params = frame_params(seed);
     let shares = cipher_shares(&wrapper_keys(seed), &params, target);
+    let permutation_term = perm_term(seed);
     let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
     let permutations = [
         [0usize, 1, 2],
@@ -142,21 +144,30 @@ pub(crate) fn embedded_outer_ciphertext(
             continue;
         }
         let cipher = &stream[4..];
-        let blocked = outer_cipher(cipher, &shares, perm_term(seed), &params);
+        let frame = chacha8_xor(
+            cipher,
+            &shares,
+            permutation_term,
+            cipher.len() as u32,
+            CHACHA8_OUTER_DOMAIN,
+            target,
+            &chacha,
+        );
         let Ok(mut compressed) =
-            decrypt_block_transport(&blocked, &shares, perm_term(seed), &block_params(seed))
+            open_transport_frame(&frame, &shares, permutation_term, &frame_params)
         else {
             continue;
         };
-        if apply_compression_cipher(&mut compressed, &wrapper_keys(seed), &params).is_err() {
+        if apply_compression_cipher(&mut compressed, &shares, permutation_term, target, &chacha)
+            .is_err()
+        {
             continue;
         }
         let Ok(plain) = decompress_bytecode(&compressed) else {
             continue;
         };
-        // A segment order is accepted only after both transport ciphers, the
-        // dynamic block frame, inner stream, strict LZW frame and semantic
-        // image Adler gate agree.
+        // Accept an order only after both ChaCha8 domains, frame v2, strict
+        // LZW and the semantic image Adler gate all agree.
         let recorded = plain
             .get(28..32)
             .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
@@ -176,25 +187,38 @@ pub(crate) fn embedded_outer_ciphertext(
     Ok(winners.pop().unwrap())
 }
 
-/// Extract the embedded payload after removing the outer stream and block
-/// envelope. The strict LZW frame remains present and its body remains
-/// protected by the independent inner stream.
+/// Extract the embedded payload after the anti-hook-bound outer ChaCha8 pass
+/// and strict transport frame are removed. The LZW body is still protected by
+/// the independently domain-separated inner ChaCha8 pass.
 pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let cipher = embedded_outer_ciphertext(source, target, seed)?;
     let params = cipher_params(seed);
     let shares = cipher_shares(&wrapper_keys(seed), &params, target);
     let permutation = perm_term(seed);
-    let blocked = outer_cipher(&cipher, &shares, permutation, &params);
-    decrypt_block_transport(&blocked, &shares, permutation, &block_params(seed))
+    let frame = chacha8_xor(
+        &cipher,
+        &shares,
+        permutation,
+        cipher.len() as u32,
+        CHACHA8_OUTER_DOMAIN,
+        target,
+        &chacha_params(seed),
+    );
+    open_transport_frame(&frame, &shares, permutation, &frame_params(seed))
 }
 
-/// Verification helper: resolve the generated script's segmented payload,
-/// remove both transport ciphers and the independent compressed-body stream,
-/// then strictly decompress it. The result is the private, seed-specific ISA10
-/// semantic wire image; it intentionally does not equal the public canonical
-/// `.obf` bytes supplied to `emit`.
+/// Verification helper: remove both ChaCha8 domains, authenticate frame v2,
+/// then strictly decompress the private seed-specific semantic wire image.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {
     let mut payload = extract_embedded(source, target, seed)?;
-    apply_compression_cipher(&mut payload, &wrapper_keys(seed), &cipher_params(seed))?;
+    let params = cipher_params(seed);
+    let shares = cipher_shares(&wrapper_keys(seed), &params, target);
+    apply_compression_cipher(
+        &mut payload,
+        &shares,
+        perm_term(seed),
+        target,
+        &chacha_params(seed),
+    )?;
     decompress_bytecode(&payload)
 }

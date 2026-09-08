@@ -374,11 +374,10 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
         let runner = support::root()
             .join("toolchains/bin")
             .join(if target.is_luau() { "luau" } else { "lua5.1" });
-        // Two independent fail-closed checks: replacing loadstring breaks the
-        // canonical environment probes, while changing only the first three
-        // source transcripts leaves the later segment gates valid but derives
-        // wrong payload shares. Neither path may reach user output.
-        let (tampered, wrong_witness, control) = if target.is_luau() {
+        // Environment probes, behavior-equivalent native wrappers, wrong
+        // source witnesses and generated ChaCha helper tampering must all fail
+        // closed before user output.
+        let (tampered, wrong_witness, native_hook, control) = if target.is_luau() {
             let mut level = 1;
             while generated.contains(&format!("]{}]", "=".repeat(level))) {
                 level += 1;
@@ -396,6 +395,11 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
                      local e=setmetatable({{debug=d}},{{__index=_G}}) local f=assert(loadstring({inline})) \
                      setfenv(f,e) f() print('SHOULD_NOT_RUN')"
                 ),
+                format!(
+                    "local ob=string.byte local st={{}} for k,v in pairs(string)do st[k]=v end \
+                     st.byte=function(...)return ob(...)end local e=setmetatable({{string=st}},{{__index=_G}}) \
+                     local f=assert(loadstring({inline})) setfenv(f,e) f() print('SHOULD_NOT_RUN')"
+                ),
                 format!("local f=assert(loadstring({inline})) f()"),
             )
         } else {
@@ -411,13 +415,32 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
                      local e=setmetatable({{debug=d}},{{__index=_G}}) local f=assert(loadfile('{path}')) \
                      setfenv(f,e) f() print('SHOULD_NOT_RUN')"
                 ),
+                format!(
+                    "local ob=string.byte local st={{}} for k,v in pairs(string)do st[k]=v end \
+                     st.byte=function(...)return ob(...)end local e=setmetatable({{string=st}},{{__index=_G}}) \
+                     local f=assert(loadfile('{path}')) setfenv(f,e) f() print('SHOULD_NOT_RUN')"
+                ),
                 format!("local f=assert(loadfile('{path}')) f()"),
             )
         };
+        // Change the generated ChaCha constant itself. The helper still has
+        // plausible source metadata, but the anti-hook known-answer test must
+        // reject it before either payload decrypt can expose bytes.
+        let helper_tamper = generated.replacen("1634760805", "1634760806", 1);
+        assert_ne!(helper_tamper, generated);
+        let wrong_attestation = generated.replacen(
+            "+1123945486+255)%4294967296",
+            "+1123945486+256)%4294967296",
+            1,
+        );
+        assert_ne!(wrong_attestation, generated);
         for (name, source, expect_success) in [
             ("control", control, true),
-            ("tampered", tampered, false),
+            ("loadstring-hook", tampered, false),
             ("wrong-witness", wrong_witness, false),
+            ("native-byte-hook", native_hook, false),
+            ("chacha-helper-tamper", helper_tamper, false),
+            ("wrong-attestation", wrong_attestation, false),
         ] {
             let path = workspace.0.join(format!("{name}.lua"));
             fs::write(&path, source).unwrap();
@@ -558,7 +581,7 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
 }
 
 #[test]
-fn block_transport_ciphertext_corruption_fails_closed_on_both_targets() {
+fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
     use std::collections::BTreeSet;
     use std::process::Command;
 
@@ -595,7 +618,7 @@ fn block_transport_ciphertext_corruption_fails_closed_on_both_targets() {
         let runner = support::root()
             .join("toolchains/bin")
             .join(if target.is_luau() { "luau" } else { "lua5.1" });
-        let control_path = workspace.0.join("block-control.lua");
+        let control_path = workspace.0.join("chacha-control.lua");
         fs::write(&control_path, &generated).unwrap();
         let control = Command::new(&runner).arg(&control_path).output().unwrap();
         assert!(control.status.success(), "{target}: control failed");
@@ -605,7 +628,7 @@ fn block_transport_ciphertext_corruption_fails_closed_on_both_targets() {
             let mut damaged = generated.clone();
             let replacement = adjacent_base86(generated.as_bytes()[offset]);
             damaged.replace_range(offset..offset + 1, &(replacement as char).to_string());
-            let path = workspace.0.join(format!("block-corrupt-{case}.lua"));
+            let path = workspace.0.join(format!("chacha-corrupt-{case}.lua"));
             fs::write(&path, damaged).unwrap();
             let output = Command::new(&runner).arg(&path).output().unwrap();
             assert!(

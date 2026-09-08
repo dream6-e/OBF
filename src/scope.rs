@@ -926,11 +926,11 @@ impl Analysis {
         let capture = captures.next().ok_or_else(|| {
             Diagnostic::new("generated VM is missing its audited environment capture")
         })?;
-        // The custom backend additionally carries exactly six audited
-        // environment probes (three key-share functions plus three base86
-        // payload-segment decoders, each re-running the native-loadstring
-        // check); the explicit native backend carries none. Anything in
-        // between is unaudited.
+        // The custom backend carries twelve audited observations: three
+        // key-share probes, three base86 segment probes, and six direct
+        // anti-hook source checks over native/generated crypto functions.
+        // The explicit native backend carries none; any partial set is
+        // unaudited.
         let probes: Vec<Span> = statements
             .iter()
             .filter_map(|statement| {
@@ -950,10 +950,10 @@ impl Analysis {
                 .then(|| values[0].span)
             })
             .collect();
-        let probed = probes.len() == 6;
+        let probed = probes.len() == 12;
         if !probed && !probes.is_empty() {
             return Err(Diagnostic::new(
-                "generated VM must carry exactly six audited environment probes or none",
+                "generated VM must carry exactly twelve audited environment probes or none",
             ));
         }
         // Barrier accounting: exactly three getfenv/_G occurrences, all

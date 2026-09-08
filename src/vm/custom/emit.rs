@@ -16,7 +16,7 @@ pub(crate) fn generate(
     // replaced by five-stage context tokens; successors use independent
     // three-stage edge tokens. Live wire descriptors are validation-equivalent
     // camouflage rather than execution truth; the target-side parser accepts
-    // only this private ISA10 image.
+    // only this private ISA11 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image, None)
 }
@@ -37,11 +37,11 @@ fn generate_semantic(
     // rebuild, varint decode, per-opcode bounds arms) hiding among the
     // shuffle -- the dispatch numbering itself is re-shuffled per seed,
     // [n8] interpreter cluster, plus the entry method at a random letter key.
-    // The embedded payload is byte-encrypted at generation time with a
-    // seed-derived Lehmer keystream; the key is split into three shares, one
-    // per probe function, and the entry calls them in seeded shuffled order
-    // before combining the shares, reversing the outer stream and validating
-    // the intermediate block envelope at runtime. The method call
+    // The embedded payload uses two domain-separated ChaCha8 passes. Runtime
+    // key/nonce material derives from three source-witness shares, semantic
+    // context, domain and anti-hook attestation. Word operations, quarter
+    // round, block, KDF/stream and anti-hook are sibling shuffled fields; the
+    // entry composes them before opening strict frame v2. The method call
     // resolves the entry directly as an own key of the payload table,
     // receives (self) — or (self,...) when the chunk reads `...` — chains
     // the sections in order and returns the program result. The metatable
@@ -49,7 +49,8 @@ fn generate_semantic(
     let method = wrapper_method(program.target, seed);
     let keys = wrapper_keys(seed);
     let params = cipher_params(seed);
-    let block = block_params(seed);
+    let chacha = chacha_params(seed);
+    let frame = frame_params(seed);
     // Per-seed primitive renumbering: every canonical ISA slot maps to a
     // distinct byte used by operand validation and inside unrolled recipe
     // bodies. Semantic use sites contain no opcode byte; their random recipe
@@ -336,9 +337,8 @@ if d7+d8*65521~={fake_adler} then E()end;"
     for (_, statement) in &units {
         s.push_str(statement);
     }
-    // Shared exact-integer transport primitives. Reusing these in the outer,
-    // block, compression and semantic gates keeps the generated decoder small
-    // without relying on target-specific bit libraries.
+    // Shared exact-integer primitives. ChaCha8 deliberately reuses arithmetic
+    // X8 and does not depend on target-specific bit libraries.
     s.push_str("local X8=function(a,b)local r=0;for j=0,7 do r=r+(a+b)%2*2^j;a=MF(a/2);b=MF(b/2)end;return r end;local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65521;y=(y+x)%65521 end;return x+y*65536 end;local L32=function(S,p)return SB(S,p)+SB(S,p+1)*256+SB(S,p+2)*65536+SB(S,p+3)*16777216 end;");
     let mut ret_order: Vec<&str> = vec![
         "SC", "Z", "U", "G", "E", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS", "NX",
@@ -347,15 +347,10 @@ if d7+d8*65521~={fake_adler} then E()end;"
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
     s.push_str(&format!("\nreturn {ret_names}\nend,"));
-    // The decoder section receives the three runtime-witness-bound probe
-    // shares (called by the entry in seeded shuffled order), the two
-    // structural inner-stream keys and the
-    // shared helpers. It combines the shares into the outer keystream seed,
-    // byte-decrypts the embedded blob, reverses and validates the independently
-    // scheduled block frame, decrypts the compression body, and strictly
-    // expands the bounded LZW frame before parsing.
-    // Lehmer 48271 mod 2147483647 keeps every intermediate below 2^53, so the
-    // Lua-side double arithmetic reproduces both Rust streams bit-for-bit.
+    // Entry reconstructs three source-witness shares in shuffled call order.
+    // Both ChaCha8 domains then derive final key/nonce/counter words only at
+    // runtime after anti-hook attestation. Pure arithmetic stays below 2^53,
+    // keeping Lua 5.1/Luau behavior bit-identical without bit libraries.
     let shares = cipher_shares(&keys, &params, program.target);
     // B1: the payload seed additionally carries the permutation term,
     // computed on both ends from the rebuilt renumbering table at three
@@ -364,23 +359,28 @@ if d7+d8*65521~={fake_adler} then E()end;"
     let pv = perm_term(seed);
     let pv_slots = perm_indices(seed);
     // Compress the complete private semantic image before any cipher. The
-    // bounded LZW frame is emitted only when it is strictly smaller and its
-    // body is then protected by the former constant-layer stream. Encrypting
-    // the compressed body (rather than randomizing constants before LZW)
-    // preserves compressibility while covering more than the old selective
-    // constant cipher. Public canonical `.obf` bytes remain unchanged.
+    // bounded LZW frame is emitted only when it is strictly smaller; its body
+    // is protected by the inner ChaCha8 domain. Encrypting after compression
+    // preserves compressibility. Public canonical `.obf` bytes stay unchanged.
     let mut payload = match compression_override {
         Some(frame) => frame,
         None => compress_bytecode(&semantic_image.bytes)?,
     };
-    apply_compression_cipher(&mut payload, &keys, &params)?;
-    // A versioned, dynamically keyed, chained 32-bit generalized Feistel
-    // envelope sits between the compressed inner stream and the outer stream.
-    // Its two large key states exist only after the audited shares,
-    // permutation term and padded frame length are available.
-    let blocked = encrypt_block_transport(&payload, &shares, pv, &block)?;
-    let encrypted = outer_cipher(&blocked, &shares, pv, &params);
-    // Transport layer: the triply transformed image is base86-encoded (all
+    apply_compression_cipher(&mut payload, &shares, pv, program.target, &chacha)?;
+    // ChaCha8 supplies two domain-separated confidentiality passes. The
+    // strict frame between them authenticates descriptor, exact length,
+    // cookie, payload tag and deterministic padding before exposure.
+    let framed = seal_transport_frame(&payload, &shares, pv, &frame)?;
+    let encrypted = chacha8_xor(
+        &framed,
+        &shares,
+        pv,
+        framed.len() as u32,
+        CHACHA8_OUTER_DOMAIN,
+        program.target,
+        &chacha,
+    );
+    // Transport layer: the framed double-ChaCha8 image is base86-encoded (all
     // printable alphabet characters, ~1.25 chars per byte instead of 4-char
     // decimal escapes) and split into three segments placed in seed-shuffled
     // payload-table functions. Each segment function re-runs the audited
@@ -501,88 +501,20 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
             keys[12]
         ),
     ];
-    // Random decoder sections: the monolithic decoder is flattened into
-    // sibling payload fields -- outer/block decrypt, a seeded two- or
-    // three-field compression inverse, one or two ordinary semantic-reader
-    // clusters, and the parse core. Every field lands at a random layout
-    // position; entry wiring retains only the real dependency order. `bp`
-    // stays an upvalue inside its reader cluster; the core's final position
-    // check goes through exported `pos` (a returned number would go stale).
-    // Flattened outer-decrypt machine: keystream XOR self-loop, rebuild
-    // and size gate, finish -- state numbers and spellings per seed. All
-    // data locals flow through the scratch table g[...] (per-seed keys),
-    // cleared before the field returns.
-    let dsv = state_values(&mut structure, 3);
-    let (d_loop, d_gate, d_done) = (dsv[0], dsv[1], dsv[2]);
-    // A2: the outer keystream step is one of three arithmetic families
-    // (Lehmer / dual Lehmer sum / mod-2^32 LCG emitting the top byte),
-    // drawn per seed; the Rust cipher runs the identical family.
-    let (st_step, y_expr, sv_local) = match params.outer_stream.family {
-        0 => (
-            format!("st={}*st%2147483647;", params.outer_stream.multiplier),
-            "st%256".to_owned(),
-            false,
-        ),
-        1 => (
-            format!(
-                "st={}*st%2147483647;sv={}*sv%2147483647;",
-                params.outer_stream.multiplier, params.outer_stream.second
-            ),
-            "(st+sv)%2147483647%256".to_owned(),
-            true,
-        ),
-        _ => (
-            format!(
-                "st=({}*st+{})%4294967296;",
-                params.outer_stream.second, params.outer_stream.add
-            ),
-            "(st-st%16777216)/16777216".to_owned(),
-            false,
-        ),
-    };
-    let xor_step = format!("{st_step}XB[i]=NCH(X8(SB(B,i),{y_expr}));i=i+1;");
-    let block_decode = block_transport_decoder(&block);
-    let mut decrypt_locals = vec![
-        "st", "XB", "i", "w", "bk0", "bk1", "bdesc", "bcl", "bcr", "bo", "cl", "cr", "bl", "br",
-        "brk", "bf", "blo", "bhi", "BP", "bd", "bn", "bc", "bt", "bpad", "bexpect",
-    ];
-    if sv_local {
-        decrypt_locals.insert(1, "sv");
-    }
-    let mut decrypt_text = format!(
-        "local st=1+(s1+s2+s3+pv+{mix}*#B)%2147483646;{sv_init}local XB={{}};local i=1;local w={d_loop};\
-{machine}",
-        mix = params.mix,
-        sv_init = if sv_local {
-            "local sv=1+(st*7+31)%2147483646;"
-        } else {
-            ""
-        },
-        machine = state_machine(
-            &mut structure,
-            "w",
-            vec![
-                (
-                    d_loop,
-                    format!("if i>#B then w={d_gate} else {xor_step} end;"),
-                ),
-                (
-                    d_gate,
-                    format!("B=TC(XB);XB=nil;if #B>16777232 then E()end;w={d_done};"),
-                ),
-                (d_done, format!("{block_decode}g=nil;return B;")),
-            ],
-        ),
-    );
-    decrypt_text = slot_rewrite(&mut structure, &decrypt_text, &decrypt_locals);
+    // Random decoder sections: the anti-hook gate, 32-bit word operations,
+    // quarter round, ChaCha8 block, stream/KDF, outer frame inverse and inner
+    // LZW inverse are all sibling numeric-keyed fields. The final layout pass
+    // globally shuffles them; entry wiring alone composes the decryptor.
+    let (crypto_fields, crypto_wiring) = chacha_decoder_sections(&chacha, program.target, &keys);
+    let frame_decode = transport_frame_decoder(&frame);
     let decrypt_field = format!(
-        "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32)\nlocal g={{}};\n{decrypt_text}\nend,",
+        "[{}]=function(B,s1,s2,s3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS)\nlocal aw=AH(AH,CC,CB,X8,E,SB,NCH,TC,MF,DBG,GI,LS);B=CC(B,s1,s2,s3,pv,#B,1,aw,CB,E,SB,NCH,TC,MF,X8);{frame_decode}return B end,",
         keys[1]
     );
     let split_lzw_helpers =
         crate::random::Prng::new(seed ^ 0x6c7a_775f_7370_6c38).next_u64() % 2 == 0;
     let (compression_fields, compression_wiring) =
-        compression_decoder_sections(&params, &keys, split_lzw_helpers);
+        compression_decoder_sections(&keys, split_lzw_helpers);
     let g1 = r#"local bp=1;
 local b8=function()local v=SB(B,bp);if v==nil then E()end;bp=bp+1;return v end;
 local b16=function()local a,b=b8(),b8();return a+b*256 end;
@@ -614,21 +546,22 @@ local pos=function()return bp end;"#
     let mut bounds: Vec<usize> = bounds_set.into_iter().map(|b| b as usize).collect();
     bounds.push(groups.len());
     let mut decoder_fields = vec![decrypt_field];
+    decoder_fields.extend(crypto_fields);
     decoder_fields.extend(compression_fields);
-    // The forms field runs first so the entry can derive the outer/block
-    // permutation term. Those layers expose only an inner-stream-encrypted
-    // LZW frame; the independently shuffled compression fields then decrypt,
-    // strictly expand and checksum it before any semantic reader is built.
+    // Forms first yields the permutation term. Five shuffled crypto fields
+    // are then composed locally; both anti-hook gates run before ChaCha8.
     let mut decoder_wiring = format!(
         "local FMt,PT=VMS[{forms}](E,SB);\
 local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;\
-local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32);\
+{crypto_wiring}\
+local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS);\
 {compression_wiring}",
         forms = keys[13],
         i0 = pv_slots[0],
         i1 = pv_slots[1],
         i2 = pv_slots[2],
         decrypt = keys[1],
+        crypto_wiring = crypto_wiring,
         compression_wiring = compression_wiring,
     );
     let mut prior_exports: Vec<&str> = Vec::new();
@@ -973,7 +906,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     // debug-source transcript for `loadstring`, folds returned bytes into its
     // share after the seeded rounds, and returns no standalone witness. A
     // malformed transcript faults closed; a well-shaped but wrong transcript
-    // derives wrong outer/block keys and fails their strict gates. The entry
+    // derives wrong ChaCha8/frame keys and fails strict gates. The entry
     // calls the functions in seeded shuffled order.
     // Shuffled CALL order of the three probe functions (indices 0..=2 into
     // keys[5..8] / probe_inputs / shares).
@@ -1365,15 +1298,11 @@ end;
 
 /// Build the strict Lua-side inverse of the bounded LZW frame. The bit-reader
 /// and dictionary stages are either separate sibling payload functions or one
-/// combined function according to the seed; the frame/cipher stage is always a
-/// third independently keyed field. The outer layout pass shuffles all of them
+/// combined function according to the seed; the inner-ChaCha8/frame stage is
+/// always a third independently keyed field. The outer layout pass shuffles all of them
 /// among unrelated VM sections, so neither count nor physical position is a
 /// stable decoder signature.
-fn compression_decoder_sections(
-    params: &CipherParams,
-    keys: &[u64],
-    split_helpers: bool,
-) -> (Vec<String>, String) {
+fn compression_decoder_sections(keys: &[u64], split_helpers: bool) -> (Vec<String>, String) {
     let bit_reader = r#"local BR=function(S,N)local p=0;local R=function(n)if p>N-n then E()end;local v=0;for j=0,n-1 do local q=p+j;v=v+MF(SB(S,MF(q/8)+1)/2^(q%8))%2*2^j end;p=p+n;return v end;return R,function()return p end end;"#;
     let lzw_decoder = r#"local LD=function(S,N,L)local R,RP=BR(S,N);local O={};local total=0;while total<L do local lim=total+8192;if lim>L then lim=L end;local DP,ST={},{};local nx=256;local prev=nil;local pf=0;while total<lim do local t=R(1);local code;if t==1 then code=R(8);if code<32 then E()end else t=R(1);if t==1 then code=R(5)else if prev==nil then E()end;local w=0;local z=nx-256;while z>0 do w=w+1;z=MF(z/2)end;code=256+R(w)end end;if code>nx then E()end;local special=code==nx;if special then DP[nx]=prev*256+pf end;local sn=0;local cur=code;while cur>=256 do local z=DP[cur];sn=sn+1;ST[sn]=z%256;cur=MF(z/256)end;sn=sn+1;ST[sn]=cur;local first=cur;if not special and prev~=nil then DP[nx]=prev*256+first end;if prev~=nil then nx=nx+1 end;prev=code;pf=first;if total+sn>lim then E()end;for j=sn,1,-1 do total=total+1;O[total]=NCH(ST[j])end end end;if RP()~=N then E()end;return TC(O)end;"#;
     let mut fields = Vec::new();
@@ -1397,69 +1326,28 @@ fn compression_decoder_sections(
         ));
         format!("local LD=VMS[{}](E,SB,NCH,TC,MF);", keys[22])
     };
-
-    let mut ku_steps = String::new();
-    for _ in 0..params.constant_rounds {
-        let _ = write!(ku_steps, "ku={}*ku%2147483647;", params.constant);
-    }
-    let (kv_init, stream_step, stream_byte) = match params.constant_stream.family {
-        0 => (
-            String::new(),
-            format!("ks={}*ks%2147483647;", params.constant_stream.multiplier),
-            "ks%256".to_owned(),
-        ),
-        1 => (
-            "local kv=1+(ks*7+31)%2147483646;".to_owned(),
-            format!(
-                "ks={}*ks%2147483647;kv={}*kv%2147483647;",
-                params.constant_stream.multiplier, params.constant_stream.second
-            ),
-            "(ks+kv)%2147483647%256".to_owned(),
-        ),
-        _ => (
-            String::new(),
-            format!(
-                "ks=({}*ks+{})%4294967296;",
-                params.constant_stream.second, params.constant_stream.add
-            ),
-            "(ks-ks%16777216)/16777216".to_owned(),
-        ),
-    };
-    let core = format!(
-        r#"if #C<16 or L32(C,1)~=22501964 then E()end;local n=L32(C,5);local bits=L32(C,9);local cs=L32(C,13);local bl=MF((bits+7)/8);local cc=MF((n+8191)/8192);if n<1 or n>16777216 or bits<1 or bl~=#C-16 or #C>=n then E()end;local ku=(ca*{mix}+cb)%2147483647;{ku_steps}local cross=n*31+bits*17+(cs%65536)*7+MF(cs/65536)+cc*13;local ks=1+(ku+cross+{mix}*bl)%2147483646;{kv_init}local D={{}};for i=17,#C do {stream_step}D[#D+1]=NCH(X8(SB(C,i),{stream_byte}))end;D=TC(D);local pad=#D*8-bits;if pad>7 or pad>0 and MF(SB(D,#D)/2^(8-pad))~=0 then E()end;local B=LD(D,bits,n);if AD(B,1,#B)~=cs then E()end;return B"#,
-        mix = params.mix,
-        ku_steps = ku_steps,
-        kv_init = kv_init,
-        stream_step = stream_step,
-        stream_byte = stream_byte,
-    );
+    let core = r#"if #C<17 or L32(C,1)~=22501964 then E()end;local n=L32(C,5);local bits=L32(C,9);local cs=L32(C,13);local bl=MF((bits+7)/8);local cc=MF((n+8191)/8192);if n<1 or n>16777216 or bits<1 or bl~=#C-16 or #C>=n then E()end;local ctx=(n*31+bits*17+cs*7+cc*13+bl)%4294967296;local aw=AH(AH,CC,CB,X8,E,SB,NCH,TC,MF,DBG,GI,LS);local D=CC(SS(C,17),s1,s2,s3,pv,ctx,2,aw,CB,E,SB,NCH,TC,MF,X8);local pad=#D*8-bits;if pad>7 or pad>0 and MF(SB(D,#D)/2^(8-pad))~=0 then E()end;local B=LD(D,bits,n);if AD(B,1,#B)~=cs then E()end;return B"#;
     fields.push(format!(
-        "[{}]=function(C,ca,cb,LD,E,SB,NCH,TC,MF,X8,AD,L32){core} end,",
+        "[{}]=function(C,s1,s2,s3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS){core} end,",
         keys[23]
     ));
     let wiring = format!(
-        "{wiring}local B=VMS[{}](C,{},{},LD,E,SB,NCH,TC,MF,X8,AD,L32);",
-        keys[23], keys[4], keys[7]
+        "{wiring}local B=VMS[{}](C,c1,c2,c3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS);",
+        keys[23]
     );
     (fields, wiring)
 }
 
-/// Lua-side inverse of `encrypt_block_transport`. Rounds are intentionally
-/// unrolled in reverse so no serialized round-key table exists; each subkey is
-/// derived from the two runtime-only key states and the current block index.
-fn block_transport_decoder(params: &BlockParams) -> String {
+/// Compact strict frame-v2 inverse. Confidentiality is handled by the outer
+/// ChaCha8 field; this stage validates every framed byte before returning the
+/// independently encrypted compression frame.
+fn transport_frame_decoder(params: &FrameParams) -> String {
     let c0 = params.key_coefficients[0];
     let c1 = params.key_coefficients[1];
-    let mut source = format!(
-        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;\
-local bk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;\
-local bk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;\
-local bdesc={version}+{rounds}*256+4*65536+(bk0+bk1+{descriptor})%256*16777216;\
-local bcl=(bk0+bk1*3+{iv0})%65536;local bcr=(bk1+bk0*5+{iv1})%65536;local bo={{}};\
-for bi=1,#B,4 do local cl=SB(B,bi)+SB(B,bi+1)*256;local cr=SB(B,bi+2)+SB(B,bi+3)*256;local bl,br=cl,cr;",
-        header = BLOCK_TRANSPORT_HEADER,
-        version = BLOCK_TRANSPORT_VERSION,
-        rounds = params.rounds.len(),
+    format!(
+        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;local fk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;local fk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;local fd={version}+{header}*256+(fk0+fk1+{descriptor})%65536*65536;local d=L32(B,1);local n=L32(B,5);local c=L32(B,9);local t=L32(B,13);local pad=(4-(16+n)%4)%4;if n>16777216 or #B~=16+n+pad or d~=fd then E()end;local ex=(n+d*257+(fk0%65536)*65536+(fk1%65536)*17+{cookie})%4294967296;if c~=ex then E()end;ex=(AD(B,17,16+n)+c*263+d*31+(fk0%65536)*65536+fk1%65536+{tag})%4294967296;if t~=ex then E()end;for i=1,pad do if SB(B,16+n+i)~=(fk0+fk1*i+{padding})%256 then E()end end;B=SS(B,17,16+n);",
+        header = TRANSPORT_FRAME_HEADER,
+        version = TRANSPORT_FRAME_VERSION,
         c00 = c0[0],
         c01 = c0[1],
         c02 = c0[2],
@@ -1473,65 +1361,10 @@ for bi=1,#B,4 do local cl=SB(B,bi)+SB(B,bi+1)*256;local cr=SB(B,bi+2)+SB(B,bi+3)
         s0 = params.key_salts[0],
         s1 = params.key_salts[1],
         descriptor = params.descriptor_salt,
-        iv0 = params.iv_salts[0],
-        iv1 = params.iv_salts[1],
-    );
-    for round in params.rounds.iter().rev() {
-        let _ = write!(
-            source,
-            "brk=(bk0*{ka}+bk1*{kb}+{salt}+((bi-1)/4)*{position})%65536;",
-            ka = round.key_a,
-            kb = round.key_b,
-            salt = round.salt,
-            position = round.position,
-        );
-        match round.family {
-            0 => {
-                let _ = write!(
-                    source,
-                    "bf=(bl*bl+bl*{a}+brk+((bi-1)/4)*{b})%65536;",
-                    a = round.a,
-                    b = round.b,
-                );
-            }
-            1 => {
-                let _ = write!(
-                    source,
-                    "blo=bl%256;bhi=(bl-blo)/256;bf=(blo*{a}+bhi*{b}+blo*bhi*{c}+brk+((bi-1)/4)*{position})%65536;",
-                    a = round.a,
-                    b = round.b,
-                    c = round.c,
-                    position = round.position,
-                );
-            }
-            _ => {
-                let _ = write!(
-                    source,
-                    "bf=(bl*{a}+brk+((bi-1)/4)*{b})%65536;bf=(bf*bf+bf*{c}+brk+((bi-1)/4)*{position})%65536;",
-                    a = round.a,
-                    b = round.b,
-                    c = round.c,
-                    position = round.position,
-                );
-            }
-        }
-        source.push_str("bl,br=(br-bf)%65536,bl;");
-    }
-    let _ = write!(
-        source,
-        "bl=(bl-bcl)%65536;br=(br-bcr)%65536;bo[#bo+1]=NCH(bl%256);bo[#bo+1]=NCH((bl-bl%256)/256);\
-bo[#bo+1]=NCH(br%256);bo[#bo+1]=NCH((br-br%256)/256);bcl,bcr=cl,cr end;\
-local BP=TC(bo);bo=nil;local bd=L32(BP,1);local bn=L32(BP,5);local bc=L32(BP,9);local bt=L32(BP,13);\
-local bpad=(4-(16+bn)%4)%4;if bn>16777216 or #BP~=16+bn+bpad or bd~=bdesc then E()end;\
-local bexpect=(bn+bd*257+(bk0%65536)*65536+(bk1%65536)*17+{cookie})%4294967296;if bc~=bexpect then E()end;\
-bexpect=(AD(BP,17,16+bn)+bc*263+bd*31+(bk0%65536)*65536+bk1%65536+{tag})%4294967296;\
-if bt~=bexpect then E()end;for bj=1,bpad do if SB(BP,16+bn+bj)~=(bk0+bk1*bj+{padding})%256 then E()end end;\
-B=SS(BP,17,16+bn);BP=nil;",
         cookie = params.cookie_salt,
         tag = params.tag_salt,
         padding = params.padding_salt,
-    );
-    source
+    )
 }
 
 #[cfg(test)]

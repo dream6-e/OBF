@@ -67,8 +67,8 @@ fn bounded_lzw_roundtrips_exactly_and_rejects_malformed_frames() {
         assert!(decompress_bytecode(&malformed).is_err());
     }
 
-    // Feed malformed compression frames through freshly recomputed inner,
-    // block and outer transports. This bypasses all upstream integrity gates
+    // Feed malformed compression frames through freshly recomputed inner
+    // ChaCha8, frame-v2, and outer-ChaCha8 transports. This bypasses upstream gates
     // on purpose and proves the generated Lua inverse itself still fails
     // closed before the user chunk can print anything.
     for target in [Target::Lua51, Target::Luau] {
@@ -114,87 +114,175 @@ fn bounded_lzw_roundtrips_exactly_and_rejects_malformed_frames() {
 }
 
 #[test]
-fn block_transport_roundtrips_rejects_every_byte_and_varies_by_seed() {
+fn chacha8_matches_published_vector_and_roundtrips_both_domains() {
+    let expected = [
+        0x2fef_003e, 0xd640_5f89, 0xe8b8_5b7f, 0xa1a5_091f,
+        0xc30e_842c, 0x3b7f_9ace, 0x88e1_1b18, 0x1e1a_71ef,
+        0x72e1_4c98, 0x416f_21b9, 0x6753_449f, 0x1956_6d45,
+        0xa342_4a31, 0x01b0_86da, 0xb8fd_7b38, 0x42fe_0c0e,
+    ];
+    assert_eq!(chacha8_block([0; 8], 0, [0; 3]), expected);
+
     let payload: Vec<u8> = (0..513u32)
         .map(|index| index.wrapping_mul(2_654_435_761).to_le_bytes()[3])
         .collect();
-    let mut schedules = BTreeSet::new();
-    let mut round_counts = BTreeSet::new();
-    let mut ciphertexts = BTreeSet::new();
+    let mut outputs = BTreeSet::new();
+    for target in [Target::Lua51, Target::Luau] {
+        for seed in [0u64, 1, 735, u64::MAX] {
+            let cipher = cipher_params(seed);
+            let shares = cipher_shares(&wrapper_keys(seed), &cipher, target);
+            let permutation = perm_term(seed);
+            let params = chacha_params(seed);
+            for domain in [CHACHA8_OUTER_DOMAIN, CHACHA8_INNER_DOMAIN] {
+                let encrypted = chacha8_xor(
+                    &payload,
+                    &shares,
+                    permutation,
+                    0x0102_0304,
+                    domain,
+                    target,
+                    &params,
+                );
+                assert_ne!(encrypted, payload);
+                assert_eq!(
+                    chacha8_xor(
+                        &encrypted,
+                        &shares,
+                        permutation,
+                        0x0102_0304,
+                        domain,
+                        target,
+                        &params,
+                    ),
+                    payload
+                );
+                outputs.insert(encrypted);
+            }
+            let guard = runtime_attestation(target);
+            let outer = chacha_material(
+                &shares,
+                permutation,
+                0x0102_0304,
+                CHACHA8_OUTER_DOMAIN,
+                guard,
+                &params,
+            );
+            let inner = chacha_material(
+                &shares,
+                permutation,
+                0x0102_0304,
+                CHACHA8_INNER_DOMAIN,
+                guard,
+                &params,
+            );
+            let changed = chacha_material(
+                &shares,
+                permutation,
+                0x0102_0305,
+                CHACHA8_OUTER_DOMAIN,
+                guard,
+                &params,
+            );
+            let wrong_guard = chacha_material(
+                &shares,
+                permutation,
+                0x0102_0304,
+                CHACHA8_OUTER_DOMAIN,
+                guard.wrapping_add(1),
+                &params,
+            );
+            assert_ne!(outer, inner);
+            assert_ne!(outer, changed);
+            assert_ne!(outer, wrong_guard);
+        }
+    }
+    assert_eq!(outputs.len(), 16);
+}
 
+#[test]
+fn frame_v2_roundtrips_and_rejects_every_outer_ciphertext_byte() {
+    let payload: Vec<u8> = (0..513u32)
+        .map(|index| index.wrapping_mul(2_654_435_761).to_le_bytes()[3])
+        .collect();
+    let mut frames = BTreeSet::new();
     for seed in 0..=15u64 {
-        let params = block_params(seed);
-        assert!((7..=10).contains(&params.rounds.len()));
-        let families: BTreeSet<_> = params.rounds.iter().map(|round| round.family).collect();
-        assert_eq!(families, BTreeSet::from([0, 1, 2]));
-        schedules.insert(format!("{params:?}"));
-        round_counts.insert(params.rounds.len());
-
+        let target = if seed % 2 == 0 { Target::Lua51 } else { Target::Luau };
         let cipher = cipher_params(seed);
-        let shares = cipher_shares(&wrapper_keys(seed), &cipher, Target::Lua51);
+        let shares = cipher_shares(&wrapper_keys(seed), &cipher, target);
         let permutation = perm_term(seed);
-        let encrypted = encrypt_block_transport(&payload, &shares, permutation, &params).unwrap();
-        assert_eq!(encrypted.len(), block_transport_len(payload.len()).unwrap());
-        assert_eq!(encrypted.len() % 4, 0);
+        let params = frame_params(seed);
+        let frame = seal_transport_frame(&payload, &shares, permutation, &params).unwrap();
+        assert_eq!(frame.len(), transport_frame_len(payload.len()).unwrap());
         assert_eq!(
-            decrypt_block_transport(&encrypted, &shares, permutation, &params).unwrap(),
+            open_transport_frame(&frame, &shares, permutation, &params).unwrap(),
             payload
         );
-        ciphertexts.insert(encrypted);
-    }
-    assert!(schedules.len() >= 12, "insufficient schedule diversity");
-    assert!(round_counts.len() >= 3, "round count did not vary enough");
-    assert!(ciphertexts.len() >= 12, "ciphertext did not vary by seed");
+        frames.insert(frame.clone());
 
-    // Every possible padding width, including an empty payload, has an exact
-    // framed length and round-trips through the same bounded validator.
-    let seed = 735u64;
-    let params = block_params(seed);
+        let chacha = chacha_params(seed);
+        let encrypted = chacha8_xor(
+            &frame,
+            &shares,
+            permutation,
+            frame.len() as u32,
+            CHACHA8_OUTER_DOMAIN,
+            target,
+            &chacha,
+        );
+        let wrong_attestation = chacha8_xor_with_attestation(
+            &encrypted,
+            &shares,
+            permutation,
+            encrypted.len() as u32,
+            CHACHA8_OUTER_DOMAIN,
+            runtime_attestation(target).wrapping_add(1),
+            &chacha,
+        );
+        assert!(open_transport_frame(
+            &wrong_attestation,
+            &shares,
+            permutation,
+            &params,
+        )
+        .is_err());
+        for index in 0..encrypted.len() {
+            let mut damaged = encrypted.clone();
+            damaged[index] ^= 1;
+            let opened = chacha8_xor(
+                &damaged,
+                &shares,
+                permutation,
+                damaged.len() as u32,
+                CHACHA8_OUTER_DOMAIN,
+                target,
+                &chacha,
+            );
+            assert!(
+                open_transport_frame(&opened, &shares, permutation, &params).is_err(),
+                "outer ciphertext corruption at byte {index} was accepted"
+            );
+        }
+        let mut wrong = shares;
+        wrong[0] ^= 1;
+        assert!(open_transport_frame(&frame, &wrong, permutation, &params).is_err());
+        assert!(open_transport_frame(&frame, &shares, permutation + 1, &params).is_err());
+        assert!(open_transport_frame(&frame, &shares, permutation, &frame_params(seed + 1)).is_err());
+    }
+    assert!(frames.len() >= 12);
+
+    let seed = 735;
     let cipher = cipher_params(seed);
     let shares = cipher_shares(&wrapper_keys(seed), &cipher, Target::Lua51);
     let permutation = perm_term(seed);
+    let params = frame_params(seed);
     for length in 0..=19usize {
-        let plain: Vec<u8> = (0..length)
-            .map(|index| (index * 37 + length) as u8)
-            .collect();
-        let encrypted = encrypt_block_transport(&plain, &shares, permutation, &params).unwrap();
-        assert_eq!(encrypted.len(), (length + 16 + 3) / 4 * 4);
-        assert_eq!(
-            decrypt_block_transport(&encrypted, &shares, permutation, &params).unwrap(),
-            plain
-        );
+        let plain: Vec<u8> = (0..length).map(|index| (index * 37 + length) as u8).collect();
+        let frame = seal_transport_frame(&plain, &shares, permutation, &params).unwrap();
+        assert_eq!(frame.len(), (length + 16 + 3) / 4 * 4);
+        assert_eq!(open_transport_frame(&frame, &shares, permutation, &params).unwrap(), plain);
     }
-
-    let encrypted = encrypt_block_transport(&payload, &shares, permutation, &params).unwrap();
-    // Exhaustive single-byte corruption: header, payload, chaining and each
-    // padding position must all fail before an inner image is returned.
-    for index in 0..encrypted.len() {
-        let mut damaged = encrypted.clone();
-        damaged[index] ^= 1;
-        assert!(
-            decrypt_block_transport(&damaged, &shares, permutation, &params).is_err(),
-            "block corruption at byte {index} was accepted"
-        );
-    }
-    let mut wrong_shares = shares;
-    wrong_shares[0] ^= 1;
-    assert!(decrypt_block_transport(&encrypted, &wrong_shares, permutation, &params).is_err());
-    assert!(decrypt_block_transport(&encrypted, &shares, permutation + 1, &params).is_err());
-    assert!(
-        decrypt_block_transport(&encrypted, &shares, permutation, &block_params(seed + 1)).is_err()
-    );
-    assert!(decrypt_block_transport(&[], &shares, permutation, &params).is_err());
-    assert!(decrypt_block_transport(
-        &encrypted[..encrypted.len() - 1],
-        &shares,
-        permutation,
-        &params
-    )
-    .is_err());
-    let mut extended = encrypted.clone();
-    extended.extend_from_slice(&[0; 4]);
-    assert!(decrypt_block_transport(&extended, &shares, permutation, &params).is_err());
-    assert!(block_transport_len(usize::MAX).is_err());
+    assert!(open_transport_frame(&[], &shares, permutation, &params).is_err());
+    assert!(transport_frame_len(usize::MAX).is_err());
 }
 
 #[test]
@@ -216,9 +304,9 @@ fn runtime_probe_witness_is_required_by_every_share_and_control_mask() {
             assert_eq!(shares, cipher_shares(&keys, &cipher, target));
             let mask = runtime_control_mask(&shares);
             let permutation = perm_term(seed);
-            let schedule = block_params(seed);
+            let framing = frame_params(seed);
             let encrypted =
-                encrypt_block_transport(&payload, &shares, permutation, &schedule).unwrap();
+                seal_transport_frame(&payload, &shares, permutation, &framing).unwrap();
 
             for changed in 0..3 {
                 let mut wrong_witnesses = witnesses;
@@ -240,7 +328,7 @@ fn runtime_probe_witness_is_required_by_every_share_and_control_mask() {
                     "{target} seed {seed}: witness did not switch physical state pair"
                 );
                 assert!(
-                    decrypt_block_transport(&encrypted, &wrong, permutation, &schedule).is_err(),
+                    open_transport_frame(&encrypted, &wrong, permutation, &framing).is_err(),
                     "{target} seed {seed}: wrong runtime witness opened payload"
                 );
             }
@@ -284,9 +372,9 @@ fn emitted_probe_transcript_masks_interpreter_control_states() {
 
 #[test]
 fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
-    // The shares and the combined keystream seed are COMPUTED at run time
-    // from both script structure and the target probe transcript; none of
-    // the resulting key material may appear as a numeric literal (or, for
+    // Shares and final ChaCha8 material are COMPUTED at run time from script
+    // structure, target source witnesses, domain/context, and attestation;
+    // none of the resulting material may appear as a numeric literal (or, for
     // the large values, any digit run at all) in the output.
     for (target, fixture) in [
         (
@@ -308,24 +396,45 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
             let pv = perm_term(seed);
             let compressed = compress_bytecode(&semantic).unwrap();
             let compressed_header = compression_header(&compressed).unwrap();
-            let blocked_len = block_transport_len(compressed.len()).unwrap();
-            let state = cipher_state(&shares, pv, blocked_len, params.mix);
-            let block_keys = block_key_states(&shares, pv, blocked_len, &block_params(seed));
+            let frame_len = transport_frame_len(compressed.len()).unwrap();
+            let frame_keys = frame_key_states(&shares, pv, frame_len, &frame_params(seed));
+            let chacha = chacha_params(seed);
+            let guard = runtime_attestation(target);
+            let outer = chacha_material(
+                &shares,
+                pv,
+                frame_len as u32,
+                CHACHA8_OUTER_DOMAIN,
+                guard,
+                &chacha,
+            );
+            let inner = chacha_material(
+                &shares,
+                pv,
+                compression_cipher_context(compressed_header),
+                CHACHA8_INNER_DOMAIN,
+                guard,
+                &chacha,
+            );
             let runtime_values = [
                 runtime_probe_witness(target).to_string(),
                 runtime_control_mask(&shares).to_string(),
+                guard.to_string(),
             ];
-            assert_ne!(block_keys[0], block_keys[1]);
-            let secrets = [
+            assert_ne!(frame_keys[0], frame_keys[1]);
+            assert_ne!(outer, inner);
+            let mut secrets = vec![
                 shares[0].to_string(),
                 shares[1].to_string(),
                 shares[2].to_string(),
                 pv.to_string(),
-                state.to_string(),
-                block_keys[0].to_string(),
-                block_keys[1].to_string(),
-                compression_cipher_state(&keys, compressed_header, &params).to_string(),
+                frame_keys[0].to_string(),
+                frame_keys[1].to_string(),
+                outer.counter.to_string(),
+                inner.counter.to_string(),
             ];
+            secrets.extend(outer.key.into_iter().chain(inner.key).map(|word| word.to_string()));
+            secrets.extend(outer.nonce.into_iter().chain(inner.nonce).map(|word| word.to_string()));
             for secret in &secrets {
                 assert!(
                     !output.contains(secret.as_str()),
@@ -345,9 +454,8 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
                     "{target} seed {seed}: numeric literal {text} leaks key material"
                 );
             }
-            // The derivation is structural: the same seed must still
-            // reproduce the exact script and private wire image, while a
-            // wrong seed must fail the dynamic block frame.
+            // The same seed reproduces the exact script/private image, while
+            // a wrong seed must fail dynamic frame v2.
             assert_eq!(emit(&data, target, seed).unwrap(), output);
             assert_eq!(
                 decrypt_embedded(&output, target, seed).unwrap(),
@@ -355,7 +463,7 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
             );
             assert!(
                 decrypt_embedded(&output, target, seed.wrapping_add(1)).is_err(),
-                "{target} seed {seed}: wrong seed opened the block frame"
+                "{target} seed {seed}: wrong seed opened frame v2"
             );
         }
     }
@@ -375,7 +483,7 @@ fn compressed_body_cipher_is_an_independent_second_layer() {
 
         // The bounded frame header remains available for allocation and key
         // derivation, but every code bit is protected by the independent
-        // inner stream after outer and block transport have been removed.
+        // inner ChaCha8 body after outer ChaCha8 and frame v2 are removed.
         assert_eq!(
             &encrypted_frame[..COMPRESSION_HEADER],
             &plain_frame[..COMPRESSION_HEADER]
@@ -391,8 +499,11 @@ fn compressed_body_cipher_is_an_independent_second_layer() {
         let number = 3.25f64.to_le_bytes();
         assert!(!encrypted_frame.windows(8).any(|w| w == number));
 
+        let cipher = cipher_params(seed);
+        let shares = cipher_shares(&wrapper_keys(seed), &cipher, target);
+        let pv = perm_term(seed);
         let mut opened = encrypted_frame.clone();
-        apply_compression_cipher(&mut opened, &wrapper_keys(seed), &cipher_params(seed)).unwrap();
+        apply_compression_cipher(&mut opened, &shares, pv, target, &chacha_params(seed)).unwrap();
         assert_eq!(opened, plain_frame);
         assert_eq!(decompress_bytecode(&opened).unwrap(), semantic);
         assert_eq!(decrypt_embedded(&output, target, seed).unwrap(), semantic);
@@ -400,10 +511,14 @@ fn compressed_body_cipher_is_an_independent_second_layer() {
         // The same clear frame with a wrong inner key never yields partial or
         // replacement bytes: strict bit parsing/checksum rejects it.
         let mut wrong = encrypted_frame;
+        let wrong_cipher = cipher_params(seed + 1);
+        let wrong_shares = cipher_shares(&wrapper_keys(seed + 1), &wrong_cipher, target);
         apply_compression_cipher(
             &mut wrong,
-            &wrapper_keys(seed + 1),
-            &cipher_params(seed + 1),
+            &wrong_shares,
+            perm_term(seed + 1),
+            target,
+            &chacha_params(seed + 1),
         )
         .unwrap();
         assert!(decompress_bytecode(&wrong).is_err());
@@ -416,9 +531,18 @@ fn compression_frame_is_seed_independent_but_its_inner_stream_is_not() {
     let semantic = wire(&data, Target::Lua51, 735);
     let plain = compress_bytecode(&semantic).unwrap();
     for seed in [0, 1, 735, u64::MAX] {
+        let cipher = cipher_params(seed);
+        let shares = cipher_shares(&wrapper_keys(seed), &cipher, Target::Lua51);
+        let permutation = perm_term(seed);
         let mut encrypted = plain.clone();
-        apply_compression_cipher(&mut encrypted, &wrapper_keys(seed), &cipher_params(seed))
-            .unwrap();
+        apply_compression_cipher(
+            &mut encrypted,
+            &shares,
+            permutation,
+            Target::Lua51,
+            &chacha_params(seed),
+        )
+        .unwrap();
         assert_eq!(
             &encrypted[..COMPRESSION_HEADER],
             &plain[..COMPRESSION_HEADER]
@@ -427,8 +551,14 @@ fn compression_frame_is_seed_independent_but_its_inner_stream_is_not() {
             &encrypted[COMPRESSION_HEADER..],
             &plain[COMPRESSION_HEADER..]
         );
-        apply_compression_cipher(&mut encrypted, &wrapper_keys(seed), &cipher_params(seed))
-            .unwrap();
+        apply_compression_cipher(
+            &mut encrypted,
+            &shares,
+            permutation,
+            Target::Lua51,
+            &chacha_params(seed),
+        )
+        .unwrap();
         assert_eq!(encrypted, plain);
     }
 }
@@ -581,8 +711,7 @@ fn field_layout_is_fully_unanchored_with_separator_and_prelude_variants() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Ranks among all seventeen field starts (sixteen numeric
-            // plus the entry method).
+            // Ranks among every globally shuffled numeric field plus entry.
             let tokens = crate::lexer::lex(&raw, target).unwrap();
             let mut starts = Vec::new();
             for index in 0..tokens.len().saturating_sub(4) {
@@ -594,7 +723,7 @@ fn field_layout_is_fully_unanchored_with_separator_and_prelude_variants() {
                     starts.push(tokens[index + 1].text(&raw).to_owned());
                 }
             }
-            assert!((21..=24).contains(&starts.len()), "{target} seed {seed}");
+            assert!((26..=29).contains(&starts.len()), "{target} seed {seed}");
             let keys = wrapper_keys(seed);
             let interpreter_key = keys[4].to_string();
             entry_ranks.insert(starts.iter().position(|k| k.starts_with('"')).unwrap());
@@ -767,14 +896,13 @@ fn core_logic_flows_through_scratch_table_slots() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Slotted fields: decrypt, three segments, forms, decode,
-            // validate, parse core, the validation loop and SETUP --
-            // exactly ten scratch tables, no silent opt-outs.
+            // Three segments, forms, decode, validate, parse core, the
+            // validation loop and SETUP remain slotted. The compact ChaCha8
+            // frame inverse intentionally keeps no redundant scratch copy.
             let tables = raw.matches("local g={};").count();
-            assert_eq!(tables, 10, "{target} seed {seed}: {tables} scratch tables");
-            // Finish-style fields clear the table before returning.
+            assert_eq!(tables, 9, "{target} seed {seed}: {tables} scratch tables");
             let clears = raw.matches("g=nil;").count();
-            assert_eq!(clears, 6, "{target} seed {seed}: {clears} clears");
+            assert_eq!(clears, 5, "{target} seed {seed}: {clears} clears");
             // No slotted field still declares its data as locals: the
             // parse core and segments no longer spell `local P=`, `local
             // st=` style stage locals (frame locals of the interpreter
@@ -812,12 +940,9 @@ fn core_logic_flows_through_scratch_table_slots() {
 
 #[test]
 fn stages_are_flattened_into_seeded_state_machines() {
-    // Control-flow flattening: the base86 segments, the outer decrypt,
-    // the parse core and the interpreter loop all run as seeded state
-    // machines (per-seed state numbers, shuffled branch order, four
-    // condition spellings), and the frame setup / per-prototype stages
-    // are split into their own functions. No stage keeps a linear
-    // loop shape.
+    // Control-flow flattening remains on the base86 segments, parse core,
+    // interpreter and contextual token decoders. ChaCha8 itself is instead
+    // decomposed into independently shuffled algorithmic functions.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
@@ -826,11 +951,9 @@ fn stages_are_flattened_into_seeded_state_machines() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Nine machines: three segments, outer decrypt, parse core,
-            // interpreter fetch/dispatch, five-stage recipe-token decode, and
-            // three-stage edge-token decode. Both token machines are shared by
-            // validation and runtime fetch.
-            assert_eq!(raw.matches("while true do").count(), 9);
+            // Eight machines: three segments, parse core, interpreter
+            // fetch/dispatch, and the shared recipe/edge token machines.
+            assert_eq!(raw.matches("while true do").count(), 8);
             assert_eq!(raw.matches("local RD=function(v,l,n,s,f)").count(), 1);
             assert_eq!(raw.matches("local ED=function(v,l,f,ek)").count(), 1);
             assert!(
@@ -904,11 +1027,11 @@ fn decoder_splits_into_seeded_random_sections() {
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
             let keys = wrapper_keys(seed);
             assert!(raw.contains(&format!(
-                "[{}]=function(B,s1,s2,s3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,AD,L32)",
+                "[{}]=function(B,s1,s2,s3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS)",
                 keys[1]
             )));
             assert!(raw.contains(&format!(
-                "[{}]=function(C,ca,cb,LD,E,SB,NCH,TC,MF,X8,AD,L32)",
+                "[{}]=function(C,s1,s2,s3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS)",
                 keys[23]
             )));
             assert!(raw.contains(&format!("[{}]=function", keys[22])));

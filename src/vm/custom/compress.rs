@@ -1,10 +1,10 @@
 use super::*;
 use std::collections::HashMap;
 
-/// Private bytecode-compression envelope. Compression happens before either
-/// transport cipher, so encrypted bytes never enter the LZW dictionary. The
-/// independent inner stream encrypts only the bitstream; these block-integrity-
-/// covered header fields remain available for bounded key derivation/allocation.
+/// Private bytecode-compression envelope. Compression precedes both ChaCha8
+/// domains, so ciphertext never enters the LZW dictionary. The inner domain
+/// protects only the bitstream; frame-v2-authenticated header fields remain
+/// available for bounded context derivation and allocation.
 pub(crate) const COMPRESSION_MAGIC: [u8; 4] = *b"LZW\x01";
 pub(crate) const COMPRESSION_HEADER: usize = 16;
 pub(crate) const COMPRESSION_CHUNK: usize = 8_192;
@@ -33,8 +33,8 @@ fn u32_at(bytes: &[u8], offset: usize) -> usize {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
 }
 
-/// Validate the clear, block-integrity-covered compression header without
-/// touching the inner-stream-encrypted bitstream. This is safe for key derivation.
+/// Validate the clear, frame-v2-covered compression header without touching
+/// the inner-ChaCha8-encrypted bitstream. This is safe for context derivation.
 pub(crate) fn compression_header(bytes: &[u8]) -> Result<CompressionHeader, Diagnostic> {
     if bytes.len() < COMPRESSION_HEADER || bytes[..4] != COMPRESSION_MAGIC {
         return Err(bad("bad magic or truncated header"));
@@ -301,36 +301,36 @@ pub(crate) fn decompress_bytecode(frame: &[u8]) -> Result<Vec<u8>, Diagnostic> {
     Ok(out)
 }
 
-/// Runtime-derived seed for the independent stream protecting the compressed
-/// bitstream. It binds both structural wrapper keys and every clear header
-/// field, including the derived bounded reset count.
-pub(crate) fn compression_cipher_state(
-    keys: &[u64],
-    header: CompressionHeader,
-    params: &CipherParams,
-) -> u64 {
-    let cross = header.original_len as u64 * 31
+/// Integrity-covered context for the independent inner ChaCha8 domain. The
+/// bounded frame header remains clear long enough to enforce allocation
+/// limits, while every header field and the exact encrypted body length affect
+/// runtime key/nonce derivation.
+pub(crate) fn compression_cipher_context(header: CompressionHeader) -> u32 {
+    (header.original_len as u64 * 31
         + header.bit_len as u64 * 17
-        + u64::from(header.checksum % 65_536) * 7
-        + u64::from(header.checksum / 65_536)
-        + header.chunks as u64 * 13;
-    constant_cipher_state(keys, cross, header.body_len, params)
+        + u64::from(header.checksum) * 7
+        + header.chunks as u64 * 13
+        + header.body_len as u64)
+        .rem_euclid(4_294_967_296) as u32
 }
 
-/// Symmetric inner stream over the compressed frame bitstream. The clear
-/// header is already covered by the block tag and is mixed into this key.
 pub(crate) fn apply_compression_cipher(
     frame: &mut [u8],
-    keys: &[u64],
-    params: &CipherParams,
+    shares: &[u64; 3],
+    permutation: u64,
+    target: Target,
+    params: &ChaChaParams,
 ) -> Result<(), Diagnostic> {
     let header = compression_header(frame)?;
-    let mut stream = Keystream::new(
-        params.constant_stream,
-        compression_cipher_state(keys, header, params),
+    let body = chacha8_xor(
+        &frame[COMPRESSION_HEADER..],
+        shares,
+        permutation,
+        compression_cipher_context(header),
+        CHACHA8_INNER_DOMAIN,
+        target,
+        params,
     );
-    for byte in &mut frame[COMPRESSION_HEADER..] {
-        *byte ^= stream.next();
-    }
+    frame[COMPRESSION_HEADER..].copy_from_slice(&body);
     Ok(())
 }

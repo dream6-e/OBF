@@ -10,9 +10,9 @@ const LONG_FIELDS: &[&str] = &[
 ];
 
 fn embedded(source: &str, target: Target, seed: u64) -> Vec<u8> {
-    // Removing the outer/block transports, compressed-body stream and strict
-    // LZW frame reveals the private seed-specific semantic image, not the
-    // public canonical bytecode supplied to `emit`.
+    // Removing outer ChaCha8, frame v2, inner ChaCha8, and strict LZW reveals
+    // the private seed-specific semantic image, not the public canonical
+    // bytecode supplied to `emit`.
     vm::custom::decrypt_embedded(source, target, seed).unwrap()
 }
 
@@ -21,7 +21,7 @@ fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
     assert_eq!(&image[..4], b"OBF\x02");
     assert_eq!(image[4], if target.is_luau() { 0x75 } else { 0x51 });
     assert_eq!(image[6], 1, "generated scripts require private encoding 1");
-    assert_eq!(u32::from_le_bytes(image[24..28].try_into().unwrap()), 10);
+    assert_eq!(u32::from_le_bytes(image[24..28].try_into().unwrap()), 11);
 }
 
 fn assert_private_names_hidden(output: &str, target: Target) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ISA10 runtime-witness/control + global-segment/LZW VM benchmark and size contracts.
+# ISA11 runtime-witness/control + global-segment/LZW VM benchmark and size contracts.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) for the
 # checked-in goldens and enforces three hard gates:

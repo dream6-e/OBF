@@ -867,15 +867,14 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
                 ExpressionKind::Name(reference) => assert_eq!(reference.value, wrapper_name),
                 _ => panic!("{target}: {output}"),
             }
-            // payload table: thirteen numeric-keyed functions (five
-            // sections, three probe/share functions, three base86
-            // payload-segment decoders, two split watermark-check
-            // functions) and exactly one string-keyed entry function
-            // (the called method)
+            // The payload table has one string-keyed entry and a seed-variable
+            // numeric field count. Five additional globally shuffled fields
+            // compose word operations, quarter round, ChaCha8 block,
+            // stream/KDF and anti-hook attestation.
             let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
                 panic!("{target}: {output}");
             };
-            assert!((20..=22).contains(&fields.len()), "{target}: {output}");
+            assert!((25..=27).contains(&fields.len()), "{target}: {output}");
             let mut numeric_keys = std::collections::BTreeSet::new();
             let mut entries = 0;
             for field in fields {
@@ -904,7 +903,7 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
                 }
             }
             assert_eq!(entries, 1);
-            assert!((19..=21).contains(&numeric_keys.len()));
+            assert!((24..=26).contains(&numeric_keys.len()));
             // The wrapper is not just structural: it runs the program.
             let workspace = native::Workspace::new();
             let path = workspace.0.join("wrapped.lua");
