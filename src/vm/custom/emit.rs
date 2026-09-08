@@ -16,7 +16,7 @@ pub(crate) fn generate(
     // replaced by five-stage context tokens; successors use independent
     // three-stage edge tokens. Live wire descriptors are validation-equivalent
     // camouflage rather than execution truth; the target-side parser accepts
-    // only this private ISA11 image.
+    // only this private ISA12 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image, None)
 }
@@ -57,6 +57,12 @@ fn generate_semantic(
     // id selects a program-specific sequence. The Lua side rebuilds this
     // primitive table from the packed forms-field string.
     let perm = opcode_permutation(seed, 64);
+    // ISA12 breaks the report's image-wide operand tuple ABI. Every private
+    // prototype gets a distinct affine (layout family, component rotation,
+    // sparse lane) profile across the full 32,767-id private image limit, while
+    // semantic fragments use four result-binding orders and never publish the
+    // actual opcode number.
+    let operand_abi = operand_layout(seed);
     let primitive_ops: std::collections::BTreeSet<Opcode> = semantic_image
         .recipes
         .iter()
@@ -833,9 +839,9 @@ return a,b,c,p end;\nend,",
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
     let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
     let semantic_validator = format!(
-        r#"{edge_decoder}{recipe_decoder}
+        r#"{edge_decoder}{recipe_decoder}{operand_getter}
 for id=0,np-1 do
- local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;
+ local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;{operand_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
  local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};
  for z=1,nr do local rid=D16();local n=SB(CD,p);p=p+1;if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
@@ -848,20 +854,23 @@ for id=0,np-1 do
  for at=0,F.__obf_proto_nc-1 do local label,nextToken,skipToken,token=D16(),D16(),D16(),D16();local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
   if label==0 or code[label]~=nil or recipe==nil then E()end;local I={{token,nextToken,skipToken,PT[recipe[#recipe]],#recipe}};
   for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local k=b+c*256;local j=a+k*256;
-   if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;local base=3+qi*3;I[base]=a;I[base+1]=b;I[base+2]=c;
+   if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
   end;code[label]=I;
  end;
  if p~=#CD+1 or start==0 or code[start]==nil then E()end;
- for label,I in NX,code do local next1=ED(I[2],label,id,0);local skip=ED(I[3],label,id,1);local last=I[4];local n=I[5];local base=3+n*3;local a,b,c=I[base],I[base+1],I[base+2];local j=a+(b+c*256)*256;
+ for label,I in NX,code do local next1=ED(I[2],label,id,0);local skip=ED(I[3],label,id,1);local last=I[4];local n=I[5];local a,b,c,k,j=OG(id,I,n,0);
   if last=={jump} then if next1~=0 or skip~=0 or code[j]==nil then E()end
   elseif last=={ret} or last=={tail} then if next1~=0 or skip~=0 then E()end
   elseif last=={test} then if code[next1]==nil or code[skip]==nil then E()end
   elseif code[next1]==nil or skip~=0 then E()end;
  end;code[0]=start;F.__obf_proto_code=code;
-end;return RD,ED;"#,
+end;return RD,ED,OG;"#,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
         mask_salt = semantic_image.mask_salt,
+        operand_getter = operand_abi.getter_lua(),
+        operand_profile = operand_abi.parser_profile_lua(),
+        operand_store = OperandLayout::parser_store_lua(),
         jump = perm[Opcode::Jump as usize],
         test = perm[Opcode::Test as usize],
         ret = perm[Opcode::Return as usize],
@@ -949,9 +958,9 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
 local c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS);local c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS);local c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS);
 local Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);
 local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);
-local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});P.__obf_proto_control=(c1+c2+c3)%65520;\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD,ED=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
+local P,np,entry=VMS[{}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,{},{});P.__obf_proto_control=(c1+c2+c3)%65520;\nlocal dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);\nlocal RD,ED,OG=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);
 local CV,SV,Lookup=VMS[{}](TY,E);
-local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED);
+local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG);
 local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
         keys[0],
         keys[5 + probe_order[0]],
@@ -984,7 +993,7 @@ local result=H(entry,Z(...),{{}});return U(result,1,result.n)\nend,\n",
     .unwrap();
     write!(
         s,
-        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED)\n",
+        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG)\n",
         keys[4]
     )
     .unwrap();
@@ -1123,7 +1132,7 @@ end;
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,o,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n while true do\n  local F,R,va=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {
@@ -1142,6 +1151,10 @@ end;
     };
     let mut recipe_entries: Vec<(u16, String)> = Vec::new();
     let mut fragment_arms: Vec<(u16, String)> = Vec::new();
+    let mut binding_forms = [0usize, 1, 2, 3];
+    debug_assert_eq!(binding_forms.len(), OPERAND_BINDING_FORMS);
+    structure.shuffle(&mut binding_forms);
+    let mut binding_cursor = 0usize;
     for (recipe, chunks) in semantic_image.recipes.iter().zip(&recipe_chunks) {
         if recipe.live {
             debug_assert!(recipe.descriptor_ops.iter().zip(&recipe.execute_ops).all(
@@ -1163,15 +1176,13 @@ end;
             let mut body = String::new();
             for index in start..start + length {
                 let op = recipe.execute_ops[index];
-                let base = 6 + index * 3;
-                write!(
-                    body,
-                    "a,b,c=I[{base}],I[{}],I[{}];k=b+c*256;j=a+k*256;o={};",
-                    base + 1,
-                    base + 2,
-                    perm[op as usize],
-                )
-                .unwrap();
+                if binding_cursor == binding_forms.len() {
+                    structure.shuffle(&mut binding_forms);
+                    binding_cursor = 0;
+                }
+                let form = binding_forms[binding_cursor];
+                binding_cursor += 1;
+                body.push_str(&operand_binding_lua(index + 1, form));
                 body.push_str(&semantic_handler(op)?);
             }
             let exits_frame = matches!(

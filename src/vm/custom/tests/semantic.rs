@@ -486,6 +486,109 @@ fn operand_features_are_split_into_separate_shuffled_fields() {
 }
 
 #[test]
+fn per_prototype_operand_abi_breaks_the_static_slot_handler_bridge() {
+    // The ISA11 report recovered every real operation from one global rule:
+    // `I[6+3*i..8+3*i] -> a/b/c -> actual-op marker -> plaintext handler`.
+    // ISA12 gives each prototype a heterogeneous physical operand profile,
+    // returns operands in four binding orders, and emits no actual-op marker.
+    for (target, fixture) in [
+        (
+            Target::Lua51,
+            include_str!("../../../../tests/fixtures/vm_lua51.lua"),
+        ),
+        (
+            Target::Luau,
+            include_str!("../../../../tests/fixtures/vm_luau.lua"),
+        ),
+    ] {
+        let data = compile(fixture, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut parameter_sets = BTreeSet::new();
+        for seed in [0u64, 1, 2, 3, 735, 7001, 7351, u64::MAX] {
+            let image = semantic::encode(&program, seed).unwrap();
+            let abi = operand_layout(seed);
+            parameter_sets.insert(format!("{abi:?}"));
+
+            assert!(OPERAND_LAYOUT_UNIQUE_SPAN >= OPERAND_LAYOUT_PRIVATE_PROTOTYPE_LIMIT);
+            let all_profiles = (0..OPERAND_LAYOUT_PRIVATE_PROTOTYPE_LIMIT)
+                .map(|prototype| abi.profile(prototype))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                all_profiles.len(),
+                OPERAND_LAYOUT_PRIVATE_PROTOTYPE_LIMIT,
+                "{target} seed {seed}: full-range prototype profiles collided"
+            );
+            let checked = image.prototype_order.len();
+            let profiles = (0..checked)
+                .map(|prototype| abi.profile(prototype))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                profiles.len(),
+                checked,
+                "{target} seed {seed}: emitted prototype operand profiles collided"
+            );
+            if checked >= OPERAND_LAYOUT_FAMILIES {
+                assert_eq!(
+                    profiles
+                        .iter()
+                        .map(|profile| profile.0)
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                    OPERAND_LAYOUT_FAMILIES
+                );
+            }
+            if checked >= OPERAND_LAYOUT_ROTATIONS {
+                assert_eq!(
+                    profiles
+                        .iter()
+                        .map(|profile| profile.1)
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                    OPERAND_LAYOUT_ROTATIONS
+                );
+            }
+
+            let raw = generate(&data, &program, seed).unwrap();
+            assert!(raw.contains("return RD,ED,OG"));
+            assert!(!raw.contains("a,b,c=I["));
+            assert!(!raw.contains("local base=3+qi*3"));
+            assert!(!raw.contains("k=b+c*256;j=a+k*256;o="));
+
+            let operations: usize = image
+                .recipes
+                .iter()
+                .map(|recipe| recipe.execute_ops.len())
+                .sum();
+            assert_eq!(raw.matches("=OG(fid,I,").count(), operations);
+            for form in 0..OPERAND_BINDING_FORMS {
+                assert!(
+                    raw.contains(&format!("{}=OG(fid,I,", operand_binding_lhs(form))),
+                    "{target} seed {seed}: missing binding form {form}"
+                );
+            }
+            let permutation = opcode_permutation(seed, 64);
+            for op in image
+                .recipes
+                .iter()
+                .flat_map(|recipe| &recipe.execute_ops)
+            {
+                assert!(
+                    !raw.contains(&format!(";o={};", permutation[*op as usize])),
+                    "{target} seed {seed}: actual opcode marker survived"
+                );
+            }
+
+            let output = emit(&data, target, seed).unwrap();
+            assert_eq!(blob(&output, target, seed), image.bytes);
+        }
+        assert!(
+            parameter_sets.len() >= 6,
+            "{target}: operand ABI parameters are seed-pinned"
+        );
+    }
+}
+
+#[test]
 fn full_code_randomization_layout_and_cipher_vary_per_seed() {
     // Full code randomization: payload fields (including every
     // decryption/probe/segment function) are emitted in a seeded
@@ -866,7 +969,15 @@ fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
             // 3/4-op recipes also retain at least one fused two-op fragment.
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            let fragments = raw.matches(" then a,b,c=I[").count();
+            let fragments: usize = (0..OPERAND_BINDING_FORMS)
+                .map(|form| {
+                    raw.matches(&format!(
+                        "then {}=OG(fid,I,",
+                        operand_binding_lhs(form)
+                    ))
+                    .count()
+                })
+                .sum();
             let multi = image
                 .recipes
                 .iter()
@@ -877,6 +988,7 @@ fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
                 .iter()
                 .map(|recipe| recipe.execute_ops.len())
                 .sum();
+            assert_eq!(raw.matches("=OG(fid,I,").count(), operations);
             assert!(fragments >= image.recipes.len() + multi);
             assert!(fragments <= operations);
             if image

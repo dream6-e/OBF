@@ -1104,7 +1104,7 @@ fn dispatch_chains_split_into_seeded_subchains() {
             // fetch/dispatch phase machine the chain may sit before or
             // after the fetch line in the text.
             let f5_at = raw
-                .find("local I,rid,sid,next1,skip1,o,a,b,c,k,j;local w=")
+                .find("local I,rid,sid,next1,skip1,a,b,c,k,j;local w=")
                 .expect("interpreter phase machine");
             let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
             let interp = &raw[f5_at..f5_end];

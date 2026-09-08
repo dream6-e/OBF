@@ -1,6 +1,6 @@
 //! Executable VM for AST-produced OBF v2 bytecode. Public `.obf` files keep
 //! the canonical opcode-plus-varint ISA2 format, but generated scripts lower
-//! that program into a private seed-specific ISA11 image: straight-line words
+//! that program into a private seed-specific ISA12 image: straight-line words
 //! become recipe superoperators, use sites carry operands plus random graph
 //! labels, three-stage successor tokens, and five-stage recipe tokens (not
 //! plaintext successors/opcodes/recipe ids). Reachable neutral bundles split
@@ -15,9 +15,12 @@
 //! by an inner ChaCha8 domain, sealed in strict transport frame v2, and
 //! protected again by a disjoint outer ChaCha8 domain. Word-XOR/rotate,
 //! quarter-round, block, stream/KDF and anti-hook code are independent shuffled
-//! fields. ISA11 binds every key schedule to live source witnesses plus a
-//! fail-closed runtime attestation; share parity also selects one of two
-//! fetch/dispatch state pairs before masking their concrete representation.
+//! fields. ISA12 retains ISA11's live source-witness key schedule and
+//! fail-closed runtime attestation, then adds a per-prototype heterogeneous
+//! operand ABI: decoded operands use one of four physical record layouts,
+//! independently rotated and placed in a sparse lane, while fragment bindings
+//! vary and no actual-opcode marker is emitted. Share parity also selects one
+//! of two fetch/dispatch state pairs before masking their concrete representation.
 //! Primitive semantics still live in the two target opcode subfolders. The
 //! seed never changes public `.obf` bytes, but it does change the embedded
 //! semantic image as well as transport, layout, local, and private-field
@@ -27,6 +30,7 @@ mod chacha;
 mod cipher;
 mod compress;
 mod emit;
+mod lowering;
 mod semantic;
 mod structure;
 #[cfg(test)]
@@ -40,6 +44,7 @@ pub(crate) use chacha::*;
 pub(crate) use cipher::*;
 pub(crate) use compress::*;
 pub(crate) use emit::generate;
+pub(crate) use lowering::*;
 pub(crate) use structure::*;
 pub(crate) use transport::*;
 pub use transport::{decrypt_embedded, extract_embedded};
