@@ -1,14 +1,16 @@
 //! Executable VM for AST-produced OBF v2 bytecode. Public `.obf` files keep
 //! the canonical opcode-plus-varint ISA2 format, but generated scripts lower
-//! that program into a private seed-specific ISA8 image: straight-line words
+//! that program into a private seed-specific ISA9 image: straight-line words
 //! become recipe superoperators, use sites carry operands plus random graph
 //! labels, three-stage successor tokens, and five-stage recipe tokens (not
 //! plaintext successors/opcodes/recipe ids). Reachable neutral bundles split
 //! every real entry and sampled CFG edges. Live dictionary descriptors are
 //! validation-equivalent camouflage; actual semantics are split into random-id
-//! 1..2-primitive fragments and globally shuffled. Records/sibling prototypes
-//! are shuffled, an unreachable synthetic subtree changes topology, and the
-//! target retains only tokens in its persistent code records. The semantic
+//! 1..2-primitive fragments and globally shuffled. Each prototype code image is
+//! additionally split into a masked two-node id/owner/next chain; every node is
+//! shuffled through one cross-prototype pool and fully validated before user
+//! execution. Records/sibling prototypes are shuffled, an unreachable synthetic
+//! subtree changes topology, and persistent code records retain only tokens. The semantic
 //! image is then losslessly compressed by bounded LZW; its code bits retain
 //! the existing independent inner stream before a versioned dynamically keyed
 //! 32-bit block transport and the outer byte stream.

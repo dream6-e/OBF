@@ -2,7 +2,7 @@
 //!
 //! Public `.obf` files remain the canonical OBF v2/ISA2 format. Before a
 //! canonical program is embedded in a generated script, this module lowers
-//! its fixed one-word instructions into a private ISA8 wire image:
+//! its fixed one-word instructions into a private ISA9 wire image:
 //!
 //! * straight-line words are grouped into program-specific superoperators;
 //! * each superoperator has a random 16-bit recipe id, while every use site
@@ -14,6 +14,9 @@
 //!   sequences, decoupling wire schemas from the execution semantics;
 //! * sibling prototypes are seed-shuffled, Closure operands are rewritten, and
 //!   an unreachable synthetic prototype subtree breaks count/tree isomorphism;
+//! * each prototype code image becomes a two-node, owner-bound chain with a
+//!   seed/context-derived non-empty split; masked roots stay in metadata while
+//!   compact id/owner/next records are globally shuffled across prototypes;
 //! * unused recipe descriptors also have deliberately mismatched bodies.
 //!
 //! The generated target validator reconstructs and validates the linked
@@ -28,7 +31,7 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 8;
+pub(crate) const WIRE_ISA_VERSION: u32 = 9;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -96,6 +99,13 @@ pub(crate) struct SemanticImage {
     pub prototype_order: Vec<usize>,
     pub decoy_prototypes: usize,
     pub shuffled_records: usize,
+    pub code_segments: usize,
+    pub prototype_segment_counts: Vec<usize>,
+    pub segment_physical_ids: Vec<usize>,
+    pub segment_physical_owners: Vec<usize>,
+    pub segment_next_ids: Vec<usize>,
+    pub segment_root_ids: Vec<usize>,
+    pub segments_interleaved: bool,
     pub referenced_recipe_ids: BTreeSet<u16>,
 }
 
@@ -115,6 +125,14 @@ struct PrototypePlan {
     bundles: Vec<Bundle>,
     physical: Vec<usize>,
     recipe_indices: BTreeSet<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct CodeSegment {
+    id: u16,
+    owner: u16,
+    next: u16,
+    bytes: Vec<u8>,
 }
 
 fn error(message: impl Into<String>) -> Diagnostic {
@@ -1034,13 +1052,185 @@ fn encode_code(
     Ok(out)
 }
 
+fn owners_are_interleaved(segments: &[CodeSegment]) -> bool {
+    let mut closed = BTreeSet::new();
+    let mut previous = None;
+    for segment in segments {
+        if previous != Some(segment.owner) {
+            if let Some(owner) = previous {
+                closed.insert(owner);
+            }
+            if closed.contains(&segment.owner) {
+                return true;
+            }
+            previous = Some(segment.owner);
+        }
+    }
+    false
+}
+
+/// Context used by the compact ISA9 segment graph. Reusing one full-width
+/// recipe-token layer keeps the segment links seed-coupled without adding a
+/// self-describing key block to the wire image.
+fn segment_parameters(image: &SemanticImage) -> (u16, u16) {
+    (image.token_layers[0].add, image.token_layers[0].multiplier)
+}
+
+/// Every prototype has exactly two non-empty nodes in this ISA9 batch. Their
+/// boundary is seed- and owner-dependent; it is never serialized as a plain
+/// offset. `context` is in 0..=65535, so the result is always in 1..code_len.
+pub(crate) fn code_segment_split(code_len: usize, owner: u16, image: &SemanticImage) -> usize {
+    debug_assert!(code_len >= 2);
+    let (add, multiplier) = segment_parameters(image);
+    let context = add.wrapping_add(owner.wrapping_mul(multiplier));
+    1 + ((code_len - 1) as u64 * u64::from(context) / 65_536) as usize
+}
+
+pub(crate) fn encode_segment_root(root: u16, owner: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    root.wrapping_add(add)
+        .wrapping_add(owner.wrapping_mul(multiplier))
+}
+
+#[cfg(test)]
+pub(crate) fn decode_segment_root(token: u16, owner: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    token
+        .wrapping_sub(owner.wrapping_mul(multiplier))
+        .wrapping_sub(add)
+}
+
+pub(crate) fn encode_segment_id(id: u16, physical_slot: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    id.wrapping_add(add)
+        .wrapping_add(physical_slot.wrapping_mul(multiplier))
+}
+
+#[cfg(test)]
+pub(crate) fn decode_segment_id(token: u16, physical_slot: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    token
+        .wrapping_sub(physical_slot.wrapping_mul(multiplier))
+        .wrapping_sub(add)
+}
+
+pub(crate) fn encode_segment_owner(
+    owner: u16,
+    id: u16,
+    physical_slot: u16,
+    image: &SemanticImage,
+) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    owner
+        .wrapping_add(add)
+        .wrapping_add(id.wrapping_mul(multiplier))
+        .wrapping_add(physical_slot)
+}
+
+#[cfg(test)]
+pub(crate) fn decode_segment_owner(
+    token: u16,
+    id: u16,
+    physical_slot: u16,
+    image: &SemanticImage,
+) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    token
+        .wrapping_sub(id.wrapping_mul(multiplier))
+        .wrapping_sub(physical_slot)
+        .wrapping_sub(add)
+}
+
+pub(crate) fn encode_segment_next(next: u16, id: u16, owner: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    next.wrapping_add(add)
+        .wrapping_add(id.wrapping_mul(multiplier))
+        .wrapping_add(owner)
+}
+
+#[cfg(test)]
+pub(crate) fn decode_segment_next(token: u16, id: u16, owner: u16, image: &SemanticImage) -> u16 {
+    let (add, multiplier) = segment_parameters(image);
+    token
+        .wrapping_sub(id.wrapping_mul(multiplier))
+        .wrapping_sub(owner)
+        .wrapping_sub(add)
+}
+
+/// Build one globally shuffled graph rather than serializing code after each
+/// prototype. Odd ids are roots and even ids are terminal nodes. Every record
+/// carries independently checked id, owner, and next tokens; roots and split
+/// boundaries also use seed/context-dependent u16 encodings.
+fn build_code_segment_pool(
+    codes: Vec<Vec<u8>>,
+    image: &SemanticImage,
+    random: &mut crate::random::Prng,
+) -> Result<(Vec<CodeSegment>, Vec<usize>, bool), Diagnostic> {
+    if codes.is_empty() {
+        return Err(error("global code segment pool is empty"));
+    }
+    if codes.len() > usize::from(u16::MAX / 2) {
+        return Err(error("too many prototypes for the segment id graph"));
+    }
+    let owner_count = codes.len();
+    let mut pool = Vec::with_capacity(owner_count * 2);
+    for (owner, code) in codes.into_iter().enumerate() {
+        if code.len() < 2 {
+            return Err(error("prototype code is too short to segment"));
+        }
+        let owner =
+            u16::try_from(owner).map_err(|_| error("prototype id exceeds segment owner range"))?;
+        let root = owner
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| error("segment id overflow"))?;
+        let terminal = root
+            .checked_add(1)
+            .ok_or_else(|| error("segment id overflow"))?;
+        let split = code_segment_split(code.len(), owner, image);
+        pool.push(CodeSegment {
+            id: root,
+            owner,
+            next: terminal,
+            bytes: code[..split].to_vec(),
+        });
+        pool.push(CodeSegment {
+            id: terminal,
+            owner,
+            next: 0,
+            bytes: code[split..].to_vec(),
+        });
+    }
+    // A full-record shuffle makes physical order independent of both owner
+    // and chain order. Reject the rare owner-grouped permutation rather than
+    // silently weakening the global-pool invariant.
+    for _ in 0..64 {
+        random.shuffle(&mut pool);
+        if pool.len() <= 2 || owners_are_interleaved(&pool) {
+            return Ok((pool, vec![2; owner_count], true));
+        }
+    }
+    Err(error("failed to interleave global code segment pool"))
+}
+
 fn serialize(
     plans: &[PrototypePlan],
     image: &SemanticImage,
     decoys: &[usize],
     target: Target,
     random: &mut crate::random::Prng,
-) -> Result<Vec<u8>, Diagnostic> {
+) -> Result<
+    (
+        Vec<u8>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        bool,
+    ),
+    Diagnostic,
+> {
     let mut codes = Vec::with_capacity(plans.len());
     for (prototype_id, plan) in plans.iter().enumerate() {
         let prototype_id = u16::try_from(prototype_id)
@@ -1054,6 +1244,22 @@ fn serialize(
             random,
         )?);
     }
+    let code_lengths: Vec<usize> = codes.iter().map(Vec::len).collect();
+    let (segments, segment_counts, segments_interleaved) =
+        build_code_segment_pool(codes, image, random)?;
+    let physical_ids = segments
+        .iter()
+        .map(|segment| usize::from(segment.id))
+        .collect::<Vec<_>>();
+    let physical_owners = segments
+        .iter()
+        .map(|segment| usize::from(segment.owner))
+        .collect::<Vec<_>>();
+    let next_ids = segments
+        .iter()
+        .map(|segment| usize::from(segment.next))
+        .collect::<Vec<_>>();
+    let root_ids = (0..plans.len()).map(|owner| owner * 2 + 1).collect();
     let mut out = Vec::from(*b"OBF\x02");
     out.extend_from_slice(&[
         if target.is_luau() { 0x75 } else { 0x51 },
@@ -1067,8 +1273,12 @@ fn serialize(
     write_u32(&mut out, 0)?;
     out.extend_from_slice(&WIRE_ISA_VERSION.to_le_bytes());
     write_u32(&mut out, 0)?;
-    for (plan, code) in plans.iter().zip(codes) {
+    // Prototype metadata remains parent-indexed, but no function code bytes
+    // follow it. The formerly reserved u16 is now a context-masked unique root
+    // id; all actual nodes live only in the global shuffled segment pool.
+    for (prototype_id, plan) in plans.iter().enumerate() {
         let prototype = &plan.prototype;
+        let code_len = code_lengths[prototype_id];
         out.extend_from_slice(
             &prototype
                 .parent
@@ -1081,10 +1291,16 @@ fn serialize(
             &mut out,
             u16::try_from(prototype.captures.len()).map_err(|_| error("too many captures"))?,
         );
-        write_u16(&mut out, 0);
+        let owner = u16::try_from(prototype_id)
+            .map_err(|_| error("prototype id exceeds segment owner range"))?;
+        let root = owner
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| error("segment root id overflow"))?;
+        write_u16(&mut out, encode_segment_root(root, owner, image));
         write_u32(&mut out, prototype.constants.len())?;
         write_u32(&mut out, plan.bundles.len())?;
-        write_u32(&mut out, code.len())?;
+        write_u32(&mut out, code_len)?;
         for capture in &prototype.captures {
             let (tag, index) = match *capture {
                 Capture::Local(register) => (0, register),
@@ -1116,7 +1332,26 @@ fn serialize(
                 }
             }
         }
-        out.extend_from_slice(&code);
+        if out.len() > custom::MAX_BYTES {
+            return Err(error("image exceeds size limit"));
+        }
+    }
+    for (slot, segment) in segments.iter().enumerate() {
+        let physical_slot = u16::try_from(slot + 1)
+            .map_err(|_| error("segment physical slot exceeds u16 range"))?;
+        write_u16(
+            &mut out,
+            encode_segment_id(segment.id, physical_slot, image),
+        );
+        write_u16(
+            &mut out,
+            encode_segment_owner(segment.owner, segment.id, physical_slot, image),
+        );
+        write_u16(
+            &mut out,
+            encode_segment_next(segment.next, segment.id, segment.owner, image),
+        );
+        out.extend_from_slice(&segment.bytes);
         if out.len() > custom::MAX_BYTES {
             return Err(error("image exceeds size limit"));
         }
@@ -1125,7 +1360,15 @@ fn serialize(
     out[12..16].copy_from_slice(&length.to_le_bytes());
     let checksum = custom::checksum(&out[custom::HEADER_SIZE..]);
     out[28..32].copy_from_slice(&checksum.to_le_bytes());
-    Ok(out)
+    Ok((
+        out,
+        segment_counts,
+        physical_ids,
+        physical_owners,
+        next_ids,
+        root_ids,
+        segments_interleaved,
+    ))
 }
 
 pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diagnostic> {
@@ -1271,8 +1514,31 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         prototype_order,
         decoy_prototypes,
         shuffled_records,
+        code_segments: 0,
+        prototype_segment_counts: Vec::new(),
+        segment_physical_ids: Vec::new(),
+        segment_physical_owners: Vec::new(),
+        segment_next_ids: Vec::new(),
+        segment_root_ids: Vec::new(),
+        segments_interleaved: false,
         referenced_recipe_ids,
     };
-    image.bytes = serialize(&plans, &image, &decoys, program.target, &mut random)?;
+    let (
+        bytes,
+        segment_counts,
+        physical_ids,
+        physical_owners,
+        next_ids,
+        root_ids,
+        segments_interleaved,
+    ) = serialize(&plans, &image, &decoys, program.target, &mut random)?;
+    image.bytes = bytes;
+    image.code_segments = physical_owners.len();
+    image.prototype_segment_counts = segment_counts;
+    image.segment_physical_ids = physical_ids;
+    image.segment_physical_owners = physical_owners;
+    image.segment_next_ids = next_ids;
+    image.segment_root_ids = root_ids;
+    image.segments_interleaved = segments_interleaved;
     Ok(image)
 }

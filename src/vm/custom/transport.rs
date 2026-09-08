@@ -190,7 +190,7 @@ pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
 
 /// Verification helper: resolve the generated script's segmented payload,
 /// remove both transport ciphers and the independent compressed-body stream,
-/// then strictly decompress it. The result is the private, seed-specific ISA8
+/// then strictly decompress it. The result is the private, seed-specific ISA9
 /// semantic wire image; it intentionally does not equal the public canonical
 /// `.obf` bytes supplied to `emit`.
 pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u8>, Diagnostic> {

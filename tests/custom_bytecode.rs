@@ -166,7 +166,7 @@ fn repaired_checksums_do_not_bypass_structural_validation() {
     // Operand semantics survive repaired checksums at the Word level: decode,
     // corrupt one logical instruction, and the serializer's own validation
     // must still refuse it (varint re-encoding cannot launder operands).
-    let mut program = bc::decode(&bytes, target).unwrap();
+    let program = bc::decode(&bytes, target).unwrap();
     let last = program.prototypes[0].code.len() - 1;
     for (at, word) in [
         (0, Word([Opcode::Nil as u8, 255, 0, 0])), // register 255

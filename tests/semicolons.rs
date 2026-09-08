@@ -229,7 +229,7 @@ fn existing_semicolons_empty_blocks_and_invalid_newline_calls_are_not_rewritten(
 }
 
 #[test]
-fn cli_and_both_vm_backends_share_the_new_delimiters() {
+fn cli_keeps_strict_delimiters_while_both_vm_backends_use_checked_compaction() {
     let work = Workspace::new();
     let input = work.0.join("input.lua");
     let source = "local function outer(v) local function inner(x) return x+v end return inner end print(outer(3)(4))";
@@ -253,10 +253,10 @@ fn cli_and_both_vm_backends_share_the_new_delimiters() {
                 obf::vm::virtualize(source.as_bytes(), target, obf::vm::Options { seed: 735 })
             }
             .unwrap();
-            assert!(!output.contains("end end"));
-            assert!(!output.contains("end local"));
-            assert!(!output.contains("end return"));
-            assert!(output.contains(";end;"));
+            // Generated VM source is crate-owned and reparsed after its
+            // optional-separator pass; unlike user minification above, safe
+            // keyword/closing-delimiter boundaries need not retain `;`.
+            assert!(!output.contains(['\r', '\n']));
             let path = work.0.join("vm.lua");
             fs::write(&path, output).unwrap();
             assert_eq!(compile_and_run(target, &path), b"7\n");

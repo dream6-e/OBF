@@ -16,7 +16,7 @@ pub(crate) fn generate(
     // replaced by five-stage context tokens; successors use independent
     // three-stage edge tokens. Live wire descriptors are validation-equivalent
     // camouflage rather than execution truth; the target-side parser accepts
-    // only this private ISA8 image.
+    // only this private ISA9 image.
     let semantic_image = semantic::encode(program, seed)?;
     generate_semantic(program, seed, semantic_image, None)
 }
@@ -680,7 +680,7 @@ local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,E,SB,SS,SF,NCH,TC,MF,IF,X8,A
         core_text,
         r#"
 if b8()~=1 or b8()~=1 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
-local np=b32();local entry=b32();local isa=b32();if np==0 or np>65536 or entry~=0 or isa~={} then E()end;
+local np=b32();local entry=b32();local isa=b32();if np==0 or np>32767 or entry~=0 or isa~={} then E()end;
 local check=b32();if AD(B,33,#B)~=check then E()end;
 "#,
         semantic::WIRE_ISA_VERSION
@@ -689,22 +689,24 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     // Flattened parse core: the per-prototype stages are split into local
     // functions -- header read/validate (PH), upvalue wiring (PU), constant
     // pool (PK) -- whose definition order shuffles per seed, driven by a
-    // seeded state machine (next/header -> upvalues -> constants -> take
-    // code -> advance; finish breaks out to the field's return).
+    // seeded state machine (next/header -> upvalues -> constants -> commit
+    // metadata -> advance). Its finish state reads the one global shuffled
+    // code-segment graph, validates masked ids/owners/roots/next links and
+    // exact coverage, then reconstructs each stream before semantic parsing.
     let csv = state_values(&mut structure, 5);
     let (c_next, c_up, c_konst, c_code, c_fin) = (csv[0], csv[1], csv[2], csv[3], csv[4]);
     let mut ph = String::from(
         "local PH=function()\n local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}};F.__obf_proto_parent=b32();F.__obf_proto_m=b16();F.__obf_proto_p=b8();F.__obf_proto_flags=b8();F.__obf_proto_nu=b16();\n",
     );
     ph.push_str(
-        " if b16()~=0 then E()end;F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();\n if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<4 or VMCS>16777216 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
+        " local RT=b16();F.__obf_proto_nk=b32();F.__obf_proto_nc=b32();local VMCS=b32();\n if F.__obf_proto_m<1 or F.__obf_proto_m>256 or F.__obf_proto_p>F.__obf_proto_m or F.__obf_proto_nu>256 or F.__obf_proto_nk>65536 or F.__obf_proto_nc<1 or F.__obf_proto_flags>15 or VMCS<4 or VMCS>16777216 then E()end;\n F.__obf_proto_shared=MF(F.__obf_proto_flags/8)%2==1;if F.__obf_proto_shared and (isa<2 or id==0)then E()end;\n if id==0 then if F.__obf_proto_parent~=4294967295 or F.__obf_proto_nu~=0 or MF(F.__obf_proto_flags/2)%2~=0 then E()end\n elseif F.__obf_proto_parent>=id then E()end;\n local legacy=MF(F.__obf_proto_flags/2)%2;\n if legacy==1 and (F.__obf_proto_flags%2==0 or F.__obf_proto_p>=F.__obf_proto_m)or MF(F.__obf_proto_flags/4)%2==1 and legacy==0 then E()end;\n",
     );
     if program.target.is_luau() {
         ph.push_str("if legacy~=0 then E()end;");
     } else {
         ph.push_str("if F.__obf_proto_shared then E()end;");
     }
-    ph.push_str("\n return F,VMCS\nend;\n");
+    ph.push_str("\n return F,VMCS,RT\nend;\n");
     let pu = "local PU=function()\n for j=0,F.__obf_proto_nu-1 do local tag,index=b8(),b8();local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
         .to_owned();
     let mut pk = String::from(
@@ -723,6 +725,8 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     core_text.push_str(&format!(
         "local P={{}};local work=0;local id=0;local w={c_next};\n"
     ));
+    let segment_add = semantic_image.token_layers[0].add;
+    let segment_multiplier = semantic_image.token_layers[0].multiplier;
     core_text.push_str(&state_machine(
         &mut structure,
         "w",
@@ -730,7 +734,7 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
             (
                 c_next,
                 format!(
-                    "if id>=np then w={c_fin} else F,VMCS=PH();\
+                    "if id>=np then w={c_fin} else F,VMCS,RT=PH();\
 work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;w={c_up}; end;"
                 ),
             ),
@@ -739,12 +743,14 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
             (
                 c_code,
                 format!(
-                    "F.__obf_proto_code=take(VMCS);P[id]=F;id=id+1;w={c_next};"
+                    "F.__obf_proto_code={{VMCS,RT}};P[id]=F;id=id+1;w={c_next};"
                 ),
             ),
             (
                 c_fin,
-                "if pos()~=#B+1 then E()end;B=nil;break;".to_owned(),
+                format!(
+                    "local Q={{}};local SN=np*2;for slot=1,SN do local sid=(b16()-slot*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or Q[sid]then E()end;local owner=MF((sid-1)/2);local claimed=(b16()-sid*{segment_multiplier}-slot-{segment_add})%65536;if claimed~=owner then E()end;local part=(sid-1)%2;local SP=P[owner].__obf_proto_code;local nxt=(b16()-sid*{segment_multiplier}-owner-{segment_add})%65536;local split=1+MF((SP[1]-1)*(({segment_add}+owner*{segment_multiplier})%65536)/65536);local n=part==0 and split or SP[1]-split;Q[sid]={{owner,nxt,take(n)}}end;if pos()~=#B+1 then E()end;local used={{}};local roots={{}};for owner=0,np-1 do local SP=P[owner].__obf_proto_code;local sid=(SP[2]-owner*{segment_multiplier}-{segment_add})%65536;if sid~=owner*2+1 or roots[sid]then E()end;roots[sid]=1;local code='';for count=1,2 do local S=Q[sid];if not S or S[1]~=owner or used[sid]then E()end;used[sid]=1;code=code..S[3];sid=S[2]end;if sid~=0 or #code~=SP[1]then E()end;SP[2]=code end;for sid=1,SN do if not used[sid]then E()end end;B=nil;break;"
+                ),
             ),
         ],
     ));
@@ -753,7 +759,7 @@ work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 the
         &mut structure,
         &core_text,
         &[
-            "P", "work", "id", "w", "np", "entry", "isa", "check", "sa", "sb", "F", "VMCS",
+            "P", "work", "id", "w", "np", "entry", "isa", "check", "sa", "sb", "F", "VMCS", "RT",
             "legacy", "tag", "index", "parent", "v", "lo", "hi",
         ],
     );
@@ -879,8 +885,10 @@ return a,b,c,p end;\nend,",
         key = keys[15],
         body = validate_body,
     );
-    // Semantic graph validator. Each prototype code stream begins with a
-    // masked recipe dictionary and a random entry label. Physical records
+    // Semantic graph validator. The parser has already fail-closed the global
+    // segment graph (masked root/id/next, owner, count, total and coverage) and
+    // reconstructed each exact code image. Every stream begins with a masked
+    // recipe dictionary and random entry label. Records
     // then carry (label,next-token,skip-token,recipe-token) plus operand-only
     // varints. Shared three/five-stage nested state machines resolve edge and
     // recipe tokens from graph/prototype context both here and on every runtime
@@ -894,7 +902,7 @@ return a,b,c,p end;\nend,",
     let semantic_validator = format!(
         r#"{edge_decoder}{recipe_decoder}
 for id=0,np-1 do
- local F=P[id];local CD=F.__obf_proto_code;local p=1;
+ local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
  local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};
  for z=1,nr do local rid=D16();local n=SB(CD,p);p=p+1;if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;

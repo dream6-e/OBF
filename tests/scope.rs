@@ -376,6 +376,7 @@ fn nested_interpolations_rewrite_only_expression_bindings_and_remove_trivia() {
 }
 
 #[test]
+#[allow(clippy::reversed_empty_ranges)] // the reversed span is the malformed input under test
 fn malformed_token_arrays_fail_with_diagnostics_instead_of_panicking() {
     use obf::lexer::{Token, TokenKind};
     for span in [0..100, 2..1, 1..2] {

@@ -231,42 +231,176 @@ fn every_supported_opcode_is_actually_executed_in_the_target_runtime() {
     }
 }
 
-fn semantic_prototype_layouts(bytes: &[u8]) -> Vec<(usize, usize, usize, usize)> {
+#[derive(Clone, Debug)]
+struct SemanticPrototypeLayout {
+    header: usize,
+    code_positions: Vec<usize>,
+    code_len: usize,
+    records: usize,
+    segment_count: usize,
+    root_token: u16,
+    root_token_position: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SemanticSegmentLayout {
+    physical_slot: usize,
+    id_token_position: usize,
+    id: usize,
+    owner_token_position: usize,
+    owner: usize,
+    next_token_position: usize,
+    next: usize,
+    payload: std::ops::Range<usize>,
+}
+
+fn semantic_layouts(
+    image: &super::semantic::SemanticImage,
+) -> (Vec<SemanticPrototypeLayout>, Vec<SemanticSegmentLayout>) {
+    let bytes = &image.bytes;
     let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
     let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     let prototypes = u32_at(16) as usize;
-    let mut proto = 32usize;
+    let mut position = 32usize;
     let mut layouts = Vec::with_capacity(prototypes);
     for _ in 0..prototypes {
-        let captures = usize::from(u16_at(proto + 8));
-        let constants = u32_at(proto + 12) as usize;
-        let records = u32_at(proto + 16) as usize;
-        let code_len = u32_at(proto + 20) as usize;
-        let mut code = proto + 24 + captures * 2;
+        let header = position;
+        let captures = usize::from(u16_at(header + 8));
+        let segment_count = 2;
+        let root_token_position = header + 10;
+        let root_token = u16_at(root_token_position);
+        let constants = u32_at(header + 12) as usize;
+        let records = u32_at(header + 16) as usize;
+        let code_len = u32_at(header + 20) as usize;
+        position = header + 24 + captures * 2;
         for _ in 0..constants {
-            let tag = bytes[code];
-            code += 1;
-            code += match tag {
+            let tag = bytes[position];
+            position += 1;
+            position += match tag {
                 0 => 0,
                 1 => 1,
                 2 | 4 => 8,
                 3 | 5 => {
-                    let len = u32_at(code) as usize;
+                    let len = u32_at(position) as usize;
                     4 + len
                 }
                 _ => panic!("unknown constant tag in generated semantic image"),
             };
         }
-        layouts.push((proto, code, code_len, records));
-        proto = code + code_len;
+        layouts.push(SemanticPrototypeLayout {
+            header,
+            code_positions: Vec::with_capacity(code_len),
+            code_len,
+            records,
+            segment_count,
+            root_token,
+            root_token_position,
+        });
     }
-    assert_eq!(proto, bytes.len());
-    layouts
+    let mut segments = Vec::with_capacity(prototypes * 2);
+    for physical_slot in 1..=prototypes * 2 {
+        let id_token_position = position;
+        let token = u16_at(position);
+        position += 2;
+        let id = usize::from(super::semantic::decode_segment_id(
+            token,
+            physical_slot as u16,
+            image,
+        ));
+        assert!((1..=prototypes * 2).contains(&id));
+        let owner = (id - 1) / 2;
+        let owner_token_position = position;
+        let owner_token = u16_at(position);
+        position += 2;
+        assert_eq!(
+            usize::from(super::semantic::decode_segment_owner(
+                owner_token,
+                id as u16,
+                physical_slot as u16,
+                image,
+            )),
+            owner
+        );
+        let next_token_position = position;
+        let next_token = u16_at(position);
+        position += 2;
+        let next = usize::from(super::semantic::decode_segment_next(
+            next_token,
+            id as u16,
+            owner as u16,
+            image,
+        ));
+        let part = (id - 1) % 2;
+        let split =
+            super::semantic::code_segment_split(layouts[owner].code_len, owner as u16, image);
+        let length = if part == 0 {
+            split
+        } else {
+            layouts[owner].code_len - split
+        };
+        let payload = position..position + length;
+        position += length;
+        segments.push(SemanticSegmentLayout {
+            physical_slot,
+            id_token_position,
+            id,
+            owner_token_position,
+            owner,
+            next_token_position,
+            next,
+            payload,
+        });
+    }
+    assert_eq!(position, bytes.len());
+    let by_id = segments
+        .iter()
+        .map(|segment| (segment.id, segment))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(by_id.len(), segments.len());
+    for (owner, layout) in layouts.iter_mut().enumerate() {
+        let mut id = usize::from(super::semantic::decode_segment_root(
+            layout.root_token,
+            owner as u16,
+            image,
+        ));
+        for _ in 0..layout.segment_count {
+            let segment = by_id[&id];
+            assert_eq!(segment.owner, owner);
+            layout.code_positions.extend(segment.payload.clone());
+            id = segment.next;
+        }
+        assert_eq!(id, 0);
+        assert_eq!(layout.code_positions.len(), layout.code_len);
+    }
+    (layouts, segments)
 }
 
-fn semantic_first_code_layout(bytes: &[u8]) -> (usize, usize, usize) {
-    let (_, code, code_len, records) = semantic_prototype_layouts(bytes)[0];
-    (code, code_len, records)
+fn semantic_code(image: &super::semantic::SemanticImage, prototype: usize) -> Vec<u8> {
+    let layout = &semantic_layouts(image).0[prototype];
+    layout
+        .code_positions
+        .iter()
+        .map(|&position| image.bytes[position])
+        .collect()
+}
+
+fn mutate_semantic_code(
+    image: &super::semantic::SemanticImage,
+    prototype: usize,
+    mutate: impl FnOnce(&mut [u8]),
+) -> super::semantic::SemanticImage {
+    let layout = semantic_layouts(image).0.remove(prototype);
+    let mut code = layout
+        .code_positions
+        .iter()
+        .map(|&position| image.bytes[position])
+        .collect::<Vec<_>>();
+    mutate(&mut code);
+    let mut damaged = image.clone();
+    for (&position, byte) in layout.code_positions.iter().zip(code) {
+        damaged.bytes[position] = byte;
+    }
+    damaged
 }
 
 fn repair_semantic_checksum(bytes: &mut [u8]) {
@@ -280,25 +414,28 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         let data = compile("print('MUST_NOT_RUN')", target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 735).unwrap();
-        let (code, code_len, records) = semantic_first_code_layout(&image.bytes);
+        let first_layout = semantic_layouts(&image).0.remove(0);
+        let code_len = first_layout.code_len;
+        let records = first_layout.records;
+        let code_bytes = semantic_code(&image, 0);
         assert!(code_len > 20 && records > 0);
-        let recipes = u16::from_le_bytes(image.bytes[code..code + 2].try_into().unwrap()) as usize;
+        let recipes = u16::from_le_bytes(code_bytes[..2].try_into().unwrap()) as usize;
         assert!(recipes >= 2);
-        let mut cursor = code + 2;
+        let mut cursor = 2;
         let first_recipe = cursor;
         let mut dictionary = BTreeSet::new();
         for _ in 0..recipes {
             dictionary.insert(u16::from_le_bytes(
-                image.bytes[cursor..cursor + 2].try_into().unwrap(),
+                code_bytes[cursor..cursor + 2].try_into().unwrap(),
             ));
-            let len = usize::from(image.bytes[cursor + 2]);
+            let len = usize::from(code_bytes[cursor + 2]);
             assert!((1..=4).contains(&len));
             cursor += 3 + len;
         }
         let start_label = cursor;
         let first_record = start_label + 2;
-        assert!(first_record + 8 <= code + code_len);
-        let second_recipe = first_recipe + 3 + usize::from(image.bytes[first_recipe + 2]);
+        assert!(first_record + 8 <= code_len);
+        let second_recipe = first_recipe + 3 + usize::from(code_bytes[first_recipe + 2]);
         let recipe_operands: std::collections::BTreeMap<u16, usize> = image
             .recipes
             .iter()
@@ -319,23 +456,23 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
         let mut record_labels = BTreeSet::new();
         for _ in 0..records {
             let label = u16::from_le_bytes(
-                image.bytes[record_cursor..record_cursor + 2]
+                code_bytes[record_cursor..record_cursor + 2]
                     .try_into()
                     .unwrap(),
             );
             record_labels.insert(label);
             let next_token = u16::from_le_bytes(
-                image.bytes[record_cursor + 2..record_cursor + 4]
+                code_bytes[record_cursor + 2..record_cursor + 4]
                     .try_into()
                     .unwrap(),
             );
             let skip_token = u16::from_le_bytes(
-                image.bytes[record_cursor + 4..record_cursor + 6]
+                code_bytes[record_cursor + 4..record_cursor + 6]
                     .try_into()
                     .unwrap(),
             );
             let recipe_token = u16::from_le_bytes(
-                image.bytes[record_cursor + 6..record_cursor + 8]
+                code_bytes[record_cursor + 6..record_cursor + 8]
                     .try_into()
                     .unwrap(),
             );
@@ -353,31 +490,30 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
             );
             record_cursor += 8;
             for _ in 0..recipe_operands[&rid] {
-                while image.bytes[record_cursor] >= 128 {
+                while code_bytes[record_cursor] >= 128 {
                     record_cursor += 1;
                 }
                 record_cursor += 1;
             }
         }
-        assert_eq!(record_cursor, code + code_len);
+        assert_eq!(record_cursor, code_len);
 
         let mut corruptions = Vec::new();
-        let mut bad = image.clone();
-        bad.bytes[first_recipe + 2] = 0; // empty recipe
-        corruptions.push(bad);
-        let mut bad = image.clone();
-        let duplicate = bad.bytes[first_recipe..first_recipe + 2].to_vec();
-        bad.bytes[second_recipe..second_recipe + 2].copy_from_slice(&duplicate); // duplicate id
-        corruptions.push(bad);
-        let mut bad = image.clone();
-        bad.bytes[start_label..start_label + 2].fill(0); // null entry label
-        corruptions.push(bad);
-        let mut bad = image.clone();
-        bad.bytes[first_record..first_record + 2].fill(0); // null record label
-        corruptions.push(bad);
-        let mut bad = image.clone();
+        corruptions.push(mutate_semantic_code(&image, 0, |code| {
+            code[first_recipe + 2] = 0; // empty recipe
+        }));
+        corruptions.push(mutate_semantic_code(&image, 0, |code| {
+            let duplicate = code[first_recipe..first_recipe + 2].to_vec();
+            code[second_recipe..second_recipe + 2].copy_from_slice(&duplicate); // duplicate id
+        }));
+        corruptions.push(mutate_semantic_code(&image, 0, |code| {
+            code[start_label..start_label + 2].fill(0); // null entry label
+        }));
+        corruptions.push(mutate_semantic_code(&image, 0, |code| {
+            code[first_record..first_record + 2].fill(0); // null record label
+        }));
         let label = u16::from_le_bytes(
-            bad.bytes[first_record..first_record + 2]
+            code_bytes[first_record..first_record + 2]
                 .try_into()
                 .unwrap(),
         );
@@ -385,32 +521,35 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
             .find(|label| !record_labels.contains(label))
             .unwrap();
         let edge_token =
-            super::semantic::encode_edge_token(unknown_label, label, 0, 0, &bad.edge_layers);
-        bad.bytes[first_record + 2..first_record + 4].copy_from_slice(&edge_token.to_le_bytes()); // decoded successor is absent
-        corruptions.push(bad);
-        let mut bad = image.clone();
-        let label = u16::from_le_bytes(
-            bad.bytes[first_record..first_record + 2]
-                .try_into()
-                .unwrap(),
-        );
+            super::semantic::encode_edge_token(unknown_label, label, 0, 0, &image.edge_layers);
+        corruptions.push(mutate_semantic_code(&image, 0, |code| {
+            code[first_record + 2..first_record + 4].copy_from_slice(&edge_token.to_le_bytes());
+            // decoded successor is absent
+        }));
         let next_token = u16::from_le_bytes(
-            bad.bytes[first_record + 2..first_record + 4]
+            code_bytes[first_record + 2..first_record + 4]
                 .try_into()
                 .unwrap(),
         );
         let skip_token = u16::from_le_bytes(
-            bad.bytes[first_record + 4..first_record + 6]
+            code_bytes[first_record + 4..first_record + 6]
                 .try_into()
                 .unwrap(),
         );
-        let next = super::semantic::decode_edge_token(next_token, label, 0, 0, &bad.edge_layers);
-        let skip = super::semantic::decode_edge_token(skip_token, label, 0, 1, &bad.edge_layers);
+        let next = super::semantic::decode_edge_token(next_token, label, 0, 0, &image.edge_layers);
+        let skip = super::semantic::decode_edge_token(skip_token, label, 0, 1, &image.edge_layers);
         let unknown = (1..=u16::MAX).find(|id| !dictionary.contains(id)).unwrap();
-        let token =
-            super::semantic::encode_recipe_token(unknown, label, next, skip, 0, &bad.token_layers);
-        bad.bytes[first_record + 6..first_record + 8].copy_from_slice(&token.to_le_bytes());
-        corruptions.push(bad);
+        let token = super::semantic::encode_recipe_token(
+            unknown,
+            label,
+            next,
+            skip,
+            0,
+            &image.token_layers,
+        );
+        corruptions.push(mutate_semantic_code(&image, 0, |code| {
+            code[first_record + 6..first_record + 8].copy_from_slice(&token.to_le_bytes());
+        }));
 
         for (kind, mut bad) in corruptions.into_iter().enumerate() {
             repair_semantic_checksum(&mut bad.bytes);
@@ -452,8 +591,8 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
         .iter()
         .position(|old| *old == old_child)
         .expect("real child missing after semantic reorder");
-    let layouts = semantic_prototype_layouts(&image.bytes);
-    let child = layouts[child_id].0;
+    let (layouts, segments) = semantic_layouts(&image);
+    let child = layouts[child_id].header;
     assert!(child + 26 <= image.bytes.len());
     let captures = u16::from_le_bytes(image.bytes[child + 8..child + 10].try_into().unwrap());
     assert!(captures > 0, "fixture must exercise capture metadata");
@@ -474,6 +613,57 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
     let mut bad = image.clone();
     bad.bytes[child + 25] = 255; // capture index outside parent frame
     corruptions.push(bad);
+    let mut bad = image.clone();
+    let terminal_root = super::semantic::encode_segment_root(2, 0, &image);
+    bad.bytes[layouts[0].root_token_position..layouts[0].root_token_position + 2]
+        .copy_from_slice(&terminal_root.to_le_bytes()); // root has no two-node chain
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    let foreign_root = super::semantic::encode_segment_root(3, 0, &image);
+    bad.bytes[layouts[0].root_token_position..layouts[0].root_token_position + 2]
+        .copy_from_slice(&foreign_root.to_le_bytes()); // root belongs to another owner
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    let duplicate = super::semantic::encode_segment_id(
+        segments[0].id as u16,
+        segments[1].physical_slot as u16,
+        &image,
+    );
+    bad.bytes[segments[1].id_token_position..segments[1].id_token_position + 2]
+        .copy_from_slice(&duplicate.to_le_bytes()); // duplicate id also leaves one id missing
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    let out_of_range =
+        super::semantic::encode_segment_id(0, segments[0].physical_slot as u16, &image);
+    bad.bytes[segments[0].id_token_position..segments[0].id_token_position + 2]
+        .copy_from_slice(&out_of_range.to_le_bytes());
+    corruptions.push(bad);
+    let root_segment = segments
+        .iter()
+        .find(|segment| segment.id == 1)
+        .expect("root segment missing");
+    let next_position = root_segment.next_token_position;
+    let mut bad = image.clone();
+    let cycle = super::semantic::encode_segment_next(1, 1, 0, &image);
+    bad.bytes[next_position..next_position + 2].copy_from_slice(&cycle.to_le_bytes());
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    let wrong_owner = super::semantic::encode_segment_next(3, 1, 0, &image);
+    bad.bytes[next_position..next_position + 2].copy_from_slice(&wrong_owner.to_le_bytes());
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    bad.bytes[segments[0].payload.start] ^= 1; // pooled code corruption
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    bad.bytes.pop(); // truncated final segment payload
+    let bad_len = bad.bytes.len() as u32;
+    bad.bytes[12..16].copy_from_slice(&bad_len.to_le_bytes());
+    corruptions.push(bad);
+    let mut bad = image.clone();
+    bad.bytes.push(0); // global pool has an unconsumed trailing byte
+    let bad_len = bad.bytes.len() as u32;
+    bad.bytes[12..16].copy_from_slice(&bad_len.to_le_bytes());
+    corruptions.push(bad);
 
     for (kind, mut bad) in corruptions.into_iter().enumerate() {
         repair_semantic_checksum(&mut bad.bytes);
@@ -492,6 +682,126 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
             result.stdout.is_empty(),
             "prototype corruption {kind} leaked output"
         );
+    }
+}
+
+#[test]
+fn target_decoder_rejects_every_global_segment_graph_corruption_on_both_targets() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("print('MUST_NOT_RUN')", target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let image = super::semantic::encode(&program, 917).unwrap();
+        let (layouts, segments) = semantic_layouts(&image);
+        assert!(layouts.len() >= 2 && segments.len() >= 4);
+        let root = segments
+            .iter()
+            .find(|segment| segment.id == 1)
+            .expect("root segment missing");
+        let root_next = root.next_token_position;
+        let terminal = segments
+            .iter()
+            .find(|segment| segment.id == 2)
+            .expect("terminal segment missing");
+        let mut corruptions = Vec::new();
+
+        let mut bad = image.clone();
+        let terminal_root = super::semantic::encode_segment_root(2, 0, &image);
+        bad.bytes[layouts[0].root_token_position..layouts[0].root_token_position + 2]
+            .copy_from_slice(&terminal_root.to_le_bytes());
+        corruptions.push(("non-root", bad));
+
+        let mut bad = image.clone();
+        let duplicate_root = super::semantic::encode_segment_root(1, 1, &image);
+        bad.bytes[layouts[1].root_token_position..layouts[1].root_token_position + 2]
+            .copy_from_slice(&duplicate_root.to_le_bytes());
+        corruptions.push(("duplicate-root", bad));
+
+        let mut bad = image.clone();
+        let duplicate_id = super::semantic::encode_segment_id(
+            segments[0].id as u16,
+            segments[1].physical_slot as u16,
+            &image,
+        );
+        bad.bytes[segments[1].id_token_position..segments[1].id_token_position + 2]
+            .copy_from_slice(&duplicate_id.to_le_bytes());
+        corruptions.push(("duplicate-and-missing-id", bad));
+
+        let mut bad = image.clone();
+        let out_of_range =
+            super::semantic::encode_segment_id(0, segments[0].physical_slot as u16, &image);
+        bad.bytes[segments[0].id_token_position..segments[0].id_token_position + 2]
+            .copy_from_slice(&out_of_range.to_le_bytes());
+        corruptions.push(("out-of-range-id", bad));
+
+        let mut bad = image.clone();
+        let segment = &segments[0];
+        let claimed_owner = ((segment.owner + 1) % layouts.len()) as u16;
+        let wrong_owner_token = super::semantic::encode_segment_owner(
+            claimed_owner,
+            segment.id as u16,
+            segment.physical_slot as u16,
+            &image,
+        );
+        bad.bytes[segment.owner_token_position..segment.owner_token_position + 2]
+            .copy_from_slice(&wrong_owner_token.to_le_bytes());
+        corruptions.push(("wrong-owner-token", bad));
+
+        let mut bad = image.clone();
+        let cycle = super::semantic::encode_segment_next(1, 1, 0, &image);
+        bad.bytes[root_next..root_next + 2].copy_from_slice(&cycle.to_le_bytes());
+        corruptions.push(("cycle", bad));
+
+        let mut bad = image.clone();
+        let nonzero_terminal = super::semantic::encode_segment_next(1, 2, 0, &image);
+        bad.bytes[terminal.next_token_position..terminal.next_token_position + 2]
+            .copy_from_slice(&nonzero_terminal.to_le_bytes());
+        corruptions.push(("nonzero-terminal-next", bad));
+
+        let mut bad = image.clone();
+        let foreign_owner = super::semantic::encode_segment_next(3, 1, 0, &image);
+        bad.bytes[root_next..root_next + 2].copy_from_slice(&foreign_owner.to_le_bytes());
+        corruptions.push(("wrong-owner", bad));
+
+        let mut bad = image.clone();
+        let wrong_total = (layouts[0].code_len as u32 + 1).to_le_bytes();
+        bad.bytes[layouts[0].header + 20..layouts[0].header + 24].copy_from_slice(&wrong_total);
+        corruptions.push(("wrong-total-length", bad));
+
+        let mut bad = image.clone();
+        bad.bytes.pop();
+        let length = bad.bytes.len() as u32;
+        bad.bytes[12..16].copy_from_slice(&length.to_le_bytes());
+        corruptions.push(("truncated", bad));
+
+        let mut bad = image.clone();
+        bad.bytes.push(0);
+        let length = bad.bytes.len() as u32;
+        bad.bytes[12..16].copy_from_slice(&length.to_le_bytes());
+        corruptions.push(("trailing", bad));
+
+        for (kind, mut bad) in corruptions {
+            repair_semantic_checksum(&mut bad.bytes);
+            let raw = super::emit::generate_from_semantic_image(&program, 917, bad).unwrap();
+            let output = finalize(&raw, target, 917).unwrap();
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join(if target.is_luau() {
+                "invalid_segments.luau"
+            } else {
+                "invalid_segments.lua"
+            });
+            fs::write(&path, output).unwrap();
+            assert!(
+                native::compile(target, &path).status.success(),
+                "{target} {kind}"
+            );
+            let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+            let result = Command::new(native::root().join("toolchains/bin").join(runner))
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(!result.status.success(), "{target} {kind} ran");
+            assert!(result.stdout.is_empty(), "{target} {kind} leaked output");
+        }
     }
 }
 
@@ -1888,6 +2198,96 @@ fn semantic_wire_uses_superoperators_random_graphs_and_reordered_prototypes() {
 }
 
 #[test]
+fn global_function_segment_pool_is_decoder_coupled_interleaved_and_exact() {
+    for (target, fixture) in [
+        (
+            Target::Lua51,
+            include_str!("../../../tests/fixtures/vm_lua51.lua"),
+        ),
+        (
+            Target::Luau,
+            include_str!("../../../tests/fixtures/vm_luau.lua"),
+        ),
+    ] {
+        let data = compile(fixture, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut physical_orders = BTreeSet::new();
+        for seed in [0u64, 1, 2, 735, u64::MAX] {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            assert_eq!(
+                image.code_segments,
+                image.prototype_segment_counts.iter().sum::<usize>()
+            );
+            assert!(
+                image
+                    .prototype_segment_counts
+                    .iter()
+                    .all(|&count| count == 2),
+                "{target} seed {seed}: prototype segment count was not exactly two"
+            );
+            assert!(
+                image.segments_interleaved,
+                "{target} seed {seed}: global pool stayed owner-grouped"
+            );
+            assert_eq!(image.segment_physical_ids.len(), image.code_segments);
+            assert_eq!(image.segment_physical_owners.len(), image.code_segments);
+            assert_eq!(image.segment_next_ids.len(), image.code_segments);
+            physical_orders.insert(image.segment_physical_ids.clone());
+
+            let (layouts, segments) = semantic_layouts(&image);
+            assert_eq!(segments.len(), image.code_segments);
+            assert_eq!(layouts.len(), image.prototype_order.len());
+            assert_eq!(image.segment_root_ids.len(), layouts.len());
+            let ids = segments
+                .iter()
+                .map(|segment| segment.id)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(ids, (1..=segments.len()).collect());
+            for (index, segment) in segments.iter().enumerate() {
+                assert!(!segment.payload.is_empty());
+                assert_eq!(image.segment_physical_ids[index], segment.id);
+                assert_eq!(image.segment_physical_owners[index], segment.owner);
+                assert_eq!(image.segment_next_ids[index], segment.next);
+                assert_eq!(
+                    segment.next,
+                    if segment.id % 2 == 1 {
+                        segment.id + 1
+                    } else {
+                        0
+                    }
+                );
+            }
+            for (prototype, layout) in layouts.iter().enumerate() {
+                assert_eq!(
+                    layout.segment_count,
+                    image.prototype_segment_counts[prototype]
+                );
+                let expected_root = prototype * 2 + 1;
+                assert_eq!(image.segment_root_ids[prototype], expected_root);
+                assert_eq!(
+                    usize::from(super::semantic::decode_segment_root(
+                        layout.root_token,
+                        prototype as u16,
+                        &image,
+                    )),
+                    expected_root
+                );
+                let split =
+                    super::semantic::code_segment_split(layout.code_len, prototype as u16, &image);
+                assert!(split > 0 && split < layout.code_len);
+                let code = semantic_code(&image, prototype);
+                assert_eq!(code.len(), layout.code_len);
+                assert!(u16::from_le_bytes(code[..2].try_into().unwrap()) > 0);
+            }
+        }
+        assert!(
+            physical_orders.len() >= 4,
+            "{target}: segment pool has little seed diversity"
+        );
+    }
+}
+
+#[test]
 fn operand_features_are_split_into_separate_shuffled_fields() {
     // The operand-form map (`[0]=3,[1]=4,...` sequential-key literal),
     // the varint reader with its `if f==1 elseif f==2 ...` shape chain
@@ -2134,7 +2534,7 @@ fn opaque_true_false_branches_carry_real_but_unreachable_instructions() {
 
 #[test]
 fn generation_respects_the_documented_size_budget() {
-    // ISA8 keeps the existing 85/94 kB structural ceilings for seed diversity,
+    // ISA9 keeps the existing 85/94 kB structural ceilings for seed diversity,
     // and adds a stronger fixed-seed contract: each checked-in compressed
     // golden must be strictly smaller than its ISA7 uncompressed predecessor.
     // Raise neither comparison silently.

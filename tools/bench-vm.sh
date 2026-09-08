@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ISA8 bounded-LZW + semantic-fragment VM benchmark and size contracts.
+# ISA9 global code-segment graph + bounded-LZW VM benchmark and size contracts.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) for the
 # checked-in goldens and enforces three hard gates:

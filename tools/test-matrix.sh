@@ -334,7 +334,7 @@ for vm in "$tmp"/vm51*.lua "$tmp"/vmluau*.lua "$tmp"/legacy-*.lua; do
             fi
             ;;
         *)
-            if ! grep -Eq 'local [a-z]{1,2}=\{\};return setmetatable\(' "$vm"; then
+            if ! grep -Eq 'local [a-z]{1,2}=\{\};?return setmetatable\(' "$vm"; then
                 echo "error: VM output $vm is missing its wrapped payload table" >&2
                 exit 1
             fi

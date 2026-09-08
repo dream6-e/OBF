@@ -80,9 +80,9 @@ fn finalize(
         // to the newly spelled source, including its interpolation fragments.
         let (_, statement_ends) =
             parser::parse_lexed_with_statement_ends(&renamed, &tokens, target)?;
-        emit_tokens(&renamed, &tokens, target, &statement_ends, 0)?
+        emit_tokens(&renamed, &tokens, target, &statement_ends, 0, generated_vm)?
     } else {
-        emit_tokens(source, &tokens, target, &statement_ends, 0)?
+        emit_tokens(source, &tokens, target, &statement_ends, 0, generated_vm)?
     };
     // Fail closed: reparse the final, normalized source and verify that every
     // reference still resolves to exactly the same binding (or global).
@@ -114,7 +114,7 @@ fn finalize(
 /// array. For default safe local renaming, use `obf::minify` instead.
 pub fn minify(source: &str, tokens: &[Token], target: Target) -> Result<String, Diagnostic> {
     let (_, statement_ends) = parser::parse_with_statement_ends(source, tokens, target)?;
-    let output = emit_tokens(source, tokens, target, &statement_ends, 0)?;
+    let output = emit_tokens(source, tokens, target, &statement_ends, 0, false)?;
     parser::parse_source(&output, target)?;
     Ok(output)
 }
@@ -125,6 +125,7 @@ fn emit_tokens(
     target: Target,
     statement_ends: &[usize],
     depth: usize,
+    compact_vm_boundaries: bool,
 ) -> Result<String, Diagnostic> {
     if depth > 64 {
         return Err(Diagnostic::new(
@@ -134,10 +135,33 @@ fn emit_tokens(
     let mut output = String::new();
     let mut previous: Option<(TokenKind, String, usize)> = None;
 
-    for token in tokens.iter().filter(|token| token.kind != TokenKind::Eof) {
+    let tokens = tokens
+        .iter()
+        .filter(|token| token.kind != TokenKind::Eof)
+        .collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
         let raw = token.text(source);
+        if compact_vm_boundaries && raw == ";" {
+            if let (Some((previous_kind, previous_text, previous_end)), Some(next)) =
+                (&previous, tokens.get(index + 1))
+            {
+                let next_text = next.text(source);
+                if statement_ends.binary_search(previous_end).is_ok()
+                    && vm_boundary_can_omit(*previous_kind, previous_text, next.kind, next_text)
+                {
+                    continue;
+                }
+            }
+        }
         let text = if token.kind == TokenKind::String && raw.starts_with('`') {
-            emit_interpolated(source, token, target, statement_ends, depth + 1)?
+            emit_interpolated(
+                source,
+                token,
+                target,
+                statement_ends,
+                depth + 1,
+                compact_vm_boundaries,
+            )?
         } else if token.kind == TokenKind::String {
             normalize_string(raw, target).map_err(|error| {
                 Diagnostic::at(error, token.span.start, token.line, token.column)
@@ -148,11 +172,19 @@ fn emit_tokens(
 
         if let Some((previous_kind, previous_text, previous_end)) = &previous {
             if text != ";" && statement_ends.binary_search(previous_end).is_ok() {
-                // A semicolon is a statement terminator, NOT general trivia.
-                // Prefer it at every proven statement boundary, even when
-                // the old emitter could concatenate the tokens without space.
-                // Existing ';' tokens are retained; never introduce ';;'.
-                output.push(';');
+                // Public source keeps an explicit terminator at every proven
+                // boundary. Generated VM source may omit one only where a
+                // keyword or a closing delimiter makes the token boundary
+                // grammar-unambiguous; the finalized chunk is reparsed below.
+                if compact_vm_boundaries
+                    && vm_boundary_can_omit(*previous_kind, previous_text, token.kind, &text)
+                {
+                    if needs_separator(*previous_kind, previous_text, token.kind, &text) {
+                        output.push(' ');
+                    }
+                } else {
+                    output.push(';');
+                }
             } else if needs_separator(*previous_kind, previous_text, token.kind, &text) {
                 output.push(' ');
             }
@@ -175,6 +207,7 @@ fn emit_interpolated(
     target: Target,
     statement_ends: &[usize],
     depth: usize,
+    compact_vm_boundaries: bool,
 ) -> Result<String, Diagnostic> {
     let ranges = lexer::interpolated_expression_ranges(source, token.span.clone(), target)?;
     let mut output = String::from("`");
@@ -183,7 +216,14 @@ fn emit_interpolated(
         emit_segment(source, start, range.start - 1, target, &mut output)?;
         output.push('{');
         let tokens = lexer::lex_fragment(source, range.clone(), target)?;
-        let expression = emit_tokens(source, &tokens, target, statement_ends, depth)?;
+        let expression = emit_tokens(
+            source,
+            &tokens,
+            target,
+            statement_ends,
+            depth,
+            compact_vm_boundaries,
+        )?;
         // `{{` is not a valid interpolation opener in Luau. A table literal
         // as the first expression token needs this otherwise-unnecessary gap.
         if expression.starts_with('{') {
@@ -416,6 +456,40 @@ fn hex(byte: u8) -> Result<u8, String> {
     }
 }
 
+/// Generated VM source is crate-owned and reparsed after minification, so it
+/// can use Lua's optional statement separators at grammar-unambiguous edges.
+/// Public/user source deliberately keeps the stronger every-boundary policy.
+fn vm_boundary_can_omit(
+    previous_kind: TokenKind,
+    previous: &str,
+    current_kind: TokenKind,
+    current: &str,
+) -> bool {
+    if current_kind == TokenKind::Keyword
+        && matches!(
+            current,
+            "break"
+                | "do"
+                | "else"
+                | "elseif"
+                | "end"
+                | "for"
+                | "function"
+                | "if"
+                | "local"
+                | "repeat"
+                | "return"
+                | "until"
+                | "while"
+        )
+    {
+        return true;
+    }
+    current_kind == TokenKind::Identifier
+        && previous_kind == TokenKind::Symbol
+        && matches!(previous, ")" | "]" | "}")
+}
+
 fn needs_separator(
     previous_kind: TokenKind,
     previous: &str,
@@ -559,6 +633,22 @@ mod tests {
 #[cfg(test)]
 mod generated_tests {
     use super::*;
+
+    #[test]
+    fn generated_vm_uses_optional_separators_only_at_unambiguous_boundaries() {
+        let prefix = "local G=(getfenv and getfenv(1))or _G;";
+        for target in [Target::Lua51, Target::Luau] {
+            let source = format!(
+                "{prefix}local privateTable={{}};privateTable[1]=1;privateTable[2]=2;local privateFunction=function()return privateTable[1]end;privateFunction();(privateFunction)();return privateFunction()"
+            );
+            let output = finalize_vm(&source, target, 42).unwrap();
+            parser::parse_source(&output, target).unwrap();
+            assert!(output.contains(";("), "ambiguous call boundary was removed");
+            assert!(output.matches(';').count() <= 3, "{target}: {output}");
+            assert!(!output.contains(";local") && !output.contains(";return"));
+            assert!(!output.contains(['\r', '\n']));
+        }
+    }
 
     #[test]
     fn vm_exception_only_allows_the_audited_environment_capture() {
