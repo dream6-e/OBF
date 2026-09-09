@@ -359,6 +359,102 @@ fn p1_number_spellings_survive_finalize_on_both_targets() {
     }
 }
 
+/// T6 gate (G4 paren noise): the template respeller draws `(dec)` forms
+/// across seeds, deterministically, without changing any value; paren
+/// spellings survive the minify path and run identically on both targets.
+/// Routine words never take parens, so corrosion-surgery anchors stay put.
+#[test]
+fn paren_number_spellings_vary_roundtrip_and_survive() {
+    // Same boundary rule as the emitter and `p4_canon_numbers`: a paren
+    // pair counts only at a literal boundary (call parens follow a name,
+    // chained-call parens follow `)`) around a 3+ digit run. Asserts no
+    // `)(ddd+)` chained call exists anywhere: that shape would be
+    // uncanonicalizable, so its absence is pinned, not assumed.
+    fn paren_values(body: &str, target: Target, seed: u64) -> Vec<u64> {
+        fn word_byte(c: u8) -> bool {
+            matches!(c, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'.')
+        }
+        let bytes = body.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'(' {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let digits = j - (i + 1);
+                if digits >= 3 && j < bytes.len() && bytes[j] == b')' {
+                    assert!(
+                        i == 0 || bytes[i - 1] != b')',
+                        "{target} seed {seed}: chained call breaks canon"
+                    );
+                    if i == 0 || !word_byte(bytes[i - 1]) {
+                        out.push(body[i + 1..j].parse::<u64>().unwrap());
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+    for target in [Target::Lua51, Target::Luau] {
+        let mut variants: BTreeSet<Vec<u64>> = BTreeSet::new();
+        for seed in 0..64u64 {
+            let body = seed_loop_lua(target, seed);
+            assert_eq!(body, seed_loop_lua(target, seed), "{target} seed {seed}: template varies");
+            let mut values = paren_values(&body, target, seed);
+            for value in &values {
+                // Emitter rule: 3+ digits, below 2^53, fuel budget exempt.
+                assert!(*value >= 100, "{target} seed {seed}: short paren {value}");
+                assert!(*value < (1 << 53), "{target} seed {seed}: paren over 2^53");
+                assert_ne!(*value, 100_000, "{target} seed {seed}: budget paren'd");
+            }
+            values.sort_unstable();
+            variants.insert(values);
+        }
+        assert!(
+            variants.iter().any(|v| !v.is_empty()),
+            "{target}: paren spellings never appear across 64 seeds"
+        );
+        assert!(
+            variants.len() >= 2,
+            "{target}: paren spellings identical across 64 seeds"
+        );
+        // Routine words stay paren-free on every op and seed.
+        for op in Opcode::ALL {
+            let Some(prog) = routine_for(target, *op) else {
+                continue;
+            };
+            for seed in [0u64, 735, 7001, u64::MAX] {
+                let text = routine_lua(
+                    &prog,
+                    seed,
+                    *op as usize,
+                    seed_deform::p6_site_width(*op),
+                );
+                assert!(
+                    !text.contains('('),
+                    "{target} {} seed {seed}: routine took a paren",
+                    op.name()
+                );
+            }
+        }
+        // Minify-path acceptance: paren decimals lex/parse/emit/reparse and
+        // run identically through both native toolchains.
+        let src = "local a=(1001);local b=(999999);print(a,b)";
+        let output =
+            crate::minify::with_options(src, target, crate::minify::Options::seeded(735)).unwrap();
+        let work = native::Workspace::new();
+        let path = work.0.join("t6_paren.lua");
+        fs::write(&path, output).unwrap();
+        assert!(native::compile(target, &path).status.success());
+        assert_eq!(native::compile_and_run(target, &path), b"1001\t999999\n");
+    }
+}
+
 const P1_DIALECT_SEEDS: [u64; 8] = [0, 1, 42, 735, 7001, 7351, 100, u64::MAX];
 
 /// P1 acceptance: every seed emits a textually distinct template and image
@@ -666,6 +762,9 @@ fn p4_dual_forms_appear() {
 /// P4 helper: canonicalize number spellings to decimal values so chain
 /// locks compare semantics, immune to the respeller (identifier-embedded
 /// digits like `ok5`/`u9` are kept: same boundary rule as the emitter).
+/// T6: one paren pair around a pure digit run canonicalizes to the value
+/// (same rule as the emitter; calls like `f(x)` never match because their
+/// insides are not pure digits).
 fn p4_canon_numbers(text: &str) -> String {
     fn word_byte(c: u8) -> bool {
         matches!(c, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'.')
@@ -675,6 +774,17 @@ fn p4_canon_numbers(text: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         let is_start = i == 0 || !word_byte(bytes[i - 1]);
+        if is_start && bytes[i] == b'(' && (i == 0 || bytes[i - 1] != b')') {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j - (i + 1) >= 3 && j < bytes.len() && bytes[j] == b')' {
+                out.push_str(&text[i + 1..j].parse::<u64>().unwrap().to_string());
+                i = j + 1;
+                continue;
+            }
+        }
         if is_start && bytes[i] == b'0' && i + 2 < bytes.len() + 1 && text[i..].starts_with("0x") {
             let mut j = i + 2;
             while j < bytes.len() && bytes[j].is_ascii_hexdigit() {

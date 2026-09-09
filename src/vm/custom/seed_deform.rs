@@ -267,12 +267,70 @@ pub(crate) fn p1_number_form(dec: &str, rng: &mut Prng) -> String {
     picked
 }
 
+/// T6 (G4 paren noise): value of a possibly paren-wrapped spelling. The
+/// template emitter wraps pure decimal runs in exactly one paren pair;
+/// the test gates share this rule, so any drift fails loudly on both
+/// sides instead of silently changing a value.
+fn p1_paren_value(form: &str) -> u64 {
+    let inner = form
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(form);
+    assert!(
+        !inner.contains(['(', ')']),
+        "P1 respell: nested parens unrepresentable"
+    );
+    p1_number_value(inner)
+}
+
+/// T6: template-only spelling choice. `routine_lua` keeps calling
+/// `p1_number_form` (duplicated builder below, deliberately not shared:
+/// routine words must never take parens, so every corrosion-surgery
+/// anchor stays byte-stable). The template additionally draws `(dec)`:
+/// parens cost exactly 2 bytes (inside the standing +2B budget rule) and
+/// keep the inner spelling decimal-canonical, so the audit surface keeps
+/// grepping decimal. Same eligibility as `p1_number_form` (3+ digits,
+/// below 2^53, fuel budget exempt).
+pub(crate) fn p1_number_form_full(dec: &str, rng: &mut Prng) -> String {
+    if dec.len() < 3 {
+        return dec.to_owned();
+    }
+    let value: u64 = dec.parse().expect("P1 respell: bad literal");
+    assert!(value < (1 << 53), "P1 respell: literal exceeds 2^53");
+    if value == 100_000 {
+        return dec.to_owned();
+    }
+    let mut forms = vec![dec.to_owned()];
+    for hex in [format!("0x{value:x}"), format!("0x{value:X}")] {
+        if hex.len() <= dec.len() + 2 && !forms.contains(&hex) {
+            forms.push(hex);
+        }
+    }
+    if value > 0 {
+        let mut scale = 10u64;
+        let mut exp = 1u32;
+        while exp < 19 && value % scale == 0 {
+            let sci = format!("{}e{exp}", value / scale);
+            if sci.len() <= dec.len() + 2 && !forms.contains(&sci) {
+                forms.push(sci);
+            }
+            scale *= 10;
+            exp += 1;
+        }
+    }
+    let paren = format!("({dec})");
+    assert_eq!(paren.len(), dec.len() + 2, "P1 respell: paren over budget");
+    forms.push(paren);
+    let picked = forms[rng.index(forms.len())].clone();
+    assert_eq!(p1_paren_value(&picked), value, "P1 respell changed a value");
+    picked
+}
 /// Region 5: respell eligible integer literals (3+ digits, budget exempt).
 /// String contents are skipped; a literal must sit between two non-word
 /// bytes so identifiers, floats and concat runs are never touched.
 fn p1_respell_numbers(src: &str, rng: &mut Prng) -> String {
     let bytes = src.as_bytes();
-    let mut out = String::with_capacity(src.len() + 128);
+    let mut out = String::with_capacity(src.len() + 256);
     let mut i = 0;
     let mut in_string = false;
     while i < bytes.len() {
@@ -305,7 +363,9 @@ fn p1_respell_numbers(src: &str, rng: &mut Prng) -> String {
             let left_ok = start == 0 || !p1_word_byte(bytes[start - 1]);
             let right_ok = i >= bytes.len() || !p1_word_byte(bytes[i]);
             if left_ok && right_ok {
-                out.push_str(&p1_number_form(dec, rng));
+                // T6: template-only spelling table (routine_lua keeps the
+                // paren-free `p1_number_form`, so routine text is unchanged).
+                out.push_str(&p1_number_form_full(dec, rng));
             } else {
                 out.push_str(dec);
             }
@@ -315,8 +375,10 @@ fn p1_respell_numbers(src: &str, rng: &mut Prng) -> String {
         i += 1;
     }
     assert!(!in_string, "P1 respell: unterminated string literal");
+    // T6: the cap moves 128 -> 256 because every eligible literal may now
+    // draw the +2B paren form on top of the standing +2B hex/sci budget.
     assert!(
-        out.len() <= src.len() + 128,
+        out.len() <= src.len() + 256,
         "P1 respell grew the template by {}B",
         out.len().saturating_sub(src.len())
     );
