@@ -46,17 +46,17 @@ fn pins_lua51() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 4),
-            (256, 156),
-            (65536, 96),
-            (16777216, 8),
+            (256, 168),
+            (65536, 100),
+            (16777216, 10),
             (2147483647, 27),
-            (4294967296, 29),
+            (4294967296, 18),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
-            12,
+            11,
             vec![
                 ("X=N*X%N".to_string(), 21),
                 ("X[N]=N".to_string(), 19),
@@ -68,12 +68,15 @@ fn pins_lua51() -> AuditPins {
                     9,
                 ),
                 ("X=(X+X+(N*N+N))%N".to_string(), 8),
-                ("X=NXXXXXXX=(X*N+X+X+X+X+(N*N+N))%N".to_string(), 8),
+                ("X[N]=NXX[N]==NXX[N]=N".to_string(), 7),
             ],
         ),
-        check6_alias_prologues: 0,
+        // K7: the block state table (pre-existing shape) drifts into a
+        // `local`-starting `;`-fragment; the heuristic counts slots, not
+        // captures.
+        check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 85),
+        check8_literal_gcd: (1, 76),
         check9_stream: (15536, 1, false),
     }
 }
@@ -81,18 +84,18 @@ fn pins_lua51() -> AuditPins {
 fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
-            (86, 4),
-            (256, 161),
-            (65536, 98),
-            (16777216, 8),
+            (86, 6),
+            (256, 146),
+            (65536, 92),
+            (16777216, 4),
             (2147483647, 22),
-            (4294967296, 29),
+            (4294967296, 16),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
-            11,
+            12,
             vec![
                 ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
@@ -110,9 +113,9 @@ fn pins_luau() -> AuditPins {
                 ),
             ],
         ),
-        check6_alias_prologues: 1,
+        check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 90),
+        check8_literal_gcd: (1, 73),
         check9_stream: (20687, 2, false),
     }
 }

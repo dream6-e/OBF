@@ -203,18 +203,20 @@ pub fn base86_decode_mixed(text: &str, alphabet: &[u8; 86]) -> Result<Vec<u8>, D
     Ok(out)
 }
 
-/// K9a Lua embedding: escape exactly the three classes `"..."` cannot hold
-/// raw (`"` -> `\"`, `\` -> `\\`, bytes < 32 -> `\ddd`); everything else is
-/// emitted raw. The emitted decoder reads post-escape bytes via SB(), so
+/// K9a Lua embedding: escape exactly the classes `"..."` cannot hold raw
+/// (`"` -> `\"`, `\` -> `\\`, bytes < 32 or >= 127 -> `\ddd`); the rest is
+/// emitted raw. The high-byte arm is load-bearing: pushing a byte >= 128 as
+/// `char` would UTF-8-encode it into two bytes (caught by the K7 vector
+/// harness). The emitted decoder reads post-escape bytes via SB(), so
 /// embedding is invisible to it; the product audit unescapes with the same
-/// three rules, and `slot_rewrite` is escape-aware.
+/// rules, and `slot_rewrite` is escape-aware.
 pub(crate) fn lua_escape_string(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() + 16);
     for &byte in bytes {
         match byte {
             34 => out.push_str("\\\""),
             92 => out.push_str("\\\\"),
-            0..=31 => {
+            0..=31 | 127..=255 => {
                 out.push('\\');
                 out.push((b'0' + byte / 100) as char);
                 out.push((b'0' + (byte / 10) % 10) as char);
@@ -230,14 +232,27 @@ pub(crate) fn lua_escape_string(bytes: &[u8]) -> String {
 /// set (rejection-sampled from the image stream; deterministic). K9a hides
 /// the byte width (256) and the length modulus (2^24) behind such opaque
 /// pairs; the radix (86) is split by the caller into [2, 84], which the
-/// nice set never touches.
+/// nice set never touches. K7 additionally splits (2^32 + c)/2^33 for modulus
+/// spellings, so the reject list covers the audit's full nice set (the big
+/// entries are unreachable for K9a's small values: zero behavior change).
+const NICE_FULL: [u64; 17] = [
+    85, 7225, 614125, 52200625, 86, 7396, 636056, 54700816, 256, 65535, 65536, 16777216,
+    2147483648, 2147483647, 4294967295, 4294967296, 4294967297,
+];
+
+/// An opaque-split part is "nice" (recognizable to an analyst) exactly when
+/// it lands in [`NICE_FULL`]. Shared with the K7 sandwich sampler so every
+/// noise literal in every spelling passes one predicate.
+pub(crate) fn is_nice_part(value: u64) -> bool {
+    NICE_FULL.contains(&value)
+}
+
 pub(crate) fn opaque_split(rng: &mut crate::random::Prng, value: u64) -> (u64, u64) {
-    const NICE_SMALL: [u64; 9] = [85, 86, 256, 7225, 7396, 65535, 65536, 636056, 614125];
     debug_assert!(value > 2, "K9a: opaque split needs headroom");
     loop {
         let a = 1 + rng.index(value as usize - 1) as u64;
         let b = value - a;
-        if !NICE_SMALL.contains(&a) && !NICE_SMALL.contains(&b) {
+        if !is_nice_part(a) && !is_nice_part(b) {
             return (a, b);
         }
     }

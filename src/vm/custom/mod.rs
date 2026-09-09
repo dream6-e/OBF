@@ -37,6 +37,7 @@
 //! semantic image as well as transport, layout, local, and private-field
 //! randomization.
 
+mod bitops;
 mod chacha;
 mod cipher;
 mod compress;
@@ -53,6 +54,7 @@ mod transport;
 use crate::bytecode::custom::{self, Opcode, Program};
 use crate::{Diagnostic, Target};
 
+pub(crate) use bitops::*;
 pub(crate) use chacha::*;
 pub(crate) use cipher::*;
 pub(crate) use compress::*;

@@ -1110,18 +1110,18 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
             schedules.insert(format!("{:?}", chacha_params(seed)));
             let keys = wrapper_keys(seed);
-            assert!(raw.contains(&format!("[{}]=function(MF,X8)", keys[CHACHA_WORD_FIELD])));
-            assert!(raw.contains(&format!("[{}]=function(X,R)", keys[CHACHA_QUARTER_FIELD])));
+            assert!(raw.contains(&format!("[{}]=function(MF,X8,X8C", keys[CHACHA_WORD_FIELD])));
+            assert!(raw.contains(&format!("[{}]=function(Xa,Xb,Ra,Rb)", keys[CHACHA_QUARTER_FIELD])));
             assert!(raw.contains(&format!("[{}]=function(Q)", keys[CHACHA_BLOCK_FIELD])));
             assert!(raw.contains(&format!(
                 "[{}]=function(B,s1,s2,s3,pv,ctx,d,aw,CB",
                 keys[CHACHA_STREAM_FIELD]
             )));
-            assert!(raw.contains(&format!("[{}]=function(AH,CC,CB,X8", keys[ANTI_HOOK_FIELD])));
+            assert!(raw.contains(&format!("[{}]=function(AH,CC,CB,X8C", keys[ANTI_HOOK_FIELD])));
             assert!(raw.contains("1634760805,857760878,2036477234,1797285236"));
             assert!(raw.contains("for i=1,4 do Q(x,1,5,9,13)"));
             assert!(raw.contains("Z[1]~=804192318"));
-            assert_eq!(raw.matches("local aw=AH(AH,CC,CB,X8").count(), 2);
+            assert_eq!(raw.matches("local aw=AH(AH,CC,CB,X8C").count(), 2);
 
             let [i0, i1, i2] = perm_indices(seed);
             let pv_line = format!("local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;");
@@ -1134,8 +1134,13 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
                 .find(&format!("local B=VMS[{}](C,c1,c2,c3,pv,CC,AH,CB", keys[23]))
                 .expect("inner ChaCha8 call");
             assert!(outer_call < inner_call);
-            assert!(raw.contains("ctx=(n*31+bits*17+cs*7+cc*13+bl)%4294967296"));
-            assert!(raw.contains("ctx*d)%4294967296"));
+            let ctx_at = raw.find("local ctx=").expect("ctx binding moved");
+            let ctx_end = raw[ctx_at..].find(';').expect("ctx terminator");
+            let ctx_expr = &raw[ctx_at..ctx_at + ctx_end];
+            for term in ["n*31", "bits*17", "cs*7", "cc*13", "bl"] {
+                assert!(ctx_expr.contains(term), "{target} seed {seed}: ctx lost {term}");
+            }
+            assert!(raw.contains("ctx*d"), "{target} seed {seed}: KDF lost ctx term");
             assert!(raw.contains("q=d==1 and"));
             if target.is_luau() {
                 assert!(raw.contains(r#"if A~="[C]" or B~="[C]""#));

@@ -1067,11 +1067,11 @@ fn decoder_splits_into_seeded_random_sections() {
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
             let keys = wrapper_keys(seed);
             assert!(raw.contains(&format!(
-                "[{}]=function(B,s1,s2,s3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS)",
+                "[{}]=function(B,s1,s2,s3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS)",
                 keys[1]
             )));
             assert!(raw.contains(&format!(
-                "[{}]=function(C,s1,s2,s3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS)",
+                "[{}]=function(C,s1,s2,s3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS)",
                 keys[23]
             )));
             assert!(raw.contains(&format!("[{}]=function", keys[22])));
@@ -1378,6 +1378,18 @@ fn k9a_lua_escapes_roundtrip_through_literal_bytes() {
         assert_eq!(
             crate::minify::literal_bytes(&literal, target).unwrap(),
             pool,
+            "{target}"
+        );
+    }
+    // K7: every byte value round-trips (high bytes as \ddd, never UTF-8).
+    let all: Vec<u8> = (0u8..=255).collect();
+    let escaped_all = lua_escape_string(&all);
+    assert!(escaped_all.bytes().all(|byte| byte < 127));
+    for target in [Target::Lua51, Target::Luau] {
+        let literal = format!("\"{escaped_all}\"");
+        assert_eq!(
+            crate::minify::literal_bytes(&literal, target).unwrap(),
+            all,
             "{target}"
         );
     }

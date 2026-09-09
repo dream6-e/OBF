@@ -144,6 +144,9 @@ fn generate_semantic(
     // variants in the runtime helpers. Reuses the audited native-backend
     // variant machinery; handler order and semantics stay unchanged.
     let mut structure = crate::random::Prng::new(seed ^ 0x6d37_7374_7275_6374);
+    // K7 toolbox stream: disjoint domain, so transport/crypto/parser bytes
+    // stay identical and the wire image is frozen (pinned by unit test).
+    let mut bitops_rng = crate::random::Prng::new(seed ^ 0x6b37_6269_746f_7073);
     // M7: integer bound-check variants (exact equivalence: the operands are
     // always varint-decoded integers, so `x>K`, `K<x` and `not(x<=K)` are
     // interchangeable; no NaN or metamethod semantics can apply).
@@ -273,6 +276,12 @@ if d7+d8*65521~={fake_adler} then E()end;"
     ];
     if program.target.is_luau() {
         hidden.extend(["integer", "fromstring", "freeze", "info"]);
+        // K7: bit32/buffer libs plus every method the Luau word toolbox
+        // touches. All resolve through the char pool; none is ever spelled.
+        hidden.extend([
+            "bit32", "buffer", "bxor", "band", "bor", "bnot", "lrotate", "lshift", "rshift",
+            "create", "writeu8", "readu8", "readu32",
+        ]);
     } else {
         hidden.push("getinfo");
     }
@@ -401,6 +410,26 @@ if d7+d8*65521~={fake_adler} then E()end;"
             "Freeze",
             format!("local Freeze=G[{}][{}];", var_of["table"], var_of["freeze"]),
         ));
+        units.push((
+            "B32",
+            format!(
+                "local B32,BUF=G[{0}],G[{1}];local BX,BA,BO,BN,LR,SHL,RS=B32[{2}],B32[{3}],B32[{4}],B32[{5}],B32[{6}],B32[{7}],B32[{8}];local BNE,BW8,BR8,BFS,BR3=BUF[{9}],BUF[{10}],BUF[{11}],BUF[{12}],BUF[{13}];",
+                var_of["bit32"],
+                var_of["buffer"],
+                var_of["bxor"],
+                var_of["band"],
+                var_of["bor"],
+                var_of["bnot"],
+                var_of["lrotate"],
+                var_of["lshift"],
+                var_of["rshift"],
+                var_of["create"],
+                var_of["writeu8"],
+                var_of["readu8"],
+                var_of["fromstring"],
+                var_of["readu32"],
+            ),
+        ));
     }
     structure.shuffle(&mut units);
     let sc_at = units.iter().position(|(name, _)| *name == "SC").unwrap();
@@ -412,20 +441,41 @@ if d7+d8*65521~={fake_adler} then E()end;"
     for (_, statement) in &units {
         s.push_str(statement);
     }
-    // Shared exact-integer primitives. ChaCha8 deliberately reuses arithmetic
-    // X8 and does not depend on target-specific bit libraries.
-    s.push_str("local X8=function(a,b)local r=0;for j=0,7 do r=r+(a+b)%2*2^j;a=MF(a/2);b=MF(b/2)end;return r end;local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65521;y=(y+x)%65521 end;return x+y*65536 end;local L32=function(S,p)return SB(S,p)+SB(S,p+1)*256+SB(S,p+2)*65536+SB(S,p+3)*16777216 end;");
+    // K7 word toolbox: hot X8 (inner stream loop) plus cold X8C (table
+    // builds, anti-hook KAT) always draw distinct variants; L32 draws one of
+    // three. Lua 5.1 stays pure arithmetic, Luau runs bit32+buffer. AD (the
+    // Adler fold) is untouched arithmetic on both targets.
+    let bit_names = BitNames::emit();
+    let (x8_hot, x8_cold) = draw_dual(&mut bitops_rng);
+    let (pre_hot, decl_hot) = render_x8(program.target, x8_hot, "X8", &bit_names);
+    let (pre_cold, decl_cold) = render_x8(program.target, x8_cold, "X8C", &bit_names);
+    let l32_variant = bitops_rng.index(3);
+    let l32_decl = render_l32(
+        program.target,
+        l32_variant,
+        "L32",
+        &bit_names,
+        &mut bitops_rng,
+    );
+    s.push_str(&pre_hot);
+    s.push_str(&pre_cold);
+    s.push_str(&decl_hot);
+    s.push_str(&decl_cold);
+    s.push_str("local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65521;y=(y+x)%65521 end;return x+y*65536 end;");
+    s.push_str(&l32_decl);
     let mut ret_order: Vec<&str> = vec![
         "SC", "Z", "U", "G", "E", "PC", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS",
-        "NX", "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS", "X8", "AD", "L32",
+        "NX", "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS", "X8", "X8C", "AD", "L32",
+        "B32", "BUF", "BX", "BA", "BO", "BN", "LR", "SHL", "RS", "BNE", "BW8", "BR8", "BFS", "BR3",
     ];
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
     s.push_str(&format!("\nreturn {ret_names}\nend,"));
     // Entry reconstructs three source-witness shares in shuffled call order.
     // Both ChaCha8 domains then derive final key/nonce/counter words only at
-    // runtime after anti-hook attestation. Pure arithmetic stays below 2^53,
-    // keeping Lua 5.1/Luau behavior bit-identical without bit libraries.
+    // runtime after anti-hook attestation. Exact-integer work stays below
+    // 2^53, keeping Lua 5.1/Luau behavior bit-identical; Lua 5.1 implements
+    // the word layer in pure arithmetic while Luau runs bit32+buffer (K7).
     let shares = cipher_shares(&keys, &params, program.target);
     // B1: the payload seed additionally carries the permutation term,
     // computed on both ends from the rebuilt renumbering table at three
@@ -626,20 +676,23 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
     // quarter round, ChaCha8 block, stream/KDF, outer frame inverse and inner
     // LZW inverse are all sibling numeric-keyed fields. The final layout pass
     // globally shuffles them; entry wiring alone composes the decryptor.
-    let (crypto_fields, crypto_wiring) = chacha_decoder_sections(&chacha, program.target, &keys);
-    let frame_decode = transport_frame_decoder(&frame);
+    let (crypto_fields, crypto_wiring) =
+        chacha_decoder_sections(&chacha, program.target, &keys, &mut bitops_rng);
+    let frame_decode = transport_frame_decoder(&frame, &mut bitops_rng);
     let decrypt_field = format!(
-        "[{}]=function(B,s1,s2,s3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS)\nlocal aw=AH(AH,CC,CB,X8,E,SB,NCH,TC,MF,DBG,GI,LS);B=CC(B,s1,s2,s3,pv,#B,1,aw,CB,E,SB,NCH,TC,MF,X8);{frame_decode}return B end,",
+        "[{}]=function(B,s1,s2,s3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS)\nlocal aw=AH(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DBG,GI,LS);B=CC(B,s1,s2,s3,pv,#B,1,aw,CB,E,SB,NCH,TC,MF,X8);{frame_decode}return B end,",
         keys[1]
     );
     let split_lzw_helpers =
         crate::random::Prng::new(seed ^ 0x6c7a_775f_7370_6c38).next_u64() % 2 == 0;
     let (compression_fields, compression_wiring) =
-        compression_decoder_sections(&keys, split_lzw_helpers);
+        compression_decoder_sections(&keys, split_lzw_helpers, &mut bitops_rng);
     // P3: per-seed reader-definition order (placeholder: canonical order).
     let g1 = super::seed_deform::p3_reader_group_lua(seed);
-    let g2 = r#"local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;local num=function()return fin(b32(),b32())end;"#
-        .to_owned();
+    let g2 = format!(
+        "local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*{u32}+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;local num=function()return fin(b32(),b32())end;",
+        u32 = render_u32_atom(&mut bitops_rng)
+    );
     // The semantic parser now sees an exact decompressed ISA image, so its
     // helpers are only ordinary bounded readers and the number reconstructor.
     // The former constant-only decrypt closures are replaced by the stronger
@@ -669,7 +722,7 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
         "local FMt,PT=VMS[{forms}](E,SB);\
 local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;\
 {crypto_wiring}\
-local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS);\
+local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS);\
 {compression_wiring}",
         forms = keys[13],
         i0 = pv_slots[0],
@@ -1458,7 +1511,11 @@ end;
 /// always a third independently keyed field. The outer layout pass shuffles all of them
 /// among unrelated VM sections, so neither count nor physical position is a
 /// stable decoder signature.
-fn compression_decoder_sections(keys: &[u64], split_helpers: bool) -> (Vec<String>, String) {
+fn compression_decoder_sections(
+    keys: &[u64],
+    split_helpers: bool,
+    bitops: &mut crate::random::Prng,
+) -> (Vec<String>, String) {
     let bit_reader = r#"local BR=function(S,N)local p=0;local R=function(n)if p>N-n then E()end;local v=0;for j=0,n-1 do local q=p+j;v=v+MF(SB(S,MF(q/8)+1)/2^(q%8))%2*2^j end;p=p+n;return v end;return R,function()return p end end;"#;
     let lzw_decoder = r#"local LD=function(S,N,L)local R,RP=BR(S,N);local O={};local total=0;while total<L do local lim=total+8192;if lim>L then lim=L end;local DP,ST={},{};local nx=256;local prev=nil;local pf=0;while total<lim do local t=R(1);local code;if t==1 then code=R(8);if code<32 then E()end else t=R(1);if t==1 then code=R(5)else if prev==nil then E()end;local w=0;local z=nx-256;while z>0 do w=w+1;z=MF(z/2)end;code=256+R(w)end end;if code>nx then E()end;local special=code==nx;if special then DP[nx]=prev*256+pf end;local sn=0;local cur=code;while cur>=256 do local z=DP[cur];sn=sn+1;ST[sn]=z%256;cur=MF(z/256)end;sn=sn+1;ST[sn]=cur;local first=cur;if not special and prev~=nil then DP[nx]=prev*256+first end;if prev~=nil then nx=nx+1 end;prev=code;pf=first;if total+sn>lim then E()end;for j=sn,1,-1 do total=total+1;O[total]=NCH(ST[j])end end end;if RP()~=N then E()end;return TC(O)end;"#;
     let mut fields = Vec::new();
@@ -1482,13 +1539,14 @@ fn compression_decoder_sections(keys: &[u64], split_helpers: bool) -> (Vec<Strin
         ));
         format!("local LD=VMS[{}](E,SB,NCH,TC,MF);", keys[22])
     };
-    let core = r#"if #C<17 or L32(C,1)~=22501964 then E()end;local n=L32(C,5);local bits=L32(C,9);local cs=L32(C,13);local bl=MF((bits+7)/8);local cc=MF((n+8191)/8192);if n<1 or n>16777216 or bits<1 or bl~=#C-16 or #C>=n then E()end;local ctx=(n*31+bits*17+cs*7+cc*13+bl)%4294967296;local aw=AH(AH,CC,CB,X8,E,SB,NCH,TC,MF,DBG,GI,LS);local D=CC(SS(C,17),s1,s2,s3,pv,ctx,2,aw,CB,E,SB,NCH,TC,MF,X8);local pad=#D*8-bits;if pad>7 or pad>0 and MF(SB(D,#D)/2^(8-pad))~=0 then E()end;local B=LD(D,bits,n);if AD(B,1,#B)~=cs then E()end;return B"#;
+    let ctx_sum = render_modsum(bitops, &["n*31", "bits*17", "cs*7", "cc*13", "bl"]);
+    let core = format!("if #C<17 or L32(C,1)~=22501964 then E()end;local n=L32(C,5);local bits=L32(C,9);local cs=L32(C,13);local bl=MF((bits+7)/8);local cc=MF((n+8191)/8192);if n<1 or n>16777216 or bits<1 or bl~=#C-16 or #C>=n then E()end;local ctx={ctx_sum};local aw=AH(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DBG,GI,LS);local D=CC(SS(C,17),s1,s2,s3,pv,ctx,2,aw,CB,E,SB,NCH,TC,MF,X8);local pad=#D*8-bits;if pad>7 or pad>0 and MF(SB(D,#D)/2^(8-pad))~=0 then E()end;local B=LD(D,bits,n);if AD(B,1,#B)~=cs then E()end;return B");
     fields.push(format!(
-        "[{}]=function(C,s1,s2,s3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS){core} end,",
+        "[{}]=function(C,s1,s2,s3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS){core} end,",
         keys[23]
     ));
     let wiring = format!(
-        "{wiring}local B=VMS[{}](C,c1,c2,c3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,AD,L32,DBG,GI,LS);",
+        "{wiring}local B=VMS[{}](C,c1,c2,c3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS);",
         keys[23]
     );
     (fields, wiring)
@@ -1497,11 +1555,28 @@ fn compression_decoder_sections(keys: &[u64], split_helpers: bool) -> (Vec<Strin
 /// Compact strict frame-v2 inverse. Confidentiality is handled by the outer
 /// ChaCha8 field; this stage validates every framed byte before returning the
 /// independently encrypted compression frame.
-fn transport_frame_decoder(params: &FrameParams) -> String {
+fn transport_frame_decoder(params: &FrameParams, bitops: &mut crate::random::Prng) -> String {
     let c0 = params.key_coefficients[0];
     let c1 = params.key_coefficients[1];
+    let cookie = params.cookie_salt.to_string();
+    let tag = params.tag_salt.to_string();
+    let ex0 = render_modsum(
+        bitops,
+        &["n", "d*257", "(fk0%65536)*65536", "(fk1%65536)*17", &cookie],
+    );
+    let ex1 = render_modsum(
+        bitops,
+        &[
+            "AD(B,17,16+n)",
+            "c*263",
+            "d*31",
+            "(fk0%65536)*65536",
+            "fk1%65536",
+            &tag,
+        ],
+    );
     format!(
-        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;local fk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;local fk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;local fd={version}+{header}*256+(fk0+fk1+{descriptor})%65536*65536;local d=L32(B,1);local n=L32(B,5);local c=L32(B,9);local t=L32(B,13);local pad=(4-(16+n)%4)%4;if n>16777216 or #B~=16+n+pad or d~=fd then E()end;local ex=(n+d*257+(fk0%65536)*65536+(fk1%65536)*17+{cookie})%4294967296;if c~=ex then E()end;ex=(AD(B,17,16+n)+c*263+d*31+(fk0%65536)*65536+fk1%65536+{tag})%4294967296;if t~=ex then E()end;for i=1,pad do if SB(B,16+n+i)~=(fk0+fk1*i+{padding})%256 then E()end end;B=SS(B,17,16+n);",
+        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;local fk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;local fk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;local fd={version}+{header}*256+(fk0+fk1+{descriptor})%65536*65536;local d=L32(B,1);local n=L32(B,5);local c=L32(B,9);local t=L32(B,13);local pad=(4-(16+n)%4)%4;if n>16777216 or #B~=16+n+pad or d~=fd then E()end;local ex={ex0};if c~=ex then E()end;ex={ex1};if t~=ex then E()end;for i=1,pad do if SB(B,16+n+i)~=(fk0+fk1*i+{padding})%256 then E()end end;B=SS(B,17,16+n);",
         header = TRANSPORT_FRAME_HEADER,
         version = TRANSPORT_FRAME_VERSION,
         c00 = c0[0],
@@ -1517,8 +1592,6 @@ fn transport_frame_decoder(params: &FrameParams) -> String {
         s0 = params.key_salts[0],
         s1 = params.key_salts[1],
         descriptor = params.descriptor_salt,
-        cookie = params.cookie_salt,
-        tag = params.tag_salt,
         padding = params.padding_salt,
     )
 }
