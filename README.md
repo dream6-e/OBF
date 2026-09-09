@@ -156,10 +156,10 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 84,779 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 93,688 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 85,217 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 94,144 B |
 
-SHA-256：Lua51 `42bfd52e315cecee7d7515a9257cc93aab30515b7fd39504686eff7843d15e34`；Luau `dd4c27bcf93ce8fa2d045d73841c82181100f7dd5a244ae41a017c4f9b87e019`。
+SHA-256：Lua51 `691d9eace02bcb35192c4796923b15347ee645f6a6d1d44fe568d23eeac58a77`；Luau `eeb983132c6025d4a98999d554ec6e8f9ec4a49c2b0ce4d1d4dec6de80eaac23`。
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。**压缩大小的唯一硬契约**是：完整 LZW frame（包括 16-byte header）必须严格小于其压缩前 private semantic bytecode；Lua decoder、ChaCha8、anti-hook、包装和最终整份 `.lua` 均不进入该比较。`tools/bench-vm.sh` 的 98,000/98,000 B 仅是独立的整脚本膨胀预算，不用于判断压缩是否成功；不可压缩输入由生成器拒绝。
 
@@ -201,7 +201,7 @@ SHA-256：Lua51 `42bfd52e315cecee7d7515a9257cc93aab30515b7fd39504686eff7843d15e3
 
 `tests/scope.rs`、`tests/scope_reuse.rs`、`tests/random_names.rs`、`tests/safe_minify.rs` 及内部 VM 测试还覆盖：所有可改名 local 的 `[a-z]{1,2}`/同域唯一性/换名断言，短名跨域复用、闭包读写、声明时序、原先遮蔽的声明、参数/body 共域，多步匹配修复、小图穷举重解析、工作门限、名称池耗尽、CLI seed 报告/复现/参数拒绝/失败不覆盖文件，并发新 seed，以及原有绑定、类型、元方法、插值、变参和超长链回归。原生运行差分包含 seed `0`、`1`、`0x735`、`u64::MAX`；650 个已是单字母的 locals 也经过双目标编译/运行；10,000 个相邻块加一个累计变量的压力测试安全复用两个单字母名，另有 96 种生成式遮蔽/初始化程序的双目标多 seed 运行差分。
 
-当前 ISA14 完整矩阵为 **PASS239（124 单元 + 115 集成）**；Lua51/Luau 原生语法、运行、debug/release、golden、ChaCha8/anti-hook/corruption、operand/register/field-order ABI、capture/constant pools、dataflow fusion、entry graph 与 **semantic-bytecode→完整LZW-frame strict-smaller** 门全部通过。默认15-run `tools/bench-vm.sh` 最近结果为Lua51 **121 ms / 40.3x**、Luau **136 ms / 45.3x**。golden整脚本为84,779/93,688 B；它们与历史ISA的大小关系仅作信息展示，不是压缩验收条件。
+当前 ISA14 完整矩阵为 **PASS245（130 单元 + 115 集成）**；Lua51/Luau 原生语法、运行、debug/release、golden、ChaCha8/anti-hook/corruption、operand/register/field-order ABI、capture/constant pools、dataflow fusion、entry graph 与 **semantic-bytecode→完整LZW-frame strict-smaller** 门全部通过。默认15-run `tools/bench-vm.sh` 最近结果为Lua51 **121 ms / 60.5x**、Luau **137 ms / 45.7x**。golden整脚本为85,217/94,144 B；它们与历史ISA的大小关系仅作信息展示，不是压缩验收条件。
 
 2026-09-09 P1 seed-ISA逐seed等价变形第五批（11臂臂内变形）完成：52站点表`P5_SITES`（36比较对偶 + 16行内temp-split），覆盖MOV/T/NEW/CALL/BR/RET/STORE/LOAD/IDX/SET全部11个非ALU臂（ALU归B4a，op12体不可达除外）；split安全性由双目标求值序探针钉死（store键先值后、多重赋值/索引从左到右，双端一致），只hoist先求值侧，失败优先级逐位相同；行中性（0行增长，`seed.rs`零改动，80 KiB上限无压力）。门禁先行：双RED（52站点穷举witness落点 + 共享span守恒/单有span XOR/临时量单定义锁，64/16种子）+ 实现内`count==1` fail-closed针 + 变体吞canon组合检查；实现曾一次炸穿28项（S5d缺分号`w7end`语法融合 + S2/S7b覆盖B4b witness），修分号并把T-arm/RET witness换成P5稳定定位子（锁强度不变），另把register-ABI测试的STORE拼写改为XOR双拼写。固定seed golden为84,779/93,688 B（+38/+50），SHA-256见上表，预算维持98,000/98,000 B（8种子实测最坏lua51 85,711 B、luau 94,660 B）；完整矩阵 **PASS239（124单元 + 115集成）**，15-run bench为Lua51 121 ms / 40.3x、Luau 136 ms / 45.3x。
 
