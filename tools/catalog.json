@@ -1,0 +1,36 @@
+{
+ "import": {
+  "58": "typeof",
+  "37": "tonumber",
+  "68": "buffer.readi16",
+  "23": "bit32.countrz",
+  "56": "buffer.copy",
+  "46": "buffer.readi32",
+  "77": "coroutine.close",
+  "14": "xpcall",
+  "AL": "\"n\""
+ },
+ "meta": {
+  "jC": {
+   "key": "jC",
+   "start": 21,
+   "len": 477,
+   "params": "b,u,z,Z,o,w,K,G,q,M,F,H,E,V,f",
+   "nparams": 15,
+   "calls": {},
+   "slots": {
+    "8": 2,
+    "47": 1,
+    "66": 1,
+    "68": 1
+   },
+   "dotslots": {},
+   "writeslots": {},
+   "retstates": {
+    "191": 1,
+    "32": 1,
+    "90": 2,
+    "151": 1
+   },
+   "comps": {
+    
