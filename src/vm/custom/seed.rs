@@ -60,6 +60,7 @@
 //! |   18 | NIL shape rejected               |   36 | store/load index       |
 
 use super::*;
+use crate::random::Prng;
 
 /// Op tags.
 pub(crate) const OP_MOV: u32 = 1;
@@ -1433,7 +1434,13 @@ pub(crate) fn routine_for(target: Target, op: Opcode) -> Option<Vec<SeedInstr>> 
 }
 
 /// Emit a routine as a Lua table literal: `{{7,1,8004000},...}`.
-pub(crate) fn routine_lua(prog: &[SeedInstr]) -> String {
+/// P2 routine/arm emission domain: per-slot streams respell routine words,
+/// per-op streams (tag 0x1_0000) flip Test/TailCall arms. Fresh streams keep
+/// every other seeded choice byte-identical.
+const P2_DOMAIN_ROUTINE: u64 = 0x5031_524F_5554_494E;
+
+pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize) -> String {
+    let mut rng = Prng::new(seed ^ P2_DOMAIN_ROUTINE ^ slot as u64);
     let mut s = String::from("{");
     for (i, ins) in prog.iter().enumerate() {
         if i > 0 {
@@ -1444,7 +1451,13 @@ pub(crate) fn routine_lua(prog: &[SeedInstr]) -> String {
             if j > 0 {
                 s.push(',');
             }
-            s.push_str(&w.to_string());
+            // Values survive verbatim-or-respelled (the picker asserts the
+            // round-trip); small words keep decimal spellings, so surgery
+            // anchors (`{7,`, `{7,1,8`, `{1,0}`) never shift.
+            s.push_str(&super::seed_deform::p1_number_form(
+                &w.to_string(),
+                &mut rng,
+            ));
         }
         s.push('}');
     }
@@ -1590,7 +1603,7 @@ pub(crate) fn seed_prelude_lua_v1(target: Target, seed: u64, used: u64) -> Strin
         debug_assert_eq!(op as usize, index);
         let bit = seed_op_bit(op);
         match (used & bit != 0, routine_for(target, op)) {
-            (true, Some(prog)) => slots.push(routine_lua(&prog)),
+            (true, Some(prog)) => slots.push(routine_lua(&prog, seed, index)),
             _ => slots.push("0".to_owned()),
         }
     }
@@ -1628,7 +1641,7 @@ local SEEDT={{{}}};
 /// v1: fragment arm for an op on a target, or `None` when the op is not
 /// supported there. SEED is an H-local closing over R/RX/K, so the arm
 /// carries only a trailing-trimmed lane-prefix site block.
-pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode) -> Option<String> {
+pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode, seed: u64) -> Option<String> {
     if !op.supported(target) {
         return None;
     }
@@ -1687,11 +1700,20 @@ pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode) -> Option<String> {
         Opcode::Jump => "{0,0,0,0,j,skip1,pc}",
         Opcode::Varargs => "{a,0,0,0,0,0,0,0,va}",
     };
+    // P2: per-op sub-stream; only Test/TailCall have variant arms (Jump,
+    // Return and the default arm are single statements with no clean
+    // equivalence class, so they stay fixed and greppable).
+    let mut arm_rng = Prng::new(seed ^ P2_DOMAIN_ROUTINE ^ 0x1_0000 ^ op as u64);
+    let flipped = arm_rng.next_u64() % 2 == 1;
     if matches!(op, Opcode::TailCall) {
+        // The two action checks are mutually exclusive; order is cosmetic.
+        let tail = if flipped {
+            "if act==2 then return v1;elseif act==3 then fid,args,ups=v1,v2,v3;break;else E()end;"
+        } else {
+            "if act==3 then fid,args,ups=v1,v2,v3;break;elseif act==2 then return v1;else E()end;"
+        };
         return Some(format!(
-            "local v1,v2,v3,act=SEED(SEEDT[{i}],{site},9);act=act or v2;\
-             if act==3 then fid,args,ups=v1,v2,v3;break;\
-             elseif act==2 then return v1;else E()end;"
+            "local v1,v2,v3,act=SEED(SEEDT[{i}],{site},9);act=act or v2;{tail}"
         ));
     }
     // Frame state arrives via H-locals; the expected action rides as the
@@ -1699,9 +1721,16 @@ pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode) -> Option<String> {
     // TailCall). SEED returns value-first so Jump/Return need no locals.
     Some(match op {
         Opcode::Jump => format!("pc=SEED(SEEDT[{i}],{site},1);"),
-        Opcode::Test => format!(
-            "local av,act=SEED(SEEDT[{i}],{site},9);if act==1 then pc=av elseif act~=0 then E()end;"
-        ),
+        Opcode::Test => {
+            // act==1 assigns, act==0 falls through, anything else raises;
+            // the nested form preserves all three paths exactly.
+            let tail = if flipped {
+                "if act~=1 then if act~=0 then E()end else pc=av end;"
+            } else {
+                "if act==1 then pc=av elseif act~=0 then E()end;"
+            };
+            format!("local av,act=SEED(SEEDT[{i}],{site},9);{tail}")
+        }
         Opcode::Return => {
             format!("return SEED(SEEDT[{i}],{site},2);")
         }
@@ -1793,14 +1822,17 @@ mod tests {
 
     #[test]
     fn seed_routine_data_goldens() {
-        assert_eq!(routine_lua(&routine_jump().unwrap()), "{{7,1,8004000}}");
         assert_eq!(
-            routine_lua(&routine_test().unwrap()),
-            "{{2,0,1000000},{6,0,4},{7,1,8005000},{7,0}}"
+            routine_lua(&routine_jump().unwrap(), 735, Opcode::Jump as usize),
+            "{{7,1,8004e3}}"
         );
         assert_eq!(
-            routine_lua(&routine_return().unwrap()),
-            "{{1,0,1000000},{7,2,0}}"
+            routine_lua(&routine_test().unwrap(), 735, Opcode::Test as usize),
+            "{{2,0,0xF4240},{6,0,4},{7,1,8005e3},{7,0}}"
+        );
+        assert_eq!(
+            routine_lua(&routine_return().unwrap(), 735, Opcode::Return as usize),
+            "{{1,0,10000e2},{7,2,0}}"
         );
     }
 
@@ -1928,11 +1960,11 @@ mod tests {
                 let routine = match routine_for(target, *op) {
                     Some(r) => r,
                     None => {
-                        assert!(seed_arm_lua_for(target, *op).is_none());
+                        assert!(seed_arm_lua_for(target, *op, 735).is_none());
                         continue;
                     }
                 };
-                let arm = seed_arm_lua_for(target, *op).unwrap();
+                let arm = seed_arm_lua_for(target, *op, 735).unwrap();
                 let open = arm.find('{').unwrap();
                 let close = arm[open..].find('}').unwrap() + open;
                 let lanes_present = arm[open + 1..close].split(',').count() as u32;

@@ -1540,9 +1540,7 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 "{target} seed {seed}: jump arm missing"
             );
             assert!(
-                raw.contains(
-                    "local av,act=SEED(SEEDT[46],{a,0,0,0,0,skip1,pc},9);if act==1 then pc=av elseif act~=0 then E()end;"
-                ),
+                raw.contains(&seed_arm_lua_for(target, Opcode::Test, seed).unwrap()),
                 "{target} seed {seed}: test arm missing"
             );
             assert!(
@@ -1588,13 +1586,13 @@ fn seed_tailcall_arm_binds_value_first_with_short_return_guard() {
     // values (tailenter) or 2 (immediate value); the arm's `act or v2`
     // guard recovers the action on the short path (regression: without it
     // act binds nil and every immediate tailcall raises).
-    let arm = "local v1,v2,v3,act=SEED(SEEDT[48],{a,b},9);act=act or v2;if act==3 then fid,args,ups=v1,v2,v3;break;elseif act==2 then return v1;else E()end;";
     for target in [Target::Lua51, Target::Luau] {
         for dseed in [735u64, 7001, 1, u64::MAX] {
+        let arm = seed_arm_lua_for(target, Opcode::TailCall, dseed).unwrap();
         let data = compile(SEED_TAILCALL_FIXTURE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let raw = generate(&data, &program, dseed).unwrap();
-        assert!(raw.contains(arm), "{target} seed {dseed}: tailcall arm missing or reshaped");
+        assert!(raw.contains(&arm), "{target} seed {dseed}: tailcall arm missing or reshaped");
         let output = finalize(&raw, target, dseed).unwrap();
         let work = native::Workspace::new();
         let path = work.0.join("seed_tailcall.lua");

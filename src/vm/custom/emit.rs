@@ -1263,7 +1263,7 @@ end;
                 binding_cursor += 1;
                 body.push_str(&operand_binding_lua(start + 1, form));
                 // P0: every supported op runs its seed routine.
-                let arm = seed_arm_lua_for(program.target, op)
+                let arm = seed_arm_lua_for(program.target, op, seed)
                     .ok_or_else(|| Diagnostic::new("missing seed arm for opcode"))?;
                 body.push_str(&arm);
             } else {

@@ -224,7 +224,7 @@ fn p1_number_value(form: &str) -> u64 {
 /// hex, or exact trailing-zero scientific forms. A form is eligible only
 /// when it costs at most 2 extra bytes, and the picked form must parse
 /// back to the identical value.
-fn p1_number_form(dec: &str, rng: &mut Prng) -> String {
+pub(crate) fn p1_number_form(dec: &str, rng: &mut Prng) -> String {
     // Audit surface stays decimal-canonical: only 3+ digit literals respell
     // (every seedfail code, op number and small bound keeps its spelling),
     // and the fuel budget is exempt so the capacity audit keeps grepping.

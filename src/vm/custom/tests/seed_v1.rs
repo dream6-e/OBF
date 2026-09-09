@@ -145,8 +145,12 @@ fn seed_v1_pools_match_locked_consts() {
 /// text is target-independent and Lua51's 46 are a subset of the swept set).
 #[test]
 fn seed_v1_routine_corruption_rejected() {
-    fn lit(target: Target, op: Opcode) -> String {
-        routine_lua(&routine_for(target, op).expect("supported op must have a routine"))
+    fn lit(target: Target, op: Opcode, dseed: u64) -> String {
+        routine_lua(
+            &routine_for(target, op).expect("supported op must have a routine"),
+            dseed,
+            op as usize,
+        )
     }
     fn run_corrupted(target: Target, label: &str, src: &str, pristine: &str, dseed: u64) {
         assert_ne!(src, pristine, "{target} {label}: surgery hit nothing");
@@ -172,9 +176,9 @@ fn seed_v1_routine_corruption_rejected() {
         let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let raw = generate(&data, &program, dseed).unwrap();
-        let jump = lit(target, Opcode::Jump);
+        let jump = lit(target, Opcode::Jump, dseed);
         assert!(raw.contains(&jump), "{target} seed {dseed}: jump routine not emitted");
-        let ret = lit(target, Opcode::Return);
+        let ret = lit(target, Opcode::Return, dseed);
         // SEEDT entries are bare Lua tables (single-tuple routines stay flat),
         // so every surgery below must keep the braces balanced: corruption is
         // caught by the runtime validator or the arm post-condition, never by
@@ -185,7 +189,10 @@ fn seed_v1_routine_corruption_rejected() {
             ("zero-tuple", raw.replacen(&jump, "{0}", 1)),
             ("neg-op", raw.replacen(&jump, &jump.replacen("{", "{-", 1), 1)),
             ("bad-action", raw.replacen(&jump, &jump.replacen("{7,", "{7,9,", 1), 1)),
-            ("bad-kind-tag", raw.replacen(&jump, &jump.replacen("{7,1,8", "{7,1,9", 1), 1)),
+            // P2: the kind tag lives inside a respelled word, so the
+            // corrupted routine is built directly (decimal always lexes):
+            // kind 9 with jump's shape is rejected by runtime refd.
+            ("bad-kind-tag", raw.replacen(&jump, "{{7,1,9004000}}", 1)),
             ("wrong-action", raw.replacen(&jump, "{1,0}", 1)),
             ("wrong-routine", raw.replacen(&jump, &ret, 1)),
         ];
@@ -229,7 +236,7 @@ fn seed_v1_routine_corruption_rejected() {
         let (pristine_ok, pristine_out) = run_image(target, &format!("{name}-pristine-s{dseed}"), &raw, dseed);
         assert!(pristine_ok, "{name} seed {dseed}: pristine corpus must run clean");
         for op in Opcode::ALL.iter().copied().filter(|op| op.supported(target)) {
-            let routine = lit(target, op);
+            let routine = lit(target, op, dseed);
             if !raw.contains(&routine) {
                 continue;
             }
@@ -317,5 +324,125 @@ fn p1_deformation_distinctness_and_determinism() {
                 assert!(diff >= 10, "{target}: seeds {} and {} differ by {diff} lines", P1_DIALECT_SEEDS[i], P1_DIALECT_SEEDS[j]);
             }
         }
+    }
+}
+
+/// P2 gate (RED until Batch-2): the same routine reads differently per seed
+/// (one big word takes ~6 spellings; 64 seeds miss variation with ~6^-63).
+#[test]
+fn p2_routine_text_varies_per_seed() {
+    for target in [Target::Lua51, Target::Luau] {
+        let prog = routine_for(target, Opcode::Jump).expect("jump has a routine");
+        let mut texts = BTreeSet::new();
+        for seed in 0..64u64 {
+            texts.insert(routine_lua(&prog, seed, Opcode::Jump as usize));
+        }
+        assert!(
+            texts.len() >= 2,
+            "{target}: jump routine identical across 64 seeds"
+        );
+    }
+}
+
+/// P2 lock: respelled routines decode back to identical words, deterministi-
+/// cally. The parser below is test-side and independent (dec / 0x-hex /
+/// trailing-zero scientific); agreement with the emitter is real verification.
+#[test]
+fn p2_routine_text_roundtrips_to_identical_words() {
+    fn word(text: &str) -> u32 {
+        let value: u64 = if let Some(hex) = text.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16).unwrap()
+        } else if let Some(e) = text.find('e') {
+            text[..e].parse::<u64>().unwrap() * 10u64.pow(text[e + 1..].parse().unwrap())
+        } else {
+            text.parse().unwrap()
+        };
+        assert!(value <= u32::MAX as u64, "word out of range: {text}");
+        value as u32
+    }
+    fn table(text: &str) -> Vec<Vec<u32>> {
+        let inner = text
+            .strip_prefix('{')
+            .and_then(|t| t.strip_suffix('}'))
+            .unwrap();
+        inner
+            .split("},{")
+            .map(|ins| {
+                ins.trim_start_matches('{')
+                    .trim_end_matches('}')
+                    .split(',')
+                    .map(word)
+                    .collect()
+            })
+            .collect()
+    }
+    for target in [Target::Lua51, Target::Luau] {
+        for op in Opcode::ALL {
+            let Some(prog) = routine_for(target, *op) else {
+                continue;
+            };
+            for seed in [0u64, 735, 7001, u64::MAX] {
+                let text = routine_lua(&prog, seed, *op as usize);
+                assert_eq!(
+                    text,
+                    routine_lua(&prog, seed, *op as usize),
+                    "{target} {} seed {seed}: routine text varies",
+                    op.name()
+                );
+                assert_eq!(
+                    table(&text),
+                    prog,
+                    "{target} {} seed {seed}: routine words changed",
+                    op.name()
+                );
+            }
+        }
+    }
+}
+
+/// P2 gate (RED until Batch-2): the Test arm flips between two equivalent
+/// forms per seed (both observed over 64 seeds with ~2^-63 miss rate); the
+/// site block and call shape never change.
+#[test]
+fn p2_test_arm_flips_per_seed() {
+    for target in [Target::Lua51, Target::Luau] {
+        let mut forms = BTreeSet::new();
+        for seed in 0..64u64 {
+            let arm = seed_arm_lua_for(target, Opcode::Test, seed).unwrap();
+            assert!(
+                arm.contains("{a,0,0,0,0,skip1,pc}"),
+                "{target} seed {seed}: test site changed"
+            );
+            forms.insert(arm);
+        }
+        assert_eq!(
+            forms.len(),
+            2,
+            "{target}: test arm takes {} forms over 64 seeds",
+            forms.len()
+        );
+    }
+}
+
+/// P2 gate (RED until Batch-2): the TailCall arm permutes its two action
+/// checks per seed; site block and value-first guard never change.
+#[test]
+fn p2_tailcall_arm_permutes_per_seed() {
+    for target in [Target::Lua51, Target::Luau] {
+        let mut forms = BTreeSet::new();
+        for seed in 0..64u64 {
+            let arm = seed_arm_lua_for(target, Opcode::TailCall, seed).unwrap();
+            assert!(
+                arm.contains("SEED(SEEDT[48],{a,b},9);act=act or v2;"),
+                "{target} seed {seed}: tailcall head changed"
+            );
+            forms.insert(arm);
+        }
+        assert_eq!(
+            forms.len(),
+            2,
+            "{target}: tailcall arm takes {} forms over 64 seeds",
+            forms.len()
+        );
     }
 }
