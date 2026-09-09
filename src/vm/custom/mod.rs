@@ -43,6 +43,7 @@ mod compress;
 mod emit;
 mod lowering;
 mod seed;
+mod seed_deform;
 mod semantic;
 mod structure;
 #[cfg(test)]

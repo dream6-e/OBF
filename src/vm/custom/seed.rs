@@ -1564,10 +1564,17 @@ end seedfail(35);end;"#;
 /// `local SEED=function(prog,site,expect)...end;` (spliced inside H,
 /// R/RX/K arrive as H-locals so arms carry only the site block).
 pub(crate) fn seed_loop_lua(target: Target, seed: u64) -> String {
-    // P1 deformation draws from per-region sub-streams of `seed` (Batch-1).
-    let _ = seed;
     let fdiv = if target.is_luau() { "x//y" } else { "MF(x/y)" };
-    SEED_LOOP.replace("{FDIV}", fdiv)
+    let body = SEED_LOOP.replace("{FDIV}", fdiv);
+    let deformed = super::seed_deform::p1_deform_template(&body, seed);
+    assert_eq!(
+        deformed.lines().count(),
+        body.lines().count(),
+        "P1: deformation changed the template line count"
+    );
+    assert!(deformed.contains("100000"), "P1: fuel budget lost");
+    assert!(!deformed.contains("{FDIV}"), "P1: FDIV placeholder leaked");
+    deformed
 }
 
 /// Bit for an op in the routine-table usage mask.
