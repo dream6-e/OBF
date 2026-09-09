@@ -1668,7 +1668,7 @@ local K={[5]="k5",[6]="k6",[7]=false}
 local R={};R[12]="r12";R[13]=false;R[14]=0;R[15]={7,8};R[16]={}
 local F={__obf_proto_k=K}
 "#;
-const SEED_DIRECT_VECTORS: &str = r#"
+const SEED_DIRECT_DATA: &str = r#"
 local SITE={2,3,4,5,6,7,100}
 local V={
 {"01-mov-int",{{1,0,3005000},{7,2,0}},2,"VAL",5},
@@ -1756,6 +1756,8 @@ local V={
 {"83-ret-expect-nil-means-zero",{{7,2,3005000}},0,"NILEXP"},
 {"84-ret-expect-nil-accepts-zero",{{7,0}},0,"NILOK"},
 {"85-call-callee-error-propagates",{{5,0,7004000,3000000,0},{7,2,0}},0,"PROP"}}
+"#;
+const SEED_DIRECT_RUNNER: &str = r#"
 local pass=0
 for _,v in ipairs(V) do
 local name,prog,expact,marker,expval=v[1],v[2],v[3],v[4],v[5]
@@ -1802,10 +1804,13 @@ fn seed_ops_direct_differential_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
         for dseed in [0u64, 1, 2, 3, 735, 7001, 7351, u64::MAX] {
         let source = format!(
-            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n",
+            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n{}\n{}\n{}\n",
             SEED_DIRECT_POOLS,
             seed_loop_lua(target, dseed),
-            SEED_DIRECT_VECTORS
+            p6_lua_head(dseed, 7, 3, 5),
+            SEED_DIRECT_DATA,
+            P6_LUA_APPLY,
+            SEED_DIRECT_RUNNER
         );
         let work = native::Workspace::new();
         let path = work.0.join("seed_ops.lua");

@@ -1439,8 +1439,11 @@ pub(crate) fn routine_for(target: Target, op: Opcode) -> Option<Vec<SeedInstr>> 
 /// every other seeded choice byte-identical.
 const P2_DOMAIN_ROUTINE: u64 = 0x5031_524F_5554_494E;
 
-pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize) -> String {
+pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize, site_w: usize) -> String {
     let mut rng = Prng::new(seed ^ P2_DOMAIN_ROUTINE ^ slot as u64);
+    // P6: remap operand lanes through the image perm (pools sized by the
+    // locked consts; the width rides along so no table is consulted twice).
+    let mapper = super::seed_deform::P6Mapper::new(seed, site_w, SN_EMIT, SEEDH_NAMES.len());
     let mut s = String::from("{");
     for (i, ins) in prog.iter().enumerate() {
         if i > 0 {
@@ -1454,8 +1457,9 @@ pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize) -> String 
             // Values survive verbatim-or-respelled (the picker asserts the
             // round-trip); small words keep decimal spellings, so surgery
             // anchors (`{7,`, `{7,1,8`, `{1,0}`) never shift.
+            let word = mapper.map(ins[0], ins.len(), j, *w);
             s.push_str(&super::seed_deform::p1_number_form(
-                &w.to_string(),
+                &word.to_string(),
                 &mut rng,
             ));
         }
@@ -1604,28 +1608,39 @@ pub(crate) fn seed_prelude_lua_v1(target: Target, seed: u64, used: u64) -> Strin
         debug_assert_eq!(op as usize, index);
         let bit = seed_op_bit(op);
         match (used & bit != 0, routine_for(target, op)) {
-            (true, Some(prog)) => slots.push(routine_lua(&prog, seed, index)),
+            (true, Some(prog)) => slots.push(routine_lua(
+                &prog,
+                seed,
+                index,
+                super::seed_deform::p6_site_width(op),
+            )),
             _ => slots.push("0".to_owned()),
         }
     }
-    let stab = STAB_STRS
-        .iter()
-        .enumerate()
-        .map(|(ix, s)| {
-            // Dynamic keys must use the post-`shorten` spellings: the field
-            // pass only rewrites static dot/constructor markers, never the
-            // string literals the seed routines index with.
-            let spelling = match *s {
-                "__obf_proto_u" => crate::vm::fields::short_field("u", target, seed),
-                "__obf_proto_nu" => crate::vm::fields::short_field("nu", target, seed),
-                _ => Ok(s.to_string()),
-            }
-            .unwrap_or_else(|err| panic!("seed STAB field {ix} must shorten: {err:?}"));
-            format!("\"{spelling}\"")
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let seedh = SEEDH_NAMES.join(",");
+    // P6: canonical entry i is placed at image position perm[i], the
+    // inverse-gather of the mapper's canonical->image direction (same
+    // convention as the site placement: content follows its lane).
+    let stab_perm = super::seed_deform::p6_stab_perm(seed, STAB_STRS.len());
+    let mut stab_ordered = vec![String::new(); STAB_STRS.len()];
+    for (ix, s) in STAB_STRS.iter().enumerate() {
+        // Dynamic keys must use the post-`shorten` spellings: the field
+        // pass only rewrites static dot/constructor markers, never the
+        // string literals the seed routines index with.
+        let spelling = match *s {
+            "__obf_proto_u" => crate::vm::fields::short_field("u", target, seed),
+            "__obf_proto_nu" => crate::vm::fields::short_field("nu", target, seed),
+            _ => Ok(s.to_string()),
+        }
+        .unwrap_or_else(|err| panic!("seed STAB field {ix} must shorten: {err:?}"));
+        stab_ordered[stab_perm[ix]] = format!("\"{spelling}\"");
+    }
+    let stab = stab_ordered.join(",");
+    let seedh_perm = super::seed_deform::p6_seedh_perm(seed, SEEDH_NAMES.len());
+    let mut seedh_ordered = vec![String::new(); SEEDH_NAMES.len()];
+    for (ix, name) in SEEDH_NAMES.iter().enumerate() {
+        seedh_ordered[seedh_perm[ix]] = name.to_string();
+    }
+    let seedh = seedh_ordered.join(",");
     // STAB/SEEDH/SEEDT stay top-level; the loop is spliced inside H (see
     // emit.rs) so SEED closes over H-locals R/RX/K and the pools.
     format!(
@@ -1701,6 +1716,12 @@ pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode, seed: u64) -> Option<
         Opcode::Jump => "{0,0,0,0,j,skip1,pc}",
         Opcode::Varargs => "{a,0,0,0,0,0,0,0,va}",
     };
+    debug_assert_eq!(
+        site.split(',').count(),
+        super::seed_deform::p6_site_width(op),
+        "P6: arm site drifted from the width table"
+    );
+    let site = super::seed_deform::p6_permute_site(site, seed);
     // P2: per-op sub-stream; only Test/TailCall have variant arms (Jump,
     // Return and the default arm are single statements with no clean
     // equivalence class, so they stay fixed and greppable).
@@ -1824,16 +1845,31 @@ mod tests {
     #[test]
     fn seed_routine_data_goldens() {
         assert_eq!(
-            routine_lua(&routine_jump().unwrap(), 735, Opcode::Jump as usize),
+            routine_lua(
+                &routine_jump().unwrap(),
+                735,
+                Opcode::Jump as usize,
+                super::seed_deform::p6_site_width(Opcode::Jump)
+            ),
             "{{7,1,8004e3}}"
         );
         assert_eq!(
-            routine_lua(&routine_test().unwrap(), 735, Opcode::Test as usize),
-            "{{2,0,0xF4240},{6,0,4},{7,1,8005e3},{7,0}}"
+            routine_lua(
+                &routine_test().unwrap(),
+                735,
+                Opcode::Test as usize,
+                super::seed_deform::p6_site_width(Opcode::Test)
+            ),
+            "{{2,1000e1,0xF4240},{6,10000,4},{7,1,8005000},{7,0}}"
         );
         assert_eq!(
-            routine_lua(&routine_return().unwrap(), 735, Opcode::Return as usize),
-            "{{1,0,10000e2},{7,2,0}}"
+            routine_lua(
+                &routine_return().unwrap(),
+                735,
+                Opcode::Return as usize,
+                super::seed_deform::p6_site_width(Opcode::Return)
+            ),
+            "{{1,0x2710,1000e3},{7,2,10e3}}"
         );
     }
 

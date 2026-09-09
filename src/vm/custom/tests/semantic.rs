@@ -1539,13 +1539,20 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 "{target} seed {seed}: H must derive K per activation"
             );
             assert!(raw.contains("local SEEDT={"), "{target} seed {seed}: routine table missing");
-            assert!(raw.contains("local SEEDH={CV,SV,Lookup,"), "{target} seed {seed}: helper pool missing");
+            // P6: helper pool emits in permuted order; pin the perm prefix.
+            let seedh_perm = seed_deform::p6_seedh_perm(seed, SEEDH_NAMES.len());
+            let mut seedh_ordered = vec![""; SEEDH_NAMES.len()];
+            for (ix, name) in SEEDH_NAMES.iter().enumerate() {
+                seedh_ordered[seedh_perm[ix]] = name;
+            }
+            let seedh_prefix = format!("local SEEDH={{{},", seedh_ordered[..3].join(","));
+            assert!(raw.contains(&seedh_prefix), "{target} seed {seed}: helper pool missing");
             // Slim arms: frame state arrives via H-locals, the expected
             // action rides as the trailing argument.
+            // P6: arm sites permute; pin width + permuted content.
+            let jump_site = seed_deform::p6_permute_site("{0,0,0,0,j,skip1,pc}", seed);
             assert!(
-                raw.contains(
-                    "pc=SEED(SEEDT[45],{0,0,0,0,j,skip1,pc},1);"
-                ),
+                raw.contains(&format!("pc=SEED(SEEDT[45],{jump_site},1);")),
                 "{target} seed {seed}: jump arm missing"
             );
             assert!(
@@ -1558,12 +1565,13 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 ),
                 "{target} seed {seed}: return arm missing"
             );
+            let abc_site = seed_deform::p6_permute_site("{a,b,c}", seed);
             assert!(
-                raw.contains("SEED(SEEDT[23],{a,b,c});"),
+                raw.contains(&format!("SEED(SEEDT[23],{abc_site});")),
                 "{target} seed {seed}: default arms missing"
             );
             assert!(
-                raw.contains("SEED(SEEDT[25],{a,b,c});"),
+                raw.contains(&format!("SEED(SEEDT[25],{abc_site});")),
                 "{target} seed {seed}: default arms missing"
             );
             // SEED returns value-first, so the Test arm binds `local av,act`

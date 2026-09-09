@@ -2,6 +2,10 @@
 //! under the permanent 80 KiB source-file ceiling; generated output is
 //! unchanged by the split).
 
+use super::seed::{
+    KIND_HELPER, KIND_OPVAL, KIND_PSEUDO, KIND_REG, KIND_SCONST, KIND_TMP, OP_BR, OP_CALL, OP_RET,
+};
+use crate::bytecode::custom::Opcode;
 use crate::random::Prng;
 
 // ---- P1 per-seed template deformation -----------------------------------
@@ -740,6 +744,249 @@ fn p5_arm_forms(lines: &mut Vec<String>, rng: &mut Prng) {
         );
         if rng.index(2) == 1 {
             lines[at] = lines[at].replacen(site.canon, site.variant, 1);
+        }
+    }
+}
+// ---- P6 per-seed lane remapping -----------------------------------------
+// Routine DATA (not template text) is remapped per image seed: tmp slots,
+// site lanes, STAB/SEEDH indices are permuted, and every packed operand ref
+// follows. Offsets (`vo`), K-const layout, int values, nil, op numbers and
+// the five positional specials (RET action, CALL mk/nargs, ALU oi5 pack,
+// BR target) are never touched. Out-of-domain words pass through, so every
+// corruption probe keeps failing; the template is byte-identical, so all
+// P1-P5 gates are unaffected.
+//
+// Fail-closed: every perm asserts bijection + template-derived pins at
+// build time; map/unmap partition the word space (in-domain vs kept), so
+// unmap(map(w)) == w for all words (verified by the inverse lock).
+const P6_DOMAIN_TMP: u64 = 0x5036_544D_505F_4C4E;
+const P6_DOMAIN_SITE: u64 = 0x5036_5354_455F_4C4E;
+const P6_DOMAIN_STAB: u64 = 0x5036_5354_4142_5F4E;
+const P6_DOMAIN_SEEDH: u64 = 0x5036_5344_4848_5F4E;
+
+fn p6_shuffled(seed: u64, domain: u64, n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    Prng::new(seed ^ domain).shuffle(&mut order);
+    let mut sorted = order.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "P6: perm not bijective");
+    order
+}
+
+/// tmp perm over slots 0..16 (unconstrained: template checks `vi>15` only).
+pub(crate) fn p6_tmp_perm(seed: u64) -> [usize; 16] {
+    let order = p6_shuffled(seed, P6_DOMAIN_TMP, 16);
+    let mut out = [0usize; 16];
+    out.copy_from_slice(&order);
+    out
+}
+
+/// Site perm over 1-based lanes 1..=w with template-derived pins: lane 1 is
+/// fixed (kind-4 rejects vi<2, kind-1 rejects vi>2, forcing it), lane 4 is
+/// fixed (konst reads `site[4]` hardcoded), lanes {2,3} swap freely
+/// (kind-1 range), lanes 5..=w permute freely. Widths in use: 1,2,3,4,7,8,9.
+pub(crate) fn p6_site_perm(seed: u64, w: usize) -> Vec<usize> {
+    assert!((1..=9).contains(&w), "P6: site width out of range: {w}");
+    let mut rng = Prng::new(seed ^ P6_DOMAIN_SITE ^ w as u64);
+    let mut lanes: Vec<usize> = (1..=w).collect();
+    if w >= 3 && rng.index(2) == 1 {
+        lanes.swap(1, 2);
+    }
+    if w >= 6 {
+        rng.shuffle(&mut lanes[4..]);
+    }
+    assert_eq!(lanes[0], 1, "P6: lane 1 must stay fixed");
+    if w >= 4 {
+        assert_eq!(lanes[3], 4, "P6: k-lane 4 must stay fixed");
+    }
+    if w >= 3 {
+        assert!(
+            (lanes[1] == 2 && lanes[2] == 3) || (lanes[1] == 3 && lanes[2] == 2),
+            "P6: lanes 2..3 must stay closed"
+        );
+    }
+    let mut sorted = lanes.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (1..=w).collect::<Vec<_>>(),
+        "P6: site perm not bijective"
+    );
+    lanes
+}
+
+/// STAB/SEEDH perms over indices 0..n (unconstrained range checks).
+pub(crate) fn p6_stab_perm(seed: u64, n: usize) -> Vec<usize> {
+    p6_shuffled(seed, P6_DOMAIN_STAB, n)
+}
+pub(crate) fn p6_seedh_perm(seed: u64, n: usize) -> Vec<usize> {
+    p6_shuffled(seed, P6_DOMAIN_SEEDH, n)
+}
+
+/// Trimmed site width per op (mirrors `seed_arm_lua_for`; asserted equal
+/// there, so the two can never drift apart silently).
+pub(crate) fn p6_site_width(op: Opcode) -> usize {
+    use Opcode::*;
+    match op {
+        Nil | NewTable | NewPack | NumberPrepare | NumberStep | IteratorPrepare | Return
+        | Freeze => 1,
+        Move | NewCell | ReadCell | WriteCell | Push | Extend | Clear | Not | Negate | Length
+        | NumberTest | IteratorNext | ToString | TailCall => 2,
+        GetTable | SetTable | Method | Extract | Call | Add | Subtract | Multiply | Divide
+        | FloorDivide | Modulo | Power | Concat | Equal | Less | LessEqual | SetList | Export => 3,
+        Constant | ReadGlobal | WriteGlobal => 4,
+        Test | Jump => 7,
+        ReadUpvalue | WriteUpvalue | Closure => 8,
+        Varargs => 9,
+    }
+}
+
+/// Permute a `{e1,..,ew}` site literal through the width-w site perm.
+pub(crate) fn p6_permute_site(site: &str, seed: u64) -> String {
+    let inner = site
+        .strip_prefix('{')
+        .and_then(|t| t.strip_suffix('}'))
+        .unwrap_or_else(|| panic!("P6: site literal reshaped: {site}"));
+    let elems: Vec<&str> = inner.split(',').collect();
+    let perm = p6_site_perm(seed, elems.len());
+    // new[i] = old[pinv(i)]: content follows its lane.
+    let mut out = Vec::with_capacity(elems.len());
+    let mut inv = vec![0usize; elems.len()];
+    for (i, slot) in perm.iter().enumerate() {
+        inv[slot - 1] = i;
+    }
+    for i in 0..elems.len() {
+        out.push(elems[inv[i]]);
+    }
+    format!("{{{}}}", out.join(","))
+}
+
+/// Canonical-to-image lane mapper (perms built once, applied per word).
+pub(crate) struct P6Mapper {
+    tmp: [usize; 16],
+    tmp_inv: [usize; 16],
+    site: Vec<usize>,
+    site_inv: Vec<usize>,
+    stab: Vec<usize>,
+    stab_inv: Vec<usize>,
+    seedh: Vec<usize>,
+    seedh_inv: Vec<usize>,
+    site_w: usize,
+    stab_n: usize,
+    seedh_n: usize,
+}
+
+fn p6_invert(perm: &[usize]) -> Vec<usize> {
+    let mut inv = vec![0usize; perm.len()];
+    for (i, slot) in perm.iter().enumerate() {
+        inv[slot - 1] = i + 1;
+    }
+    inv
+}
+
+impl P6Mapper {
+    pub(crate) fn new(seed: u64, site_w: usize, stab_n: usize, seedh_n: usize) -> Self {
+        let tmp = p6_tmp_perm(seed);
+        let mut tmp_inv = [0usize; 16];
+        for (i, slot) in tmp.iter().enumerate() {
+            tmp_inv[*slot] = i;
+        }
+        let site = p6_site_perm(seed, site_w);
+        let site_inv = p6_invert(&site);
+        let stab = p6_stab_perm(seed, stab_n);
+        let seedh = p6_seedh_perm(seed, seedh_n);
+        let mut stab_inv = vec![0usize; stab_n];
+        for (i, slot) in stab.iter().enumerate() {
+            stab_inv[*slot] = i;
+        }
+        let mut seedh_inv = vec![0usize; seedh_n];
+        for (i, slot) in seedh.iter().enumerate() {
+            seedh_inv[*slot] = i;
+        }
+        Self {
+            tmp,
+            tmp_inv,
+            site,
+            site_inv,
+            stab,
+            stab_inv,
+            seedh,
+            seedh_inv,
+            site_w,
+            stab_n,
+            seedh_n,
+        }
+    }
+
+    /// Raw (non-ref) positions, transcribed 0-based from the template:
+    /// RET action `a=q[2]`; CALL `nargs=q[5]`; BR target `tgtc(q[2])` on
+    /// 2-word rows, `tgtc(q[3])` on 3-word rows (cond `dstc(q[2])` maps).
+    /// ALU oi5 / CALL mk are kind-3 ints, excluded by kind, never by skip.
+    fn skip(row_op: u32, row_len: usize, pos: usize) -> bool {
+        match (row_op, row_len, pos) {
+            (OP_RET, _, 1) => true,
+            (OP_CALL, _, 4) => true,
+            (OP_BR, 2, 1) => true,
+            (OP_BR, 3, 2) => true,
+            _ => false,
+        }
+    }
+
+    /// Map one word canonical -> image. Out-of-domain words pass through.
+    pub(crate) fn map(&self, row_op: u32, row_len: usize, pos: usize, word: u32) -> u32 {
+        if pos == 0 || Self::skip(row_op, row_len, pos) {
+            return word;
+        }
+        let kind = word / 1_000_000;
+        let vi = word / 1000 % 1000;
+        let vo = word % 1000;
+        let mapped_vi = if kind == KIND_TMP && vi < 16 {
+            Some(self.tmp[vi as usize] as u32)
+        } else if kind == KIND_REG && (1..=(self.site_w as u32)).contains(&(vi + 1)) {
+            Some((self.site[vi as usize] - 1) as u32)
+        } else if kind == KIND_PSEUDO && (2..=(self.site_w as u32)).contains(&vi) {
+            Some(self.site[(vi - 1) as usize] as u32)
+        } else if kind == KIND_SCONST && vi < self.stab_n as u32 {
+            Some(self.stab[vi as usize] as u32)
+        } else if kind == KIND_HELPER && vi < self.seedh_n as u32 {
+            Some(self.seedh[vi as usize] as u32)
+        } else if kind == KIND_OPVAL && (1..=(self.site_w as u32)).contains(&(vi + 1)) {
+            Some((self.site[vi as usize] - 1) as u32)
+        } else {
+            None
+        };
+        match mapped_vi {
+            Some(vi) => kind * 1_000_000 + vi * 1000 + vo,
+            None => word,
+        }
+    }
+
+    /// Map one word image -> canonical (exact inverse of [`Self::map`]).
+    pub(crate) fn unmap(&self, row_op: u32, row_len: usize, pos: usize, word: u32) -> u32 {
+        if pos == 0 || Self::skip(row_op, row_len, pos) {
+            return word;
+        }
+        let kind = word / 1_000_000;
+        let vi = word / 1000 % 1000;
+        let vo = word % 1000;
+        let mapped_vi = if kind == KIND_TMP && vi < 16 {
+            Some(self.tmp_inv[vi as usize] as u32)
+        } else if kind == KIND_REG && (1..=(self.site_w as u32)).contains(&(vi + 1)) {
+            Some((self.site_inv[vi as usize] - 1) as u32)
+        } else if kind == KIND_PSEUDO && (2..=(self.site_w as u32)).contains(&vi) {
+            Some(self.site_inv[(vi - 1) as usize] as u32)
+        } else if kind == KIND_SCONST && vi < self.stab_n as u32 {
+            Some(self.stab_inv[vi as usize] as u32)
+        } else if kind == KIND_HELPER && vi < self.seedh_n as u32 {
+            Some(self.seedh_inv[vi as usize] as u32)
+        } else if kind == KIND_OPVAL && (1..=(self.site_w as u32)).contains(&(vi + 1)) {
+            Some((self.site_inv[vi as usize] - 1) as u32)
+        } else {
+            None
+        };
+        match mapped_vi {
+            Some(vi) => kind * 1_000_000 + vi * 1000 + vo,
+            None => word,
         }
     }
 }

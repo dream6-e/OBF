@@ -2,6 +2,62 @@
 /// ALU sub-ops (concat/lt/le/not/len), RET action 3, spread-by-`.n`,
 /// numeric-string coercion parity, ups/va site slots, and fail-closed
 /// rejections. Runs unmodified on both runners against the emitted template.
+/// P6 driver-side lane mapper (Lua mirror of `P6Mapper`, shared by both
+/// differential drivers). `@...@` markers are substituted per dseed by
+/// `p6_lua_head`; every rule transcribes the Rust choke exactly: pos-0 and
+/// the raw positions (RET action, CALL nargs, arity-dependent BR target)
+/// pass through, non-number/negative/fraction words pass through, kinds
+/// 2/3/6 and kind>8 pass through, and only in-domain lanes remap.
+const P6_LUA_HEAD: &str = r#"
+local PTMP={@PTMP@}
+local PSITE={@PSITE@}
+local PSTAB={@PSTAB@}
+local PSEEDH={@PSEEDH@}
+local SITE_W=@SITE_W@
+local STAB_N=@STAB_N@
+local SEEDH_N=@SEEDH_N@
+local function p6map(rowop,rowlen,pos0,w)
+if pos0==0 then return w end
+if rowop==7 and pos0==1 then return w end
+if rowop==5 and pos0==4 then return w end
+if rowop==6 and ((rowlen==2 and pos0==1) or (rowlen==3 and pos0==2)) then return w end
+if type(w)~="number" or w<0 or w%1~=0 then return w end
+local vo=w%1000;local t1=(w-vo)/1000;local vi=t1%1000;local kind=(t1-vi)/1000
+if kind==0 then if vi<16 then return PTMP[vi+1]*1000+vo end;return w end
+if kind==1 then local slot=vi+1;if slot>=1 and slot<=SITE_W then return 1000000+(PSITE[slot]-1)*1000+vo end;return w end
+if kind==4 then if vi>=2 and vi<=SITE_W then return 4000000+PSITE[vi]*1000+vo end;return w end
+if kind==5 then if vi<STAB_N then return 5000000+PSTAB[vi+1]*1000+vo end;return w end
+if kind==7 then if vi<SEEDH_N then return 7000000+PSEEDH[vi+1]*1000+vo end;return w end
+if kind==8 then local slot=vi+1;if slot>=1 and slot<=SITE_W then return 8000000+(PSITE[slot]-1)*1000+vo end;return w end
+return w end
+"#;
+/// P6 driver apply block: reorder SITE/STAB/SEEDH in place (canonical
+/// content i moves to image position perm[i], mirroring emission), then
+/// map every vector row. Runs after the data consts, before the runner.
+const P6_LUA_APPLY: &str = r#"
+if #SITE~=SITE_W or #STAB~=STAB_N or #SEEDH~=SEEDH_N then error("p6: pool shape drift") end
+local NS={};for i=1,#SITE do NS[PSITE[i]]=SITE[i] end;for i=1,#SITE do SITE[i]=NS[i] end
+local NT={};for i=1,#STAB do NT[PSTAB[i]+1]=STAB[i] end;for i=1,#STAB do STAB[i]=NT[i] end
+local NH={};for i=1,#SEEDH do NH[PSEEDH[i]+1]=SEEDH[i] end;for i=1,#SEEDH do SEEDH[i]=NH[i] end
+for _,v in ipairs(V) do local prog=v[2];for _,row in ipairs(prog) do local rl=#row;local ro=row[1];for j=1,rl do row[j]=p6map(ro,rl,j-1,row[j]) end end end
+"#;
+
+/// Build the per-dseed P6 head for a driver geometry (Rust perms formatted
+/// as Lua tables; PSITE lanes stay 1-based, all other tables 0-based).
+fn p6_lua_head(dseed: u64, site_w: usize, stab_n: usize, seedh_n: usize) -> String {
+    fn csv(xs: &[usize]) -> String {
+        xs.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+    }
+    P6_LUA_HEAD
+        .replace("@PTMP@", &csv(&seed_deform::p6_tmp_perm(dseed)))
+        .replace("@PSITE@", &csv(&seed_deform::p6_site_perm(dseed, site_w)))
+        .replace("@PSTAB@", &csv(&seed_deform::p6_stab_perm(dseed, stab_n)))
+        .replace("@PSEEDH@", &csv(&seed_deform::p6_seedh_perm(dseed, seedh_n)))
+        .replace("@SITE_W@", &site_w.to_string())
+        .replace("@STAB_N@", &stab_n.to_string())
+        .replace("@SEEDH_N@", &seedh_n.to_string())
+}
+
 const SEED_V1_POOLS: &str = r#"
 local STAB={"n","s1","42"}
 local SEEDH={function(a,b)return a+b end,function()return "h1" end,function(p)return p.n..":"..tostring(p[1]) end,function(...)return select('#',...)end}
@@ -10,7 +66,7 @@ local K={[5]="k5",[6]="k6",[7]=false}
 local R={};R[12]="r12";R[13]=false;R[14]=0;R[15]={7,8};R[16]={}
 local F={__obf_proto_k=K}
 "#;
-const SEED_V1_VECTORS: &str = r#"
+const SEED_V1_DATA: &str = r#"
 local UPS={};UPS[3]="u3";UPS[9]="u9"
 local VA={n=1,"vargs"}
 local SITE={2,3,4,5,6,7,100,UPS,VA}
@@ -55,6 +111,8 @@ local V={
 {"f3-load-arity",{{9,0},{7,0}},0,"FAIL"},
 {"f4-idx-num-tab",{{10,0,3005000,3001000},{7,0}},0,"LUAERR"},
 {"f5-set-str-key",{{1,1000,1000004},{11,1000,5000000,3003000},{10,0,1000,5000000},{7,2,0}},2,"VAL",3}}
+"#;
+const SEED_V1_RUNNER: &str = r#"
 local pass=0
 for _,v in ipairs(V) do
 local name,prog,expact,marker=v[1],v[2],v[3],v[4]
@@ -78,10 +136,13 @@ fn seed_v1_ops_direct_differential_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
         for dseed in [0u64, 735, 7001, u64::MAX] {
         let source = format!(
-            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n",
+            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n{}\n{}\n{}\n",
             SEED_V1_POOLS,
             seed_loop_lua(target, dseed),
-            SEED_V1_VECTORS
+            p6_lua_head(dseed, 9, 3, 4),
+            SEED_V1_DATA,
+            P6_LUA_APPLY,
+            SEED_V1_RUNNER
         );
         let work = native::Workspace::new();
         let path = work.0.join("seed_v1_ops.lua");
@@ -99,26 +160,28 @@ fn seed_v1_ops_direct_differential_on_both_targets() {
 
 #[test]
 fn seed_v1_pools_match_locked_consts() {
-    let seedh_lit = format!("local SEEDH={{{}}};", SEEDH_NAMES.join(","));
     for target in [Target::Lua51, Target::Luau] {
         for seed in [0u64, 735] {
-            let stab_lit = format!(
-                "local STAB={{{}}};",
-                STAB_STRS
-                    .iter()
-                    .map(|s| {
-                        let spelling = match *s {
+            // P6: canonical entry i is placed at image position perm[i].
+            let seedh_perm = seed_deform::p6_seedh_perm(seed, SEEDH_NAMES.len());
+            let mut seedh_ordered = vec![""; SEEDH_NAMES.len()];
+            for (ix, name) in SEEDH_NAMES.iter().enumerate() {
+                seedh_ordered[seedh_perm[ix]] = name;
+            }
+            let seedh_lit = format!("local SEEDH={{{}}};", seedh_ordered.join(","));
+            let stab_perm = seed_deform::p6_stab_perm(seed, STAB_STRS.len());
+            let mut stab_ordered = vec![String::new(); STAB_STRS.len()];
+            for (ix, s) in STAB_STRS.iter().enumerate() {
+                let spelling = match *s {
                             "__obf_proto_u" =>
                                 crate::vm::fields::short_field("u", target, seed).unwrap(),
                             "__obf_proto_nu" =>
                                 crate::vm::fields::short_field("nu", target, seed).unwrap(),
                             _ => s.to_string(),
                         };
-                        format!("\"{spelling}\"")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
+                stab_ordered[stab_perm[ix]] = format!("\"{spelling}\"");
+            }
+            let stab_lit = format!("local STAB={{{}}};", stab_ordered.join(","));
             let mut used = 0u64;
             for op in Opcode::ALL.iter().copied() {
                 if op.supported(target) {
@@ -150,6 +213,7 @@ fn seed_v1_routine_corruption_rejected() {
             &routine_for(target, op).expect("supported op must have a routine"),
             dseed,
             op as usize,
+            seed_deform::p6_site_width(op),
         )
     }
     fn run_corrupted(target: Target, label: &str, src: &str, pristine: &str, dseed: u64) {
@@ -335,7 +399,7 @@ fn p2_routine_text_varies_per_seed() {
         let prog = routine_for(target, Opcode::Jump).expect("jump has a routine");
         let mut texts = BTreeSet::new();
         for seed in 0..64u64 {
-            texts.insert(routine_lua(&prog, seed, Opcode::Jump as usize));
+            texts.insert(routine_lua(&prog, seed, Opcode::Jump as usize, seed_deform::p6_site_width(Opcode::Jump)));
         }
         assert!(
             texts.len() >= 2,
@@ -349,48 +413,37 @@ fn p2_routine_text_varies_per_seed() {
 /// trailing-zero scientific); agreement with the emitter is real verification.
 #[test]
 fn p2_routine_text_roundtrips_to_identical_words() {
-    fn word(text: &str) -> u32 {
-        let value: u64 = if let Some(hex) = text.strip_prefix("0x") {
-            u64::from_str_radix(hex, 16).unwrap()
-        } else if let Some(e) = text.find('e') {
-            text[..e].parse::<u64>().unwrap() * 10u64.pow(text[e + 1..].parse().unwrap())
-        } else {
-            text.parse().unwrap()
-        };
-        assert!(value <= u32::MAX as u64, "word out of range: {text}");
-        value as u32
-    }
-    fn table(text: &str) -> Vec<Vec<u32>> {
-        let inner = text
-            .strip_prefix('{')
-            .and_then(|t| t.strip_suffix('}'))
-            .unwrap();
-        inner
-            .split("},{")
-            .map(|ins| {
-                ins.trim_start_matches('{')
-                    .trim_end_matches('}')
-                    .split(',')
-                    .map(word)
-                    .collect()
-            })
-            .collect()
-    }
     for target in [Target::Lua51, Target::Luau] {
         for op in Opcode::ALL {
             let Some(prog) = routine_for(target, *op) else {
                 continue;
             };
             for seed in [0u64, 735, 7001, u64::MAX] {
-                let text = routine_lua(&prog, seed, *op as usize);
+                let text = routine_lua(&prog, seed, *op as usize, seed_deform::p6_site_width(*op));
                 assert_eq!(
                     text,
-                    routine_lua(&prog, seed, *op as usize),
+                    routine_lua(&prog, seed, *op as usize, seed_deform::p6_site_width(*op)),
                     "{target} {} seed {seed}: routine text varies",
                     op.name()
                 );
+                // P6: parsed image words inverse-map to the canonical prog.
+                let mapper = seed_deform::P6Mapper::new(
+                    seed,
+                    seed_deform::p6_site_width(*op),
+                    SN_EMIT,
+                    SEEDH_NAMES.len(),
+                );
+                let back: Vec<Vec<u32>> = p6_table(&text)
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .enumerate()
+                            .map(|(pos, w)| mapper.unmap(row[0], row.len(), pos, *w))
+                            .collect()
+                    })
+                    .collect();
                 assert_eq!(
-                    table(&text),
+                    back,
                     prog,
                     "{target} {} seed {seed}: routine words changed",
                     op.name()
@@ -409,11 +462,14 @@ fn p2_test_arm_flips_per_seed() {
         let mut forms = BTreeSet::new();
         for seed in 0..64u64 {
             let arm = seed_arm_lua_for(target, Opcode::Test, seed).unwrap();
+            // P6: the site permutes; the flip count is measured with the
+            // permuted site blanked (site variance is P6's own gates).
+            let site = seed_deform::p6_permute_site("{a,0,0,0,0,skip1,pc}", seed);
             assert!(
-                arm.contains("{a,0,0,0,0,skip1,pc}"),
+                arm.contains(&site),
                 "{target} seed {seed}: test site changed"
             );
-            forms.insert(arm);
+            forms.insert(arm.replacen(&site, "{SITE}", 1));
         }
         assert_eq!(
             forms.len(),
@@ -974,6 +1030,419 @@ fn p5_insertion_locks() {
             for n in 1..=15u32 {
                 let defs = body.matches(&format!("local w{n}=")).count();
                 assert!(defs <= 1, "P5: temp w{n} defined {defs}x seed={seed}");
+            }
+        }
+    }
+}
+
+/// P6 test-side routine-text parser (extracted verbatim from the P2 lock:
+/// same independent dec / 0x-hex / trailing-zero-scientific decoding,
+/// now shared by every P6 gate).
+fn p6_word(text: &str) -> u32 {
+    let value: u64 = if let Some(hex) = text.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).unwrap()
+    } else if let Some(e) = text.find('e') {
+        text[..e].parse::<u64>().unwrap() * 10u64.pow(text[e + 1..].parse().unwrap())
+    } else {
+        text.parse().unwrap()
+    };
+    assert!(value <= u32::MAX as u64, "word out of range: {text}");
+    value as u32
+}
+fn p6_table(text: &str) -> Vec<Vec<u32>> {
+    let inner = text
+        .strip_prefix('{')
+        .and_then(|t| t.strip_suffix('}'))
+        .unwrap();
+    inner
+        .split("},{")
+        .map(|ins| {
+            ins.trim_start_matches('{')
+                .trim_end_matches('}')
+                .split(',')
+                .map(p6_word)
+                .collect()
+        })
+        .collect()
+}
+
+/// Parse one `local NAME={...};` pool line from the prelude into entries.
+fn p6_pool_line(prelude: &str, name: &str) -> Vec<String> {
+    let line = prelude
+        .lines()
+        .find(|l| l.starts_with(&format!("local {name}=")))
+        .unwrap_or_else(|| panic!("prelude lost its {name} line"));
+    let inner = line
+        .strip_prefix(&format!("local {name}={{"))
+        .and_then(|t| t.strip_suffix("};"))
+        .unwrap_or_else(|| panic!("{name} line reshaped: {line}"));
+    inner.split(',').map(|e| e.to_string()).collect()
+}
+
+/// P6 gate (RED until Batch-6): parsed routine WORDS vary per seed — the
+/// lane remap moves operand lanes, not just text spellings — and both
+/// pools reorder.
+#[test]
+fn p6_mapped_positions_vary() {
+    for target in [Target::Lua51, Target::Luau] {
+        let prog = routine_for(target, Opcode::Jump).expect("jump has a routine");
+        let base = p6_table(&routine_lua(&prog, 0, Opcode::Jump as usize, seed_deform::p6_site_width(Opcode::Jump)));
+        let mut varied = false;
+        for seed in 1..8u64 {
+            if p6_table(&routine_lua(&prog, seed, Opcode::Jump as usize, seed_deform::p6_site_width(Opcode::Jump))) != base {
+                varied = true;
+            }
+        }
+        assert!(varied, "{target}: jump routine words identical across 8 seeds");
+        // Pools: SEEDH order leaves canonical; the STAB statics' relative
+        // order leaves canonical (the two dynamic spellings are seed-owned
+        // by the field pass, so only relative order is pinned here).
+        let canon: Vec<String> = SEEDH_NAMES.iter().map(|e| e.to_string()).collect();
+        let statics = ["n", "__iter", "__call", "function", "table"];
+        let mut stab_varied = false;
+        let mut seedh_varied = false;
+        for seed in 0..8u64 {
+            let pre = seed_prelude_lua_v1(target, seed, 0);
+            if p6_pool_line(&pre, "SEEDH") != canon {
+                seedh_varied = true;
+            }
+            let stab = p6_pool_line(&pre, "STAB");
+            let order: Vec<&str> = stab
+                .iter()
+                .map(|e| e.trim_matches('"'))
+                .filter(|e| statics.contains(e))
+                .collect();
+            if order != statics {
+                stab_varied = true;
+            }
+        }
+        assert!(seedh_varied, "{target}: SEEDH order identical across 8 seeds");
+        assert!(stab_varied, "{target}: STAB order identical across 8 seeds");
+    }
+}
+
+/// P6 lock: skips, op slots, and excluded kinds are byte-stable — parsed
+/// words equal the canonical prog at every untouched position.
+#[test]
+fn p6_untouched_positions_stable() {
+    for target in [Target::Lua51, Target::Luau] {
+        for op in Opcode::ALL {
+            let Some(prog) = routine_for(target, *op) else {
+                continue;
+            };
+            for seed in [0u64, 735, 7001, u64::MAX] {
+                let parsed = p6_table(&routine_lua(&prog, seed, *op as usize, seed_deform::p6_site_width(*op)));
+                assert_eq!(parsed.len(), prog.len(), "{target} {}: row count changed", op.name());
+                for (row, (got, want)) in parsed.iter().zip(prog.iter()).enumerate() {
+                    assert_eq!(got.len(), want.len(), "{target} {} row {row}: arity changed", op.name());
+                    let row_op = want[0];
+                    for (pos, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                        let kind = w / 1_000_000;
+                        // Independent transcription of the template audit
+                        // (never calls the impl's skip fn): RET action,
+                        // CALL nargs, BR target (arity-dependent).
+                        let skip = pos == 0
+                            || matches!(
+                                (row_op, want.len(), pos),
+                                (OP_RET, _, 1) | (OP_CALL, _, 4) | (OP_BR, 2, 1) | (OP_BR, 3, 2)
+                            )
+                            || matches!(kind, KIND_KONST | KIND_INT | KIND_NIL)
+                            || kind > 8;
+                        if skip {
+                            assert_eq!(
+                                g, w,
+                                "{target} {} seed {seed} row {row} pos {pos}: untouched word changed",
+                                op.name()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// P6 gate (RED until Batch-6): parse → inverse-map → canonical prog EXACT
+/// (proves the lane map is a bijection and the emission applied it).
+/// Fixed-point probes pin every keep rule: skips, excluded kinds, and
+/// out-of-domain words must pass both directions untouched.
+#[test]
+fn p6_inverse_roundtrip() {
+    for target in [Target::Lua51, Target::Luau] {
+        for op in Opcode::ALL {
+            let Some(prog) = routine_for(target, *op) else {
+                continue;
+            };
+            for seed in [0u64, 735, 7001, u64::MAX] {
+                let parsed = p6_table(&routine_lua(&prog, seed, *op as usize, seed_deform::p6_site_width(*op)));
+                let mapper =
+                    seed_deform::P6Mapper::new(seed, seed_deform::p6_site_width(*op), SN_EMIT, SEEDH_NAMES.len());
+                let back: Vec<Vec<u32>> = parsed
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .enumerate()
+                            .map(|(pos, w)| mapper.unmap(row[0], row.len(), pos, *w))
+                            .collect()
+                    })
+                    .collect();
+                assert_eq!(
+                    back,
+                    prog,
+                    "{target} {} seed {seed}: inverse map failed",
+                    op.name()
+                );
+            }
+        }
+    }
+    for seed in [0u64, 735, u64::MAX] {
+        let mapper = seed_deform::P6Mapper::new(seed, 7, 7, 15);
+        // (row_op, row_len, pos, word): every keep rule's fixed points.
+        let fixed = [
+            (OP_RET, 3, 1, 1),        // RET action (raw, never a ref)
+            (OP_RET, 2, 0, OP_RET),   // op slot
+            (OP_CALL, 6, 4, 1),       // CALL nargs (raw count)
+            (OP_CALL, 6, 3, 3001000), // CALL mk (kind-3, excluded by kind)
+            (OP_BR, 2, 1, 4),         // BR target on 2-word rows (raw pc)
+            (OP_BR, 3, 2, 4),         // BR target on 3-word rows (raw pc)
+            (9, 3, 1, 2001000),       // konst excluded
+            (9, 3, 1, 3001000),       // int excluded
+            (9, 3, 1, 6000000),       // nil excluded
+            (9, 3, 1, 9001000),       // kind > 8
+            (9, 3, 1, 16000),         // tmp-16 out of range
+            (9, 3, 1, 1050000),       // reg vi=50 out of range
+            (9, 3, 1, 4001000),       // pseudo vi=1 below range
+            (9, 3, 1, 4008000),       // pseudo vi=8 beyond width 7
+            (9, 3, 1, 5007000),       // sconst vi == stab_n edge
+            (9, 3, 1, 7015000),       // helper vi == seedh_n edge
+            (9, 3, 1, 8009000),       // opval vi=9 out of range
+        ];
+        for (row_op, row_len, pos, word) in fixed {
+            assert_eq!(mapper.map(row_op, row_len, pos, word), word, "seed {seed}: keep rule broke map({word})");
+            assert_eq!(mapper.unmap(row_op, row_len, pos, word), word, "seed {seed}: keep rule broke unmap({word})");
+        }
+        // Ref positions adjacent to skips map exactly like ordinary refs.
+        assert_eq!(mapper.map(OP_RET, 3, 2, 3000), mapper.map(9, 3, 1, 3000), "seed {seed}: RET value must map");
+        assert_eq!(mapper.map(OP_CALL, 6, 5, 2000), mapper.map(9, 3, 1, 2000), "seed {seed}: CALL arg must map");
+        assert_eq!(mapper.map(OP_BR, 3, 1, 1000), mapper.map(9, 3, 1, 1000), "seed {seed}: BR cond must map");
+        // Round-trip probes: unmap(map(w)) == w for in-domain words.
+        for word in [3000, 1001000, 4005000, 5002000, 7009000, 8006000] {
+            assert_eq!(
+                mapper.unmap(9, 3, 1, mapper.map(9, 3, 1, word)),
+                word,
+                "seed {seed}: round-trip broke {word}"
+            );
+        }
+    }
+}
+
+/// P6 lock: conservation — pools keep their entries, sites keep their
+/// widths, tmp refs stay in range (GREEN before and after wiring).
+#[test]
+fn p6_conservation_locks() {
+    for target in [Target::Lua51, Target::Luau] {
+        for seed in [0u64, 735, 7001] {
+            let pre = seed_prelude_lua_v1(target, seed, 0);
+            let stab = p6_pool_line(&pre, "STAB");
+            assert_eq!(stab.len(), 7, "{target} seed {seed}: STAB lost entries");
+            for s in ["n", "__iter", "__call", "function", "table"] {
+                assert!(
+                    stab.iter().any(|e| e.trim_matches('"') == s),
+                    "{target} seed {seed}: STAB lost static {s}"
+                );
+            }
+            // Exact multiset conservation against per-seed expected
+            // spellings (a dynamic may collide with a static — seed 7001
+            // spells proto-nu "n" — so only the multiset is pinned; the
+            // pipeline invariant is (index -> entry) association, which P6
+            // preserves by remapping refs alongside the pools).
+            let spelling_u = crate::vm::fields::short_field("u", target, seed).unwrap();
+            let spelling_nu = crate::vm::fields::short_field("nu", target, seed).unwrap();
+            let mut expected = vec!["n", "__iter", "__call", spelling_u.as_str(), spelling_nu.as_str(), "function", "table"];
+            expected.sort();
+            let mut got: Vec<&str> = stab.iter().map(|e| e.trim_matches('"')).collect();
+            got.sort();
+            assert_eq!(got, expected, "{target} seed {seed}: STAB multiset changed");
+            let mut seedh = p6_pool_line(&pre, "SEEDH");
+            seedh.sort();
+            let mut names: Vec<String> = SEEDH_NAMES.iter().map(|e| e.to_string()).collect();
+            names.sort();
+            assert_eq!(seedh, names, "{target} seed {seed}: SEEDH multiset changed");
+            for op in Opcode::ALL {
+                let Some(arm) = seed_arm_lua_for(target, *op, seed) else {
+                    continue;
+                };
+                let after = arm.split("],").nth(1).unwrap_or_else(|| panic!("{target} {}: arm reshaped", op.name()));
+                let site = after.strip_prefix('{').and_then(|t| t.split('}').next()).unwrap();
+                assert_eq!(
+                    site.split(',').count(),
+                    seed_deform::p6_site_width(*op),
+                    "{target} {} seed {seed}: site width drifted",
+                    op.name()
+                );
+                let Some(prog) = routine_for(target, *op) else {
+                    continue;
+                };
+                for row in p6_table(&routine_lua(&prog, seed, *op as usize, seed_deform::p6_site_width(*op))) {
+                    for w in row {
+                        if w / 1_000_000 == KIND_TMP {
+                            assert!(
+                                w / 1000 % 1000 <= 15,
+                                "{target} {} seed {seed}: tmp ref out of range: {w}",
+                                op.name()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// P6 lock: pool refs follow the emitted pools — for every canonical index,
+/// the mapper's image position holds that index's entry in the emitted
+/// prelude text (binds emission placement to mapper direction; a gather/
+/// scatter flip fails here without needing Lua).
+#[test]
+fn p6_pool_refs_follow_emission() {
+    for target in [Target::Lua51, Target::Luau] {
+        let mut stab_checked = 0u32;
+        for seed in [0u64, 735, 7001, u64::MAX] {
+            let pre = seed_prelude_lua_v1(target, seed, 0);
+            let mapper = seed_deform::P6Mapper::new(seed, 9, SN_EMIT, SEEDH_NAMES.len());
+            // SEEDH names are always distinct: strict position check.
+            let seedh = p6_pool_line(&pre, "SEEDH");
+            for (vi, name) in SEEDH_NAMES.iter().enumerate() {
+                let word = KIND_HELPER * 1_000_000 + vi as u32 * 1000;
+                let pos = (mapper.map(9, 3, 1, word) / 1000 % 1000) as usize;
+                assert_eq!(
+                    seedh[pos],
+                    name.to_string(),
+                    "{target} seed {seed}: helper {vi} lost its entry"
+                );
+            }
+            // STAB: strict only when spellings are distinct (collisions are
+            // the field pass's own invariant, out of P6 scope).
+            let stab = p6_pool_line(&pre, "STAB");
+            let mut uniq = stab.clone();
+            uniq.sort();
+            uniq.dedup();
+            if uniq.len() != stab.len() {
+                continue;
+            }
+            stab_checked += 1;
+            let spelling_u = crate::vm::fields::short_field("u", target, seed).unwrap();
+            let spelling_nu = crate::vm::fields::short_field("nu", target, seed).unwrap();
+            let canon = ["n", "__iter", "__call", spelling_u.as_str(), spelling_nu.as_str(), "function", "table"];
+            for (vi, entry) in canon.iter().enumerate() {
+                let word = KIND_SCONST * 1_000_000 + vi as u32 * 1000;
+                let pos = (mapper.map(9, 3, 1, word) / 1000 % 1000) as usize;
+                assert_eq!(
+                    stab[pos].trim_matches('"'),
+                    *entry,
+                    "{target} seed {seed}: sconst {vi} lost its entry"
+                );
+            }
+        }
+        assert!(stab_checked >= 1, "{target}: STAB binding vacuous");
+    }
+}
+
+/// P6 port-proof: the Lua driver mapper agrees with `P6Mapper` word for
+/// word — hand-picked rule probes plus seeded fuzz over (rowop, rowlen,
+/// pos, word) space, on both driver geometries and both runners. Frac /
+/// negative keeps are asserted Lua-side (unrepresentable in `u32`).
+#[test]
+fn p6_lua_mapper_matches_rust() {
+    // (rowop, rowlen, pos, word): every keep/map rule, both arities of BR.
+    let mut samples: Vec<(u32, usize, usize, u32)> = vec![
+        (9, 3, 0, 9),
+        (7, 2, 1, 0),
+        (7, 3, 1, 2),
+        (7, 3, 2, 3000),
+        (7, 5, 4, 7001000),
+        (5, 6, 4, 1),
+        (5, 6, 3, 3001000),
+        (5, 6, 5, 2000),
+        (5, 5, 4, 0),
+        (4, 5, 4, 3009000),
+        (4, 5, 1, 1000),
+        (6, 2, 1, 4),
+        (6, 3, 1, 1000),
+        (6, 3, 2, 4),
+        (6, 4, 3, 2000),
+        (1, 3, 1, 0),
+        (1, 3, 2, 1000000),
+        (1, 3, 2, 1002001),
+        (1, 3, 2, 1003000),
+        (1, 3, 2, 2003000),
+        (1, 3, 2, 3001000),
+        (1, 3, 2, 4001000),
+        (1, 3, 2, 4002000),
+        (1, 3, 2, 4008000),
+        (1, 3, 2, 4009000),
+        (9, 3, 2, 5000000),
+        (9, 3, 2, 5002000),
+        (9, 3, 2, 5003000),
+        (9, 3, 2, 5007000),
+        (1, 3, 2, 6000000),
+        (5, 6, 2, 7000000),
+        (5, 6, 2, 7004000),
+        (5, 6, 2, 7005000),
+        (5, 6, 2, 7014000),
+        (8, 3, 1, 8000000),
+        (8, 3, 1, 8006000),
+        (8, 3, 1, 8008000),
+        (8, 3, 1, 8009000),
+        (1, 3, 2, 9001000),
+        (1, 3, 2, 16000),
+        (1, 3, 2, 17000),
+        (1, 3, 2, 1050000),
+        (1, 3, 2, 1003000000),
+    ];
+    let mut fuzz = crate::random::Prng::new(0x5036_4655_5A5A_2031);
+    for _ in 0..160 {
+        let word = match fuzz.index(4) {
+            0 => fuzz.index(20) as u32,
+            1 => (fuzz.index(13) * 1_000_000 + fuzz.index(1000) * 1000 + fuzz.index(1000)) as u32,
+            2 => (fuzz.index(7) * 1_000_000 + fuzz.index(17) * 1000) as u32,
+            _ => (fuzz.index(12) + 1) as u32,
+        };
+        samples.push((
+            (fuzz.index(12) + 1) as u32,
+            fuzz.index(6) + 1,
+            fuzz.index(6),
+            word,
+        ));
+    }
+    for dseed in [0u64, 7001] {
+        for (site_w, stab_n, seedh_n) in [(9usize, 3usize, 4usize), (7, 3, 5)] {
+            let mapper = seed_deform::P6Mapper::new(dseed, site_w, stab_n, seedh_n);
+            let mut expected = String::new();
+            for (rowop, rowlen, pos, word) in &samples {
+                expected.push_str(&mapper.map(*rowop, *rowlen, *pos, *word).to_string());
+                expected.push('\n');
+            }
+            expected.push_str("KEEP_OK\n");
+            let tuples: Vec<String> = samples
+                .iter()
+                .map(|(rowop, rowlen, pos, word)| format!("{{{rowop},{rowlen},{pos},{word}}}"))
+                .collect();
+            let script = format!(
+                "{}\nlocal S={{{}}};for _,s in ipairs(S) do print(p6map(s[1],s[2],s[3],s[4])) end\nif p6map(9,3,1,3001000.5)~=3001000.5 then print(\"KEEPFAIL-FRAC\") end\nif p6map(6,2,1,-4)~=-4 then print(\"KEEPFAIL-NEG\") end\nif p6map(9,3,1,3.5)~=3.5 then print(\"KEEPFAIL-RAW\") end\nprint(\"KEEP_OK\")\n",
+                p6_lua_head(dseed, site_w, stab_n, seedh_n),
+                tuples.join(",")
+            );
+            for target in [Target::Lua51, Target::Luau] {
+                let work = native::Workspace::new();
+                let path = work.0.join("seed_p6_port.lua");
+                fs::write(&path, &script).unwrap();
+                let stdout = native::compile_and_run(target, &path);
+                assert_eq!(
+                    stdout,
+                    expected.as_bytes(),
+                    "{target} dseed {dseed} geometry {site_w}/{stab_n}/{seedh_n}: Lua mapper diverged"
+                );
             }
         }
     }
