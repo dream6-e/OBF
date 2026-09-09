@@ -446,3 +446,148 @@ fn p2_tailcall_arm_permutes_per_seed() {
         );
     }
 }
+
+/// P3 gate (RED until Batch-3): CV takes both branch forms over 64 seeds.
+#[test]
+fn p3_cv_flips_per_seed() {
+    let mut forms = BTreeSet::new();
+    for seed in 0..64u64 {
+        forms.insert(seed_deform::p3_cv_lua(seed));
+    }
+    assert_eq!(forms.len(), 2, "CV takes {} forms over 64 seeds", forms.len());
+}
+
+/// P3 gate (RED until Batch-3): SV takes both branch forms over 64 seeds.
+#[test]
+fn p3_sv_flips_per_seed() {
+    let mut forms = BTreeSet::new();
+    for seed in 0..64u64 {
+        forms.insert(seed_deform::p3_sv_lua(seed));
+    }
+    assert_eq!(forms.len(), 2, "SV takes {} forms over 64 seeds", forms.len());
+}
+
+/// P3 gate (RED until Batch-3): Lookup method order varies per seed and is
+/// always a true permutation (locks), deterministic per seed (lock).
+#[test]
+fn p3_lookup_order_varies_and_permutes() {
+    assert_eq!(seed_deform::p3_lookup_order(0, 735), Vec::<usize>::new());
+    assert_eq!(seed_deform::p3_lookup_order(1, 735), vec![0]);
+    let mut orders = BTreeSet::new();
+    for seed in 0..64u64 {
+        let order = seed_deform::p3_lookup_order(4, seed);
+        assert_eq!(
+            order,
+            seed_deform::p3_lookup_order(4, seed),
+            "seed {seed}: lookup order varies"
+        );
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2, 3], "seed {seed}: not a permutation");
+        orders.insert(order);
+    }
+    assert!(
+        orders.len() >= 2,
+        "lookup order identical across 64 seeds"
+    );
+}
+
+/// P3 gate (RED until Batch-3): the reader group varies per seed; every
+/// emission keeps all six definitions in dependency-valid order (locks).
+#[test]
+fn p3_reader_group_varies_and_valid() {
+    const DEFS: [&str; 6] = [
+        "local b8=function(",
+        "local b16=function(",
+        "local b32=function(",
+        "local take=function(",
+        "local str=function(",
+        "local pos=function(",
+    ];
+    fn order_of(text: &str) -> [usize; 6] {
+        let mut pos: Vec<(usize, usize)> = DEFS
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (text.find(d).unwrap_or(usize::MAX), i))
+            .collect();
+        pos.sort_unstable();
+        assert!(pos[0].0 != usize::MAX, "reader def missing");
+        [pos[0].1, pos[1].1, pos[2].1, pos[3].1, pos[4].1, pos[5].1]
+    }
+    fn valid(order: &[usize; 6]) -> bool {
+        let at = |i: usize| order.iter().position(|&x| x == i).unwrap();
+        // b8 < b16, b8 < b32, b32 < str, take < str.
+        at(0) < at(1) && at(0) < at(2) && at(2) < at(4) && at(3) < at(4)
+    }
+    let mut texts = BTreeSet::new();
+    for seed in 0..64u64 {
+        let text = seed_deform::p3_reader_group_lua(seed);
+        assert_eq!(text, seed_deform::p3_reader_group_lua(seed), "seed {seed}: reader group varies");
+        assert!(text.starts_with("local bp=1;\n"), "seed {seed}: bp head moved");
+        assert!(valid(&order_of(&text)), "seed {seed}: invalid reader order");
+        texts.insert(text);
+    }
+    assert!(texts.len() >= 2, "reader group identical across 64 seeds");
+}
+
+/// P3 lock: raw images embed exactly the per-seed CV/SV/reader text.
+#[test]
+fn p3_helper_wiring_pins_emission() {
+    for dseed in [735u64, 7001] {
+        let data = compile(SEED_CONTROL_FIXTURE, Target::Lua51).unwrap();
+        let program = custom::decode(&data, Target::Lua51).unwrap();
+        let raw = generate(&data, &program, dseed).unwrap();
+        assert!(
+            raw.contains(seed_deform::p3_cv_lua(dseed)),
+            "seed {dseed}: CV text missing"
+        );
+        assert!(
+            raw.contains(seed_deform::p3_sv_lua(dseed)),
+            "seed {dseed}: SV text missing"
+        );
+        assert!(
+            raw.contains(&seed_deform::p3_reader_group_lua(dseed)),
+            "seed {dseed}: reader group text missing"
+        );
+    }
+}
+
+/// P3 lock: the Luau Lookup chain lists every method exactly once, in the
+/// seeded permutation order (ud_check form agnostic: only key== literals).
+#[test]
+fn p3_lookup_wiring_pins_chain_order() {
+    // Two colon-calls (mirrors the vm_luau "add" shape) force two Method
+    // constants; the gate only generates text, never runs it.
+    const TWO_METHODS: &str = "local o={v=0};function o:ma()return 1 end;function o:mb()return 2 end;print(o:ma()+o:mb())";
+    for dseed in [735u64, 7001] {
+        let data = compile(TWO_METHODS, Target::Luau).unwrap();
+        let program = custom::decode(&data, Target::Luau).unwrap();
+        let methods: Vec<&str> = program.methods().iter().copied().collect();
+        assert!(methods.len() >= 2, "fixture lost its methods");
+        let raw = generate(&data, &program, dseed).unwrap();
+        assert_eq!(
+            raw.matches("key==").count(),
+            methods.len(),
+            "seed {dseed}: key== count drifted"
+        );
+        let order = seed_deform::p3_lookup_order(methods.len(), dseed);
+        let mut lits = Vec::new();
+        for m in &methods {
+            let mut lit = String::new();
+            crate::vm::lua51::emit_byte_string(&mut lit, m.as_bytes());
+            lits.push(format!("key=={lit}"));
+        }
+        let mut positions = Vec::new();
+        for lit in &lits {
+            positions.push(raw.find(lit).unwrap_or(usize::MAX));
+        }
+        assert!(!positions.contains(&usize::MAX), "seed {dseed}: method literal missing");
+        let mut ranked = positions.clone();
+        ranked.sort_unstable();
+        let observed: Vec<usize> = ranked
+            .iter()
+            .map(|p| positions.iter().position(|q| q == p).unwrap())
+            .collect();
+        assert_eq!(observed, order, "seed {dseed}: chain order mismatch");
+    }
+}

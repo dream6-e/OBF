@@ -573,14 +573,8 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
         crate::random::Prng::new(seed ^ 0x6c7a_775f_7370_6c38).next_u64() % 2 == 0;
     let (compression_fields, compression_wiring) =
         compression_decoder_sections(&keys, split_lzw_helpers);
-    let g1 = r#"local bp=1;
-local b8=function()local v=SB(B,bp);if v==nil then E()end;bp=bp+1;return v end;
-local b16=function()local a,b=b8(),b8();return a+b*256 end;
-local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;
-local take=function(n)if n>#B-bp+1 then E()end;local v=SS(B,bp,bp+n-1);bp=bp+n;return v end;
-local str=function()return take(b32())end;
-local pos=function()return bp end;"#
-        .to_owned();
+    // P3: per-seed reader-definition order (placeholder: canonical order).
+    let g1 = super::seed_deform::p3_reader_group_lua(seed);
     let g2 = r#"local fin=function(lo,hi)local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;local num=function()return fin(b32(),b32())end;"#
         .to_owned();
     // The semantic parser now sees an exact decompressed ISA image, so its
@@ -949,18 +943,22 @@ end;return RD,ED,OG;"#,
     s.push_str("\nend,");
     let f4_start = s.len();
     write!(s, "[{}]=function(TY,E)\n", keys[3]).unwrap();
-    s.push_str(
-        r#"
-local CV=function(cell)if cell[2]then return cell[2][cell[3]]else return cell[1]end end;
-local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=value end end;
-"#,
-    );
+    // P3: per-seed CV/SV branch variants (placeholder: form 0).
+    s.push('\n');
+    s.push_str(super::seed_deform::p3_cv_lua(seed));
+    s.push('\n');
+    s.push_str(super::seed_deform::p3_sv_lua(seed));
+    s.push('\n');
     if program.target.is_luau() && !program.methods().is_empty() {
         s.push_str("local Lookup=function(object,key)if ");
         s.push_str(ud_check);
         s.push_str("then ");
-        for (index, method) in program.methods().iter().enumerate() {
-            write!(s, "{} key==", if index == 0 { "if" } else { "elseif" }).unwrap();
+        // P3: per-seed method-chain order (placeholder: sorted identity).
+        let methods: Vec<&str> = program.methods().iter().copied().collect();
+        let order = super::seed_deform::p3_lookup_order(methods.len(), seed);
+        for (pos, &mi) in order.iter().enumerate() {
+            let method = methods[mi];
+            write!(s, "{} key==", if pos == 0 { "if" } else { "elseif" }).unwrap();
             crate::vm::lua51::emit_byte_string(&mut s, method.as_bytes());
             write!(
                 s,

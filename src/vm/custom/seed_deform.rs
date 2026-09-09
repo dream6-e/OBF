@@ -353,3 +353,79 @@ pub(crate) fn p1_deform_template(body: &str, seed: u64) -> String {
     let joined = lines.join("\n");
     p1_respell_numbers(&joined, &mut p1_stream(seed, 5))
 }
+
+// ---- P1 Batch-3: helper + reader-group emission variants ----------------
+// Pure per-seed mechanisms: CV/SV
+// branch flips, Lookup method-chain order, and the six byte-reader
+// definitions in seeded topological order. Fresh domain-separated streams
+// keep every other seeded choice byte-identical.
+const P3_DOMAIN_HELPER: u64 = 0x5031_4845_4C50_4552;
+const P3_DOMAIN_POOLS: u64 = 0x5031_504F_4F4C_5353;
+
+const P3_CV_FORMS: [&str; 2] = [
+    "local CV=function(cell)if cell[2]then return cell[2][cell[3]]else return cell[1]end end;",
+    "local CV=function(cell)if not cell[2]then return cell[1]else return cell[2][cell[3]]end end;",
+];
+
+const P3_SV_FORMS: [&str; 2] = [
+    "local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=value end end;",
+    "local SV=function(cell,value)if not cell[2]then cell[1]=value else cell[2][cell[3]]=value end end;",
+];
+
+/// Cell-value read in one of two branch orders (exact `not`-negation:
+/// same conditions, same read sequence on every path, no eval reorder).
+pub(crate) fn p3_cv_lua(seed: u64) -> &'static str {
+    let pick = Prng::new(seed ^ P3_DOMAIN_HELPER ^ 1).next_u64() % 2;
+    P3_CV_FORMS[pick as usize]
+}
+
+/// Cell-value write in one of two branch orders (same argument as CV).
+pub(crate) fn p3_sv_lua(seed: u64) -> &'static str {
+    let pick = Prng::new(seed ^ P3_DOMAIN_HELPER ^ 2).next_u64() % 2;
+    P3_SV_FORMS[pick as usize]
+}
+
+/// Seeded order of the Lookup method chain. Methods are distinct keys so
+/// the equality arms are mutually exclusive and commute freely.
+pub(crate) fn p3_lookup_order(n: usize, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    Prng::new(seed ^ P3_DOMAIN_HELPER ^ 3).shuffle(&mut order);
+    order
+}
+
+const P3_READER_HEAD: &str = "local bp=1;";
+const P3_READERS: [&str; 6] = [
+    "local b8=function()local v=SB(B,bp);if v==nil then E()end;bp=bp+1;return v end;",
+    "local b16=function()local a,b=b8(),b8();return a+b*256 end;",
+    "local b32=function()local a,b,c,d=b8(),b8(),b8(),b8();return a+b*256+c*65536+d*16777216 end;",
+    "local take=function(n)if n>#B-bp+1 then E()end;local v=SS(B,bp,bp+n-1);bp=bp+n;return v end;",
+    "local str=function()return take(b32())end;",
+    "local pos=function()return bp end;",
+];
+
+// Intra-group upvalue dependencies by reader index (b8=0, b16=1, b32=2,
+// take=3, str=4, pos=5): a definition must follow the readers it calls.
+const P3_READER_DEPS: [&[usize]; 6] = [&[], &[0], &[0], &[], &[2, 3], &[]];
+
+/// The six byte-reader definitions in seeded topological order (Kahn's
+/// algorithm with seeded choice among ready nodes): every order keeps each
+/// definition behind the readers it closes over, so upvalue scope is exact.
+pub(crate) fn p3_reader_group_lua(seed: u64) -> String {
+    let mut rng = Prng::new(seed ^ P3_DOMAIN_POOLS ^ 1);
+    let mut emitted = [false; 6];
+    let mut out = String::from(P3_READER_HEAD);
+    for _ in 0..6 {
+        let mut ready = Vec::new();
+        for (i, deps) in P3_READER_DEPS.iter().enumerate() {
+            if !emitted[i] && deps.iter().all(|d| emitted[*d]) {
+                ready.push(i);
+            }
+        }
+        assert!(!ready.is_empty(), "P3: reader dependency cycle");
+        let pick = ready[rng.index(ready.len())];
+        emitted[pick] = true;
+        out.push('\n');
+        out.push_str(P3_READERS[pick]);
+    }
+    out
+}
