@@ -1734,3 +1734,23 @@ fn seed_v1_migration_leaves_no_classic_handler_text() {
         }
     }
 }
+
+#[test]
+fn k8_payload_driven_indirect_routes_are_bound_and_checked() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("local function f(x)return x+1 end print(f(4),f(9))", target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut layouts = BTreeSet::new();
+        for seed in [0u64, 735, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert!(raw.contains("__obf_proto_routes"), "{target} seed {seed}");
+            assert!(raw.contains("local VR={}"), "{target} seed {seed}");
+            assert!(raw.contains("bucket[label]"), "{target} seed {seed}");
+            assert!(raw.contains("route_info=F.__obf_proto_routes[route]"), "{target} seed {seed}");
+            assert!(raw.contains("route_info[1]~=rid"), "{target} seed {seed}");
+            assert!(raw.matches("%65521").count() >= 2, "{target} seed {seed}");
+            layouts.insert(raw);
+        }
+        assert!(layouts.len() >= 2, "{target}: route layout did not vary by seed");
+    }
+}

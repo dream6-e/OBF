@@ -1011,12 +1011,20 @@ return a,b,c,p end;\nend,",
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
     let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
     let tuple_slots = field_order.tuple_slots();
+    // K8: route each decoded record through a per-prototype, payload-derived
+    // indirect target table before the normal rid dispatch. The constants are
+    // seed-specific, while the token and prototype id come from the checked
+    // semantic image at runtime; duplicate routes fail closed during parsing.
+    let mut route_random = crate::random::Prng::new(seed ^ 0x4b38_7661_6c74_726f);
+    let route_mul = 3 + (route_random.next_u64() % 251) * 2;
+    let route_add = 1 + route_random.next_u64() % 65520;
+    let route_salt = 1 + route_random.next_u64() % 65520;
     let semantic_validator = format!(
         r#"{edge_decoder}{recipe_decoder}{operand_getter}
 for id=0,np-1 do
  local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;{operand_profile}{field_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
- local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};
+ local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};local VR={{}};
  for z=1,nr do {dict_head}if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
   local q={{}};for qi=0,n-1 do local raw=SB(CD,p);p=p+1;if raw==nil then E()end;
    local op=(raw-(rid*{mask_mul}+qi*{mask_add}+{mask_salt})%64)%64;
@@ -1025,7 +1033,7 @@ for id=0,np-1 do
  end;
  local start=D16();local code={{}};
  for at=0,F.__obf_proto_nc-1 do {record_head}local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
-  if label==0 or code[label]~=nil or recipe==nil then E()end;{tuple_construct}
+  if label==0 or code[label]~=nil or recipe==nil then E()end;local route=(label*{route_mul}+token*{route_add}+id*{route_salt})%65521;local bucket=VR[route];if bucket==nil then bucket={{}};VR[route]=bucket end;if bucket[label]~=nil then E()end;bucket[label]={{rid,#recipe}};{tuple_construct}
   for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local k=b+c*256;local j=a+k*256;
    if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
   end;code[label]=I;
@@ -1036,11 +1044,14 @@ for id=0,np-1 do
   elseif last=={ret} or last=={tail} then if next1~=0 or skip~=0 then E()end
   elseif last=={test} then if code[next1]==nil or code[skip]==nil then E()end
   elseif code[next1]==nil or skip~=0 then E()end;
- end;code[0]=start;F.__obf_proto_code=code;
+ end;code[0]=start;F.__obf_proto_code=code;F.__obf_proto_routes=VR;
 end;return RD,ED,OG;"#,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
         mask_salt = semantic_image.mask_salt,
+        route_mul = route_mul,
+        route_add = route_add,
+        route_salt = route_salt,
         operand_getter = operand_abi.getter_lua(),
         operand_profile = operand_abi.parser_profile_lua(),
         field_profile = field_order.record_profile_lua(),
@@ -1326,14 +1337,17 @@ end;
     }
     s.push_str(&seed_prelude_lua_v1(program.target, seed, seed_used));
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);sid={semantic_init};pc=next1;w={v_disp};",
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);route=(pc*{route_mul}+I[{tuple_token}]*{route_add}+fid*{route_salt})%65521;route_info=F.__obf_proto_routes[route];if route_info==nil then E()end;route_info=route_info[pc];if not route_info or route_info[1]~=rid or route_info[2]<1 or route_info[2]>4 then E()end;rid=route_info[1];sid={semantic_init};pc=next1;w={v_disp};",
         tuple_next = tuple_slots[1],
         tuple_skip = tuple_slots[2],
         tuple_token = tuple_slots[0],
+        route_mul = route_mul,
+        route_add = route_add,
+        route_salt = route_salt,
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
         seed_loop = seed_loop_lua(program.target, seed),
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
