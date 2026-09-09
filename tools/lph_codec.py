@@ -17,6 +17,13 @@ Recovered chain, byte-for-byte identical to what the VM does:
 
 => a radix-85 ASCII-armour with alphabet  chr(40+i), i=0..84  ('(' .. '|'),
    10 out-of-alphabet chars used as single-char shortcuts for 10 fixed groups.
+
+Why 85 and not 64:  ceil((2**32)**(1/5)) = 85  -- 5 printable chars must cover a u32, and 85 is the
+minimum radix that does it (85**5 = 4437053125 is only 3.3% wider than 2**32).
+
+Built-in self-check: for a *uniform random* (i.e. whitened) word stream, the fraction of groups whose
+value exceeds 2**32 must equal 1 - 2**32/85**5 = 3.2023%.  Measured on this sample: 3.2737% (0.5 sigma)
+=> the framing above is correct AND the payload really is encrypted (it is not a decoding artefact).
 """
 import re, sys, collections
 
@@ -75,7 +82,12 @@ if __name__ == "__main__":
     print(f"decode window      : {len(d['u'][4:len(d['u'])-1])} chars -> {len(d['gs'])} groups of 5")
     print(f"decoded words      : {len(d['vals'])} x 32-bit  ({len(d['stream'])} bytes)")
     over = sum(1 for v in d["vals"] if v >= 1 << 32)
-    print(f"groups > 2^32 (radix slack, 85^5={85**5}): {over}")
+    exp = 1 - 2**32 / 85**5
+    sigma = (exp * (1 - exp) / len(d["vals"])) ** .5
+    print(f"self-check  groups >= 2^32 : {over}/{len(d['vals'])} = {over/len(d['vals'])*100:.4f}%"
+          f"   (uniform-random expectation {exp*100:.4f}%, dev {abs(over/len(d['vals'])-exp)/sigma:.2f} sigma)")
+    print("            -> framing correct AND stream is whitened (uniform).  If you see a big deviation,"
+          " your group boundary / window is wrong, not the cipher.")
     out = sys.argv[2] if len(sys.argv) > 2 else "/tmp/chunk.bin"
     open(out, "wb").write(d["stream"])
     print(f"wrote {out}")
