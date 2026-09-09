@@ -556,69 +556,76 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
     }
 }
 
-fn base86_alphabet_byte(byte: u8) -> bool {
-    (35..=121).contains(&byte) && byte != 92
-}
-
-// Minimal string-literal scanner shared by the watermark and encrypted-frame
-// corruption tests. It returns double-quoted literals made only of base86
-// alphabet bytes; callers either identify the watermark group or keep the
+// K9a segment locators shared by the watermark and encrypted-frame
+// corruption tests. Spans come from the lexer's own string tokens and are
+// filtered on DECODED bytes (segments carry `\"`/`\\`/`\ddd` escapes);
+// callers either identify the watermark carrier by decoding or keep the
 // three longest spans, which are the payload segments.
-fn segment_spans(source: &str) -> Vec<(usize, usize)> {
-    let bytes = source.as_bytes();
+fn segment_spans(source: &str, target: Target, seed: u64) -> Vec<(usize, usize)> {
+    let alphabet = vm::custom::base86_image_alphabet(seed);
+    let mut member = [false; 256];
+    for &byte in &alphabet {
+        member[byte as usize] = true;
+    }
     let mut spans = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'"' {
-            let mut end = index + 1;
-            let mut clean = true;
-            while end < bytes.len() && bytes[end] != b'"' {
-                if bytes[end] == b'\\' {
-                    clean = false;
-                    end += 2;
-                    continue;
-                }
-                end += 1;
-            }
-            if clean
-                && end < bytes.len()
-                && end - index - 1 >= 12
-                && bytes[index + 1..end]
-                    .iter()
-                    .all(|&byte| base86_alphabet_byte(byte))
-            {
-                spans.push((index + 1, end));
-            }
-            index = end + 1;
-        } else {
-            index += 1;
+    for token in obf::lexer::lex(source, target).unwrap() {
+        if token.kind != obf::lexer::TokenKind::String {
+            continue;
+        }
+        // Segments are always `"..."`-quoted; anything else is skipped so
+        // the inner-span arithmetic below stays exact.
+        if !token.text(source).starts_with('"') {
+            continue;
+        }
+        let decoded = obf::minify::literal_bytes(token.text(source), target).unwrap();
+        if decoded.len() >= 12 && decoded.iter().all(|&byte| member[byte as usize]) {
+            spans.push((token.span.start + 1, token.span.end - 1));
         }
     }
     spans
 }
 
-fn base86_group_bytes(text: &str) -> [u8; 4] {
-    let mut value = 0u64;
-    for (index, byte) in text.as_bytes().iter().enumerate() {
-        let digit = u64::from(if *byte > 92 { byte - 36 } else { byte - 35 });
-        value += digit * 86u64.pow(index as u32);
-    }
-    let mut out = [0u8; 4];
-    for slot in &mut out {
-        *slot = (value % 256) as u8;
-        value /= 256;
-    }
-    out
+/// Decoded bytes of a raw inner span (re-adds the quotes for the parser).
+fn span_bytes(source: &str, target: Target, span: (usize, usize)) -> Vec<u8> {
+    obf::minify::literal_bytes(&source[span.0 - 1..span.1 + 1], target).unwrap()
 }
 
-fn adjacent_base86(byte: u8) -> u8 {
-    let alphabet: Vec<u8> = (35..=121).filter(|&value| value != 92).collect();
-    let index = alphabet.iter().position(|&value| value == byte).unwrap();
-    alphabet[if index + 1 < alphabet.len() {
-        index + 1
-    } else {
-        index - 1
-    }]
+/// Raw start offset of every decoded char: walks `\"`/`\\` (2 raw
+/// chars) and `\ddd` (up to 3 digits); everything else is 1:1.
+fn raw_char_map(inner: &str) -> Vec<usize> {
+    let bytes = inner.as_bytes();
+    let mut map = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        map.push(index);
+        if bytes[index] == b'\\' {
+            index += 1;
+            let mut digits = 0;
+            while digits < 3 && index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+                digits += 1;
+            }
+            if digits == 0 {
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    map
+}
+
+/// Nearest image-alphabet member after `byte` (cyclic) that survives raw
+/// in a literal: never 34/92/<32, so mutants stay valid Lua.
+fn adjacent_plain(byte: u8, alphabet: &[u8; 86]) -> u8 {
+    let pos = alphabet.iter().position(|&value| value == byte).unwrap();
+    for step in 1..=86 {
+        let candidate = alphabet[(pos + step) % 86];
+        if candidate != 34 && candidate != 92 && candidate >= 32 {
+            return candidate;
+        }
+    }
+    unreachable!("image alphabet without plain members");
 }
 
 #[test]
@@ -631,30 +638,52 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
         .unwrap();
         let generated = vm::custom::emit(&bytes, target, 735).unwrap();
         assert!(!generated.contains("XXS:"));
-        // Flip the FIRST character of the stream-first segment: base86
-        // groups are independent, so only the four watermark bytes change
-        // and the rest of the ciphertext stream stays byte-identical. Any
-        // abort therefore proves the watermark check itself fired.
+        // Flip the first digit of the stream-first segment's first body
+        // group (decoded char 4, right after the length prefix), keeping
+        // pv % 3 so the chained widths -- and every downstream byte --
+        // stay identical. Only the watermark bytes change (verified by
+        // re-decoding in-test), so any abort proves the watermark check
+        // itself fired.
+        let alphabet = vm::custom::base86_image_alphabet(735);
+        let plain: Vec<u8> = alphabet
+            .iter()
+            .copied()
+            .filter(|&byte| byte != 34 && byte != 92 && byte >= 32)
+            .collect();
         let mut tampered = generated.clone();
         let mut flipped = false;
-        for (start, _) in segment_spans(&generated) {
-            if base86_group_bytes(&generated[start..start + 5]) == *b"XXS:" {
-                for replacement in [b'#', b'$', b'%'] {
-                    if replacement as u8 == generated.as_bytes()[start] {
-                        continue;
-                    }
-                    let mut probe = tampered.clone();
-                    probe.replace_range(start..start + 1, &(replacement as char).to_string());
-                    if base86_group_bytes(&probe[start..start + 5]) != *b"XXS:" {
-                        probe.replace_range(start..start + 1, &(replacement as char).to_string());
-                        tampered = probe;
-                        flipped = true;
-                        break;
-                    }
+        for (start, end) in segment_spans(&generated, target, 735) {
+            let text = String::from_utf8(span_bytes(&generated, target, (start, end))).unwrap();
+            let Ok(decoded) = vm::custom::base86_decode_mixed(&text, &alphabet) else {
+                continue;
+            };
+            if !decoded.starts_with(b"XXS:") {
+                continue;
+            }
+            let map = raw_char_map(&generated[start..end]);
+            let raw_at = start + map[4];
+            let raw_len = map[5] - map[4];
+            let original = text.as_bytes()[4];
+            for &candidate in &plain {
+                if candidate == original {
+                    continue;
                 }
-                assert!(flipped, "{target}: no replacement flipped the watermark");
+                let mut probe = text.clone().into_bytes();
+                probe[4] = candidate;
+                let probe_text = String::from_utf8(probe).unwrap();
+                let Ok(probe_decoded) = vm::custom::base86_decode_mixed(&probe_text, &alphabet)
+                else {
+                    continue;
+                };
+                if probe_decoded.starts_with(b"XXS:") || probe_decoded[4..] != decoded[4..] {
+                    continue;
+                }
+                tampered.replace_range(raw_at..raw_at + raw_len, &(candidate as char).to_string());
+                flipped = true;
                 break;
             }
+            assert!(flipped, "{target}: no watermark flip preserved the chain");
+            break;
         }
         assert!(
             flipped,
@@ -692,27 +721,51 @@ fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
         )
         .unwrap();
         let generated = vm::custom::emit(&bytes, target, 735).unwrap();
-        let mut spans = segment_spans(&generated);
+        let alphabet = vm::custom::base86_image_alphabet(735);
+        let mut spans = segment_spans(&generated, target, 735);
         spans.sort_by_key(|&(start, end)| std::cmp::Reverse(end - start));
         spans.truncate(3);
         assert_eq!(spans.len(), 3, "{target}: payload segment count");
 
         let stream_first = spans
             .iter()
-            .position(|&(start, _)| base86_group_bytes(&generated[start..start + 5]) == *b"XXS:")
+            .position(|&span| {
+                let text = String::from_utf8(span_bytes(&generated, target, span)).unwrap();
+                vm::custom::base86_decode_mixed(&text, &alphabet)
+                    .is_ok_and(|bytes| bytes.starts_with(b"XXS:"))
+            })
             .unwrap_or_else(|| panic!("{target}: stream-first segment missing"));
         let mut mutation_offsets = BTreeSet::new();
         for (index, &(start, end)) in spans.iter().enumerate() {
-            // Leave the stream watermark's first group untouched. Every
-            // selected offset is the low digit of a complete base86 group;
-            // moving it to an adjacent alphabet digit keeps decoding valid
-            // and changes exactly one outer-ciphertext byte.
-            let data_start = start + if index == stream_first { 5 } else { 0 };
-            let full_groups = (end - data_start) / 5;
-            assert!(full_groups > 0, "{target}: empty ciphertext segment");
-            mutation_offsets.insert(data_start);
-            mutation_offsets.insert(data_start + (full_groups / 2) * 5);
-            mutation_offsets.insert(data_start + (full_groups - 1) * 5);
+            // Spread raw offsets across the literal, snapped to plain
+            // (non-escape) chars so every mutant stays valid Lua. Any flip
+            // desyncs the chained widths or corrupts ciphertext, and some
+            // gate (transport, watermark, frame, LZW, Adler) fires. The
+            // watermark carrier (decoded chars 0..10: 4-char prefix plus a
+            // first body group of at most 6) is skipped with margin on the
+            // stream-first segment so these mutants exercise the layers
+            // past the watermark.
+            let inner = &generated[start..end];
+            let map = raw_char_map(inner);
+            let skip = if index == stream_first { 12 } else { 0 };
+            let mut usable = Vec::new();
+            for decoded_at in skip..map.len() {
+                let raw_end = if decoded_at + 1 < map.len() {
+                    map[decoded_at + 1]
+                } else {
+                    inner.len()
+                };
+                if raw_end - map[decoded_at] == 1 {
+                    let byte = inner.as_bytes()[map[decoded_at]];
+                    if byte != 34 && byte != 92 && byte >= 32 {
+                        usable.push(start + map[decoded_at]);
+                    }
+                }
+            }
+            assert!(!usable.is_empty(), "{target}: no plain mutant offsets");
+            mutation_offsets.insert(usable[0]);
+            mutation_offsets.insert(usable[usable.len() / 2]);
+            mutation_offsets.insert(usable[usable.len() - 1]);
         }
 
         let workspace = Workspace::new();
@@ -727,7 +780,7 @@ fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
 
         for (case, offset) in mutation_offsets.into_iter().enumerate() {
             let mut damaged = generated.clone();
-            let replacement = adjacent_base86(generated.as_bytes()[offset]);
+            let replacement = adjacent_plain(generated.as_bytes()[offset], &alphabet);
             damaged.replace_range(offset..offset + 1, &(replacement as char).to_string());
             let path = workspace.0.join(format!("chacha-corrupt-{case}.lua"));
             fs::write(&path, damaged).unwrap();

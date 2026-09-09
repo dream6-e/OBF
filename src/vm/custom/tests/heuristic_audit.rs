@@ -35,55 +35,61 @@ type AuditPins = (
     ([usize; 5], usize),   // M7: top-5 string lens + 3rd/4th gap
 );
 
-// Pins observed 2026-09-09 (post-T6 template). Any drift means the
+// Pins observed 2026-09-09 (K9a mixed transport). Any drift means the
 // detector-visible surface moved and must be justified in the batch.
+// K9a deltas: M2 total/residues (mixed widths + prefixes, arbitrary by
+// design); M3b/M4 (opaque M24/MM/C1C2 splits + downstream rng-stream
+// shift incl. label hygiene); M4b luau (spelling lottery over the shifted
+// stream); M5/M7 raw lengths (escapes + longer segments). Stable: M1 = 86
+// distinct bytes, KAT words, M6 = (0, 0), M5 count = 5 (ALPHA frags stay
+// sub-64 raw), M7 gap stays in the hundreds.
 const PINS_LUA51_7001: AuditPins = (
     86,
-    (1085, 2, 1, 0),
+    (1189, 1, 1, 4),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (207, 4503873231485168, 4503599627370496),
+    (210, 4503860396914931, 4503599627370496),
     [
-        (1, 367),
-        (0, 366),
-        (256, 209),
-        (2, 186),
-        (3, 123),
-        (4, 101),
-        (65536, 100),
-        (90, 83),
-        (8, 80),
-        (5, 75),
-        (6, 55),
-        (7, 51),
+        (1, 434),
+        (0, 376),
+        (2, 215),
+        (256, 165),
+        (3, 155),
+        (4, 128),
+        (65536, 101),
+        (5, 70),
+        (91, 69),
+        (6, 68),
+        (8, 64),
+        (22, 52),
     ],
     0,
-    (5, 1353),
+    (5, 1676),
     (0, 0),
-    ([367, 362, 362, 131, 131], 231),
+    ([473, 473, 462, 134, 134], 328),
 );
 const PINS_LUAU_7351: AuditPins = (
     86,
-    (875, 2, 3, 0),
+    (950, 2, 2, 0),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (215, 4503853624319678, 4503599627370496),
+    (218, 4503840789749441, 4503599627370496),
     [
-        (1, 376),
-        (0, 367),
-        (256, 204),
-        (2, 191),
-        (3, 143),
-        (65536, 98),
-        (5, 91),
-        (4, 88),
-        (8, 52),
-        (16, 51),
-        (87, 51),
-        (90, 49),
+        (1, 445),
+        (0, 383),
+        (2, 210),
+        (256, 161),
+        (3, 158),
+        (4, 154),
+        (5, 98),
+        (65536, 96),
+        (13, 73),
+        (70, 71),
+        (8, 55),
+        (90, 54),
     ],
-    40,
-    (5, 1143),
+    27,
+    (5, 1360),
     (0, 0),
-    ([297, 292, 292, 131, 131], 161),
+    ([369, 363, 360, 134, 134], 226),
 );
 
 /// Value of an integer number token in any spelling the emitter produces
@@ -117,7 +123,12 @@ fn audit_metrics(target: Target, seed: u64) -> AuditPins {
     let tokens = crate::lexer::lex(&output, target).unwrap();
 
     // M1/M2: the base86 stream (transport surface, template-independent).
-    let segments = transport::segment_literals(&output, target).unwrap();
+    let segments = transport::segment_literals(&output, target, seed).unwrap();
+    let image_alphabet = transport::base86_image_alphabet(seed);
+    let mut member = [false; 256];
+    for &byte in &image_alphabet {
+        member[byte as usize] = true;
+    }
     assert_eq!(segments.len(), 3, "{target} seed {seed}: segment count moved");
     let mut distinct = [false; 256];
     let mut stream_len = 0usize;
@@ -125,8 +136,8 @@ fn audit_metrics(target: Target, seed: u64) -> AuditPins {
         stream_len += segment.len();
         for &byte in segment {
             assert!(
-                (35..=121).contains(&byte) && byte != 92,
-                "{target} seed {seed}: stream byte {byte} outside the alphabet"
+                member[byte as usize],
+                "{target} seed {seed}: stream byte {byte} outside the image alphabet"
             );
             distinct[byte as usize] = true;
         }

@@ -261,7 +261,9 @@ fn normalize_string(raw: &str, target: Target) -> Result<String, String> {
 /// Shared with scope analysis to recognize statically spelled reflective
 /// field keys, including escaped and long-quoted names. Backticks here are
 /// literal interpolation segments only, never unevaluated expressions.
-pub(crate) fn literal_bytes(raw: &str, target: Target) -> Result<Vec<u8>, String> {
+/// `pub` so the product audit decodes K9a payload escapes with the same
+/// parser the pipeline uses (no second unescaper to drift).
+pub fn literal_bytes(raw: &str, target: Target) -> Result<Vec<u8>, String> {
     let bytes = raw.as_bytes();
     if matches!(bytes.first(), Some(b'\'' | b'"' | b'`')) {
         decode_quoted(bytes, target)

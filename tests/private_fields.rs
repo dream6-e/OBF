@@ -23,8 +23,8 @@ fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
     assert_eq!(image[6], 1, "generated scripts require private encoding 1");
     assert_eq!(
         u32::from_le_bytes(image[24..28].try_into().unwrap()),
-        14,
-        "generated scripts require private ISA14 pooled images"
+        15,
+        "generated scripts require private ISA15 pooled images"
     );
 }
 

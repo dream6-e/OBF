@@ -33,66 +33,87 @@ struct AuditPins {
     check9_stream: (usize, usize, bool), // (total_len, rem5, fail)
 }
 
-// Pins observed 2026-09-09 (pre-K-series baseline). K-batches tighten.
+// Pins observed 2026-09-09 (K9a mixed transport). K-batches tighten.
+// K9a: [2] -> (86, 99, clean), [9] -> clean under the new rule; [1] drops
+// the 85/4294967295 anchors and sheds 86/256 hits (opaque splits, VAL
+// table, label hygiene: slot keys avoid 85/86, states avoid 256, wrapper
+// keys avoid 256/7225/7396); remaining 86s are forms/decoy code (K9b's).
+// [5] grows (3 self-contained decoders triple shapes; shape diversity is
+// K7's scope); [6] flips on layout-shuffle artifacts (pre-existing text,
+// position luck); [8] re-indexes on the fresh M24 addends. [3]/[4]/[7]
+// stable; 16777216/2147483647/4294967296 untouched (M24 split adds zero).
 fn pins_lua51() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
-            (85, 4),
-            (86, 28),
-            (256, 201),
+            (86, 4),
+            (256, 156),
             (65536, 96),
             (16777216, 8),
             (2147483647, 27),
-            (4294967295, 4),
             (4294967296, 29),
         ],
-        check2_alphabet: (86, 87, true),
+        check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
-            4,
+            12,
             vec![
                 ("X=N*X%N".to_string(), 21),
-                ("X[N][#X[N]+N]=X(X[N]%N)X[N]=(X[N]-X[N]%N)/N".to_string(), 9),
+                ("X[N]=N".to_string(), 19),
+                ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
+                ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
+                ("X[N]=N+N".to_string(), 9),
+                (
+                    "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
+                    9,
+                ),
                 ("X=(X+X+(N*N+N))%N".to_string(), 8),
-                ("X=X+N".to_string(), 5),
+                ("X=NXXXXXXX=(X*N+X+X+X+X+(N*N+N))%N".to_string(), 8),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 88),
-        check9_stream: (14185, 0, true),
+        check8_literal_gcd: (1, 85),
+        check9_stream: (15536, 1, false),
     }
 }
 
 fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
-            (86, 13),
-            (256, 197),
-            (65536, 96),
+            (86, 4),
+            (256, 161),
+            (65536, 98),
             (16777216, 8),
             (2147483647, 22),
-            (4294967295, 4),
             (4294967296, 29),
         ],
-        check2_alphabet: (86, 87, true),
+        check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
-            5,
+            11,
             vec![
+                ("X[N]=N".to_string(), 19),
+                ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
+                ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 16),
-                ("X[N][#X[N]+N]=X(X[N]%N)X[N]=(X[N]-X[N]%N)/N".to_string(), 9),
+                ("X[N]=N+N".to_string(), 9),
+                (
+                    "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
+                    9,
+                ),
                 ("X=(X+X+(N*N+N))%N".to_string(), 8),
-                ("X=NXXXXXXX=(X*N+X+X+X+X+(N*N+N))%N".to_string(), 6),
-                ("X=X+N".to_string(), 5),
+                (
+                    "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
+                    6,
+                ),
             ],
         ),
-        check6_alias_prologues: 0,
+        check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 93),
-        check9_stream: (18905, 0, true),
+        check8_literal_gcd: (1, 90),
+        check9_stream: (20687, 2, false),
     }
 }
 
@@ -132,43 +153,36 @@ fn audit_gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-/// Raw inner bytes of every string token (mirrors `segment_literals` without
-/// needing the `pub(crate)` escape decoder: payload segments contain no
-/// backslash or quote by construction, asserted per candidate).
+/// Decoded bytes of every string token: K9a payload segments carry `\"` /
+/// `\\` / `\ddd` escapes (non-contiguous alphabet), so filters match on
+/// post-escape bytes through the real literal parser. Spans still delimit
+/// the raw source ranges for masking.
 fn string_inners(body: &str, target: Target) -> Vec<(usize, usize, Vec<u8>)> {
     let mut out = Vec::new();
     for token in lexer::lex(body, target).unwrap() {
         if token.kind != TokenKind::String {
             continue;
         }
-        let raw = token.text(body);
-        let inner: &[u8] = if let Some(stripped) = raw.strip_prefix('"') {
-            stripped.strip_suffix('"').unwrap().as_bytes()
-        } else if raw.starts_with('[') {
-            raw.strip_prefix("[[")
-                .and_then(|t| t.strip_suffix("]]"))
-                .unwrap()
-                .as_bytes()
-        } else {
-            panic!("audit: unknown string form {raw:?}");
-        };
-        out.push((token.span.start, token.span.end, inner.to_vec()));
+        let decoded = obf::minify::literal_bytes(token.text(body), target)
+            .unwrap_or_else(|error| panic!("audit: bad string literal: {error}"));
+        out.push((token.span.start, token.span.end, decoded));
     }
     out
 }
 
-/// The three payload segment literals (same filters as `segment_literals`).
-fn segments(inners: &[(usize, usize, Vec<u8>)]) -> Vec<Vec<u8>> {
+/// The three payload segment literals (same filters as `segment_literals`:
+/// decoded length, image-alphabet membership, longest three win; mixed
+/// groups make divisibility meaningless).
+fn segments(inners: &[(usize, usize, Vec<u8>)], seed: u64) -> Vec<Vec<u8>> {
+    let alphabet = obf::vm::custom::base86_image_alphabet(seed);
+    let mut member = [false; 256];
+    for &byte in &alphabet {
+        member[byte as usize] = true;
+    }
     let mut candidates: Vec<Vec<u8>> = inners
         .iter()
         .map(|(_, _, bytes)| bytes.clone())
-        .filter(|value| {
-            value.len() >= 12
-                && value.len() % 5 != 1
-                && value
-                    .iter()
-                    .all(|&byte| (35..=121).contains(&byte) && byte != 92)
-        })
+        .filter(|value| value.len() >= 12 && value.iter().all(|&byte| member[byte as usize]))
         .collect();
     assert!(
         candidates.len() >= 3,
@@ -180,7 +194,8 @@ fn segments(inners: &[(usize, usize, Vec<u8>)]) -> Vec<Vec<u8>> {
 }
 
 /// Body with every string span replaced by `S` (keeps statement shapes small
-/// and `;`-splitting sound: segments contain `;` but no quote/backslash).
+/// and `;`-splitting sound: masking is span-based, so payload escapes and
+/// `;` bytes inside segments cannot leak into shapes).
 fn masked_body(body: &str, inners: &[(usize, usize, Vec<u8>)]) -> String {
     let mut out = String::with_capacity(body.len() / 4);
     let mut prev = 0;
@@ -221,7 +236,7 @@ fn normalize_shape(fragment: &str) -> String {
     shape
 }
 
-fn audit_golden(path: &str, target: Target) -> AuditPins {
+fn audit_golden(path: &str, target: Target, seed: u64) -> AuditPins {
     let body = std::fs::read_to_string(path).unwrap();
     assert!(!body.is_empty(), "audit: golden {path} missing");
 
@@ -234,9 +249,13 @@ fn audit_golden(path: &str, target: Target) -> AuditPins {
         }
     }
 
-    // [2]/[9] segment stream: alphabet contiguity + length divisibility.
+    // [2]/[9] segment stream over DECODED bytes: alphabet contiguity +
+    // length divisibility. K9a kills both clean rules (non-contiguous
+    // 86-subset alphabet, mixed group widths), so [9] now fires only on
+    // the everything-multiple-of-5 pathology (P ~ 0.16% for healthy
+    // output; a hit means reseed the golden and investigate).
     let inners = string_inners(&body, target);
-    let segs = segments(&inners);
+    let segs = segments(&inners, seed);
     let mut distinct = BTreeSet::new();
     let mut total = 0usize;
     for seg in &segs {
@@ -245,7 +264,11 @@ fn audit_golden(path: &str, target: Target) -> AuditPins {
     }
     let span = *distinct.last().unwrap() as usize - *distinct.first().unwrap() as usize + 1;
     let check2 = (distinct.len(), span, span - distinct.len() <= 12);
-    let check9 = (total, total % 5, total % 5 == 0);
+    let check9 = (
+        total,
+        total % 5,
+        total % 5 == 0 && segs.iter().all(|seg| seg.len() % 5 == 0),
+    );
 
     // [3] noise pairs summing to 2^32 (adapted: any literal pair around a
     // 2^32-1 site that cancels unconditionally).
@@ -434,11 +457,11 @@ fn audit_golden(path: &str, target: Target) -> AuditPins {
 
 #[test]
 fn product_text_audit_pins_hold_on_both_goldens() {
-    for (path, target, pins) in [
-        (GOLDEN_LUA51, Target::Lua51, pins_lua51()),
-        (GOLDEN_LUAU, Target::Luau, pins_luau()),
+    for (path, target, seed, pins) in [
+        (GOLDEN_LUA51, Target::Lua51, 7001u64, pins_lua51()),
+        (GOLDEN_LUAU, Target::Luau, 7351u64, pins_luau()),
     ] {
-        let actual = audit_golden(path, target);
+        let actual = audit_golden(path, target, seed);
         assert_eq!(actual, pins, "{path}: product surface moved");
     }
 }

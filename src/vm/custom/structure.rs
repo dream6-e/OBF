@@ -23,6 +23,11 @@ pub(crate) fn wrapper_keys(seed: u64) -> Vec<u64> {
     let mut keys = Vec::new();
     while keys.len() < 29 {
         let key = 100 + random.next_u64() % 9900;
+        // K9a label hygiene: arbitrary labels must never emit audit-nice
+        // values (a YARA rule for 86 must not hit a table key).
+        if key == 256 || key == 7225 || key == 7396 {
+            continue;
+        }
         if used.insert(key) {
             keys.push(key);
         }
@@ -196,6 +201,11 @@ pub(crate) fn slot_rewrite(
     for name in vars {
         loop {
             let key = 1 + structure.next_u64() % 99;
+            // K9a label hygiene: slot keys are arbitrary labels, so 85/86
+            // are rejected (they would read as radix constants).
+            if key == 85 || key == 86 {
+                continue;
+            }
             if used.insert(key) {
                 keys.insert(name, key);
                 break;
@@ -205,12 +215,21 @@ pub(crate) fn slot_rewrite(
     let mut out = String::with_capacity(text.len() + 16);
     let mut word = String::new();
     // String literals are copied verbatim: packed payloads and tags must
-    // never be mistaken for variable words.
+    // never be mistaken for variable words. The scan is escape-aware: a
+    // backslash inside a literal protects the next character, so K9a
+    // `\"`/`\\`/`\ddd` escapes can never desynchronize the quote tracker
+    // (behavior-preserving on escape-free bodies, which cover all
+    // pre-K9a templates).
     let mut quote: Option<char> = None;
+    let mut escaped = false;
     for c in text.chars() {
         if let Some(marker) = quote {
             out.push(c);
-            if c == marker {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == marker {
                 quote = None;
             }
             continue;
@@ -238,7 +257,13 @@ pub(crate) fn slot_rewrite(
 pub(crate) fn state_values(structure: &mut crate::random::Prng, count: usize) -> Vec<u16> {
     let mut used = std::collections::BTreeSet::new();
     while used.len() < count {
-        used.insert((100 + structure.next_u64() % 900) as u16);
+        let value = (100 + structure.next_u64() % 900) as u16;
+        // K9a label hygiene: state numbers are arbitrary labels, so the
+        // byte width 256 is rejected.
+        if value == 256 {
+            continue;
+        }
+        used.insert(value);
     }
     used.into_iter().collect()
 }

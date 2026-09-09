@@ -29,7 +29,7 @@ fn stream_word_stats(bytes: &[u8]) -> (usize, usize, u32) {
 fn inner_ciphertext_words_have_no_periodic_repeats() {
     for (target, seed, expected) in [
         (Target::Lua51, 7001u64, (848usize, 0usize, 0u32)),
-        (Target::Luau, 7351u64, (677usize, 0usize, 0u32)),
+        (Target::Luau, 7351u64, (676usize, 0usize, 0u32)),
     ] {
         let data = compile(AUDIT_PROBE, target).unwrap();
         let output = emit(&data, target, seed).unwrap();

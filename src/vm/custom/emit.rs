@@ -61,6 +61,23 @@ pub(crate) fn generate(
     generate_semantic(program, seed, semantic_image, None)
 }
 
+/// One K9a digit-take: `width` chars from S at `base` (1-based Lua exprs)
+/// accumulate into vv through the VAL table at radix r. Nil bytes (reads
+/// past #S) and non-alphabet bytes both abort via E(); callers snapshot
+/// pv, advance i and emit bytes themselves.
+fn k9a_take(width: &str, base: &str) -> String {
+    format!(
+        "local vv=0;local mm=1;for j=1,{width} do local bb=SB(S,{base}+j-1);\
+if bb==nil then E()end;local cc=VAL[bb];if cc==nil then E()end;vv=vv+cc*mm;mm=mm*r end;",
+    )
+}
+
+/// One K9a byte-emission: exactly `count` low bytes of vv (a padded group
+/// value) via the opaque byte width MM; leftover high padding is dropped.
+fn k9a_emit(count: &str) -> String {
+    format!("for j=1,{count} do o[#o+1]=NCH(vv%MM);vv=(vv-vv%MM)/MM end;")
+}
+
 fn generate_semantic(
     program: &Program,
     seed: u64,
@@ -163,7 +180,7 @@ fn generate_semantic(
     // Nothing downstream ever verifies them; static methodology that
     // anchors on checksums and key derivations has to disprove each decoy
     // before the real one, and executing the branch is impossible.
-    let mut fake_packed = String::from("~");
+    let mut fake_packed = String::from("\\127");
     for _ in 1..129 {
         fake_packed.push(pack86((structure.next_u64() % 86) as u8));
     }
@@ -438,12 +455,14 @@ if d7+d8*65521~={fake_adler} then E()end;"
         program.target,
         &chacha,
     );
-    // Transport layer: the framed double-ChaCha8 image is base86-encoded (all
-    // printable alphabet characters, ~1.25 chars per byte instead of 4-char
-    // decimal escapes) and split into three segments placed in seed-shuffled
-    // payload-table functions. Each segment function re-runs the audited
-    // native-loadstring probe and decodes only its own slice, so payload
-    // recovery is itself split across several [n]=function pieces.
+    // Transport layer (K9a): the framed double-ChaCha8 image is split into
+    // three byte parts; each part is mixed-group base86 (4-char length
+    // prefix, chained 4/5/6-char groups, padded tails) over the per-image
+    // 86-subset alphabet, and lands in a seed-shuffled payload-table
+    // function. Each segment function re-runs the audited
+    // native-loadstring probe and decodes only its own slice through a
+    // seeded 4-state machine (prefix, main, tail, done) with VAL-table
+    // digits -- no digit arithmetic, no length rule, no clean constant.
     // Fixed transport watermark: the decoded stream must begin with the
     // literal bytes "XXS:". The check itself is split across two payload
     // functions -- a generic big-endian packer over the first four bytes of
@@ -454,29 +473,44 @@ if d7+d8*65521~={fake_adler} then E()end;"
     let mut marked = Vec::with_capacity(encrypted.len() + 4);
     marked.extend_from_slice(b"XXS:");
     marked.extend_from_slice(&encrypted);
-    let encoded = base86_encode(&marked);
-    let groups = marked.len() / 4;
-    let tail = marked.len() % 4;
-    let base = groups / 3;
-    let extra = groups % 3;
-    let mut counts = [
-        base + usize::from(extra > 0),
-        base + usize::from(extra > 1),
-        0,
-    ];
-    counts[2] = groups - counts[0] - counts[1];
+    let alphabet = base86_image_alphabet(seed);
+    let mut transport_rng = crate::random::Prng::new(seed ^ 0x6b39_615f_7472_616e);
+    // Byte-thirds split (order-preserving: part 0 holds the watermark head).
+    let third = marked.len() / 3;
+    let split = third + (marked.len() - third) / 2;
+    let parts = [&marked[..third], &marked[third..split], &marked[split..]];
+    // The baked digit table rides as sub-12 fragments (never segment
+    // candidates): the decoder concatenates them into the 86-byte ALPHA.
+    let alpha_literal = {
+        let mut lit = String::new();
+        for (index, frag) in alphabet.chunks(11).enumerate() {
+            if index > 0 {
+                lit.push_str("..");
+            }
+            lit.push('"');
+            lit.push_str(&lua_escape_string(frag));
+            lit.push('"');
+        }
+        lit
+    };
     // Which of the three segment keys holds which stream part is shuffled.
     let mut hold = [0usize, 1, 2];
     crate::random::Prng::new(seed ^ 0x7365_676d_3373_6866).shuffle(&mut hold);
-    let mut at = 0usize;
     let mut segment_fields = Vec::new();
     for part in 0..3 {
-        let mut chars = counts[part] * 5;
-        if part == 2 {
-            chars += if tail > 0 { tail + 1 } else { 0 };
-        }
-        let text = &encoded[at..at + chars];
-        at += chars;
+        let text = base86_encode_mixed(parts[part], &alphabet, &mut transport_rng);
+        assert!(
+            text.len() >= 12,
+            "K9a: segment too short for the length filter"
+        );
+        let literal = lua_escape_string(text.as_bytes());
+        // Opaque splits, fresh per segment: radix 86 = c1+c2, byte width
+        // 256 = m1+m2, length modulus 2^24 = a24+b24; every addend avoids
+        // the audit's nice set, so no clean transport constant survives.
+        let c1 = 2 + transport_rng.index(83);
+        let c2 = 86 - c1;
+        let (m1, m2) = opaque_split(&mut transport_rng, 256);
+        let (a24, b24) = opaque_split(&mut transport_rng, 16777216);
         let (probe, gate) = if program.target.is_luau() {
             ("DB and GI(LS,\"s\")", "if A~=\"[C]\" then E()end;")
         } else {
@@ -485,52 +519,81 @@ if d7+d8*65521~={fake_adler} then E()end;"
                 "if not(A and A.what==\"C\")then E()end;",
             )
         };
-        // Control-flow flattening: the base86 decode is a seeded state
-        // machine -- main-step self-loop, tail handling, finish -- with
-        // per-seed state numbers, shuffled branch order and varied
-        // condition spellings; every data local flows through the
+        // Control-flow flattening: the mixed-group decode is a seeded
+        // 4-state machine -- length prefix, chained main groups, tail,
+        // finish -- with per-seed state numbers, shuffled branch order and
+        // varied condition spellings; every data local flows through the
         // scratch table g[...] and is cleared before returning.
-        let sv = state_values(&mut structure, 3);
-        let (k_main, k_tail, k_done) = (sv[0], sv[1], sv[2]);
-        let decode5 = "local v=0;local m=1;\
-for j=0,4 do local b=SB(S,i+j);if b==92 or b<35 or b>121 then E()end;\
-if b>92 then b=b-36 else b=b-35 end;v=v+b*m;m=m*86 end;\
-if v>4294967295 then E()end;o[#o+1]=NCH(v%256);v=(v-v%256)/256;\
-o[#o+1]=NCH(v%256);v=(v-v%256)/256;o[#o+1]=NCH(v%256);v=(v-v%256)/256;\
-o[#o+1]=NCH(v);";
-        let decode_tail = "local v=0;local m=1;for j=0,r2-1 do local b=SB(S,#S-r2+1+j);\
-if b==92 or b<35 or b>121 then E()end;\
-if b>92 then b=b-36 else b=b-35 end;v=v+b*m;m=m*86 end;\
-if v>256^(r2-1)-1 then E()end;\
-for j=1,r2-1 do o[#o+1]=NCH(v%256);v=(v-v%256)/256 end;";
+        let sv = state_values(&mut structure, 4);
+        let (k_prefix, k_main, k_tail, k_done) = (sv[0], sv[1], sv[2], sv[3]);
         let machine = state_machine(
             &mut structure,
             "st",
             vec![
                 (
+                    k_prefix,
+                    format!(
+                        "{take}B=vv%M24;R=B;pv=vv;i=5;st={k_main};",
+                        take = k9a_take("4", "1"),
+                        k_main = k_main,
+                    ),
+                ),
+                (
                     k_main,
-                    format!("if i>L then st={k_tail} else {decode5} i=i+5 end;"),
+                    format!(
+                        "if R>4 then local w=pv%3;local ww=4;local kk=3;\
+if w==1 then ww=5;kk=4 elseif w==2 then ww=6;kk=4 end;\
+{take}pv=vv;i=i+ww;{emit}R=R-kk;else st={k_tail} end;",
+                        take = k9a_take("ww", "i"),
+                        emit = k9a_emit("kk"),
+                        k_tail = k_tail,
+                    ),
                 ),
                 (
                     k_tail,
                     format!(
-                        "local r2=#S%5;if r2==1 then E()end;\
-if r2>0 then {decode_tail} end;st={k_done};"
+                        "local r1=R;\
+if r1==4 then local w=pv%3;local ww=5;if w%2==1 then ww=6 end;{take_w}pv=vv;i=i+ww;{emit4}\
+elseif r1==3 then {take4}pv=vv;i=i+4;{emit3}\
+elseif r1==2 then {take3}pv=vv;i=i+3;{emit2}\
+elseif r1==1 then {take2}pv=vv;i=i+2;{emit1}\
+end;if i~=#S+1 then E()end;st={k_done};",
+                        take_w = k9a_take("ww", "i"),
+                        emit4 = k9a_emit("4"),
+                        take4 = k9a_take("4", "i"),
+                        emit3 = k9a_emit("3"),
+                        take3 = k9a_take("3", "i"),
+                        emit2 = k9a_emit("2"),
+                        take2 = k9a_take("2", "i"),
+                        emit1 = k9a_emit("1"),
+                        k_done = k_done,
                     ),
                 ),
                 (k_done, "local rr=TC(o);g=nil;return rr;".to_owned()),
             ],
         );
         let mut body = format!(
-            "local S=\"{text}\";local o={{}};local i=1;local L=#S-#S%5;local st={k_main};{machine}",
-            text = text,
-            k_main = k_main,
+            "local ALPHA={alpha};local VAL={{}};for j=1,#ALPHA do VAL[SB(ALPHA,j)]=j-1 end;\
+local S=\"{literal}\";local r={c1}+{c2};local MM={m1}+{m2};local M24={a24}+{b24};\
+local o={{}};local B=0;local R=0;local pv=0;local i=1;local st={k_prefix};{machine}",
+            alpha = alpha_literal,
+            literal = literal,
+            c1 = c1,
+            c2 = c2,
+            m1 = m1,
+            m2 = m2,
+            a24 = a24,
+            b24 = b24,
+            k_prefix = k_prefix,
             machine = machine,
         );
         body = slot_rewrite(
             &mut structure,
             &body,
-            &["S", "o", "i", "L", "st", "v", "m", "b", "r2"],
+            &[
+                "ALPHA", "VAL", "S", "r", "MM", "M24", "o", "B", "R", "pv", "i", "st", "vv", "mm",
+                "bb", "cc", "w", "ww", "kk", "r1",
+            ],
         );
         let mut chunk = String::new();
         write!(
@@ -797,14 +860,14 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
         perm_text.push(pack86(value % 86));
         perm_text.push(pack86(value / 86));
     }
-    // A `~` marker byte prefixes both packed strings: it is outside the
-    // base86 alphabet, so the payload-segment audit (which collects the
-    // three longest alphabet-only literals) never mistakes them for
+    // A byte-127 marker prefixes both packed strings: it is outside the
+    // 28..=126 transport pool, so the payload-segment audit (which collects
+    // the three longest alphabet-only literals) never mistakes them for
     // transport segments however small the program is.
     let mut forms_body = format!(
-        "local t={{}};local p={{}};local S=\"~{text}\";for i=2,#S do local b=SB(S,i);\
+        "local t={{}};local p={{}};local S=\"\\127{text}\";for i=2,#S do local b=SB(S,i);\
 if b==92 or b<35 or b>121 then E()end;if b>92 then b=b-1 end;t[i-2]=(b-35-{rot})%86+1 end;\
-local U=\"~{renum}\";for i=2,#U,2 do local x=SB(U,i);local y=SB(U,i+1);\
+local U=\"\\127{renum}\";for i=2,#U,2 do local x=SB(U,i);local y=SB(U,i+1);\
 if x==92 or x<35 or x>121 or y==92 or y<35 or y>121 then E()end;\
 if x>92 then x=x-1 end;if y>92 then y=y-1 end;p[(i-2)/2]=x-35+(y-35)*86 end;\
 local rt,rp=t,p;g=nil;return rt,rp;",

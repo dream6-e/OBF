@@ -1191,3 +1191,399 @@ fn dispatch_chains_split_into_seeded_subchains() {
         assert_eq!(expected, native::compile_and_run(target, &path));
     }
 }
+
+#[test]
+fn k9a_image_alphabet_is_seeded_noncontiguous() {
+    let a = base86_image_alphabet(7001);
+    assert_eq!(a, base86_image_alphabet(7001));
+    assert_ne!(a, base86_image_alphabet(7351));
+    let mut sorted = a;
+    sorted.sort_unstable();
+    assert_eq!((sorted[0], sorted[85]), (28, 126), "span must be exactly 99");
+    let mut deduped = sorted.to_vec();
+    deduped.dedup();
+    assert_eq!(deduped.len(), 86);
+    assert!(a.iter().all(|&byte| (28..=126).contains(&byte)));
+    // Order is permuted, not sorted (1/86! to fluke; pinned by seed).
+    assert_ne!(a.to_vec(), sorted.to_vec());
+}
+
+#[test]
+fn k9a_mixed_codec_roundtrips_all_lengths() {
+    for seed in [1u64, 7001, 7351] {
+        let alphabet = base86_image_alphabet(seed);
+        let mut rng = crate::random::Prng::new(seed ^ 0x6b39_615f_7472_616e);
+        for length in 0..200usize {
+            let bytes: Vec<u8> = (0..length)
+                .map(|index| ((index * 31 + length * 7) % 256) as u8)
+                .collect();
+            let text = base86_encode_mixed(&bytes, &alphabet, &mut rng);
+            assert!(
+                text.bytes().all(|byte| alphabet.contains(&byte)),
+                "seed {seed} len {length}: char outside the image alphabet"
+            );
+            assert_eq!(
+                base86_decode_mixed(&text, &alphabet).unwrap(),
+                bytes,
+                "seed {seed} len {length}"
+            );
+        }
+        let big: Vec<u8> = (0..5000u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let text = base86_encode_mixed(&big, &alphabet, &mut rng);
+        assert_eq!(base86_decode_mixed(&text, &alphabet).unwrap(), big);
+    }
+}
+
+#[test]
+fn k9a_mixed_widths_chain_and_high_padding_truncates() {
+    let alphabet = base86_image_alphabet(7001);
+    let mut digit = [None::<u64>; 256];
+    for (index, &byte) in alphabet.iter().enumerate() {
+        digit[byte as usize] = Some(index as u64);
+    }
+    let bytes: Vec<u8> = (0..2000u32)
+        .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let text1 = base86_encode_mixed(&bytes, &alphabet, &mut crate::random::Prng::new(11));
+    let text2 = base86_encode_mixed(&bytes, &alphabet, &mut crate::random::Prng::new(12));
+    // Random high padding perturbs the text but truncates identically.
+    assert_ne!(text1, text2);
+    assert_eq!(base86_decode_mixed(&text1, &alphabet).unwrap(), bytes);
+    assert_eq!(base86_decode_mixed(&text2, &alphabet).unwrap(), bytes);
+    // Independent chain walk over text1: prefix length, chained widths,
+    // per-width bounds, exact end, padding presence.
+    let chars: Vec<u8> = text1.bytes().collect();
+    let mut pos = 0usize;
+    let mut take = |width: usize| -> u64 {
+        let mut value = 0u64;
+        let mut mult = 1u64;
+        for i in 0..width {
+            value += digit[chars[pos + i] as usize].unwrap() * mult;
+            mult *= 86;
+        }
+        pos += width;
+        value
+    };
+    let powers = [1u64, 86, 7396, 636056, 54700816, 4704270176, 404567234336];
+    let prefix = take(4);
+    assert_eq!((prefix % (1 << 24)) as usize, bytes.len());
+    let mut prev = prefix;
+    let mut widths = BTreeSet::new();
+    let mut padded = 0usize;
+    let mut groups = 0usize;
+    let mut remaining = bytes.len();
+    while remaining > 4 {
+        let width = [4usize, 5, 6][(prev % 3) as usize];
+        widths.insert(width);
+        let take_bytes = if width == 4 { 3 } else { 4 };
+        let value = take(width);
+        assert!(value < powers[width]);
+        if value >= (1u64 << (8 * take_bytes)) {
+            padded += 1;
+        }
+        groups += 1;
+        prev = value;
+        remaining -= take_bytes;
+    }
+    match remaining {
+        4 => {
+            let width = [5usize, 6][(prev % 3) as usize % 2];
+            widths.insert(width);
+            if take(width) >= (1u64 << 32) {
+                padded += 1;
+            }
+            groups += 1;
+        }
+        3 => {
+            if take(4) >= (1u64 << 24) {
+                padded += 1;
+            }
+            groups += 1;
+        }
+        2 => {
+            if take(3) >= (1u64 << 16) {
+                padded += 1;
+            }
+            groups += 1;
+        }
+        1 => {
+            if take(2) >= (1u64 << 8) {
+                padded += 1;
+            }
+            groups += 1;
+        }
+        0 => {}
+        _ => unreachable!(),
+    }
+    assert_eq!(pos, chars.len(), "decoder must consume the text exactly");
+    assert_eq!(widths, BTreeSet::from([4, 5, 6]), "every chain width fires");
+    assert!(groups > 100 && padded > 0, "over-range padding must occur");
+}
+
+#[test]
+fn k9a_mixed_codec_rejects_corrupt_text() {
+    let alphabet = base86_image_alphabet(7001);
+    let mut rng = crate::random::Prng::new(7001);
+    let bytes = b"hello, mixed world! padding must truncate exactly.";
+    let text = base86_encode_mixed(bytes, &alphabet, &mut rng);
+    assert_eq!(base86_decode_mixed(&text, &alphabet).unwrap(), bytes);
+    // Truncation anywhere fails closed.
+    for cut in [1, 4, 5, text.len() - 1] {
+        assert!(base86_decode_mixed(&text[..cut], &alphabet).is_err(), "cut {cut}");
+    }
+    // Trailing garbage fails closed even when alphabet-valid.
+    let mut plus = text.clone();
+    plus.push(alphabet[0] as char);
+    assert!(base86_decode_mixed(&plus, &alphabet).is_err());
+    // A dropped pool byte fails closed.
+    let dropped = (28u8..=126).find(|byte| !alphabet.contains(byte)).unwrap();
+    let mut bad = text.clone().into_bytes();
+    bad[5] = dropped;
+    assert!(base86_decode_mixed(std::str::from_utf8(&bad).unwrap(), &alphabet).is_err());
+    // Decoding under another image's alphabet fails closed.
+    let long: Vec<u8> = (0..300u32)
+        .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let long_text = base86_encode_mixed(&long, &alphabet, &mut rng);
+    assert!(base86_decode_mixed(&long_text, &base86_image_alphabet(7351)).is_err());
+    // Empty and prefix-short inputs fail closed.
+    assert!(base86_decode_mixed("", &alphabet).is_err());
+    assert!(base86_decode_mixed("abc", &alphabet).is_err());
+}
+
+#[test]
+fn k9a_opaque_split_avoids_nice_values() {
+    const NICE_SMALL: [u64; 9] = [85, 86, 256, 7225, 7396, 65535, 65536, 636056, 614125];
+    let mut rng = crate::random::Prng::new(7001);
+    for _ in 0..1000 {
+        let (m1, m2) = opaque_split(&mut rng, 256);
+        assert_eq!(m1 + m2, 256);
+        let (a24, b24) = opaque_split(&mut rng, 16777216);
+        assert_eq!(a24 + b24, 16777216);
+        for value in [m1, m2, a24, b24] {
+            assert!(!NICE_SMALL.contains(&value), "split hit {value}");
+        }
+    }
+}
+
+#[test]
+fn k9a_lua_escapes_roundtrip_through_literal_bytes() {
+    assert_eq!(lua_escape_string(b"A\"B\\C\x01\x1f "), "A\\\"B\\\\C\\001\\031 ");
+    let pool: Vec<u8> = (28u8..=126).collect();
+    let escaped = lua_escape_string(&pool);
+    for target in [Target::Lua51, Target::Luau] {
+        let literal = format!("\"{escaped}\"");
+        assert_eq!(
+            crate::minify::literal_bytes(&literal, target).unwrap(),
+            pool,
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn k9a_slot_rewrite_is_escape_aware() {
+    // `\"` inside a literal must not close the quote tracker: words after
+    // it are still rewritten, and the literal passes through byte-identical.
+    let mut rng = crate::random::Prng::new(7001);
+    let body = r#"local S="a\"b\\c\027d";local v=S..x;"#;
+    let out = slot_rewrite(&mut rng, body, &["S", "v", "x"]);
+    assert!(out.contains(r#""a\"b\\c\027d""#), "{out}");
+    assert!(!out.contains("..x"), "{out}");
+    assert!(!out.contains("local g["), "{out}");
+    assert_eq!(out.matches("g[").count(), 4, "{out}");
+}
+
+#[test]
+fn k9a_embedded_roundtrip_holds_across_seeds_and_targets() {
+    for target in [Target::Lua51, Target::Luau] {
+        for seed in [1u64, 2, 3, 5, 8, 13, 7001, 7351, 123456, 999983, u64::MAX - 1, u64::MAX] {
+            for probe in ["return 7", "local function f(x)return x+1 end print(f(41))"] {
+                let data = compile(probe, target).unwrap();
+                let output = emit(&data, target, seed).unwrap();
+                assert_eq!(
+                    decrypt_embedded(&output, target, seed).unwrap(),
+                    wire(&data, target, seed),
+                    "{target} seed {seed} probe {probe:?}"
+                );
+                let alphabet = base86_image_alphabet(seed);
+                let segments = segment_literals(&output, target, seed).unwrap();
+                assert_eq!(segments.len(), 3);
+                for segment in &segments {
+                    assert!(segment.len() >= 12);
+                    assert!(segment.iter().all(|&byte| alphabet.contains(&byte)));
+                    // Forced extremes 28/29 guarantee escapes bite somewhere.
+                    assert!(
+                        segment.iter().any(|&byte| byte == 34 || byte == 92 || byte < 32),
+                        "{target} seed {seed}: segment without escapes"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn k9a_segment_fields_match_rust_decode_in_native_runners() {
+    fn hex_decode(hex: &str) -> Vec<u8> {
+        let digits = hex.as_bytes();
+        assert!(digits.len() % 2 == 0);
+        (0..digits.len())
+            .step_by(2)
+            .map(|i| {
+                let pair = std::str::from_utf8(&digits[i..i + 2]).unwrap();
+                u8::from_str_radix(pair, 16).unwrap()
+            })
+            .collect()
+    }
+    for (target, seed) in [(Target::Lua51, 7001u64), (Target::Luau, 7351u64)] {
+        let data = compile("local function f(x)return x+1 end print(f(41))", target).unwrap();
+        let output = emit(&data, target, seed).unwrap();
+        let alphabet = base86_image_alphabet(seed);
+        let segments = segment_literals(&output, target, seed).unwrap();
+        let mut expected: Vec<Vec<u8>> = segments
+            .iter()
+            .map(|literal| {
+                base86_decode_mixed(&String::from_utf8_lossy(literal), &alphabet).unwrap()
+            })
+            .collect();
+        expected.sort();
+        // Extract the three segment fields by content: the finalizer renames
+        // every parameter, so fields are located as the innermost
+        // `function...end` chunks containing the segment literals. Openers
+        // pair over the lexer's keyword stream (strings are single tokens,
+        // so payload text can never desynchronize the depth count); `do`
+        // belongs to for/while here, never a bare block, and the compile
+        // gate below fails closed if that ever changes.
+        let tokens = crate::lexer::lex(&output, target).unwrap();
+        let mut stack: Vec<(&str, usize)> = Vec::new();
+        let mut functions: Vec<(usize, usize)> = Vec::new();
+        for token in tokens.iter().filter(|t| t.kind == crate::lexer::TokenKind::Keyword) {
+            match token.text(&output) {
+                "function" | "for" | "if" | "while" | "repeat" => {
+                    stack.push((token.text(&output), token.span.start));
+                }
+                "end" | "until" => {
+                    let (opener, start) = stack.pop().expect("unbalanced closer");
+                    let closer = token.text(&output);
+                    assert!(
+                        (closer == "end" && opener != "repeat")
+                            || (closer == "until" && opener == "repeat"),
+                        "{target}: mismatched {opener}"
+                    );
+                    if opener == "function" {
+                        functions.push((start, token.span.end));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(stack.is_empty(), "{target}: unbalanced openers left");
+        let mut chunks = Vec::new();
+        for literal in &segments {
+            let span = tokens
+                .iter()
+                .filter(|t| t.kind == crate::lexer::TokenKind::String)
+                .map(|t| {
+                    (
+                        t.span.clone(),
+                        crate::minify::literal_bytes(t.text(&output), target).unwrap(),
+                    )
+                })
+                .find(|(_, bytes)| bytes == literal)
+                .map(|(span, _)| span)
+                .unwrap();
+            let innermost = functions
+                .iter()
+                .filter(|(start, end)| *start < span.start && span.end < *end)
+                .max_by_key(|(start, _)| *start)
+                .unwrap();
+            let chunk = output[innermost.0..innermost.1].to_owned();
+            // Seven positional parameters (E,SB,NCH,TC,DB,GI,LS pre-rename).
+            let params = chunk["function".len()..].trim_start();
+            assert!(params.starts_with('('), "{target}: {params:?}");
+            let arity = params[1..params.find(')').unwrap()].split(',').count();
+            assert_eq!(arity, 7, "{target}: segment field arity moved");
+            chunks.push(chunk);
+        }
+        assert_eq!(chunks.len(), 3, "{target}: segment field count moved");
+        let mut actual = Vec::new();
+        for (part, chunk) in chunks.iter().enumerate() {
+            let stub = if target.is_luau() { "\"[C]\"" } else { "{what=\"C\"}" };
+            let harness = format!(
+                "local SB=string.byte;local NCH=string.char;local TC=table.concat;\
+local E=function() error(\"boom\") end;local DB=true;local LS=function() end;\
+local GI=function() return {stub} end;local F={chunk};\
+local r=F(E,SB,NCH,TC,DB,GI,LS);local h=\"\";\
+for i=1,#r do h=h..string.format(\"%02x\",SB(r,i)) end;print(h)"
+            );
+            let workspace = native::Workspace::new();
+            let path = workspace.0.join(format!("k9a_segment{part}.lua"));
+            fs::write(&path, &harness).unwrap();
+            assert!(native::compile(target, &path).status.success());
+            let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+            let result = Command::new(native::root().join("toolchains/bin").join(runner))
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{target} segment {part} failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            actual.push(hex_decode(String::from_utf8(result.stdout).unwrap().trim()));
+        }
+        actual.sort();
+        assert_eq!(actual, expected, "{target}: Lua/Rust decode mismatch");
+    }
+}
+
+#[test]
+fn k9a_label_draws_never_emit_nice_values() {
+    // Slot keys (1..99) avoid 85/86, state numbers (100..999) avoid 256,
+    // wrapper keys avoid 256/7225/7396: arbitrary labels must not read as
+    // transport constants. Sweep many seeds; coverage asserts prove the
+    // draws still span their domains.
+    let (mut slot_min, mut slot_max) = (99u64, 1u64);
+    let (mut state_min, mut state_max) = (999u16, 100u16);
+    for seed in 0..200u64 {
+        let mut rng = crate::random::Prng::new(seed);
+        let out = slot_rewrite(&mut rng, "local a=b;local c=a;", &["a", "b", "c"]);
+        let bytes = out.as_bytes();
+        let mut i = 0;
+        let mut found = 0;
+        while i + 2 < bytes.len() {
+            if &bytes[i..i + 2] == b"g[" {
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                assert!(j > i + 2 && bytes[j] == b']', "{out}");
+                let key: u64 = out[i + 2..j].parse().unwrap();
+                assert!((1..=99).contains(&key), "{out}");
+                assert!(key != 85 && key != 86, "{out}");
+                slot_min = slot_min.min(key);
+                slot_max = slot_max.max(key);
+                found += 1;
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+        assert_eq!(found, 4, "{out}");
+        for state in state_values(&mut rng, 4) {
+            assert!((100..=999).contains(&state), "{state}");
+            assert_ne!(state, 256);
+            state_min = state_min.min(state);
+            state_max = state_max.max(state);
+        }
+        for key in wrapper_keys(seed) {
+            assert!((100..=9999).contains(&key), "{key}");
+            assert!(key != 256 && key != 7225 && key != 7396, "{key}");
+        }
+    }
+    assert!(slot_min < 10 && slot_max > 89, "{slot_min} {slot_max}");
+    assert!(state_min < 200 && state_max > 899, "{state_min} {state_max}");
+}
