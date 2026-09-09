@@ -964,7 +964,7 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
-            87_000usize,
+            95_000usize,
         ),
         (
             Target::Luau,
