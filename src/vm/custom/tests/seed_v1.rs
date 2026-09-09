@@ -770,3 +770,211 @@ fn p4_insertion_locks() {
         }
     }
 }
+
+/// P5 liveness witness: one alternative = (optional prev-line substring,
+/// required substrings of the matched line). Unique-span sites witness with
+/// the bare variant; shared spans (`#q` checks, `ip=ip+1;`) anchor to a
+/// combination-stable co-span so the variant must land on ITS OWN line.
+fn p5_witnesses() -> Vec<Vec<(Option<&'static str>, Vec<&'static str>)>> {
+    let bare = |v: &'static str| vec![(None, vec![v])];
+    vec![
+        vec![(Some("op==1 then"), vec!["3~=#q"])],
+        vec![(Some("op==2 then"), vec!["3~=#q"])],
+        vec![(Some("op==3 then"), vec!["3~=#q"])],
+        vec![(Some("op==8 then"), vec!["3~=#q"])],
+        vec![(Some("op==9 then"), vec!["3~=#q"])],
+        vec![(Some("op==10 then"), vec!["4~=#q"])],
+        vec![(Some("op==11 then"), vec!["4~=#q"])],
+        bare("if 5~=#q then seedfail(5)end;"),
+        bare("if 5+nargs~=#q then seedfail(5)end;"),
+        bare("1~=#q"),
+        vec![(None, vec!["2==#q", "tgtc(q[2])"])],
+        vec![(None, vec!["3==#q", "tgtc(q[3])"])],
+        vec![(None, vec!["2==#q", "return nil,0;"])],
+        bare("if 0~=a then"),
+        vec![(None, vec!["3==#q", "rv(q[3])"])],
+        bare("5==#q"),
+        bare("if 3~=a then"),
+        vec![
+            (None, vec!["tmp[dstc(q[2])]=rv(q[3]);ip=1+ip;"]),
+            (None, vec!["tmp[w1]=rv(q[3]);ip=1+ip;"]),
+        ],
+        vec![(None, vec!["local v=rv(q[3]);", ";ip=1+ip;"])],
+        vec![
+            (None, vec!["tmp[dstc(q[2])]={};ip=1+ip;"]),
+            (None, vec!["tmp[w3]={};ip=1+ip;"]),
+        ],
+        vec![(Some("tmp[dstc(q[2])]=r;"), vec!["ip=1+ip;"])],
+        vec![
+            (Some("else tmp[dv]=f(Z(U(ag,1,nargs)));end;"), vec!["ip=1+ip;"]),
+            (Some("local w6=f(Z(U(ag,1,nargs)));tmp[dv]=w6;"), vec!["ip=1+ip;"]),
+        ],
+        vec![
+            (None, vec!["local si=rv(q[2]);R[RX(stix(si))]=rv(q[3]);ip=1+ip;"]),
+            (None, vec!["local si=rv(q[2]);local w12=RX(stix(si));R[w12]=rv(q[3]);ip=1+ip;"]),
+        ],
+        vec![
+            (None, vec!["local li=rv(q[3]);tmp[dstc(q[2])]=R[RX(stix(li))];ip=1+ip;"]),
+            (None, vec!["local li=rv(q[3]);local w13=dstc(q[2]);tmp[w13]=R[RX(stix(li))];ip=1+ip;"]),
+        ],
+        vec![
+            (None, vec!["tmp[dstc(q[2])]=rv(q[3])[rv(q[4])];ip=1+ip;"]),
+            (None, vec!["local w14=dstc(q[2]);tmp[w14]=rv(q[3])[rv(q[4])];ip=1+ip;"]),
+        ],
+        vec![
+            (None, vec!["rv(q[2])[rv(q[3])]=rv(q[4]);ip=1+ip;"]),
+            (None, vec!["local w15=rv(q[2]);w15[rv(q[3])]=rv(q[4]);ip=1+ip;"]),
+        ],
+        bare("E();ip=1+ip;"),
+        bare("TNUM~=TY(l)"),
+        bare("TFUN~=TY(f)"),
+        bare("1~=nargs"),
+        bare("TTAB~=TY(t)"),
+        bare("nil==m"),
+        bare("8<m"),
+        bare("9~=expect"),
+        bare("expect~=a"),
+        bare("if not tmp[cv] then ip=ip+1 else ip=t end;"),
+        bare("local w1=dstc(q[2]);tmp[w1]=rv(q[3]);"),
+        bare("local v=rv(q[3]);local w2=dstc(q[2]);tmp[w2]="),
+        bare("local w3=dstc(q[2]);tmp[w3]={};"),
+        bare("local w4=f(U(ag,1,nargs));tmp[dv]=w4;"),
+        bare("local w5=f(U(t,1,m));tmp[dv]=w5;"),
+        bare("local w6=f(Z(U(ag,1,nargs)));tmp[dv]=w6;"),
+        bare("local w7=rv(q[5+i]);ag[i]=w7"),
+        bare("local w8=tgtc(q[2]);ip=w8;"),
+        bare("local cv=dstc(q[2]);local t=tgtc(q[3]);"),
+        bare("local w9=expect or 0;expect=w9;"),
+        bare("local w10=rv(q[3]);return w10,a;"),
+        bare("local w11=rv(q[3]);return w11,rv(q[4]),rv(q[5]),a;"),
+        bare("local w12=RX(stix(si));R[w12]=rv(q[3]);"),
+        bare("local w13=dstc(q[2]);tmp[w13]=R[RX(stix(li))];"),
+        bare("local w14=dstc(q[2]);tmp[w14]=rv(q[3])[rv(q[4])];"),
+        bare("local w15=rv(q[2]);w15[rv(q[3])]=rv(q[4]);"),
+    ]
+}
+
+/// P5 gate (RED until Batch-5): every site's variant lands on its own line
+/// at least once across 64 seeds (exhaustive over P5_SITES).
+#[test]
+fn p5_variants_appear() {
+    let witnesses = p5_witnesses();
+    assert_eq!(witnesses.len(), seed_deform::P5_SITES.len());
+    for target in [Target::Lua51, Target::Luau] {
+        let mut seen = vec![false; witnesses.len()];
+        for seed in 0..64u64 {
+            let body = seed_loop_lua(target, seed);
+            let lines: Vec<&str> = body.lines().collect();
+            for (idx, alts) in witnesses.iter().enumerate() {
+                if seen[idx] {
+                    continue;
+                }
+                'scan: for (i, line) in lines.iter().enumerate() {
+                    for (prev, subs) in alts {
+                        if !subs.iter().all(|sub| line.contains(sub)) {
+                            continue;
+                        }
+                        if let Some(prev) = prev {
+                            if i == 0 || !lines[i - 1].contains(prev) {
+                                continue;
+                            }
+                        }
+                        seen[idx] = true;
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        let missing: Vec<usize> =
+            seen.iter().enumerate().filter(|(_, s)| !**s).map(|(i, _)| i).collect();
+        assert!(missing.is_empty(), "P5: variants never landed: {missing:?}");
+    }
+}
+
+/// P5 lock: shared spans conserve exact totals, unique spans XOR per seed,
+/// temps are singular. Location is enforced impl-side (fail-closed needles).
+#[test]
+fn p5_insertion_locks() {
+    for target in [Target::Lua51, Target::Luau] {
+        for seed in 0..16u64 {
+            let body = seed_loop_lua(target, seed);
+            let total = |a: &str, b: &str| body.matches(a).count() + body.matches(b).count();
+            assert_eq!(total("#q~=3", "3~=#q"), 5, "P5: q3 drift seed={seed}");
+            assert_eq!(total("#q~=4", "4~=#q"), 2, "P5: q4 drift seed={seed}");
+            assert_eq!(total("#q==2", "2==#q"), 2, "P5: q2 drift seed={seed}");
+            assert_eq!(total("#q==3", "3==#q"), 2, "P5: q3eq drift seed={seed}");
+            assert_eq!(total("ip=ip+1;", "ip=1+ip;"), 10, "P5: ip drift seed={seed}");
+            for (canon, variant) in [
+                ("if #q~=5 then seedfail(5)end;", "if 5~=#q then seedfail(5)end;"),
+                ("if #q~=5+nargs then seedfail(5)end;", "if 5+nargs~=#q then seedfail(5)end;"),
+                ("if #q~=1 then seedfail(5)end;", "if 1~=#q then seedfail(5)end;"),
+                ("if a~=0 then", "if 0~=a then"),
+                ("#q==5", "5==#q"),
+                ("if a~=3 then", "if 3~=a then"),
+                ("TY(l)~=TNUM", "TNUM~=TY(l)"),
+                ("TY(f)~=TFUN", "TFUN~=TY(f)"),
+                ("nargs~=1", "1~=nargs"),
+                ("TY(t)~=TTAB", "TTAB~=TY(t)"),
+                ("m==nil", "nil==m"),
+                ("m>8", "8<m"),
+                ("expect~=9", "9~=expect"),
+                ("a~=expect", "expect~=a"),
+                (
+                    "if tmp[cv] then ip=t else ip=ip+1 end;",
+                    "if not tmp[cv] then ip=ip+1 else ip=t end;",
+                ),
+                ("tmp[dstc(q[2])]=rv(q[3]);", "local w1=dstc(q[2]);tmp[w1]=rv(q[3]);"),
+                (
+                    "local v=rv(q[3]);tmp[dstc(q[2])]=",
+                    "local v=rv(q[3]);local w2=dstc(q[2]);tmp[w2]=",
+                ),
+                ("tmp[dstc(q[2])]={};", "local w3=dstc(q[2]);tmp[w3]={};"),
+                ("tmp[dv]=f(U(ag,1,nargs));", "local w4=f(U(ag,1,nargs));tmp[dv]=w4;"),
+                ("tmp[dv]=f(U(t,1,m));", "local w5=f(U(t,1,m));tmp[dv]=w5;"),
+                (
+                    "tmp[dv]=f(Z(U(ag,1,nargs)));",
+                    "local w6=f(Z(U(ag,1,nargs)));tmp[dv]=w6;",
+                ),
+                ("ag[i]=rv(q[5+i])", "local w7=rv(q[5+i]);ag[i]=w7"),
+                ("ip=tgtc(q[2]);", "local w8=tgtc(q[2]);ip=w8;"),
+                (
+                    "local cv,t=dstc(q[2]),tgtc(q[3]);",
+                    "local cv=dstc(q[2]);local t=tgtc(q[3]);",
+                ),
+                ("expect=expect or 0;", "local w9=expect or 0;expect=w9;"),
+                ("return rv(q[3]),a;", "local w10=rv(q[3]);return w10,a;"),
+                (
+                    "return rv(q[3]),rv(q[4]),rv(q[5]),a;",
+                    "local w11=rv(q[3]);return w11,rv(q[4]),rv(q[5]),a;",
+                ),
+                (
+                    "R[RX(stix(si))]=rv(q[3]);",
+                    "local w12=RX(stix(si));R[w12]=rv(q[3]);",
+                ),
+                (
+                    "tmp[dstc(q[2])]=R[RX(stix(li))];",
+                    "local w13=dstc(q[2]);tmp[w13]=R[RX(stix(li))];",
+                ),
+                (
+                    "tmp[dstc(q[2])]=rv(q[3])[rv(q[4])];",
+                    "local w14=dstc(q[2]);tmp[w14]=rv(q[3])[rv(q[4])];",
+                ),
+                (
+                    "rv(q[2])[rv(q[3])]=rv(q[4]);",
+                    "local w15=rv(q[2]);w15[rv(q[3])]=rv(q[4]);",
+                ),
+            ] {
+                let canon_n = body.matches(canon).count();
+                let variant_n = body.matches(variant).count();
+                assert!(
+                    (canon_n == 1 && variant_n == 0) || (canon_n == 0 && variant_n == 1),
+                    "P5: neither-or-both canon={canon_n} variant={variant_n} seed={seed} {canon:?}"
+                );
+            }
+            for n in 1..=15u32 {
+                let defs = body.matches(&format!("local w{n}=")).count();
+                assert!(defs <= 1, "P5: temp w{n} defined {defs}x seed={seed}");
+            }
+        }
+    }
+}

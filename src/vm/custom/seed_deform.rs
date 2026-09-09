@@ -353,6 +353,7 @@ pub(crate) fn p1_deform_template(body: &str, seed: u64) -> String {
     p4_alu_forms(&mut lines, &mut p1_stream(seed, 6));
     p4_chain_perms(&mut lines, &mut p1_stream(seed, 7));
     let inserted = p4_dead_temps(&mut lines, &mut p1_stream(seed, 8));
+    p5_arm_forms(&mut lines, &mut p1_stream(seed, 9));
     assert_eq!(
         lines.len(),
         line_count + inserted,
@@ -517,7 +518,7 @@ pub(crate) struct P4Chain {
     pub close: &'static str,
     pub sep: &'static str,
     pub pinned: usize,
-    /// Stable witness for gates (survives permutation).
+    /// Stable witness for gates (survives B4b permutation, P5 spans, respell).
     pub witness: &'static str,
 }
 
@@ -540,8 +541,8 @@ pub(crate) const P4_CHAINS: [P4Chain; 20] = [
     P4Chain { open: "if ", inner: "mk~=3 or mv>2 or mo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(27)" },
     P4Chain { open: "if ", inner: "TY(t)~=TNUM or t<1 or t>#prog or t%1~=0", close: " then", sep: " or ", pinned: 1, witness: "seedfail(32)" },
     P4Chain { open: "if ", inner: "a~=0 and a~=1 and a~=2 and a~=3", close: " then", sep: " and ", pinned: 0, witness: "seedfail(34)" },
-    P4Chain { open: "if ", inner: "a==0 or a==3", close: " then", sep: " or ", pinned: 0, witness: "return rv(q[3]),a;" },
-    P4Chain { open: "(", inner: "v~=nil and v~=false", close: ")", sep: " and ", pinned: 0, witness: "local v=rv(q[3]);tmp[dstc(q[2])]=" },
+    P4Chain { open: "if ", inner: "a==0 or a==3", close: " then", sep: " or ", pinned: 0, witness: "a==0" },
+    P4Chain { open: "(", inner: "v~=nil and v~=false", close: ")", sep: " and ", pinned: 0, witness: "local v=rv(q[3]);" },
 ];
 
 /// P4: permute each chain's free suffix (pinned type checks stay first).
@@ -617,3 +618,128 @@ fn p4_dead_temps(lines: &mut Vec<String>, rng: &mut Prng) -> usize {
     inserted
 }
 
+/// P5 (Batch-5) arm-body deformation table: one entry per span operation.
+/// Matching runs on post-B1..B4 text: `line` (plus optional `prev` arm-header
+/// substring) locates exactly one line, then `canon` must occur exactly once
+/// in it. Duals apply before splits; all spans are disjoint by construction
+/// (checked at runtime: no variant may contain any canon span).
+pub(crate) struct P5Site {
+    pub(crate) prev: Option<&'static str>,
+    pub(crate) line: &'static str,
+    pub(crate) canon: &'static str,
+    pub(crate) variant: &'static str,
+    pub(crate) temp: Option<&'static str>,
+}
+
+pub(crate) const P5_SITES: &[P5Site] = &[
+    // Size-check duals (2-line needles: identical text across arms).
+    P5Site { prev: Some("op==1 then"), line: "if #q~=3 then seedfail(5)end;", canon: "#q~=3", variant: "3~=#q", temp: None },
+    P5Site { prev: Some("op==2 then"), line: "if #q~=3 then seedfail(5)end;", canon: "#q~=3", variant: "3~=#q", temp: None },
+    P5Site { prev: Some("op==3 then"), line: "if #q~=3 then seedfail(5)end;", canon: "#q~=3", variant: "3~=#q", temp: None },
+    P5Site { prev: Some("op==8 then"), line: "if #q~=3 then seedfail(5)end;", canon: "#q~=3", variant: "3~=#q", temp: None },
+    P5Site { prev: Some("op==9 then"), line: "if #q~=3 then seedfail(5)end;", canon: "#q~=3", variant: "3~=#q", temp: None },
+    P5Site { prev: Some("op==10 then"), line: "if #q~=4 then seedfail(5)end;", canon: "#q~=4", variant: "4~=#q", temp: None },
+    P5Site { prev: Some("op==11 then"), line: "if #q~=4 then seedfail(5)end;", canon: "#q~=4", variant: "4~=#q", temp: None },
+    P5Site { prev: None, line: "if #q~=5 then seedfail(5)end;", canon: "#q~=5", variant: "5~=#q", temp: None },
+    P5Site { prev: None, line: "if #q~=5+nargs then seedfail(5)end;", canon: "#q~=5+nargs", variant: "5+nargs~=#q", temp: None },
+    P5Site { prev: None, line: "if #q~=1 then seedfail(5)end;", canon: "#q~=1", variant: "1~=#q", temp: None },
+    P5Site { prev: None, line: "#q==2 then ip=tgtc(q[2]);", canon: "#q==2", variant: "2==#q", temp: None },
+    P5Site { prev: None, line: "#q==3 then local cv,t=", canon: "#q==3", variant: "3==#q", temp: None },
+    P5Site { prev: None, line: "#q==2 then if a~=0 then seedfail(5)end;return nil,0;", canon: "#q==2", variant: "2==#q", temp: None },
+    P5Site { prev: None, line: "if a~=0 then seedfail(5)end;return nil,0;", canon: "if a~=0 then", variant: "if 0~=a then", temp: None },
+    P5Site { prev: None, line: "#q==3 then if a", canon: "#q==3", variant: "3==#q", temp: None },
+    P5Site { prev: None, line: "#q==5 then if a~=3 then seedfail(5)end;return rv(q[3]),rv(q[4]),rv(q[5]),a;", canon: "#q==5", variant: "5==#q", temp: None },
+    P5Site { prev: None, line: "if a~=3 then seedfail(5)end;return rv(q[3]),rv(q[4]),rv(q[5]),a;", canon: "if a~=3 then", variant: "if 3~=a then", temp: None },
+    // ip-step duals (standalone op4/op5 lines take prev-line context).
+    P5Site { prev: None, line: "tmp[dstc(q[2])]=rv(q[3]);ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: None, line: "local v=rv(q[3]);tmp[dstc(q[2])]=", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: None, line: "tmp[dstc(q[2])]={};ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: Some("tmp[dstc(q[2])]=r;"), line: "ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: Some("else tmp[dv]=f(Z(U(ag,1,nargs)));end;"), line: "ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: None, line: "local si=rv(q[2]);R[RX(stix(si))]=rv(q[3]);ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: None, line: "local li=rv(q[3]);tmp[dstc(q[2])]=R[RX(stix(li))];ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: None, line: "tmp[dstc(q[2])]=rv(q[3])[rv(q[4])];ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: None, line: "rv(q[2])[rv(q[3])]=rv(q[4]);ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    P5Site { prev: None, line: "E();ip=ip+1;", canon: "ip=ip+1;", variant: "ip=1+ip;", temp: None },
+    // Guard duals (B4b-chain interiors excluded: already permuted).
+    P5Site { prev: None, line: "if TY(l)~=TNUM then seedfail(21)end;", canon: "TY(l)~=TNUM", variant: "TNUM~=TY(l)", temp: None },
+    P5Site { prev: None, line: "local f=rv(q[3]);if TY(f)~=TFUN then seedfail(26)end;", canon: "TY(f)~=TFUN", variant: "TFUN~=TY(f)", temp: None },
+    P5Site { prev: None, line: "if nargs~=1 then seedfail(29)end;", canon: "nargs~=1", variant: "1~=nargs", temp: None },
+    P5Site { prev: None, line: "local t=ag[1];if TY(t)~=TTAB then seedfail(30)end;", canon: "TY(t)~=TTAB", variant: "TTAB~=TY(t)", temp: None },
+    P5Site { prev: None, line: "local m=t.n;if m==nil then m=#t end;", canon: "m==nil", variant: "nil==m", temp: None },
+    P5Site { prev: None, line: "if m>8 then seedfail(31)end;", canon: "m>8", variant: "8<m", temp: None },
+    P5Site { prev: None, line: "expect~=9", canon: "expect~=9", variant: "9~=expect", temp: None },
+    P5Site { prev: None, line: "a~=expect", canon: "a~=expect", variant: "expect~=a", temp: None },
+    P5Site { prev: None, line: "if tmp[cv] then ip=t else ip=ip+1 end;", canon: "if tmp[cv] then ip=t else ip=ip+1 end;", variant: "if not tmp[cv] then ip=ip+1 else ip=t end;", temp: None },
+    // Temp-splits (within-line, key-side-first per dual-target probe).
+    P5Site { prev: None, line: "tmp[dstc(q[2])]=rv(q[3]);", canon: "tmp[dstc(q[2])]=rv(q[3]);", variant: "local w1=dstc(q[2]);tmp[w1]=rv(q[3]);", temp: Some("w1") },
+    P5Site { prev: None, line: "local v=rv(q[3]);tmp[dstc(q[2])]=", canon: "local v=rv(q[3]);tmp[dstc(q[2])]=", variant: "local v=rv(q[3]);local w2=dstc(q[2]);tmp[w2]=", temp: Some("w2") },
+    P5Site { prev: None, line: "tmp[dstc(q[2])]={};", canon: "tmp[dstc(q[2])]={};", variant: "local w3=dstc(q[2]);tmp[w3]={};", temp: Some("w3") },
+    P5Site { prev: None, line: "tmp[dv]=f(U(ag,1,nargs));", canon: "tmp[dv]=f(U(ag,1,nargs));", variant: "local w4=f(U(ag,1,nargs));tmp[dv]=w4;", temp: Some("w4") },
+    P5Site { prev: None, line: "tmp[dv]=f(U(t,1,m));", canon: "tmp[dv]=f(U(t,1,m));", variant: "local w5=f(U(t,1,m));tmp[dv]=w5;", temp: Some("w5") },
+    P5Site { prev: None, line: "tmp[dv]=f(Z(U(ag,1,nargs)));", canon: "tmp[dv]=f(Z(U(ag,1,nargs)));", variant: "local w6=f(Z(U(ag,1,nargs)));tmp[dv]=w6;", temp: Some("w6") },
+    P5Site { prev: None, line: "for i=1,nargs do ag[i]=rv(q[5+i])end;", canon: "ag[i]=rv(q[5+i])", variant: "local w7=rv(q[5+i]);ag[i]=w7;", temp: Some("w7") },
+    P5Site { prev: None, line: "then ip=tgtc(q[2]);", canon: "ip=tgtc(q[2]);", variant: "local w8=tgtc(q[2]);ip=w8;", temp: Some("w8") },
+    P5Site { prev: None, line: "local cv,t=dstc(q[2]),tgtc(q[3]);", canon: "local cv,t=dstc(q[2]),tgtc(q[3]);", variant: "local cv=dstc(q[2]);local t=tgtc(q[3]);", temp: None },
+    P5Site { prev: None, line: "expect=expect or 0;", canon: "expect=expect or 0;", variant: "local w9=expect or 0;expect=w9;", temp: Some("w9") },
+    P5Site { prev: None, line: "return rv(q[3]),a;", canon: "return rv(q[3]),a;", variant: "local w10=rv(q[3]);return w10,a;", temp: Some("w10") },
+    P5Site { prev: None, line: "return rv(q[3]),rv(q[4]),rv(q[5]),a;", canon: "return rv(q[3]),rv(q[4]),rv(q[5]),a;", variant: "local w11=rv(q[3]);return w11,rv(q[4]),rv(q[5]),a;", temp: Some("w11") },
+    P5Site { prev: None, line: "R[RX(stix(si))]=rv(q[3]);", canon: "R[RX(stix(si))]=rv(q[3]);", variant: "local w12=RX(stix(si));R[w12]=rv(q[3]);", temp: Some("w12") },
+    P5Site { prev: None, line: "tmp[dstc(q[2])]=R[RX(stix(li))];", canon: "tmp[dstc(q[2])]=R[RX(stix(li))];", variant: "local w13=dstc(q[2]);tmp[w13]=R[RX(stix(li))];", temp: Some("w13") },
+    P5Site { prev: None, line: "tmp[dstc(q[2])]=rv(q[3])[rv(q[4])];", canon: "tmp[dstc(q[2])]=rv(q[3])[rv(q[4])];", variant: "local w14=dstc(q[2]);tmp[w14]=rv(q[3])[rv(q[4])];", temp: Some("w14") },
+    P5Site { prev: None, line: "rv(q[2])[rv(q[3])]=rv(q[4]);", canon: "rv(q[2])[rv(q[3])]=rv(q[4]);", variant: "local w15=rv(q[2]);w15[rv(q[3])]=rv(q[4]);", temp: Some("w15") },
+];
+
+/// P5 (Batch-5): arm-body duals/splits as line-neutral within-line span
+/// replaces. Table order is application order (all duals precede all splits);
+/// every needle is fail-closed (`count == 1` or panic). Split safety rests on
+/// the dual-target probe: stores evaluate key-side first, multi-assign and
+/// indexing left-to-right, so hoisting the first-evaluated call preserves
+/// failure precedence exactly. B4b-chain interiors are excluded (they already
+/// permute); `expect or 0` has no Lua dual; op12's body is unreachable.
+fn p5_arm_forms(lines: &mut Vec<String>, rng: &mut Prng) {
+    for site in P5_SITES {
+        if let Some(temp) = site.temp {
+            let def = format!("local {temp}=");
+            assert!(
+                !lines.iter().any(|l| l.contains(&def)),
+                "P5: temp collides: {temp}"
+            );
+        }
+    }
+    for a in P5_SITES {
+        for b in P5_SITES {
+            assert!(
+                !a.variant.contains(b.canon),
+                "P5: variant cannibalizes canon: {} in {}",
+                b.canon,
+                a.variant
+            );
+        }
+    }
+    for site in P5_SITES {
+        let mut hits = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains(site.line) {
+                continue;
+            }
+            if let Some(prev) = site.prev {
+                if i == 0 || !lines[i - 1].contains(prev) {
+                    continue;
+                }
+            }
+            hits.push(i);
+        }
+        assert_eq!(hits.len(), 1, "P5: needle drifted: {}", site.line);
+        let at = hits[0];
+        assert_eq!(
+            lines[at].matches(site.canon).count(),
+            1,
+            "P5: canon drifted: {}",
+            site.canon
+        );
+        if rng.index(2) == 1 {
+            lines[at] = lines[at].replacen(site.canon, site.variant, 1);
+        }
+    }
+}

@@ -670,9 +670,18 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
             assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;"));
             // P0: register-file indexing now happens only in the three seed
             // loop sites (REG read, STORE, LOAD); classic bodies are gone.
-            assert!(raw.matches("R[RX(").count() >= 3);
+            // P5: STORE ships two spellings (inline `R[RX(stix(si))]` or
+            // hoisted `local w12=RX(stix(si));` + `R[w12]=`); exactly one
+            // must be present and RX-wrapping is conserved either way.
+            assert!(raw.matches("R[RX(").count() + raw.matches("local w12=RX(").count() >= 3);
             assert!(raw.contains("R[RX(sl+vo)]"));
-            assert!(raw.contains("R[RX(stix(si))]"));
+            let store_inline = raw.contains("R[RX(stix(si))]");
+            let store_split =
+                raw.contains("local w12=RX(stix(si));") && raw.contains("R[w12]=");
+            assert!(
+                store_inline != store_split,
+                "{target} seed {seed}: STORE spelling neither-or-both"
+            );
             assert!(raw.contains("R[RX(stix(li))]"));
             for old in ["R[a]", "R[b]", "R[c]", "R[i]", "R[d[2]]"] {
                 assert!(
