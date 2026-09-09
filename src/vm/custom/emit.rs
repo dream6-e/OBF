@@ -309,6 +309,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
     let mut hidden: Vec<&str> = vec![
         "select",
         "error",
+        "pcall",
         "unpack",
         "string",
         "byte",
@@ -403,6 +404,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
             ),
         ),
         ("E", format!("local E={};", gv(&var_of, "error"))),
+        ("PC", format!("local PC={};", gv(&var_of, "pcall"))),
         (
             "SB",
             format!(
@@ -474,8 +476,8 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // X8 and does not depend on target-specific bit libraries.
     s.push_str("local X8=function(a,b)local r=0;for j=0,7 do r=r+(a+b)%2*2^j;a=MF(a/2);b=MF(b/2)end;return r end;local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65521;y=(y+x)%65521 end;return x+y*65536 end;local L32=function(S,p)return SB(S,p)+SB(S,p+1)*256+SB(S,p+2)*65536+SB(S,p+3)*16777216 end;");
     let mut ret_order: Vec<&str> = vec![
-        "SC", "Z", "U", "G", "E", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS", "NX",
-        "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS", "X8", "AD", "L32",
+        "SC", "Z", "U", "G", "E", "PC", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS",
+        "NX", "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS", "X8", "AD", "L32",
     ];
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
@@ -1145,7 +1147,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
         keys[14], keys[15], keys[2], keys[3],
     );
     let run_stage = format!(
-        "local H=VMS[{}](SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
+        "local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
         keys[4]
     );
     let entry_machine = state_machine(
@@ -1167,7 +1169,7 @@ local SV=function(cell,value)if cell[2]then cell[2][cell[3]]=value else cell[1]=
     .unwrap();
     write!(
         s,
-        "[{}]=function(SC,Z,U,G,E,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG)\n",
+        "[{}]=function(SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG)\n",
         keys[4]
     )
     .unwrap();
@@ -1182,6 +1184,10 @@ local W=SM({},{__mode='kv'});local H;local Make;
     );
     s.push_str(call_body);
     s.push_str(&register_abi.factory_lua());
+    // Seed-ISA prelude: the generic handler-shape loop plus the fixed slice
+    // routines. Placed beside the RK factory so every fragment arm below can
+    // reach SEED as an upvalue through the interpreter module scope.
+    s.push_str(&seed_prelude_lua(program.target));
     s.push_str(
         r#"
 Make=function(id,up)
@@ -1337,7 +1343,13 @@ end;
                 let form = binding_forms[binding_cursor];
                 binding_cursor += 1;
                 body.push_str(&operand_binding_lua(start + 1, form));
-                body.push_str(&semantic_handler(op)?);
+                // Dual-form dispatch: migrated ops run their seed routine
+                // through the generic loop; the rest keep classic bodies.
+                if let Some(arm) = seed_arm_lua(op) {
+                    body.push_str(&arm);
+                } else {
+                    body.push_str(&semantic_handler(op)?);
+                }
             } else if length == 2 {
                 let first_op = recipe.execute_ops[start];
                 let second_op = recipe.execute_ops[start + 1];

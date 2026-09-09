@@ -42,6 +42,7 @@ mod cipher;
 mod compress;
 mod emit;
 mod lowering;
+mod seed;
 mod semantic;
 mod structure;
 #[cfg(test)]
@@ -56,6 +57,7 @@ pub(crate) use cipher::*;
 pub(crate) use compress::*;
 pub(crate) use emit::generate;
 pub(crate) use lowering::*;
+pub(crate) use seed::*;
 pub(crate) use structure::*;
 pub(crate) use transport::*;
 pub use transport::{decrypt_embedded, extract_embedded};

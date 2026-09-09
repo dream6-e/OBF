@@ -857,6 +857,7 @@ fn global_names_are_hidden_behind_a_character_function_pool() {
                 "string",
                 "math",
                 "error",
+                "pcall",
                 "tonumber",
                 "type",
                 "select",
@@ -978,8 +979,10 @@ fn stages_are_flattened_into_seeded_state_machines() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Nine machines: entry graph, three segments, parse core,
-            // interpreter fetch/dispatch, and shared recipe/edge token machines.
+            // Nine `while true do` machines: entry graph, three segments,
+            // parse core, interpreter fetch/dispatch, and shared recipe/edge
+            // token machines. The seed-ISA handler-shape loop uses a bounded
+            // `for` loop instead, so it is not counted here.
             assert_eq!(raw.matches("while true do").count(), 9);
             assert!(!raw.contains("local FMt,PT=VMS["));
             assert!(!raw.contains("local P,np,entry=VMS["));

@@ -964,12 +964,12 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
-            85_000usize,
+            87_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
-            94_000usize,
+            95_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -1585,3 +1585,73 @@ fn generated_parser_reads_global_capture_constant_pools() {
     }
 }
 
+
+const SEED_CONTROL_FIXTURE: &str = "local function f(x)if x>0 then return x*2 else return 0-x end end;local r=0;local i=0;while i<5 do r=r+f(i-2);i=i+1 end;print(r)";
+
+#[test]
+fn seed_arms_emit_for_jump_test_return_on_both_targets() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let raw = generate(&data, &program, 735).unwrap();
+        assert_eq!(
+            raw.matches("local SEED=function(prog,site,R,RX,K,STAB,SEEDH)")
+                .count(),
+            1,
+            "{target}: seed loop missing"
+        );
+        assert_eq!(
+            raw.matches(
+                "local SEEDJ,SEEDT,SEEDR={{7,1,8004000}},{{2,0,1000000},{6,0,4},{7,1,8005000},{7,0}},{{1,0,1000000},{7,2,0}};"
+            )
+            .count(),
+            1,
+            "{target}: seed routine data missing"
+        );
+        assert!(
+            raw.contains("local STAB,SEEDH={},{};"),
+            "{target}: seed pools missing"
+        );
+        for (routine, site) in [
+            ("SEEDJ", "{0,0,0,0,j,skip1,pc}"),
+            ("SEEDT", "{a,0,0,0,0,skip1,pc}"),
+            ("SEEDR", "{a,0,0,0,0,skip1,pc}"),
+        ] {
+            assert!(
+                raw.contains(&format!(
+                    "SEED({routine},{site},R,RX,F.__obf_proto_k,STAB,SEEDH)"
+                )),
+                "{target}: {routine} call site missing"
+            );
+        }
+        assert!(
+            raw.contains("if act~=1 then E()end;pc=av;"),
+            "{target}: jump apply missing"
+        );
+        assert!(
+            raw.contains("if act==1 then pc=av elseif act~=0 then E()end;"),
+            "{target}: test apply missing"
+        );
+        assert!(
+            raw.contains("if act~=2 then E()end;return av;"),
+            "{target}: return apply missing"
+        );
+    }
+}
+
+#[test]
+fn seed_migration_leaves_no_classic_control_text() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 735, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            for old in ["pc=j;", "then pc=skip1 end", "return R[RX(a)];"] {
+                assert!(
+                    !raw.contains(old),
+                    "{target} seed {seed}: classic control text survived: {old}"
+                );
+            }
+        }
+    }
+}
