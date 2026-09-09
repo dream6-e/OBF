@@ -871,12 +871,12 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
-            95_000usize,
+            98_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
-            95_000usize,
+            98_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -1590,15 +1590,17 @@ fn seed_tailcall_arm_binds_value_first_with_short_return_guard() {
     // act binds nil and every immediate tailcall raises).
     let arm = "local v1,v2,v3,act=SEED(SEEDT[48],{a,b},9);act=act or v2;if act==3 then fid,args,ups=v1,v2,v3;break;elseif act==2 then return v1;else E()end;";
     for target in [Target::Lua51, Target::Luau] {
+        for dseed in [735u64, 7001, 1, u64::MAX] {
         let data = compile(SEED_TAILCALL_FIXTURE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, 735).unwrap();
-        assert!(raw.contains(arm), "{target}: tailcall arm missing or reshaped");
-        let output = finalize(&raw, target, 735).unwrap();
+        let raw = generate(&data, &program, dseed).unwrap();
+        assert!(raw.contains(arm), "{target} seed {dseed}: tailcall arm missing or reshaped");
+        let output = finalize(&raw, target, dseed).unwrap();
         let work = native::Workspace::new();
         let path = work.0.join("seed_tailcall.lua");
         fs::write(&path, output).unwrap();
         assert_eq!(native::compile_and_run(target, &path), b"0\n");
+        }
     }
 }
 

@@ -1220,7 +1220,7 @@ end;
     write!(
         s,
         "H=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
-        seed_loop = seed_loop_lua(program.target),
+        seed_loop = seed_loop_lua(program.target, seed),
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {

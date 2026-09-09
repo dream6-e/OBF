@@ -68,14 +68,15 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
 fn execute_recipe_ids(
     data: &[u8],
     target: Target,
+    dseed: u64,
 ) -> (super::semantic::SemanticImage, BTreeSet<u16>) {
     let program = custom::decode(data, target).unwrap();
-    let image = super::semantic::encode(&program, 735).unwrap();
-    let raw = generate(data, &program, 735).unwrap();
+    let image = super::semantic::encode(&program, dseed).unwrap();
+    let raw = generate(data, &program, dseed).unwrap();
     // Instrument the real graph fetch BEFORE the same final whole-output
     // naming/audit pass. This observes ids only after both edge and recipe
     // token machines have run. Tuple slots follow the per-image field order.
-    let tuple = super::lowering::field_layout(735).tuple_slots();
+    let tuple = super::lowering::field_layout(dseed).tuple_slots();
     let fetch_probe = format!(
         "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);",
         tuple[1], tuple[2], tuple[0]
@@ -91,7 +92,7 @@ fn execute_recipe_ids(
         "for id in ProbePairs(Probe)do ProbePrint('recipe:'..id)end;return U(result,1,result.n)",
     );
     let raw = format!("local Probe={{}};local ProbePrint,ProbePairs=print,pairs;{raw}");
-    let output = finalize(&raw, target, 735).unwrap();
+    let output = finalize(&raw, target, dseed).unwrap();
     let work = native::Workspace::new();
     let path = work.0.join("coverage.lua");
     fs::write(&path, output).unwrap();
@@ -114,8 +115,8 @@ fn execute_recipe_ids(
     (image, executed)
 }
 
-fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
-    let (image, recipe_ids) = execute_recipe_ids(data, target);
+fn execute_coverage(data: &[u8], target: Target, dseed: u64) -> BTreeSet<Opcode> {
+    let (image, recipe_ids) = execute_recipe_ids(data, target, dseed);
     let recipes: std::collections::BTreeMap<u16, &super::semantic::SemanticRecipe> = image
         .recipes
         .iter()
@@ -131,7 +132,7 @@ fn execute_coverage(data: &[u8], target: Target) -> BTreeSet<Opcode> {
 fn reachable_neutral_decoy_bundles_execute_but_poison_recipes_do_not() {
     for target in [Target::Lua51, Target::Luau] {
         let data = compile("local x=4 print(x+3)", target).unwrap();
-        let (image, executed) = execute_recipe_ids(&data, target);
+        let (image, executed) = execute_recipe_ids(&data, target, 735);
         assert!(image.reachable_decoy_bundles >= 2);
         assert!(
             image
@@ -186,9 +187,10 @@ fn every_supported_opcode_is_actually_executed_in_the_target_runtime() {
             ],
         ),
     ] {
+        for dseed in [735u64, 7001, 1, u64::MAX] {
         let mut executed = BTreeSet::new();
         for corpus in corpora {
-            executed.extend(execute_coverage(&compile(corpus, target).unwrap(), target));
+            executed.extend(execute_coverage(&compile(corpus, target).unwrap(), target, dseed));
         }
         // TOSTRING is directly useful in handwritten Lua 5.1 IR as well as
         // Luau interpolation; prove its value, not a synthetic no-op hit.
@@ -214,13 +216,14 @@ fn every_supported_opcode_is_actually_executed_in_the_target_runtime() {
             ],
             terminator: T::Return(0),
         }];
-        executed.extend(execute_coverage(&custom::encode(&module).unwrap(), target));
+        executed.extend(execute_coverage(&custom::encode(&module).unwrap(), target, dseed));
         let expected: BTreeSet<_> = Opcode::ALL
             .iter()
             .copied()
             .filter(|op| op.supported(target))
             .collect();
-        assert_eq!(executed, expected, "unexecuted custom opcode on {target}");
+        assert_eq!(executed, expected, "unexecuted custom opcode on {target} seed {dseed}");
+        }
     }
 }
 
@@ -1780,25 +1783,28 @@ print("SEEDOPS PASS "..pass.."/"..#V)
 #[test]
 fn seed_control_flow_matches_classic_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
+        for dseed in [735u64, 7001, 1, u64::MAX] {
         let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, 735).unwrap();
-        let output = finalize(&raw, target, 735).unwrap();
+        let raw = generate(&data, &program, dseed).unwrap();
+        let output = finalize(&raw, target, dseed).unwrap();
         let work = native::Workspace::new();
         let path = work.0.join("seed_ctrl.lua");
         fs::write(&path, output).unwrap();
         let stdout = native::compile_and_run(target, &path);
-        assert_eq!(stdout, b"9\n", "{target}: control-flow output mismatch");
+        assert_eq!(stdout, b"9\n", "{target} seed {dseed}: control-flow output mismatch");
+        }
     }
 }
 
 #[test]
 fn seed_ops_direct_differential_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
+        for dseed in [0u64, 1, 2, 3, 735, 7001, 7351, u64::MAX] {
         let source = format!(
             "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n",
             SEED_DIRECT_POOLS,
-            seed_loop_lua(target),
+            seed_loop_lua(target, dseed),
             SEED_DIRECT_VECTORS
         );
         let work = native::Workspace::new();
@@ -1808,8 +1814,9 @@ fn seed_ops_direct_differential_on_both_targets() {
         assert_eq!(
             stdout,
             b"SEEDOPS PASS 85/85\n",
-            "{target}: direct vectors mismatch: {}",
+            "{target} seed {dseed}: direct vectors mismatch: {}",
             String::from_utf8_lossy(&stdout)
         );
+        }
     }
 }

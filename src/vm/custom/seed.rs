@@ -1563,7 +1563,9 @@ end seedfail(35);end;"#;
 /// Emit the full seed-loop statement for a target:
 /// `local SEED=function(prog,site,expect)...end;` (spliced inside H,
 /// R/RX/K arrive as H-locals so arms carry only the site block).
-pub(crate) fn seed_loop_lua(target: Target) -> String {
+pub(crate) fn seed_loop_lua(target: Target, seed: u64) -> String {
+    // P1 deformation draws from per-region sub-streams of `seed` (Batch-1).
+    let _ = seed;
     let fdiv = if target.is_luau() { "x//y" } else { "MF(x/y)" };
     SEED_LOOP.replace("{FDIV}", fdiv)
 }
@@ -1891,8 +1893,8 @@ mod tests {
 
     #[test]
     fn seed_template_is_dual_target_clean() {
-        let lua51 = seed_loop_lua(Target::Lua51);
-        let luau = seed_loop_lua(Target::Luau);
+        let lua51 = seed_loop_lua(Target::Lua51, 735);
+        let luau = seed_loop_lua(Target::Luau, 735);
         assert!(lua51.starts_with("local SEED=function(prog,site,expect)"));
         assert!(luau.starts_with("local SEED=function(prog,site,expect)"));
         // Floordiv must be per-target: Lua 5.1 has no `//` operator.
@@ -1952,7 +1954,7 @@ mod tests {
     #[test]
     fn seed_template_stays_under_size_cap() {
         for target in [Target::Lua51, Target::Luau] {
-            let body = seed_loop_lua(target);
+            let body = seed_loop_lua(target, 735);
             assert!(
                 body.len() <= 12_000,
                 "{target} seed loop is {}B over cap",

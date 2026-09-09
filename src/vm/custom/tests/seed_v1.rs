@@ -76,10 +76,11 @@ print("SEEDV1 PASS "..pass.."/"..#V)
 #[test]
 fn seed_v1_ops_direct_differential_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
+        for dseed in [0u64, 735, 7001, u64::MAX] {
         let source = format!(
             "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n",
             SEED_V1_POOLS,
-            seed_loop_lua(target),
+            seed_loop_lua(target, dseed),
             SEED_V1_VECTORS
         );
         let work = native::Workspace::new();
@@ -89,9 +90,10 @@ fn seed_v1_ops_direct_differential_on_both_targets() {
         assert_eq!(
             stdout,
             b"SEEDV1 PASS 40/40\n",
-            "{target}: v1 vectors mismatch: {}",
+            "{target} seed {dseed}: v1 vectors mismatch: {}",
             String::from_utf8_lossy(&stdout)
         );
+        }
     }
 }
 
@@ -146,9 +148,9 @@ fn seed_v1_routine_corruption_rejected() {
     fn lit(target: Target, op: Opcode) -> String {
         routine_lua(&routine_for(target, op).expect("supported op must have a routine"))
     }
-    fn run_corrupted(target: Target, label: &str, src: &str, pristine: &str) {
+    fn run_corrupted(target: Target, label: &str, src: &str, pristine: &str, dseed: u64) {
         assert_ne!(src, pristine, "{target} {label}: surgery hit nothing");
-        let output = finalize(src, target, 735).unwrap();
+        let output = finalize(src, target, dseed).unwrap();
         let work = native::Workspace::new();
         let path = work.0.join(format!("seed_v1_corr_{label}.lua"));
         fs::write(&path, output).unwrap();
@@ -166,11 +168,12 @@ fn seed_v1_routine_corruption_rejected() {
         );
     }
     for target in [Target::Lua51, Target::Luau] {
+    for dseed in [735u64, 7001] {
         let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, 735).unwrap();
+        let raw = generate(&data, &program, dseed).unwrap();
         let jump = lit(target, Opcode::Jump);
-        assert!(raw.contains(&jump), "{target}: jump routine not emitted");
+        assert!(raw.contains(&jump), "{target} seed {dseed}: jump routine not emitted");
         let ret = lit(target, Opcode::Return);
         // SEEDT entries are bare Lua tables (single-tuple routines stay flat),
         // so every surgery below must keep the braces balanced: corruption is
@@ -187,8 +190,9 @@ fn seed_v1_routine_corruption_rejected() {
             ("wrong-routine", raw.replacen(&jump, &ret, 1)),
         ];
         for (label, src) in &cases {
-            run_corrupted(target, label, src, &raw);
+            run_corrupted(target, &format!("{label}-s{dseed}"), src, &raw, dseed);
         }
+    }
     }
     // Liveness-probed sweep: a corrupted routine can only break the run if
     // the corpus actually executes it. If the corrupted image still succeeds
@@ -196,8 +200,8 @@ fn seed_v1_routine_corruption_rejected() {
     // and skip); otherwise the run must fail with no stdout. Every supported
     // routine must be live-covered at least once, so the fixtures are forced
     // to execute the full op set (fail-closed, no magic skip lists).
-    fn run_image(target: Target, stem: &str, src: &str) -> (bool, Vec<u8>) {
-        let output = finalize(src, target, 735).unwrap();
+    fn run_image(target: Target, stem: &str, src: &str, dseed: u64) -> (bool, Vec<u8>) {
+        let output = finalize(src, target, dseed).unwrap();
         let work = native::Workspace::new();
         let path = work.0.join(format!("seed_v1_corr_{stem}.lua"));
         fs::write(&path, output).unwrap();
@@ -217,23 +221,24 @@ fn seed_v1_routine_corruption_rejected() {
     let mut swept = BTreeSet::new();
     let mut live_covered = BTreeSet::new();
     let mut dead = BTreeSet::new();
+    for dseed in [735u64, 7001] {
     for (name, fixture) in corpora {
         let data = compile(fixture, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, 735).unwrap();
-        let (pristine_ok, pristine_out) = run_image(target, &format!("{name}-pristine"), &raw);
-        assert!(pristine_ok, "{name}: pristine corpus must run clean");
+        let raw = generate(&data, &program, dseed).unwrap();
+        let (pristine_ok, pristine_out) = run_image(target, &format!("{name}-pristine-s{dseed}"), &raw, dseed);
+        assert!(pristine_ok, "{name} seed {dseed}: pristine corpus must run clean");
         for op in Opcode::ALL.iter().copied().filter(|op| op.supported(target)) {
             let routine = lit(target, op);
             if !raw.contains(&routine) {
                 continue;
             }
             swept.insert(op);
-            let label = format!("sweep-{name}-{}", op.name());
+            let label = format!("sweep-{name}-s{dseed}-{}", op.name());
             let corrupted = routine.replacen("{", "{9,", 1);
             let src = raw.replacen(&routine, &corrupted, 1);
             assert_ne!(src, raw, "{target} {label}: surgery hit nothing");
-            let (ok, out) = run_image(target, &label, &src);
+            let (ok, out) = run_image(target, &label, &src, dseed);
             if ok && out == pristine_out {
                 dead.insert((name, op.name()));
                 continue;
@@ -248,6 +253,7 @@ fn seed_v1_routine_corruption_rejected() {
             );
         }
     }
+    }
     eprintln!("sweep dead-in-corpus (skipped): {dead:?}");
     let supported: BTreeSet<Opcode> =
         Opcode::ALL.iter().copied().filter(|op| op.supported(target)).collect();
@@ -256,4 +262,60 @@ fn seed_v1_routine_corruption_rejected() {
         live_covered, supported,
         "every supported routine must be live-covered at least once"
     );
+}
+
+
+/// P1 number spellings must lex, minify and run identically on both targets:
+/// decimal (canonical), `0x` hex in either digit case, and exact scientific
+/// forms for round values. Decides what the respeller may emit.
+#[test]
+fn p1_number_spellings_survive_finalize_on_both_targets() {
+    // Number tokens bypass renaming untouched, so the user-source minify path
+    // exercises the exact lex/parse/emit/reparse stages spellings depend on
+    // (finalize_vm additionally demands a full generated VM around them).
+    let src = "local a=0xF4240;local b=0xff;local c=1e5;local d=3e6;local e=1001e3;print(a,b,c,d,e)";
+    for target in [Target::Lua51, Target::Luau] {
+        let output =
+            crate::minify::with_options(src, target, crate::minify::Options::seeded(735)).unwrap();
+        let work = native::Workspace::new();
+        let path = work.0.join("p1_numspell.lua");
+        fs::write(&path, output).unwrap();
+        assert!(native::compile(target, &path).status.success());
+        assert_eq!(
+            native::compile_and_run(target, &path),
+            b"1000000\t255\t100000\t3000000\t1001000\n"
+        );
+    }
+}
+
+const P1_DIALECT_SEEDS: [u64; 8] = [0, 1, 42, 735, 7001, 7351, 100, u64::MAX];
+
+/// P1 acceptance: every seed emits a textually distinct template and image
+/// (no cross-sample stable fingerprint), deterministically.
+#[test]
+fn p1_deformation_distinctness_and_determinism() {
+    for target in [Target::Lua51, Target::Luau] {
+        let mut loops = Vec::new();
+        let mut raws = Vec::new();
+        for seed in P1_DIALECT_SEEDS {
+            let a = seed_loop_lua(target, seed);
+            assert_eq!(a, seed_loop_lua(target, seed), "{target} seed {seed}: template varies");
+            loops.push(a);
+            let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let r1 = generate(&data, &program, seed).unwrap();
+            assert_eq!(r1, generate(&data, &program, seed).unwrap(), "{target} seed {seed}: image varies");
+            raws.push(r1);
+        }
+        for i in 0..loops.len() {
+            for j in (i + 1)..loops.len() {
+                assert_ne!(loops[i], loops[j], "{target}: seeds {} and {} share a template", P1_DIALECT_SEEDS[i], P1_DIALECT_SEEDS[j]);
+                assert_ne!(raws[i], raws[j], "{target}: seeds {} and {} share an image", P1_DIALECT_SEEDS[i], P1_DIALECT_SEEDS[j]);
+                let li: Vec<_> = loops[i].lines().collect();
+                let lj: Vec<_> = loops[j].lines().collect();
+                let diff = li.iter().zip(lj.iter()).filter(|(a, b)| a != b).count() + li.len().abs_diff(lj.len());
+                assert!(diff >= 10, "{target}: seeds {} and {} differ by {diff} lines", P1_DIALECT_SEEDS[i], P1_DIALECT_SEEDS[j]);
+            }
+        }
+    }
 }
