@@ -366,9 +366,11 @@ if [[ $(find src/vm/opcode -maxdepth 1 -name 'luau_*.rs' | wc -l) -ne 91 ]]; the
     exit 1
 fi
 
-if [[ $(find src/vm/opcode/lua51 -maxdepth 1 -name 'c*.rs' | wc -l) -ne 46 ]] \
-    || [[ $(find src/vm/opcode/luau -maxdepth 1 -name 'c*.rs' | wc -l) -ne 49 ]]; then
-    echo 'error: custom ISA folders do not match 46 Lua51 / 49 Luau handlers' >&2; exit 1
+# P0 complete: classic per-op plaintext handlers are deleted; every custom op
+# is served by a seed routine plus a uniform arm (pinned by the seed_* Rust
+# gates: arm emission, lane subset, pools, corruption, execution).
+if [[ -e src/vm/opcode/lua51 || -e src/vm/opcode/luau ]]; then
+    echo 'error: classic custom-ISA handler folders resurfaced' >&2; exit 1
 fi
 printf '%s\n' '[matrix] Custom ISA executed coverage: Lua 5.1=46/46, Luau=49/49 (runtime token/fragment probe)'
 

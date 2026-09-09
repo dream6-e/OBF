@@ -2,83 +2,6 @@ use super::*;
 
 use std::fmt::Write as _;
 
-fn semantic_handler_source(target: Target, op: Opcode) -> Result<String, Diagnostic> {
-    let raw = crate::vm::opcode::custom(target, op)
-        .ok_or_else(|| Diagnostic::new("missing custom opcode implementation"))?;
-    Ok(match op {
-        Opcode::Jump => raw.replace("pc=j*4+1;", "pc=j;"),
-        Opcode::Test => raw.replace("pc=pc+4", "pc=skip1"),
-        _ => raw.to_owned(),
-    })
-}
-
-fn dataflow_chunk_ranges(
-    ops: &[Opcode],
-    target: Target,
-    structure: &mut crate::random::Prng,
-    cache: &mut std::collections::BTreeMap<(Opcode, Opcode), bool>,
-) -> Result<Vec<(usize, usize)>, Diagnostic> {
-    if ops.len() <= 1 {
-        return Ok(vec![(0, ops.len())]);
-    }
-    let mut capable = vec![false; ops.len() - 1];
-    for index in 0..ops.len() - 1 {
-        let pair = (ops[index], ops[index + 1]);
-        capable[index] = if let Some(&capable) = cache.get(&pair) {
-            capable
-        } else {
-            let first = semantic_handler_source(target, pair.0)?;
-            let second = semantic_handler_source(target, pair.1)?;
-            let capable =
-                lowering::fuse_dataflow_pair(pair.0, &first, pair.1, &second, target)?.is_some();
-            cache.insert(pair, capable);
-            capable
-        };
-    }
-
-    // Enumerate the tiny path matching (recipes contain at most four ops),
-    // retain every maximum-cardinality non-overlapping fusion, then use the
-    // structure stream only to select among equivalent maxima. A 2-op chunk
-    // therefore always means a real carried-value fusion; unsupported pairs
-    // remain separate single fragments rather than reverting to textual
-    // handler concatenation.
-    let mut best = 0u32;
-    let mut masks = Vec::new();
-    for mask in 0usize..(1usize << capable.len()) {
-        if mask & (mask << 1) != 0 {
-            continue;
-        }
-        if capable
-            .iter()
-            .enumerate()
-            .any(|(index, capable)| mask & (1 << index) != 0 && !capable)
-        {
-            continue;
-        }
-        let count = mask.count_ones();
-        if count > best {
-            best = count;
-            masks.clear();
-        }
-        if count == best {
-            masks.push(mask);
-        }
-    }
-    let mask = masks[(structure.next_u64() % masks.len() as u64) as usize];
-    let mut ranges = Vec::new();
-    let mut index = 0usize;
-    while index < ops.len() {
-        if index + 1 < ops.len() && mask & (1 << index) != 0 {
-            ranges.push((index, 2));
-            index += 2;
-        } else {
-            ranges.push((index, 1));
-            index += 1;
-        }
-    }
-    Ok(ranges)
-}
-
 /// Global capture/constant pool readers (ISA14). Each pool loop runs
 /// exactly its validated total (`TU`/`TK`, accumulated from header
 /// metadata), and decodes three anonymous u16 slots per record under the
@@ -1184,10 +1107,6 @@ local W=SM({},{__mode='kv'});local H;local Make;
     );
     s.push_str(call_body);
     s.push_str(&register_abi.factory_lua());
-    // Seed-ISA prelude: the generic handler-shape loop plus the fixed slice
-    // routines. Placed beside the RK factory so every fragment arm below can
-    // reach SEED as an upvalue through the interpreter module scope.
-    s.push_str(&seed_prelude_lua(program.target));
     s.push_str(
         r#"
 Make=function(id,up)
@@ -1241,17 +1160,13 @@ end;
     // behavior in this loop.
     let mut chunk_ranges: Vec<Vec<(usize, usize)>> = Vec::new();
     let mut fragment_count = 0usize;
-    let mut fusion_capabilities = std::collections::BTreeMap::new();
     for recipe in &semantic_image.recipes {
         if !(1..=semantic::MAX_BUNDLE_WORDS).contains(&recipe.execute_ops.len()) {
             return Err(Diagnostic::new("invalid semantic recipe length"));
         }
-        let ranges = dataflow_chunk_ranges(
-            &recipe.execute_ops,
-            program.target,
-            &mut structure,
-            &mut fusion_capabilities,
-        )?;
+        // P0: every op runs its seed routine; fragments are always single
+        // (textual dataflow fusion retired with the classic handler bodies).
+        let ranges: Vec<(usize, usize)> = (0..recipe.execute_ops.len()).map(|i| (i, 1)).collect();
         fragment_count += ranges.len();
         chunk_ranges.push(ranges);
     }
@@ -1287,6 +1202,15 @@ end;
     let v_fetch = selected_masked_state_value(k_fetch, k_fetch_alt, control_mask);
     let v_disp = selected_masked_state_value(k_disp, k_disp_alt, control_mask);
     let dispatch_first = structure.next_u64() % 2 == 0;
+    // Seed-ISA v1 prelude: after Make binds (so the helper pool captures
+    // live values) and before H (so every arm reaches it lexically).
+    let mut seed_used = 0u64;
+    for recipe in &semantic_image.recipes {
+        for op in &recipe.execute_ops {
+            seed_used |= seed_op_bit(*op);
+        }
+    }
+    s.push_str(&seed_prelude_lua_v1(program.target, seed, seed_used));
     let fetch_branch = format!(
         "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);sid={semantic_init};pc=next1;w={v_disp};",
         tuple_next = tuple_slots[1],
@@ -1295,7 +1219,8 @@ end;
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n while true do\n  local F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j;local w={v_fetch};\n  while true do\n   {machine_open}",
+        seed_loop = seed_loop_lua(program.target),
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {
@@ -1303,12 +1228,6 @@ end;
         },
     )
     .unwrap();
-    let semantic_handler = |op: Opcode| -> Result<String, Diagnostic> {
-        lower_register_accesses(
-            &semantic_handler_source(program.target, op)?,
-            program.target,
-        )
-    };
     let mut recipe_entries: Vec<(u16, String)> = Vec::new();
     let mut fragment_arms: Vec<(u16, String)> = Vec::new();
     let mut binding_forms = [0usize, 1, 2, 3];
@@ -1343,49 +1262,10 @@ end;
                 let form = binding_forms[binding_cursor];
                 binding_cursor += 1;
                 body.push_str(&operand_binding_lua(start + 1, form));
-                // Dual-form dispatch: migrated ops run their seed routine
-                // through the generic loop; the rest keep classic bodies.
-                if let Some(arm) = seed_arm_lua(op) {
-                    body.push_str(&arm);
-                } else {
-                    body.push_str(&semantic_handler(op)?);
-                }
-            } else if length == 2 {
-                let first_op = recipe.execute_ops[start];
-                let second_op = recipe.execute_ops[start + 1];
-                let first_source = semantic_handler_source(program.target, first_op)?;
-                let second_source = semantic_handler_source(program.target, second_op)?;
-                let fusion = lowering::fuse_dataflow_pair(
-                    first_op,
-                    &first_source,
-                    second_op,
-                    &second_source,
-                    program.target,
-                )?
-                .ok_or_else(|| {
-                    Diagnostic::new("planned semantic dataflow fusion is not lowerable")
-                })?;
-                if fusion.forwarded_reads == 0 {
-                    return Err(Diagnostic::new(
-                        "semantic dataflow fusion carries no consumer reads",
-                    ));
-                }
-                if binding_cursor == binding_forms.len() {
-                    structure.shuffle(&mut binding_forms);
-                    binding_cursor = 0;
-                }
-                let first_form = binding_forms[binding_cursor];
-                binding_cursor += 1;
-                body.push_str(&operand_binding_lua(start + 1, first_form));
-                body.push_str(&fusion.producer);
-                if binding_cursor == binding_forms.len() {
-                    structure.shuffle(&mut binding_forms);
-                    binding_cursor = 0;
-                }
-                let second_form = binding_forms[binding_cursor];
-                binding_cursor += 1;
-                body.push_str(&operand_binding_lua(start + 2, second_form));
-                body.push_str(&fusion.consumer);
+                // P0: every supported op runs its seed routine.
+                let arm = seed_arm_lua_for(program.target, op)
+                    .ok_or_else(|| Diagnostic::new("missing seed arm for opcode"))?;
+                body.push_str(&arm);
             } else {
                 return Err(Diagnostic::new("invalid semantic fragment width"));
             }

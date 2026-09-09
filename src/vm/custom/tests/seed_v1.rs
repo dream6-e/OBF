@@ -1,0 +1,259 @@
+/// Direct v1 seed-op differential vectors: STORE/LOAD/IDX/SET/RAISE, the raw
+/// ALU sub-ops (concat/lt/le/not/len), RET action 3, spread-by-`.n`,
+/// numeric-string coercion parity, ups/va site slots, and fail-closed
+/// rejections. Runs unmodified on both runners against the emitted template.
+const SEED_V1_POOLS: &str = r#"
+local STAB={"n","s1","42"}
+local SEEDH={function(a,b)return a+b end,function()return "h1" end,function(p)return p.n..":"..tostring(p[1]) end,function(...)return select('#',...)end}
+local RX=function(i)return i+10 end
+local K={[5]="k5",[6]="k6",[7]=false}
+local R={};R[12]="r12";R[13]=false;R[14]=0;R[15]={7,8};R[16]={}
+local F={__obf_proto_k=K}
+"#;
+const SEED_V1_VECTORS: &str = r#"
+local UPS={};UPS[3]="u3";UPS[9]="u9"
+local VA={n=1,"vargs"}
+local SITE={2,3,4,5,6,7,100,UPS,VA}
+local V={
+{"s1-store-int",{{8,3020000,3007000},{9,0,3020000},{7,2,0}},2,"VAL",7},
+{"s2-store-reg-src",{{1,1000,1000000},{8,3021000,1000},{9,0,3021000},{7,2,0}},2,"VAL","r12"},
+{"s3-store-opval",{{8,8006000,3009000},{9,0,8006000},{7,2,0}},2,"VAL",9},
+{"s4-store-tmp-idx",{{1,1000,3022000},{8,1000,3004000},{9,0,1000},{7,2,0}},2,"VAL",4},
+{"s5-store-frac",{{4,0,3007000,3002000,3003000},{8,0,3001000},{7,0}},0,"FAIL"},
+{"s6-load-str",{{1,0,1000000},{9,1000,0},{7,0}},0,"FAIL"},
+{"s7-load-dst-oob",{{9,16000,3001000},{7,0}},0,"FAIL"},
+{"s8-store-arity",{{8,3001000},{7,0}},0,"FAIL"},
+{"i1-idx-static",{{1,1000,1002001},{10,0,1000,3001000},{7,2,0}},2,"VAL",7},
+{"i2-idx-dynkey",{{1,1000,1002001},{1,2000,3002000},{10,0,1000,2000},{7,2,0}},2,"VAL",8},
+{"i3-idx-nil-tab",{{10,0,6000000,3001000},{7,0}},0,"LUAERR"},
+{"i4-idx-opval-key",{{1,1000,1002001},{10,0,1000,8000000},{7,2,0}},2,"VAL",8},
+{"i5-set-then-idx",{{1,1000,1000004},{11,1000,3001000,3009000},{10,0,1000,3001000},{7,2,0}},2,"VAL",9},
+{"i6-set-arity",{{11,1000,3001000},{7,0}},0,"FAIL"},
+{"i7-idx-arity",{{10,0,1000},{7,0}},0,"FAIL"},
+{"r1-raise",{{12},{7,0}},0,"LUAERR"},
+{"r2-raise-arity",{{12,3001000},{7,0}},0,"FAIL"},
+{"a1-concat",{{4,0,3001000,5001000,3009000},{7,2,0}},2,"VAL","1s1"},
+{"a2-concat-nums",{{4,0,3001000,3002000,3009000},{7,2,0}},2,"VAL","12"},
+{"a3-lt-true",{{4,0,3001000,3002000,3010000},{7,2,0}},2,"VAL",true},
+{"a4-lt-false",{{4,0,3002000,3001000,3010000},{7,2,0}},2,"FALSE"},
+{"a5-le-eq",{{4,0,3002000,3002000,3011000},{7,2,0}},2,"VAL",true},
+{"a6-not-false",{{4,0,1001000,3000000,3012000},{7,2,0}},2,"VAL",true},
+{"a7-not-val",{{4,0,3001000,3000000,3012000},{7,2,0}},2,"FALSE"},
+{"a8-len-str",{{4,0,5001000,3000000,3013000},{7,2,0}},2,"VAL",2},
+{"a9-len-tab",{{4,0,1002001,3000000,3013000},{7,2,0}},2,"VAL",2},
+{"a10-coerce-add",{{4,0,5002000,3001000,3000000},{7,2,0}},2,"VAL",43},
+{"a11-alu-badop14",{{4,0,3001000,3002000,3014000},{7,0}},0,"FAIL"},
+{"t1-ret3",{{7,3,3001000,3002000,3003000}},3,"VAL3",1,2,3},
+{"t2-ret3-arity4",{{7,3,3001000,3002000},{7,0}},0,"FAIL"},
+{"t3-ret3-arity3",{{7,3,3001000},{7,0}},0,"FAIL"},
+{"p1-spread-n",{{3,0,3000000},{11,0,3001000,3006000},{11,0,3002000,3007000},{11,0,5000000,3005000},{5,1000,7003000,3001000,1,0},{7,2,1000}},2,"VAL",5},
+{"u1-ups",{{10,0,4008000,8001000},{7,2,0}},2,"VAL","u3"},
+{"u2-va",{{1,0,4009000},{7,2,0}},2,"VA"},
+{"u3-va-store-load",{{8,3025000,4009000},{9,0,3025000},{7,2,0}},2,"VA"},
+{"f1-store-str-idx",{{8,1000000,3001000},{7,0}},0,"FAIL"},
+{"f2-load-nil-idx",{{9,0,6000000},{7,0}},0,"FAIL"},
+{"f3-load-arity",{{9,0},{7,0}},0,"FAIL"},
+{"f4-idx-num-tab",{{10,0,3005000,3001000},{7,0}},0,"LUAERR"},
+{"f5-set-str-key",{{1,1000,1000004},{11,1000,5000000,3003000},{10,0,1000,5000000},{7,2,0}},2,"VAL",3}}
+local pass=0
+for _,v in ipairs(V) do
+local name,prog,expact,marker=v[1],v[2],v[3],v[4]
+local ok,av,aw,ax,a3,a5=pcall(SEED,prog,SITE,9);local act=(expact==3) and a3 or aw
+local good=false
+if marker=="FAIL" then good=(not ok)and type(av)=="string" and av:sub(1,9)=="seedfail:"
+elseif marker=="LUAERR" then good=(not ok)and(type(av)~="string" or av:sub(1,9)~="seedfail:")
+elseif ok and act==expact then
+if marker=="VAL" then good=(av==v[5])
+elseif marker=="VAL3" then good=(av==v[5] and aw==v[6] and ax==v[7])
+elseif marker=="VA" then good=(av==VA)
+elseif marker=="FALSE" then good=(av==false)
+end end
+if good then pass=pass+1 else print("V1FAIL:"..name..":"..tostring(av).."/"..tostring(act)) end
+end
+print("SEEDV1 PASS "..pass.."/"..#V)
+"#;
+
+#[test]
+fn seed_v1_ops_direct_differential_on_both_targets() {
+    for target in [Target::Lua51, Target::Luau] {
+        let source = format!(
+            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n",
+            SEED_V1_POOLS,
+            seed_loop_lua(target),
+            SEED_V1_VECTORS
+        );
+        let work = native::Workspace::new();
+        let path = work.0.join("seed_v1_ops.lua");
+        fs::write(&path, source).unwrap();
+        let stdout = native::compile_and_run(target, &path);
+        assert_eq!(
+            stdout,
+            b"SEEDV1 PASS 40/40\n",
+            "{target}: v1 vectors mismatch: {}",
+            String::from_utf8_lossy(&stdout)
+        );
+    }
+}
+
+#[test]
+fn seed_v1_pools_match_locked_consts() {
+    let seedh_lit = format!("local SEEDH={{{}}};", SEEDH_NAMES.join(","));
+    for target in [Target::Lua51, Target::Luau] {
+        for seed in [0u64, 735] {
+            let stab_lit = format!(
+                "local STAB={{{}}};",
+                STAB_STRS
+                    .iter()
+                    .map(|s| {
+                        let spelling = match *s {
+                            "__obf_proto_u" =>
+                                crate::vm::fields::short_field("u", target, seed).unwrap(),
+                            "__obf_proto_nu" =>
+                                crate::vm::fields::short_field("nu", target, seed).unwrap(),
+                            _ => s.to_string(),
+                        };
+                        format!("\"{spelling}\"")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            let mut used = 0u64;
+            for op in Opcode::ALL.iter().copied() {
+                if op.supported(target) {
+                    used |= seed_op_bit(op);
+                }
+            }
+            let prelude_ = seed_prelude_lua_v1(target, seed, used);
+        assert!(
+            prelude_.contains(&stab_lit),
+            "{target}: STAB literal diverged from STAB_STRS"
+        );
+        assert!(
+            prelude_.contains(&seedh_lit),
+            "{target}: SEEDH literal diverged from SEEDH_NAMES"
+        );
+        }
+    }
+}
+
+/// Generalized v1 corruption gate: every emitted routine is integrity-checked
+/// at runtime (validator fail-closed) or by its arm post-condition. Eight
+/// adaptive structural cases on Jump (small fixture, both targets) plus a
+/// bad-op sweep over every routine each corpus emits (Luau only: routine
+/// text is target-independent and Lua51's 46 are a subset of the swept set).
+#[test]
+fn seed_v1_routine_corruption_rejected() {
+    fn lit(target: Target, op: Opcode) -> String {
+        routine_lua(&routine_for(target, op).expect("supported op must have a routine"))
+    }
+    fn run_corrupted(target: Target, label: &str, src: &str, pristine: &str) {
+        assert_ne!(src, pristine, "{target} {label}: surgery hit nothing");
+        let output = finalize(src, target, 735).unwrap();
+        let work = native::Workspace::new();
+        let path = work.0.join(format!("seed_v1_corr_{label}.lua"));
+        fs::write(&path, output).unwrap();
+        assert!(native::compile(target, &path).status.success());
+        let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+        let result = Command::new(native::root().join("toolchains/bin").join(runner))
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{target} corruption {label} ran");
+        assert!(
+            result.stdout.is_empty(),
+            "{target} corruption {label} leaked output: {:?}",
+            result.stdout
+        );
+    }
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let raw = generate(&data, &program, 735).unwrap();
+        let jump = lit(target, Opcode::Jump);
+        assert!(raw.contains(&jump), "{target}: jump routine not emitted");
+        let ret = lit(target, Opcode::Return);
+        // SEEDT entries are bare Lua tables (single-tuple routines stay flat),
+        // so every surgery below must keep the braces balanced: corruption is
+        // caught by the runtime validator or the arm post-condition, never by
+        // the parser.
+        let cases: Vec<(&str, String)> = vec![
+            ("bad-op", raw.replacen(&jump, &jump.replacen("{", "{9,", 1), 1)),
+            ("drop-tail", raw.replacen(&jump, "{7}", 1)),
+            ("zero-tuple", raw.replacen(&jump, "{0}", 1)),
+            ("neg-op", raw.replacen(&jump, &jump.replacen("{", "{-", 1), 1)),
+            ("bad-action", raw.replacen(&jump, &jump.replacen("{7,", "{7,9,", 1), 1)),
+            ("bad-kind-tag", raw.replacen(&jump, &jump.replacen("{7,1,8", "{7,1,9", 1), 1)),
+            ("wrong-action", raw.replacen(&jump, "{1,0}", 1)),
+            ("wrong-routine", raw.replacen(&jump, &ret, 1)),
+        ];
+        for (label, src) in &cases {
+            run_corrupted(target, label, src, &raw);
+        }
+    }
+    // Liveness-probed sweep: a corrupted routine can only break the run if
+    // the corpus actually executes it. If the corrupted image still succeeds
+    // with byte-identical output, the routine is dead in that corpus (record
+    // and skip); otherwise the run must fail with no stdout. Every supported
+    // routine must be live-covered at least once, so the fixtures are forced
+    // to execute the full op set (fail-closed, no magic skip lists).
+    fn run_image(target: Target, stem: &str, src: &str) -> (bool, Vec<u8>) {
+        let output = finalize(src, target, 735).unwrap();
+        let work = native::Workspace::new();
+        let path = work.0.join(format!("seed_v1_corr_{stem}.lua"));
+        fs::write(&path, output).unwrap();
+        assert!(native::compile(target, &path).status.success());
+        let runner = if target.is_luau() { "luau" } else { "lua5.1" };
+        let result = Command::new(native::root().join("toolchains/bin").join(runner))
+            .arg(&path)
+            .output()
+            .unwrap();
+        (result.status.success(), result.stdout)
+    }
+    let target = Target::Luau;
+    let corpora = [
+        ("vm", include_str!("../../../../tests/fixtures/vm_luau.lua")),
+        ("scope", include_str!("../../../../tests/fixtures/scope_luau.lua")),
+    ];
+    let mut swept = BTreeSet::new();
+    let mut live_covered = BTreeSet::new();
+    let mut dead = BTreeSet::new();
+    for (name, fixture) in corpora {
+        let data = compile(fixture, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let raw = generate(&data, &program, 735).unwrap();
+        let (pristine_ok, pristine_out) = run_image(target, &format!("{name}-pristine"), &raw);
+        assert!(pristine_ok, "{name}: pristine corpus must run clean");
+        for op in Opcode::ALL.iter().copied().filter(|op| op.supported(target)) {
+            let routine = lit(target, op);
+            if !raw.contains(&routine) {
+                continue;
+            }
+            swept.insert(op);
+            let label = format!("sweep-{name}-{}", op.name());
+            let corrupted = routine.replacen("{", "{9,", 1);
+            let src = raw.replacen(&routine, &corrupted, 1);
+            assert_ne!(src, raw, "{target} {label}: surgery hit nothing");
+            let (ok, out) = run_image(target, &label, &src);
+            if ok && out == pristine_out {
+                dead.insert((name, op.name()));
+                continue;
+            }
+            live_covered.insert(op);
+            assert!(!ok, "{target} corruption {label} ran");
+            // Late-executed routines may print a correct prefix before the
+            // validator fires; what must never happen is DIVERGENT output.
+            assert!(
+                pristine_out.starts_with(&out),
+                "{target} corruption {label} diverged: {out:?}"
+            );
+        }
+    }
+    eprintln!("sweep dead-in-corpus (skipped): {dead:?}");
+    let supported: BTreeSet<Opcode> =
+        Opcode::ALL.iter().copied().filter(|op| op.supported(target)).collect();
+    assert_eq!(swept, supported, "sweep must corrupt every supported routine at least once");
+    assert_eq!(
+        live_covered, supported,
+        "every supported routine must be live-covered at least once"
+    );
+}

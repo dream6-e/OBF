@@ -56,6 +56,18 @@ fn names<'a>(
     Ok(result)
 }
 
+/// Short name for one prototype-schema field under `(target, seed)`. The seed
+/// string pool needs the post-`shorten` spellings of `u`/`nu` at emission
+/// time (dynamic keys are invisible to the field pass); the mapping is the
+/// same deterministic bijection `shorten` applies to the static uses.
+pub(crate) fn short_field(field: &str, target: Target, seed: u64) -> Result<String, Diagnostic> {
+    let mapping = names(PROTOTYPE_FIELDS, target, seed)?;
+    mapping
+        .get(field)
+        .cloned()
+        .ok_or_else(|| error("unknown schema field marker"))
+}
+
 /// Run once after decoder, validation, runtime and all handlers/adapters have
 /// been assembled, BEFORE final local renaming and separator emission.
 /// A bijection is applied to explicitly marked dot fields/constructor keys.

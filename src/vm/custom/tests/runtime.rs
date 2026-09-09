@@ -1656,14 +1656,17 @@ fn empty_capture_pool_roundtrips_on_both_targets() {
 /// pools and helpers, then 79 micro-programs covering every op shape,
 /// falsy-value preservation, per-target floordiv/mod parity, and 30 fail-closed
 /// rejections. Runs unmodified on both runners against the emitted template.
-const SEED_DIRECT_VECTORS: &str = r#"
-local RXF=function(i)return i+10 end
-local K={[5]="k5",[6]="k6",[7]=false}
-local R={};R[12]="r12";R[13]=false;R[14]=0;R[15]={7,8};R[16]={}
-local SITE={2,3,4,5,6,7,100}
+const SEED_DIRECT_POOLS: &str = r#"
 local STAB={"s0","s1",""}
 local n3=0
-local H={function(a,b)return a+b end,function()return "h1" end,function(p)return p.n..":"..tostring(p[1]) end,function()n3=n3+1;if n3<3 then return 1 end end}
+local SEEDH={function(a,b)return a+b end,function()return "h1" end,function(p)return p.n..":"..tostring(p[1]) end,function()n3=n3+1;if n3<3 then return 1 end end,function()error("boom-raise")end}
+local RX=function(i)return i+10 end
+local K={[5]="k5",[6]="k6",[7]=false}
+local R={};R[12]="r12";R[13]=false;R[14]=0;R[15]={7,8};R[16]={}
+local F={__obf_proto_k=K}
+"#;
+const SEED_DIRECT_VECTORS: &str = r#"
+local SITE={2,3,4,5,6,7,100}
 local V={
 {"01-mov-int",{{1,0,3005000},{7,2,0}},2,"VAL",5},
 {"02-mov-reg",{{1,0,1000000},{7,2,0}},2,"VAL","r12"},
@@ -1704,19 +1707,19 @@ local V={
 {"37-eq-false",{{4,0,3005000,3006000,3008000},{7,2,0}},2,"FALSE"},
 {"38-eq-mixed",{{4,0,2003000,3005000,3008000},{7,2,0}},2,"FALSE"},
 {"39-alu-tmp-src",{{1,1000,3006000},{4,0,1000,3007000,3000000},{7,2,0}},2,"VAL",13},
-{"40-alu-typefail",{{4,0,2003000,3001000,3000000},{7,2,0}},0,"FAIL"},
-{"41-alu-fdiv-zero",{{4,0,3007000,3000000,3007000},{7,2,0}},0,"FAIL"},
-{"42-alu-badop",{{4,0,3001000,3002000,3009000},{7,0}},0,"FAIL"},
+{"40-alu-typefail",{{4,0,2003000,3001000,3000000},{7,2,0}},0,"LUAERR"},
+{"41-alu-fdiv-zero",{{4,0,3007000,3000000,3007000},{7,2,0}},2,"INF"},
+{"42-alu-badop",{{4,0,3001000,3002000,3014000},{7,0}},0,"FAIL"},
 {"43-call-plain",{{5,0,7000000,3000000,2,3006000,3007000},{7,2,0}},2,"VAL",13},
 {"44-call-nargs0",{{5,0,7001000,3000000,0},{7,2,0}},2,"VAL","h1"},
 {"45-call-tmp-f",{{1,1000,7000000},{5,0,1000,3000000,2,3001000,3002000},{7,2,0}},2,"VAL",3},
 {"46-call-spread",{{1,1000,1002001},{5,0,7000000,3001000,1,1000},{7,2,0}},2,"VAL",15},
-{"47-call-spread-empty",{{3,0,3000000},{5,1000,7000000,3001000,1,0},{7,2,1000}},0,"FAIL"},
+{"47-call-spread-empty",{{3,0,3000000},{5,1000,7000000,3001000,1,0},{7,2,1000}},0,"LUAERR"},
 {"48-call-pack",{{5,0,7002000,3002000,1,3005000},{7,2,0}},2,"VAL","1:5"},
 {"49-call-badmode",{{5,0,7000000,3003000,0},{7,0}},0,"FAIL"},
 {"50-call-nargs9",{{5,0,7000000,3000000,9,3001000,3001000,3001000,3001000,3001000,3001000,3001000,3001000,3001000},{7,0}},0,"FAIL"},
 {"51-call-badfn",{{5,0,3005000,3000000,0},{7,0}},0,"FAIL"},
-{"52-call-helper-oob",{{5,0,7004000,3000000,0},{7,0}},0,"FAIL"},
+{"52-call-helper-oob",{{5,0,7005000,3000000,0},{7,0}},0,"FAIL"},
 {"53-br-jmp-fwd",{{6,3},{7,2,3001000},{7,2,3002000}},2,"VAL",2},
 {"54-br-jif-taken",{{2,0,3005000},{6,0,4},{7,2,3001000},{7,2,3002000}},2,"VAL",2},
 {"55-br-jif-fall",{{2,0,6000000},{6,0,4},{7,2,3001000},{7,2,3002000}},2,"VAL",1},
@@ -1736,20 +1739,30 @@ local V={
 {"69-forged-fid",{{1,0,4001000},{7,0}},0,"FAIL"},
 {"70-temp-oob",{{1,16000,3001000},{7,0}},0,"FAIL"},
 {"71-int-huge",{{1,0,1003000000},{7,0}},0,"FAIL"},
-{"72-opval-oob",{{1,0,8007000},{7,0}},0,"FAIL"},
+{"72-opval-oob",{{1,0,8009000},{7,0}},0,"FAIL"},
 {"73-opval-pc",{{7,2,8006000}},2,"VAL",100},
 {"74-pseudo9",{{7,2,4009000}},2,"NIL"},
 {"75-reg-idx3",{{1,0,1003000},{7,0}},0,"FAIL"},
 {"76-call-arity-short",{{5,0,7000000,3000000,2,3001000},{7,0}},0,"FAIL"},
 {"77-mov-len2",{{1,0},{7,2,0}},0,"FAIL"},
 {"78-frac-ref",{{1,0,3001000.5},{7,0}},0,"FAIL"},
-{"79-sconst-oob",{{1,0,5003000},{7,0}},0,"FAIL"}}
+{"79-sconst-oob",{{1,0,5003000},{7,0}},0,"FAIL"},
+{"80-ret-expect-ok",{{7,2,3005000}},2,"VAL",5,2},
+{"81-ret-expect-mismatch",{{7,2,3005000}},0,"LUAERR",nil,0},
+{"82-ret-expect-9-unchecked",{{7,2,3005000}},2,"VAL",5,9},
+{"83-ret-expect-nil-means-zero",{{7,2,3005000}},0,"NILEXP"},
+{"84-ret-expect-nil-accepts-zero",{{7,0}},0,"NILOK"},
+{"85-call-callee-error-propagates",{{5,0,7004000,3000000,0},{7,2,0}},0,"PROP"}}
 local pass=0
 for _,v in ipairs(V) do
 local name,prog,expact,marker,expval=v[1],v[2],v[3],v[4],v[5]
-local ok,act,av=pcall(SEED,prog,SITE,R,RXF,K,STAB,H)
+local ok,av,act=pcall(SEED,prog,SITE,v[6] or 9)
 local good=false
-if marker=="FAIL" then good=(not ok)and type(act)=="string" and act:sub(1,9)=="seedfail:"
+if marker=="FAIL" then good=(not ok)and type(av)=="string" and av:sub(1,9)=="seedfail:"
+elseif marker=="LUAERR" then good=(not ok)and(type(av)~="string" or av:sub(1,9)~="seedfail:")
+elseif marker=="NILEXP" then good=(not pcall(SEED,prog,SITE))
+elseif marker=="NILOK" then local ok2,av2,act2=pcall(SEED,prog,SITE);good=ok2 and act2==0 and av2==nil
+elseif marker=="PROP" then good=(not ok) and type(av)=="string" and av:find("boom-raise",1,true)~=nil
 elseif ok and act==expact then
 if marker=="VAL" then good=(av==expval)
 elseif marker=="NIL" then good=(av==nil)
@@ -1759,7 +1772,7 @@ elseif marker=="TABLE" then good=(type(av)=="table")
 elseif marker=="TBL15" then good=(av==R[15])
 elseif marker=="INF" then good=(av==1/0)
 end end
-if good then pass=pass+1 else print("VFAIL:"..name..":"..tostring(act)) end
+if good then pass=pass+1 else print("VFAIL:"..name..":"..tostring(av).."/"..tostring(act)) end
 end
 print("SEEDOPS PASS "..pass.."/"..#V)
 "#;
@@ -1783,7 +1796,8 @@ fn seed_control_flow_matches_classic_on_both_targets() {
 fn seed_ops_direct_differential_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
         let source = format!(
-            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n",
+            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n",
+            SEED_DIRECT_POOLS,
             seed_loop_lua(target),
             SEED_DIRECT_VECTORS
         );
@@ -1793,66 +1807,9 @@ fn seed_ops_direct_differential_on_both_targets() {
         let stdout = native::compile_and_run(target, &path);
         assert_eq!(
             stdout,
-            b"SEEDOPS PASS 79/79\n",
+            b"SEEDOPS PASS 85/85\n",
             "{target}: direct vectors mismatch: {}",
             String::from_utf8_lossy(&stdout)
         );
-    }
-}
-
-#[test]
-fn seed_routine_corruption_rejected_on_both_targets() {
-    for target in [Target::Lua51, Target::Luau] {
-        let data = compile(SEED_CONTROL_FIXTURE, target).unwrap();
-        let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, 735).unwrap();
-        assert!(
-            raw.contains(
-                "local SEEDJ,SEEDT,SEEDR={{7,1,8004000}},{{2,0,1000000},{6,0,4},{7,1,8005000},{7,0}},{{1,0,1000000},{7,2,0}};"
-            ),
-            "{target}: seed routine data not emitted (migration absent?)"
-        );
-        let cases: Vec<(&str, String)> = vec![
-            ("bad-op", raw.replacen("{{7,1,8004000}}", "{{9,1,8004000}}", 1)),
-            ("bad-arity", raw.replacen("{{7,1,8004000}}", "{{7}}", 1)),
-            ("bad-target", raw.replacen("{6,0,4}", "{6,0,9}", 1)),
-            ("forged-pc", raw.replacen("{2,0,1000000}", "{2,0,4000000}", 1)),
-            (
-                "drop-tail",
-                raw.replacen(
-                    "{{2,0,1000000},{6,0,4},{7,1,8005000},{7,0}}",
-                    "{{2,0,1000000},{6,0,4},{7,1,8005000}}",
-                    1,
-                ),
-            ),
-            ("falloff", raw.replacen("{{7,1,8004000}}", "{{1,0,0}}", 1)),
-            (
-                "bad-kind",
-                raw.replacen("{{7,1,8004000}}", "{{7,1,8004000000}}", 1),
-            ),
-            (
-                "ret-action",
-                raw.replacen("{{7,1,8004000}}", "{{7,3,8004000}}", 1),
-            ),
-        ];
-        for (label, src) in &cases {
-            assert_ne!(*src, raw, "{target} {label}: surgery hit nothing");
-            let output = finalize(src, target, 735).unwrap();
-            let work = native::Workspace::new();
-            let path = work.0.join(format!("seed_corr_{label}.lua"));
-            fs::write(&path, output).unwrap();
-            assert!(native::compile(target, &path).status.success());
-            let runner = if target.is_luau() { "luau" } else { "lua5.1" };
-            let result = Command::new(native::root().join("toolchains/bin").join(runner))
-                .arg(&path)
-                .output()
-                .unwrap();
-            assert!(!result.status.success(), "{target} corruption {label} ran");
-            assert!(
-                result.stdout.is_empty(),
-                "{target} corruption {label} leaked output: {:?}",
-                result.stdout
-            );
-        }
     }
 }

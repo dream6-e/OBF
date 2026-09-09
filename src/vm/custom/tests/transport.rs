@@ -1000,7 +1000,8 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local PH=function()"));
             assert!(raw.contains("local PU=function()"));
             assert!(raw.contains("local PK=function()"));
-            assert!(raw.contains("local F,R,va,RX,RF=SETUP(fid,args);"));
+            assert!(raw.contains("local F,R,va,RX,RF,K;"));
+            assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;"));
             // Graph fetch dynamically derives successors and the recipe id,
             // then routes that id into the random semantic fragment pool.
             // Tuple slots follow the per-image field order.
