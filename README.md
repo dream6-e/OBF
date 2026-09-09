@@ -156,10 +156,10 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 文件 | 来源 | seed | v2 bytecode | 最终单行脚本 |
 |---|---|---:|---:|---:|
-| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 84,701 B |
-| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 93,538 B |
+| `vm_lua51.out.lua` | `tests/fixtures/vm_lua51.lua` | 7001 | 5,525 B | 84,741 B |
+| `vm_luau.out.lua` | `tests/fixtures/vm_luau.lua` | 7351 | 6,575 B | 93,638 B |
 
-SHA-256：Lua51 `bf8efbe921d782b119880fdd3807dcb0ab167bbe5437b206122f9b4a83c382c1`；Luau `b742e99d46e27b0fd368c87e9728ad8306f06dd19bdaca0ef0d22ab079a07b40`。
+SHA-256：Lua51 `946df83823ff70b49c6bb9d8ee3b68b18bc466c3a4cf2634a45e21ccb9a7df84`；Luau `92b91c3b2b8f515b6d3de9e6db3792ea55e664997a06b12279af198eb9a23aab`。
 
 生成器、命名或分隔策略变更后必须再生成两份示例。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。**压缩大小的唯一硬契约**是：完整 LZW frame（包括 16-byte header）必须严格小于其压缩前 private semantic bytecode；Lua decoder、ChaCha8、anti-hook、包装和最终整份 `.lua` 均不进入该比较。`tools/bench-vm.sh` 的 98,000/98,000 B 仅是独立的整脚本膨胀预算，不用于判断压缩是否成功；不可压缩输入由生成器拒绝。
 
@@ -250,6 +250,13 @@ VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_lu
 ## 当前边界与后续工作
 
 默认 AST/IR/v2 register VM、完整 primitive ISA、private ISA14 semantic graph、per-prototype operand/register/field-order ABI、capture/constant pools、carried-value fusion、六状态 entry graph、runtime-witness/data-dependent control、bounded LZW、双 ChaCha8、每次解密 anti-hook、frame v2 与最终随机短名均已可运行。破解报告暴露的统一 `6+3*i` operand slot、canonical actual-op marker、全像统一逻辑 `R[index]` 物理键、逐 primitive 原始 handler 拼接边界、顶层稳定线性入口链、统一 record/segment/dictionary/metadata 字段顺序及 per-prototype capture/constant 邻接均已被针对性削弱；但 pool token 掩码、profile/fusion/置换规则、`RF`、primitive算术/表操作、parser字段及全部 inverse 仍随客户端交付，计算或模拟后仍可逆。captures/constants 全局池已完成；下一批应推进函数结构变换（须独立评估）；继续堆叠 encryption/encoding/compression 不能替代这些结构工作。继续堆叠 encryption/encoding/compression 不能替代这些结构工作，也不得宣称客户端秘密、不可逆或“静态恢复已解决”。
+
+当前限制必须保留：不模拟原始 debug/环境反射与错误位置；消除已证明的死路径后，仍对可能跳过条件所用 local 初始化的 `repeat/continue` 保守拒绝；隐藏元表、GC/分配时机、含洞 table 的 `#` 和布局敏感遍历不属于完全等价保证，Roblox executor 尚未实机验证。原生所有优化相关的函数身份也尚未完整模拟。结构验证不是沙箱或任意输入的语义等价证明。详见 [`虚拟机兼容性.md`](虚拟机兼容性.md) 和 [`自定义字节码.md`](自定义字节码.md)。
+
+## Anti 状态
+
+本阶段的 anti-hook 与 ChaCha8 material 紧耦合，实现在 `src/vm/custom/chacha.rs` 的独立 payload field，而非通用 `src/anti/`：这样每次 decrypt 都必须先得到 attestation，且 scope 可直接审计六个 source observation。`src/anti/` 仍保留给未来面向用户源码/通用运行环境的 Anti；不得把当前 gate 描述为不可绕过。
+�立评估）；继续堆叠 encryption/encoding/compression 不能替代这些结构工作。继续堆叠 encryption/encoding/compression 不能替代这些结构工作，也不得宣称客户端秘密、不可逆或“静态恢复已解决”。
 
 当前限制必须保留：不模拟原始 debug/环境反射与错误位置；消除已证明的死路径后，仍对可能跳过条件所用 local 初始化的 `repeat/continue` 保守拒绝；隐藏元表、GC/分配时机、含洞 table 的 `#` 和布局敏感遍历不属于完全等价保证，Roblox executor 尚未实机验证。原生所有优化相关的函数身份也尚未完整模拟。结构验证不是沙箱或任意输入的语义等价证明。详见 [`虚拟机兼容性.md`](虚拟机兼容性.md) 和 [`自定义字节码.md`](自定义字节码.md)。
 

@@ -1580,9 +1580,10 @@ pub(crate) fn seed_loop_lua(target: Target, seed: u64) -> String {
     let fdiv = if target.is_luau() { "x//y" } else { "MF(x/y)" };
     let body = SEED_LOOP.replace("{FDIV}", fdiv);
     let deformed = super::seed_deform::p1_deform_template(&body, seed);
-    assert_eq!(
-        deformed.lines().count(),
-        body.lines().count(),
+    // P4 dead temps add lines (exact count asserted inside the deformer);
+    // only the bound is checked here.
+    assert!(
+        (body.lines().count()..=body.lines().count() + 6).contains(&deformed.lines().count()),
         "P1: deformation changed the template line count"
     );
     assert!(deformed.contains("100000"), "P1: fuel budget lost");

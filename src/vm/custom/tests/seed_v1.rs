@@ -591,3 +591,182 @@ fn p3_lookup_wiring_pins_chain_order() {
         assert_eq!(observed, order, "seed {dseed}: chain order mismatch");
     }
 }
+
+/// P4 gate (RED until Batch-4): comparison-duality spellings appear across
+/// seeds (`x<y` <-> `y>x`, `x<=y` <-> `y>=x`; exact by language definition).
+#[test]
+fn p4_dual_forms_appear() {
+    let mut gt = false;
+    let mut ge = false;
+    for seed in 0..64u64 {
+        let body = seed_loop_lua(Target::Lua51, seed);
+        gt |= body.contains(">x");
+        ge |= body.contains(">=x");
+    }
+    assert!(gt, "y>x never appears across 64 seeds");
+    assert!(ge, "y>=x never appears across 64 seeds");
+}
+
+/// P4 helper: canonicalize number spellings to decimal values so chain
+/// locks compare semantics, immune to the respeller (identifier-embedded
+/// digits like `ok5`/`u9` are kept: same boundary rule as the emitter).
+fn p4_canon_numbers(text: &str) -> String {
+    fn word_byte(c: u8) -> bool {
+        matches!(c, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'.')
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let is_start = i == 0 || !word_byte(bytes[i - 1]);
+        if is_start && bytes[i] == b'0' && i + 2 < bytes.len() + 1 && text[i..].starts_with("0x") {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            if j > i + 2 && (j >= bytes.len() || !word_byte(bytes[j])) {
+                out.push_str(&u64::from_str_radix(&text[i + 2..j], 16).unwrap().to_string());
+                i = j;
+                continue;
+            }
+        }
+        if is_start && bytes[i].is_ascii_digit() {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            // Trailing-zero scientific form.
+            if j < bytes.len() && bytes[j] == b'e' {
+                let mut k = j + 1;
+                while k < bytes.len() && bytes[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k > j + 1 && (k >= bytes.len() || !word_byte(bytes[k])) {
+                    let value: u64 = text[i..j].parse::<u64>().unwrap()
+                        * 10u64.pow(text[j + 1..k].parse().unwrap());
+                    out.push_str(&value.to_string());
+                    i = k;
+                    continue;
+                }
+            }
+            if j >= bytes.len() || !word_byte(bytes[j]) {
+                out.push_str(&text[i..j].parse::<u64>().unwrap().to_string());
+                i = j;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+/// P4 gate (RED until Batch-4): operand chains permute (representative
+/// witnesses: pinned-prefix tgtc, full arity, kind-range, 3-operand kind-1).
+#[test]
+fn p4_chain_orders_vary() {
+    let mut seen: Vec<BTreeSet<String>> = vec![BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
+    let witnesses = ["seedfail(32)", "seedfail(34)", "seedfail(7)", "seedfail(10)"];
+    for seed in 0..64u64 {
+        let body = seed_loop_lua(Target::Lua51, seed);
+        for (set, w) in seen.iter_mut().zip(witnesses) {
+            // Skeletons: spelling variation must not pose as order variation.
+            set.insert(p4_canon_numbers(body.lines().find(|l| l.contains(w)).unwrap()));
+        }
+    }
+    for (set, w) in seen.iter().zip(witnesses) {
+        assert!(set.len() >= 2, "{w} chain fixed across 64 seeds");
+    }
+}
+
+/// P4 gate (RED until Batch-4): temp-split ALU forms appear (`local uN=x;`
+/// before the reduced operation; evaluation order preserved).
+#[test]
+fn p4_split_forms_appear() {
+    let mut seen = false;
+    for seed in 0..64u64 {
+        seen |= seed_loop_lua(Target::Lua51, seed).contains("local u");
+    }
+    assert!(seen, "split temps never appear across 64 seeds");
+}
+
+/// P4 gate (RED until Batch-4): dead temporaries appear (`local qN=<digit>;`
+/// at fixed anchor points; pure literals, never read).
+#[test]
+fn p4_dead_temps_appear() {
+    let mut seen = false;
+    for seed in 0..64u64 {
+        let body = seed_loop_lua(Target::Lua51, seed);
+        seen |= (1..=6).any(|n| body.contains(&format!("local q{n}=")));
+    }
+    assert!(seen, "dead temps never appear across 64 seeds");
+}
+
+/// P4 locks: chain operands preserved, inserted lines well-formed and
+/// unique, growth bounded (base 104 lines + <=6 dead temps).
+#[test]
+fn p4_insertion_locks() {
+    for target in [Target::Lua51, Target::Luau] {
+        for seed in P1_DIALECT_SEEDS {
+            let body = seed_loop_lua(target, seed);
+            let lines: Vec<&str> = body.lines().collect();
+            assert!(
+                (104..=110).contains(&lines.len()),
+                "{target} seed {seed}: {} lines",
+                lines.len()
+            );
+            // Every chain row: witness unique, all operands present,
+            // pinned prefix in canonical order.
+            for chain in seed_deform::P4_CHAINS {
+                let hits: Vec<&&str> = lines.iter().filter(|l| l.contains(chain.witness)).collect();
+                assert_eq!(hits.len(), 1, "{target} seed {seed}: witness drifted: {}", chain.witness);
+                let shape = p4_canon_numbers(hits[0]);
+                for op in chain.inner.split(chain.sep) {
+                    assert!(
+                        shape.contains(&p4_canon_numbers(op)),
+                        "{target} seed {seed}: chain lost {op}"
+                    );
+                }
+                let pinned: Vec<&str> = chain.inner.split(chain.sep).take(chain.pinned).collect();
+                if !pinned.is_empty() {
+                    let head = format!("{}{}", chain.open, pinned.join(chain.sep));
+                    assert!(hits[0].contains(&head), "{target} seed {seed}: pin moved: {}", chain.witness);
+                }
+            }
+            for line in &lines {
+                // Canonical `local q=prog[ip];` is not a dead temp; only
+                // `local q<1..6>=` lines are checked.
+                if line.len() > "local q".len()
+                    && line.starts_with("local q")
+                    && matches!(line.as_bytes()["local q".len()], b'1'..=b'6')
+                {
+                    let tail = &line["local q".len()..];
+                    let ok = tail.len() == 4
+                        && tail.as_bytes()[1] == b'='
+                        && tail.as_bytes()[2].is_ascii_digit()
+                        && tail.as_bytes()[3] == b';';
+                    assert!(ok, "{target} seed {seed}: malformed dead temp: {line}");
+                }
+                if line.contains("local u") {
+                    assert!(
+                        (line.starts_with("if oi5==") || line.starts_with("elseif oi5=="))
+                            && line.contains(" then local u")
+                            && line.contains(";r="),
+                        "{target} seed {seed}: malformed split: {line}"
+                    );
+                }
+            }
+            for n in 1..=10u32 {
+                assert!(
+                    body.matches(&format!("local u{n}=")).count() <= 1,
+                    "{target} seed {seed}: u{n} bound twice"
+                );
+            }
+            for n in 1..=6u32 {
+                assert!(
+                    body.matches(&format!("local q{n}=")).count() <= 1,
+                    "{target} seed {seed}: q{n} bound twice"
+                );
+            }
+        }
+    }
+}

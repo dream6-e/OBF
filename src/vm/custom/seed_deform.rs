@@ -350,6 +350,14 @@ pub(crate) fn p1_deform_template(body: &str, seed: u64) -> String {
         line_count,
         "P1: structural pass changed the line count"
     );
+    p4_alu_forms(&mut lines, &mut p1_stream(seed, 6));
+    p4_chain_perms(&mut lines, &mut p1_stream(seed, 7));
+    let inserted = p4_dead_temps(&mut lines, &mut p1_stream(seed, 8));
+    assert_eq!(
+        lines.len(),
+        line_count + inserted,
+        "P1: line-count accounting drifted"
+    );
     let joined = lines.join("\n");
     p1_respell_numbers(&joined, &mut p1_stream(seed, 5))
 }
@@ -429,3 +437,183 @@ pub(crate) fn p3_reader_group_lua(seed: u64) -> String {
     }
     out
 }
+
+// ---- P1 Batch-4: ALU forms + chain perms + dead temps -------------------
+
+/// One ALU binary site: canonical body plus temp-split spelling. Split
+/// preserves left-to-right evaluation of locals (unobservable, hence safe
+/// even under metamethods: the operator sees identical argument values).
+struct P4AluSite {
+    oi5: u32,
+    plain: &'static str,
+    split: &'static str,
+    /// Comparison duality (`<` <-> `>`, `<=` <-> `>=`): exact by language
+    /// definition (`a>b` IS `b<a`, including metamethod dispatch).
+    /// Arithmetic/`==` swaps are excluded (`__add`/`__eq` dispatch order).
+    dual: Option<(&'static str, &'static str)>,
+}
+
+const P4_ALU_SITES: [P4AluSite; 10] = [
+    P4AluSite { oi5: 0, plain: "r=x+y;", split: "local u1=x;r=u1+y;", dual: None },
+    P4AluSite { oi5: 1, plain: "r=x-y;", split: "local u2=x;r=u2-y;", dual: None },
+    P4AluSite { oi5: 2, plain: "r=x*y;", split: "local u3=x;r=u3*y;", dual: None },
+    P4AluSite { oi5: 3, plain: "r=x/y;", split: "local u4=x;r=u4/y;", dual: None },
+    P4AluSite { oi5: 4, plain: "r=x%y;", split: "local u5=x;r=u5%y;", dual: None },
+    P4AluSite { oi5: 5, plain: "r=x^y;", split: "local u6=x;r=u6^y;", dual: None },
+    P4AluSite { oi5: 8, plain: "r=(x==y);", split: "local u7=x;r=(u7==y);", dual: None },
+    P4AluSite { oi5: 9, plain: "r=x..y;", split: "local u8=x;r=u8..y;", dual: None },
+    P4AluSite {
+        oi5: 10,
+        plain: "r=x<y;",
+        split: "local u9=x;r=u9<y;",
+        dual: Some(("r=y>x;", "local u9=y;r=u9>x;")),
+    },
+    P4AluSite {
+        oi5: 11,
+        plain: "r=x<=y;",
+        split: "local u10=x;r=u10<=y;",
+        dual: Some(("r=y>=x;", "local u10=y;r=u10>=x;")),
+    },
+];
+
+/// P4: spell each ALU binary line in one of its equivalent forms. Runs
+/// after branch permutation on exact canonical bodies (position-free).
+fn p4_alu_forms(lines: &mut Vec<String>, rng: &mut Prng) {
+    for site in P4_ALU_SITES {
+        let hits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.contains(&format!("oi5=={} then ", site.oi5)) && l.ends_with(site.plain)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "P4: ALU site lost its canonical line: oi5=={}", site.oi5);
+        let at = hits[0];
+        let (cond, body) = p1_branch(&lines[at]);
+        assert_eq!(body, site.plain, "P4: ALU site body drifted: oi5=={}", site.oi5);
+        let first = lines[at].starts_with("if ");
+        let drawn = match site.dual {
+            None => [site.plain, site.split][rng.index(2)],
+            Some((dual, dual_split)) => {
+                [site.plain, site.split, dual, dual_split][rng.index(4)]
+            }
+        };
+        lines[at] = p1_emit(first, &cond, drawn);
+    }
+}
+
+/// Pure and/or operand chains. A chain is permutable only when every
+/// operand is total (`==`/`~=` never fault) or provably numeric at that
+/// point (refd outputs, arithmetic results, SEED-internal `ip`). Chains
+/// whose later operands fault on mistyped input (nargs/tgtc: `%`/`<` on
+/// arbitrary `rv()` values) pin their type check first and permute only
+/// the narrowed suffix (40-vector gate caught the unpinned form: raw
+/// arithmetic error instead of seedfail). Guards with no freedom after
+/// pinning (refd head, stix) are excluded; the expect-check is Batch-1.
+pub(crate) struct P4Chain {
+    pub open: &'static str,
+    pub inner: &'static str,
+    pub close: &'static str,
+    pub sep: &'static str,
+    pub pinned: usize,
+    /// Stable witness for gates (survives permutation).
+    pub witness: &'static str,
+}
+
+pub(crate) const P4_CHAINS: [P4Chain; 20] = [
+    P4Chain { open: "if ", inner: "ip<1 or ip>#prog", close: " then", sep: " or ", pinned: 0, witness: "seedfail(2)" },
+    P4Chain { open: "if ", inner: "vi>15 or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(9)" },
+    P4Chain { open: "if ", inner: "vi>2 or vo>255 or vo%1~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(10)" },
+    P4Chain { open: "if ", inner: "vi~=3 or vo>255 or vo%1~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(12)" },
+    P4Chain { open: "if ", inner: "vi>999999 or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(14)" },
+    P4Chain { open: "if ", inner: "vi==0 or vi==1", close: " then", sep: " or ", pinned: 0, witness: "seedfail(15)" },
+    P4Chain { open: "if ", inner: "vi>9 or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(16)" },
+    P4Chain { open: "if ", inner: "vi>=SN or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(17)" },
+    P4Chain { open: "if ", inner: "vi~=0 or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(18)" },
+    P4Chain { open: "if ", inner: "vi>=HN or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(19)" },
+    P4Chain { open: "if ", inner: "vi>=9 or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(20)" },
+    P4Chain { open: "if ", inner: "kind~=0 or vi>15 or vo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(8)" },
+    P4Chain { open: "if ", inner: "kind<0 or kind>8 or kind%1~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(7)" },
+    P4Chain { open: "if ", inner: "ok5~=3 or oi5>13 or oo5~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(22)" },
+    P4Chain { open: "if ", inner: "TY(nargs)~=TNUM or nargs<0 or nargs>8 or nargs%1~=0", close: " then", sep: " or ", pinned: 1, witness: "seedfail(25)" },
+    P4Chain { open: "if ", inner: "mk~=3 or mv>2 or mo~=0", close: " then", sep: " or ", pinned: 0, witness: "seedfail(27)" },
+    P4Chain { open: "if ", inner: "TY(t)~=TNUM or t<1 or t>#prog or t%1~=0", close: " then", sep: " or ", pinned: 1, witness: "seedfail(32)" },
+    P4Chain { open: "if ", inner: "a~=0 and a~=1 and a~=2 and a~=3", close: " then", sep: " and ", pinned: 0, witness: "seedfail(34)" },
+    P4Chain { open: "if ", inner: "a==0 or a==3", close: " then", sep: " or ", pinned: 0, witness: "return rv(q[3]),a;" },
+    P4Chain { open: "(", inner: "v~=nil and v~=false", close: ")", sep: " and ", pinned: 0, witness: "local v=rv(q[3]);tmp[dstc(q[2])]=" },
+];
+
+/// P4: permute each chain's free suffix (pinned type checks stay first).
+/// `P4_CHAINS` is the single source of truth (the lock gate reads it).
+fn p4_chain_perms(lines: &mut Vec<String>, rng: &mut Prng) {
+    for chain in P4_CHAINS {
+        let needle = format!("{}{}{}", chain.open, chain.inner, chain.close);
+        let hits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(&needle))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "P4: chain anchor drifted: {needle}");
+        let operands: Vec<&str> = chain.inner.split(chain.sep).collect();
+        assert!(operands.len() >= 2, "P4: chain too short: {needle}");
+        assert!(
+            chain.pinned < operands.len(),
+            "P4: chain over-pinned: {needle}"
+        );
+        let (head, mut tail) = operands.split_at(chain.pinned);
+        let mut tail = tail.to_vec();
+        rng.shuffle(&mut tail);
+        let mut reordered = head.to_vec();
+        reordered.extend(tail);
+        let rebuilt = format!(
+            "{}{}{}",
+            chain.open,
+            reordered.join(chain.sep),
+            chain.close
+        );
+        for op in operands {
+            assert!(rebuilt.contains(op), "P4: chain lost an operand: {op}");
+        }
+        lines[hits[0]] = lines[hits[0]].replacen(&needle, &rebuilt, 1);
+    }
+}
+/// Dead-temporary insertion points: (exact anchor line, seeded name). All
+/// names are asserted absent before insertion (fail-closed vs drift).
+const P4_DEAD_POINTS: [(&str, &str); 6] = [
+    ("local TNUM,TFUN,TTAB,SN,HN,tmp=TY(0),TY(E),TY(STAB),#STAB,#SEEDH,{};", "q1"),
+    ("return kind,vi,vo end;", "q2"),
+    ("return vi end;", "q3"),
+    ("local op=q[1];", "q4"),
+    ("tmp[dstc(q[2])]=rv(q[3]);ip=ip+1;", "q5"),
+    ("E();ip=ip+1;", "q6"),
+];
+
+/// P4: insert `local qN=<digit>;` after fixed anchors (pure literal, never
+/// read; single digit so the respeller draws nothing). Returns the count.
+fn p4_dead_temps(lines: &mut Vec<String>, rng: &mut Prng) -> usize {
+    for (_, name) in P4_DEAD_POINTS {
+        assert!(
+            !lines.iter().any(|l| l.contains(name)),
+            "P4: dead-temp name collides: {name}"
+        );
+    }
+    let mut inserted = 0;
+    for (anchor, name) in P4_DEAD_POINTS {
+        let hits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| *l == anchor)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "P4: dead-temp anchor drifted: {anchor}");
+        if rng.index(2) == 1 {
+            let value = rng.index(10);
+            lines.insert(hits[0] + 1, format!("local {name}={value};"));
+            inserted += 1;
+        }
+    }
+    inserted
+}
+
