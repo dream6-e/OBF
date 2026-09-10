@@ -431,6 +431,14 @@ if d7+d8*65521~={fake_adler} then E()end;"
             ),
         ));
     }
+    // T7: the Luau probe transcript is a pool-assembled prelude local.
+    let probe_transcript = program
+        .target
+        .is_luau()
+        .then(|| probe_transcript_unit(&var_of));
+    if let Some(t) = &probe_transcript {
+        units.push((t.unit, t.definition.clone()));
+    }
     structure.shuffle(&mut units);
     let sc_at = units.iter().position(|(name, _)| *name == "SC").unwrap();
     let z_at = units.iter().position(|(name, _)| *name == "Z").unwrap();
@@ -468,6 +476,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
         "NX", "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS", "X8", "X8C", "AD", "L32",
         "B32", "BUF", "BX", "BA", "BO", "BN", "LR", "SHL", "RS", "BNE", "BW8", "BR8", "BFS", "BR3",
     ];
+    ret_order.extend(probe_transcript.as_ref().map(|t| t.unit));
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
     s.push_str(&format!("\nreturn {ret_names}\nend,"));
@@ -1108,35 +1117,35 @@ end;return RD,ED,OG;"#,
             s.push_str("local Lookup=function(object,key)return object[key]end;");
         }
     }
-    // Three audited key-probe functions: each consumes the target runtime's
-    // debug-source transcript for `loadstring`, folds returned bytes into its
-    // share after the seeded rounds, and returns no standalone witness. A
-    // malformed transcript faults closed; a well-shaped but wrong transcript
-    // derives wrong ChaCha8/frame keys and fails strict gates. The entry
-    // calls the functions in seeded shuffled order.
+    // Three audited key-probe functions: each folds the target runtime's
+    // debug-source transcript for `loadstring` into its share after the seeded
+    // rounds and returns no standalone witness. A malformed transcript faults
+    // closed; a well-shaped wrong one derives bad keys and fails strict gates.
+    // Luau appends the pool-assembled name transcript (never spelled).
     // Shuffled CALL order of the three probe functions (indices 0..=2 into
     // keys[5..8] / probe_inputs / shares).
     let mut probe_order = [0usize, 1, 2];
     crate::random::Prng::new(seed ^ 0x6f72_6433_6873_7663).shuffle(&mut probe_order);
     // Structural inputs per probe: pairs of payload-table numeric keys the
-    // entry passes positionally. The Rust cipher derives the exact same
-    // shares from the exact same pairs, so no share or final keystream state
-    // exists as a script literal: each probe computes its transient share at
-    // run time after consuming its environment transcript, using exact double
-    // arithmetic.
+    // entry passes positionally. The Rust cipher derives the same shares from
+    // the same pairs, so no share or keystream state is a script literal: each
+    // probe computes its transient share at run time after consuming its
+    // environment transcript, in exact double arithmetic.
     let probe_inputs = cipher_probe_inputs(&keys);
+    let (probe_arg, probe_body) = match &probe_transcript {
+        Some(t) => (t.argument.as_str(), t.body.as_str()),
+        None => ("", PROBE_BODY_LUA51),
+    };
     let mut probe_fields = Vec::new();
     for (index, _) in shares.iter().enumerate() {
         let mut steps = String::new();
         for _ in 0..params.probe_rounds[index] {
             steps.push_str(&format!("x={}*x%2147483647;", params.outer));
         }
-        let mut field = format!("[{}]=function(SB,a,b,DB,GI,LS)local A=", keys[5 + index]);
-        if program.target.is_luau() {
-            field.push_str("DB and GI(LS,\"s\");A=A..\"buffer|bit32|table.freeze|debug.info\";");
-        } else {
-            field.push_str("DB and GI(LS,\"S\");A=A and A.source;");
-        }
+        let mut field = format!(
+            "[{}]=function(SB,a,b,DB,GI,LS{probe_arg})local A={probe_body}",
+            keys[5 + index]
+        );
         let _ = write!(
             field,
             "local x=(a*{}+b)%2147483647;{steps}a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%2147483647;b=b+1 end;return 1+(x+a*{})%2147483646;end,",
@@ -1170,7 +1179,7 @@ end;return RD,ED,OG;"#,
     );
     let prelude_stage = format!("{ret_names}=VMS[{}]();es={e_probe};", keys[0]);
     let probe_stage = format!(
-        "c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS);c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS);c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS);es={e_segments};",
+        "c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});es={e_segments};",
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
         probe_inputs[probe_order[0]].1,

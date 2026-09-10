@@ -206,13 +206,60 @@ pub(crate) fn cipher_probe_inputs(keys: &[u64]) -> [(u64, u64); 3] {
     [(keys[0], keys[4]), (keys[2], keys[3]), (keys[5], keys[6])]
 }
 
-pub(crate) fn runtime_probe_witness(target: Target) -> u64 {
-    let source: &[u8] = if target.is_luau() {
-        b"[C]buffer|bit32|table.freeze|debug.info"
+/// Names the Luau key probe appends to the `debug.info(loadstring, "s")`
+/// transcript. The emitted script never spells them out: the prelude
+/// concatenates the hidden-name pool locals in exactly this order at run time
+/// (see [`probe_transcript_unit`]), and [`runtime_probe_witness`] folds the
+/// value derived from this same list, so the two sides cannot drift apart.
+pub(crate) const PROBE_TRANSCRIPT_NAMES: [&str; 6] =
+    ["buffer", "bit32", "table", "freeze", "debug", "info"];
+
+/// Prelude unit key holding the assembled transcript local.
+pub(crate) const PROBE_TRANSCRIPT_UNIT: &str = "PTS";
+
+/// Lua51 fold body: the transcript is the raw `debug.getinfo` source field.
+pub(crate) const PROBE_BODY_LUA51: &str = "DB and GI(LS,\"S\");A=A and A.source;";
+
+/// Everything the emitter needs for the assembled Luau transcript: the prelude
+/// unit it defines, the extra probe parameter it is threaded through (the
+/// probes are sibling table entries and cannot see prelude locals), and the
+/// probe body folding it onto the debug-source transcript.
+pub(crate) struct ProbeTranscript {
+    pub(crate) unit: &'static str,
+    pub(crate) definition: String,
+    pub(crate) argument: String,
+    pub(crate) body: String,
+}
+
+/// Build the prelude statement, the extra probe parameter and the probe body
+/// for the run-time assembled transcript, from the prelude's hidden-name
+/// locals, so no library or reflection name reaches the output.
+pub(crate) fn probe_transcript_unit(
+    var_of: &std::collections::BTreeMap<&str, String>,
+) -> ProbeTranscript {
+    let unit = PROBE_TRANSCRIPT_UNIT;
+    let suffix = PROBE_TRANSCRIPT_NAMES
+        .map(|name| var_of[name].clone())
+        .join("..\"|\"..");
+    ProbeTranscript {
+        unit,
+        definition: format!("local {unit}={suffix};"),
+        argument: format!(",{unit}"),
+        body: format!("DB and GI(LS,\"s\");A=A..{unit};"),
+    }
+}
+
+fn probe_transcript(target: Target) -> String {
+    if target.is_luau() {
+        format!("[C]{}", PROBE_TRANSCRIPT_NAMES.join("|"))
     } else {
-        b"=[C]"
-    };
-    source.iter().fold(0u64, |state, &byte| {
+        "=[C]".to_owned()
+    }
+}
+
+pub(crate) fn runtime_probe_witness(target: Target) -> u64 {
+    let source = probe_transcript(target);
+    source.as_bytes().iter().fold(0u64, |state, &byte| {
         (state * 257 + u64::from(byte)) % 2_147_483_647
     })
 }

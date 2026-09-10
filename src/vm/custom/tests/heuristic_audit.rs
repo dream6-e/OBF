@@ -35,61 +35,69 @@ type AuditPins = (
     ([usize; 5], usize),   // M7: top-5 string lens + 3rd/4th gap
 );
 
-// Pins observed 2026-09-09 (K9a mixed transport). Any drift means the
+// Pins observed 2026-09-10 (re-recorded after the keyed dual-lane frame tag
+// and the pool-assembled Luau probe transcript). Any drift means the
 // detector-visible surface moved and must be justified in the batch.
-// K9a deltas: M2 total/residues (mixed widths + prefixes, arbitrary by
-// design); M3b/M4 (opaque M24/MM/C1C2 splits + downstream rng-stream
-// shift incl. label hygiene); M4b luau (spelling lottery over the shifted
-// stream); M5/M7 raw lengths (escapes + longer segments). Stable: M1 = 86
-// distinct bytes, KAT words, M6 = (0, 0), M5 count = 5 (ALPHA frags stay
-// sub-64 raw), M7 gap stays in the hundreds.
+// The previous pins dated from K9a, so two batches of change are absorbed at
+// once. K8/K9 added emitted constant sites: the +18 `256` values in M4 are
+// theirs, not the tag's -- verified by counting the goldens kept in git (the
+// same growth was already present in the commit preceding the tag). The tag
+// itself replaced the position-independent Adler fold with two mod-65521
+// lanes, which moves M2 total/residues, the M3b count/sum, the 65536 and
+// 4294967296 entries of M4, and M5/M7 lengths (longer tag helper text, and a
+// shifted downstream rng stream). The Luau probe-transcript fix shifts M3b/M4/
+// M5 once more (the pool-joined transcript local adds name-assembly index
+// runs; the probes gain one parameter) without introducing a new value class.
+// Stable on both targets: M1 = 86 distinct stream bytes, KAT words
+// [0,2,0,...] (only the audited getfenv capture), M6 = (0, 0), M5 count = 5
+// (ALPHA frags stay sub-64 raw), M7 gaps stay in the hundreds.
 const PINS_LUA51_7001: AuditPins = (
     86,
-    (1383, 0, 3, 3),
+    (1384, 1, 0, 4),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (252, 4503942668018210, 4503599627370496),
+    (247, 4503953069928348, 4503599627370496),
     [
         (1, 455),
-        (0, 391),
-        (2, 222),
-        (256, 185),
-        (3, 164),
-        (4, 127),
+        (0, 393),
+        (2, 221),
+        (256, 203),
+        (3, 162),
+        (4, 126),
         (20, 104),
-        (65536, 104),
+        (65536, 101),
         (5, 81),
         (9, 73),
         (8, 70),
         (94, 69),
     ],
     0,
-    (5, 1864),
+    (5, 1878),
     (0, 0),
-    ([539, 532, 525, 134, 134], 391),
+    ([567, 526, 517, 134, 134], 383),
 );
 const PINS_LUAU_7351: AuditPins = (
     86,
-    (1112, 2, 0, 2),
+    (1103, 2, 3, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (254, 4503936625916531, 4503599627370496),
+    (251, 4503934304006568, 4503599627370496),
     [
         (1, 454),
-        (0, 388),
-        (2, 225),
-        (4, 167),
-        (256, 161),
+        (0, 391),
+        (2, 224),
+        (256, 179),
+        (4, 177),
         (3, 146),
-        (65536, 96),
+        (65536, 93),
         (13, 92),
-        (23, 78),
+        (23, 79),
         (5, 76),
-        (7, 52),
-        (30, 52),
+        (30, 54),
+        (90, 54),
     ],
     32,
-    (5, 1528),
+    (5, 1519),
     (0, 0),
-    ([432, 419, 409, 134, 134], 275),
+    ([421, 417, 413, 134, 134], 279),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

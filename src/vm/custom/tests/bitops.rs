@@ -70,23 +70,43 @@ fn k7_wire_image_bytes_are_frozen() {
     }
 }
 
-// The new bit32/buffer method names join the hidden-name pool: spelled
-// occurrences anywhere in the final output are a static anchor (T7).
+// The bit32/buffer method names join the hidden-name pool: a spelled
+// occurrence anywhere in the final output is a static anchor (T7). The list
+// also carries the reflection names the Luau key probe used to append as a
+// string literal (2026-09-10 regression), and the gate runs over both fixed
+// goldens too - the template text is what ships, so auditing only the probe
+// program would let a literal slip through on the fixture path.
 #[test]
 fn k7_bit_library_names_are_never_spelled() {
-    const WORDS: [&str; 14] = [
+    const WORDS: [&str; 18] = [
         "bit32", "buffer", "bxor", "band", "bor", "bnot", "lrotate", "lshift", "rshift",
-        "create", "writeu8", "readu8", "fromstring", "readu32",
+        "create", "writeu8", "readu8", "fromstring", "readu32", "table.freeze", "debug.info",
+        "getinfo", "loadstring",
     ];
-    for target in [Target::Lua51, Target::Luau] {
+    for (target, golden_path) in [
+        (Target::Lua51, concat!(env!("CARGO_MANIFEST_DIR"), "/vm_lua51.out.lua")),
+        (Target::Luau, concat!(env!("CARGO_MANIFEST_DIR"), "/vm_luau.out.lua")),
+    ] {
         let data = compile(K7_PROBE, target).unwrap();
         let output = emit(&data, target, 4242).unwrap();
-        for word in WORDS {
-            assert!(
-                !output.contains(word),
-                "{target}: {word} spelled in output"
-            );
+        let golden = std::fs::read_to_string(golden_path).unwrap();
+        for text in [&output, &golden] {
+            for word in WORDS {
+                assert!(!text.contains(word), "{target}: {word} spelled in output");
+            }
+            // The probe transcript is assembled from the hidden-name pool and
+            // threaded in as a parameter; `A=A.."` would mean it is a literal.
+            assert!(!text.contains("A=A..\""), "{target}: probe transcript is a literal");
         }
+        // Luau joins the six pool names with "|" (five separators) exactly
+        // once: one shared prelude local, not one copy per probe. Lua 5.1
+        // folds only the debug-source field, so it assembles nothing here.
+        let joins = golden.matches("..\"|\"..").count();
+        assert_eq!(
+            joins,
+            if target.is_luau() { 5 } else { 0 },
+            "{target}: assembled probe transcript moved ({joins} joins)"
+        );
     }
 }
 

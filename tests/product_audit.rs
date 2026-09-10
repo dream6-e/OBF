@@ -42,15 +42,30 @@ struct AuditPins {
 // K7's scope); [6] flips on layout-shuffle artifacts (pre-existing text,
 // position luck); [8] re-indexes on the fresh M24 addends. [3]/[4]/[7]
 // stable; 16777216/2147483647/4294967296 untouched (M24 split adds zero).
+//
+// Re-recorded 2026-09-10 (frame tag + pool-assembled Luau probe transcript),
+// attributed against the goldens in git rather than guessed:
+//   * `256` 181 -> 199 happened *before* 89dcc91 (that commit's golden already
+//     had 199), i.e. in the K8/K9 batches that grew the script 93k -> 98.6k;
+//     it is extra base-256 word-packing spellings, not a new capability -
+//     [2]/[3]/[4]/[5] and the KAT-word counts stay exactly pinned.
+//   * `65536` 102 -> 99 and `4294967296` 18 -> 20 are the keyed dual-lane tag
+//     (verified by diffing 89dcc91 -> 7106908: those two move, `256` does not).
+//   * the probe-transcript fix moves no lua51 bytes at all (golden is
+//     byte-identical) and on Luau leaves every check1 value unchanged; it only
+//     replaces three 36-byte name literals with one pool-joined local.
+//   * [9] total_len tracks the transport widths (the tag's frame rng shifts the
+//     downstream draws); rem5 leaving 0 moves *away* from the multiple-of-5
+//     pathology this check exists to catch, and fail stays false.
 fn pins_lua51() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 4),
-            (256, 181),
-            (65536, 102),
+            (256, 199),
+            (65536, 99),
             (16777216, 10),
             (2147483647, 27),
-            (4294967296, 18),
+            (4294967296, 20),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
@@ -77,19 +92,24 @@ fn pins_lua51() -> AuditPins {
         check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 76),
-        check9_stream: (18445, 0, false),
+        check9_stream: (18411, 1, false),
     }
 }
 
+// Same attribution as lua51: `256` 159 -> 177 predates 89dcc91, `65536` 94 ->
+// 91 and `4294967296` 16 -> 15 come from the dual-lane tag. The probe-transcript
+// fix leaves every value here untouched (checked 2026-09-10 against
+// 7106908's golden: it deletes three 36-byte name literals and adds one
+// pool-joined local + one probe parameter, i.e. text shape only, +111 B).
 fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 6),
-            (256, 159),
-            (65536, 94),
+            (256, 177),
+            (65536, 91),
             (16777216, 4),
             (2147483647, 22),
-            (4294967296, 16),
+            (4294967296, 15),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
@@ -115,8 +135,8 @@ fn pins_luau() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 73),
-        check9_stream: (23940, 0, false),
+        check8_literal_gcd: (1, 70),
+        check9_stream: (23889, 4, false),
     }
 }
 
