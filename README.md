@@ -258,14 +258,7 @@ VM 覆盖 fixture 位于 `tests/fixtures/vm_lua51.lua` 与 `tests/fixtures/vm_lu
 
 ## 当前边界与后续工作
 
-默认 AST/IR/v2 register VM、完整 primitive ISA、private ISA15 semantic graph、per-prototype operand/register/field-order ABI、capture/constant pools、carried-value fusion、六状态 entry graph、runtime-witness/data-dependent control、bounded LZW、双 ChaCha8、每次解密 anti-hook、frame v2 与最终随机短名均已可运行。破解报告暴露的统一 `6+3*i` operand slot、canonical actual-op marker、全像统一逻辑 `R[index]` 物理键、逐 primitive 原始 handler 拼接边界、顶层稳定线性入口链、统一 record/segment/dictionary/metadata 字段顺序及 per-prototype capture/constant 邻接均已被针对性削弱；但 pool token 掩码、profile/fusion/置换规则、`RF`、primitive算术/表操作、parser字段及全部 inverse 仍随客户端交付，计算或模拟后仍可逆。captures/constants 全局池已完成；下一批应推进函数结构变换（须独立评估）；继续堆叠 encryption/encoding/compression 不能替代这些结构工作。继续堆叠 encryption/encoding/compression 不能替代这些结构工作，也不得宣称客户端秘密、不可逆或“静态恢复已解决”。
-
-当前限制必须保留：不模拟原始 debug/环境反射与错误位置；消除已证明的死路径后，仍对可能跳过条件所用 local 初始化的 `repeat/continue` 保守拒绝；隐藏元表、GC/分配时机、含洞 table 的 `#` 和布局敏感遍历不属于完全等价保证，Roblox executor 尚未实机验证。原生所有优化相关的函数身份也尚未完整模拟。结构验证不是沙箱或任意输入的语义等价证明。详见 [`虚拟机兼容性.md`](虚拟机兼容性.md) 和 [`自定义字节码.md`](自定义字节码.md)。
-
-## Anti 状态
-
-本阶段的 anti-hook 与 ChaCha8 material 紧耦合，实现在 `src/vm/custom/chacha.rs` 的独立 payload field，而非通用 `src/anti/`：这样每次 decrypt 都必须先得到 attestation，且 scope 可直接审计六个 source observation。`src/anti/` 仍保留给未来面向用户源码/通用运行环境的 Anti；不得把当前 gate 描述为不可绕过。
-�立评估）；继续堆叠 encryption/encoding/compression 不能替代这些结构工作。继续堆叠 encryption/encoding/compression 不能替代这些结构工作，也不得宣称客户端秘密、不可逆或“静态恢复已解决”。
+默认 AST/IR/v2 register VM、完整 primitive ISA、private ISA15 semantic graph、per-prototype operand/register/field-order ABI、capture/constant pools、carried-value fusion、六状态 entry graph、runtime-witness/data-dependent control、bounded LZW、双 ChaCha8、每次解密 anti-hook、frame v2 与最终随机短名均已可运行。破解报告暴露的统一 `6+3*i` operand slot、canonical actual-op marker、全像统一逻辑 `R[index]` 物理键、逐 primitive 原始 handler 拼接边界、顶层稳定线性入口链、统一 record/segment/dictionary/metadata 字段顺序及 per-prototype capture/constant 邻接均已被针对性削弱；但 pool token 掩码、profile/fusion/置换规则、`RF`、primitive算术/表操作、parser字段及全部 inverse 仍随客户端交付，计算或模拟后仍可逆。K8 per-prototype indirect route、K9 per-lane affine operand value key 与 capture/constant 全局池都已落地；下一步是 K10（体积 shrink 与静态表面收紧），更进一步的函数结构变换须独立评估；继续堆叠 encryption/encoding/compression 不能替代这些结构工作，也不得宣称客户端秘密、不可逆或“静态恢复已解决”。
 
 当前限制必须保留：不模拟原始 debug/环境反射与错误位置；消除已证明的死路径后，仍对可能跳过条件所用 local 初始化的 `repeat/continue` 保守拒绝；隐藏元表、GC/分配时机、含洞 table 的 `#` 和布局敏感遍历不属于完全等价保证，Roblox executor 尚未实机验证。原生所有优化相关的函数身份也尚未完整模拟。结构验证不是沙箱或任意输入的语义等价证明。详见 [`虚拟机兼容性.md`](虚拟机兼容性.md) 和 [`自定义字节码.md`](自定义字节码.md)。
 
