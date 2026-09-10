@@ -77,7 +77,7 @@ fn pins_lua51() -> AuditPins {
         check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 76),
-        check9_stream: (18429, 4, false),
+        check9_stream: (18445, 0, false),
     }
 }
 
@@ -116,7 +116,7 @@ fn pins_luau() -> AuditPins {
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 73),
-        check9_stream: (23917, 2, false),
+        check9_stream: (23940, 0, false),
     }
 }
 

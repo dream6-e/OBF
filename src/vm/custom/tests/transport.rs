@@ -529,7 +529,7 @@ fn compressed_body_cipher_is_an_independent_second_layer() {
         let shares = cipher_shares(&wrapper_keys(seed), &cipher, target);
         let pv = perm_term(seed);
         let mut opened = encrypted_frame.clone();
-        apply_compression_cipher(&mut opened, &shares, pv, target, &chacha_params(seed)).unwrap();
+        apply_compression_cipher_feedback(&mut opened, &shares, pv, target, &chacha_params(seed), false).unwrap();
         assert_eq!(opened, plain_frame);
         assert_eq!(decompress_bytecode(&opened).unwrap(), semantic);
         assert_eq!(decrypt_embedded(&output, target, seed).unwrap(), semantic);
@@ -539,12 +539,13 @@ fn compressed_body_cipher_is_an_independent_second_layer() {
         let mut wrong = encrypted_frame;
         let wrong_cipher = cipher_params(seed + 1);
         let wrong_shares = cipher_shares(&wrapper_keys(seed + 1), &wrong_cipher, target);
-        apply_compression_cipher(
+        apply_compression_cipher_feedback(
             &mut wrong,
             &wrong_shares,
             perm_term(seed + 1),
             target,
             &chacha_params(seed + 1),
+            false,
         )
         .unwrap();
         assert!(decompress_bytecode(&wrong).is_err());
@@ -561,12 +562,13 @@ fn compression_frame_is_seed_independent_but_its_inner_stream_is_not() {
         let shares = cipher_shares(&wrapper_keys(seed), &cipher, Target::Lua51);
         let permutation = perm_term(seed);
         let mut encrypted = plain.clone();
-        apply_compression_cipher(
+        apply_compression_cipher_feedback(
             &mut encrypted,
             &shares,
             permutation,
             Target::Lua51,
             &chacha_params(seed),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -577,12 +579,13 @@ fn compression_frame_is_seed_independent_but_its_inner_stream_is_not() {
             &encrypted[COMPRESSION_HEADER..],
             &plain[COMPRESSION_HEADER..]
         );
-        apply_compression_cipher(
+        apply_compression_cipher_feedback(
             &mut encrypted,
             &shares,
             permutation,
             Target::Lua51,
             &chacha_params(seed),
+            false,
         )
         .unwrap();
         assert_eq!(encrypted, plain);

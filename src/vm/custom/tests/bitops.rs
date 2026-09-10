@@ -151,7 +151,7 @@ fn k7_hot_stream_keeps_byte_xor_call_shape() {
     for target in [Target::Lua51, Target::Luau] {
         let raw = k7_raw(target, 7001);
         assert!(
-            raw.contains("X8(SB(B,p+i),y)"),
+            raw.contains("NCH(X8(X8(ct,y),prev))"),
             "{target}: hot stream call shape moved"
         );
     }
