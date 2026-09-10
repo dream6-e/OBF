@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 pub(super) const PREFIX: &str = "__obf_proto_";
 pub(super) const PROTOTYPE_FIELDS: &[&str] = &[
     "k", "tags", "u", "parent", "m", "p", "flags", "nu", "nk", "nc", "shared", "self", "code",
-    "cached", "control",
+    "cached", "control", "routes",
 ];
 
 fn error(message: &str) -> Diagnostic {

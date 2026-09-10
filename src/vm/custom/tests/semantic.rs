@@ -1,4 +1,27 @@
 #[test]
+fn k9_affine_lanes_round_trip_for_all_forms_and_contexts() {
+    let bytes = compile("return 1", Target::Lua51).unwrap();
+    let program = custom::decode(&bytes, Target::Lua51).unwrap();
+    let image = super::semantic::encode(&program, 0x9_0009).unwrap();
+    let multipliers = [1u32, 3, 5, 7, 9, 11, 13, 15];
+    for token in [0u16, 1, 257, 65535] {
+        for prototype in [0u16, 1, 31, 4095] {
+            for lane in 0..3u32 {
+                let index = super::semantic::k9_index(token, prototype, lane, image.mask_salt);
+                assert_eq!(multipliers[index] % 2, 1);
+                for value in [0usize, 1, 127, 128, 255] {
+                    let wire =
+                        super::semantic::k9_affine(value, token, prototype, lane, &image, 256);
+                    let inverse = [1u32, 171, 205, 183, 57, 163, 197, 239][index];
+                    let add = super::semantic::k9_add(token, prototype, lane, image.mask_add, 256);
+                    assert_eq!(((wire + 256 - add) * inverse) % 256, value as u32);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn semantic_recipe_and_edge_tokens_use_contextual_runtime_stages() {
     for target in [Target::Lua51, Target::Luau] {
         let data = compile("local function f(x)return x+1 end print(f(4),f(9))", target).unwrap();
@@ -654,8 +677,6 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
     );
 
     for target in [Target::Lua51, Target::Luau] {
-
-
         let fixture = match target {
             Target::Lua51 => include_str!("../../../../tests/fixtures/vm_lua51.lua"),
             Target::Luau => include_str!("../../../../tests/fixtures/vm_luau.lua"),
@@ -676,8 +697,7 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
             assert!(raw.matches("R[RX(").count() + raw.matches("local w12=RX(").count() >= 3);
             assert!(raw.contains("R[RX(sl+vo)]"));
             let store_inline = raw.contains("R[RX(stix(si))]");
-            let store_split =
-                raw.contains("local w12=RX(stix(si));") && raw.contains("R[w12]=");
+            let store_split = raw.contains("local w12=RX(stix(si));") && raw.contains("R[w12]=");
             assert!(
                 store_inline != store_split,
                 "{target} seed {seed}: STORE spelling neither-or-both"
@@ -1111,13 +1131,19 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
             schedules.insert(format!("{:?}", chacha_params(seed)));
             let keys = wrapper_keys(seed);
             assert!(raw.contains(&format!("[{}]=function(MF,X8,X8C", keys[CHACHA_WORD_FIELD])));
-            assert!(raw.contains(&format!("[{}]=function(Xa,Xb,Ra,Rb)", keys[CHACHA_QUARTER_FIELD])));
+            assert!(raw.contains(&format!(
+                "[{}]=function(Xa,Xb,Ra,Rb)",
+                keys[CHACHA_QUARTER_FIELD]
+            )));
             assert!(raw.contains(&format!("[{}]=function(Q)", keys[CHACHA_BLOCK_FIELD])));
             assert!(raw.contains(&format!(
                 "[{}]=function(B,s1,s2,s3,pv,ctx,d,aw,CB",
                 keys[CHACHA_STREAM_FIELD]
             )));
-            assert!(raw.contains(&format!("[{}]=function(AH,CC,CB,X8C", keys[ANTI_HOOK_FIELD])));
+            assert!(raw.contains(&format!(
+                "[{}]=function(AH,CC,CB,X8C",
+                keys[ANTI_HOOK_FIELD]
+            )));
             assert!(raw.contains("1634760805,857760878,2036477234,1797285236"));
             assert!(raw.contains("for i=1,4 do Q(x,1,5,9,13)"));
             assert!(raw.contains("Z[1]~=804192318"));
@@ -1138,9 +1164,15 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
             let ctx_end = raw[ctx_at..].find(';').expect("ctx terminator");
             let ctx_expr = &raw[ctx_at..ctx_at + ctx_end];
             for term in ["n*31", "bits*17", "cs*7", "cc*13", "bl"] {
-                assert!(ctx_expr.contains(term), "{target} seed {seed}: ctx lost {term}");
+                assert!(
+                    ctx_expr.contains(term),
+                    "{target} seed {seed}: ctx lost {term}"
+                );
             }
-            assert!(raw.contains("ctx*d"), "{target} seed {seed}: KDF lost ctx term");
+            assert!(
+                raw.contains("ctx*d"),
+                "{target} seed {seed}: KDF lost ctx term"
+            );
             assert!(raw.contains("q=d==1 and"));
             if target.is_luau() {
                 assert!(raw.contains(r#"if A~="[C]" or B~="[C]""#));
@@ -1170,7 +1202,11 @@ fn field_order_permutations_decouple_parser_from_canonical_layout() {
     for q in 0..FIELD_RECORD_ORDERS {
         let mut order = factorial_field_at_slot(q, 4);
         order.sort_unstable();
-        assert_eq!(order, vec![0, 1, 2, 3], "record quotient {q} is not a permutation");
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3],
+            "record quotient {q} is not a permutation"
+        );
     }
     assert_eq!(
         (0..FIELD_RECORD_ORDERS)
@@ -1252,7 +1288,11 @@ fn field_order_permutations_decouple_parser_from_canonical_layout() {
             // Baked per-image orders must match the seed layout exactly, and
             // must vary across seeds rather than pinning one textual order.
             let tuple_text = field.tuple_construct_lua();
-            assert_eq!(raw.matches(&tuple_text).count(), 1, "{target} seed {seed}: tuple");
+            assert_eq!(
+                raw.matches(&tuple_text).count(),
+                1,
+                "{target} seed {seed}: tuple"
+            );
             emitted_tuples.insert(tuple_text);
             // PH locals are slot-rewritten (`F` -> `g[key]`), but the marked
             // read suffixes survive: verify the marked reads follow the
@@ -1271,11 +1311,7 @@ fn field_order_permutations_decouple_parser_from_canonical_layout() {
                 found.sort_unstable();
                 found.into_iter().map(|(_, marker)| marker).collect()
             };
-            let wide_names = [
-                "__obf_proto_parent",
-                "__obf_proto_nk",
-                "__obf_proto_nc",
-            ];
+            let wide_names = ["__obf_proto_parent", "__obf_proto_nk", "__obf_proto_nc"];
             // meta_u32 field 3 is the unmarked VMCS read; drop it from the
             // expected marked subsequence.
             let expected_wide: Vec<String> = field
@@ -1312,7 +1348,9 @@ fn field_order_permutations_decouple_parser_from_canonical_layout() {
                 expected_narrow,
                 "{target} seed {seed}: metadata u8 order"
             );
-            emitted_meta.insert(format!("{expected_wide:?}{expected_medium:?}{expected_narrow:?}"));
+            emitted_meta.insert(format!(
+                "{expected_wide:?}{expected_medium:?}{expected_narrow:?}"
+            ));
             // The dictionary head shares the slot-rewritten validator field,
             // so match the read order at the loop head instead of full text.
             let z_at = raw
@@ -1340,13 +1378,23 @@ fn field_order_permutations_decouple_parser_from_canonical_layout() {
                 "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);",
                 tuple[1], tuple[2], tuple[0]
             );
-            assert_eq!(raw.matches(&fetch).count(), 1, "{target} seed {seed}: fetch disagrees");
+            assert_eq!(
+                raw.matches(&fetch).count(),
+                1,
+                "{target} seed {seed}: fetch disagrees"
+            );
             // Encoder and generated parser still agree byte for byte.
             let output = emit(&data, target, seed).unwrap();
             assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
         }
-        assert!(emitted_tuples.len() >= 2, "{target}: tuple order pinned across seeds");
-        assert!(emitted_meta.len() >= 2, "{target}: metadata order pinned across seeds");
+        assert!(
+            emitted_tuples.len() >= 2,
+            "{target}: tuple order pinned across seeds"
+        );
+        assert!(
+            emitted_meta.len() >= 2,
+            "{target}: metadata order pinned across seeds"
+        );
         let workspace = native::Workspace::new();
         let path = workspace.0.join("field_order.lua");
         fs::write(&path, source).unwrap();
@@ -1364,11 +1412,13 @@ fn pool_token_helpers_mirror_segment_masking() {
         for seed in [0u64, 735, u64::MAX] {
             let image = super::semantic::encode(&program, seed).unwrap();
             for wire_slot in [1u16, 2, 917, u16::MAX] {
-                for (owner, slot, payload) in
-                    [(0u16, 0u16, 0u16), (1, 2, 1022), (255, 256, 65535), (32767, 65535, 42)]
-                {
-                    let owner_token =
-                        super::semantic::encode_pool_owner(owner, wire_slot, &image);
+                for (owner, slot, payload) in [
+                    (0u16, 0u16, 0u16),
+                    (1, 2, 1022),
+                    (255, 256, 65535),
+                    (32767, 65535, 42),
+                ] {
+                    let owner_token = super::semantic::encode_pool_owner(owner, wire_slot, &image);
                     assert_eq!(
                         super::semantic::decode_pool_owner(owner_token, wire_slot, &image),
                         owner
@@ -1483,7 +1533,6 @@ fn generated_parser_reads_global_capture_constant_pools() {
     }
 }
 
-
 const SEED_CONTROL_FIXTURE: &str = "local function f(x)if x>0 then return x*2 else return 0-x end end;local r=0;local i=0;while i<5 do r=r+f(i-2);i=i+1 end;print(r)";
 
 #[test]
@@ -1509,7 +1558,8 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 "{target} seed {seed}: SEEDH must precede the loop for upvalue scope"
             );
             assert!(
-                raw.find("H=function(fid,args,ups)").unwrap() < raw.find("local SEED=function").unwrap(),
+                raw.find("H=function(fid,args,ups)").unwrap()
+                    < raw.find("local SEED=function").unwrap(),
                 "{target} seed {seed}: loop must sit inside H for H-local scope"
             );
             assert!(
@@ -1520,7 +1570,10 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 raw.contains("K=F.__obf_proto_k;"),
                 "{target} seed {seed}: H must derive K per activation"
             );
-            assert!(raw.contains("local SEEDT={"), "{target} seed {seed}: routine table missing");
+            assert!(
+                raw.contains("local SEEDT={"),
+                "{target} seed {seed}: routine table missing"
+            );
             // P6: helper pool emits in permuted order; pin the perm prefix.
             let seedh_perm = seed_deform::p6_seedh_perm(seed, SEEDH_NAMES.len());
             let mut seedh_ordered = vec![""; SEEDH_NAMES.len()];
@@ -1528,7 +1581,10 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 seedh_ordered[seedh_perm[ix]] = name;
             }
             let seedh_prefix = format!("local SEEDH={{{},", seedh_ordered[..3].join(","));
-            assert!(raw.contains(&seedh_prefix), "{target} seed {seed}: helper pool missing");
+            assert!(
+                raw.contains(&seedh_prefix),
+                "{target} seed {seed}: helper pool missing"
+            );
             // Slim arms: frame state arrives via H-locals, the expected
             // action rides as the trailing argument.
             // P6: arm sites permute; pin width + permuted content.
@@ -1542,9 +1598,7 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 "{target} seed {seed}: test arm missing"
             );
             assert!(
-                raw.contains(
-                    "return SEED(SEEDT[47],{a},2);"
-                ),
+                raw.contains("return SEED(SEEDT[47],{a},2);"),
                 "{target} seed {seed}: return arm missing"
             );
             let abc_site = seed_deform::p6_permute_site("{a,b,c}", seed);
@@ -1568,10 +1622,7 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 .match_indices("local av,act=SEED(")
                 .filter(|(pos, _)| !raw[*pos..].starts_with("local av,act=SEED(SEEDT[46],"))
                 .count();
-            assert!(
-                fat == 0,
-                "{target} seed {seed}: fat arms survived"
-            );
+            assert!(fat == 0, "{target} seed {seed}: fat arms survived");
         }
     }
 }
@@ -1587,16 +1638,19 @@ fn seed_tailcall_arm_binds_value_first_with_short_return_guard() {
     // act binds nil and every immediate tailcall raises).
     for target in [Target::Lua51, Target::Luau] {
         for dseed in [735u64, 7001, 1, u64::MAX] {
-        let arm = seed_arm_lua_for(target, Opcode::TailCall, dseed).unwrap();
-        let data = compile(SEED_TAILCALL_FIXTURE, target).unwrap();
-        let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, dseed).unwrap();
-        assert!(raw.contains(&arm), "{target} seed {dseed}: tailcall arm missing or reshaped");
-        let output = finalize(&raw, target, dseed).unwrap();
-        let work = native::Workspace::new();
-        let path = work.0.join("seed_tailcall.lua");
-        fs::write(&path, output).unwrap();
-        assert_eq!(native::compile_and_run(target, &path), b"0\n");
+            let arm = seed_arm_lua_for(target, Opcode::TailCall, dseed).unwrap();
+            let data = compile(SEED_TAILCALL_FIXTURE, target).unwrap();
+            let program = custom::decode(&data, target).unwrap();
+            let raw = generate(&data, &program, dseed).unwrap();
+            assert!(
+                raw.contains(&arm),
+                "{target} seed {dseed}: tailcall arm missing or reshaped"
+            );
+            let output = finalize(&raw, target, dseed).unwrap();
+            let work = native::Workspace::new();
+            let path = work.0.join("seed_tailcall.lua");
+            fs::write(&path, output).unwrap();
+            assert_eq!(native::compile_and_run(target, &path), b"0\n");
         }
     }
 }
@@ -1704,10 +1758,7 @@ fn seed_v1_migration_leaves_no_classic_handler_text() {
         ),
     ];
     for (target, vm_fixture, scope_fixture) in corpora {
-        let mut pins: Vec<&str> = SEED_V1_RESIDUE_SHARED
-            .iter()
-            .map(|(_, pin)| *pin)
-            .collect();
+        let mut pins: Vec<&str> = SEED_V1_RESIDUE_SHARED.iter().map(|(_, pin)| *pin).collect();
         pins.extend(
             (if target.is_luau() {
                 SEED_V1_RESIDUE_LUAU
@@ -1732,5 +1783,31 @@ fn seed_v1_migration_leaves_no_classic_handler_text() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn k8_payload_driven_indirect_routes_are_bound_and_checked() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("local function f(x)return x+1 end print(f(4),f(9))", target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut layouts = BTreeSet::new();
+        for seed in [0u64, 735, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert!(raw.contains("__obf_proto_routes"), "{target} seed {seed}");
+            assert!(raw.contains("local VR={}"), "{target} seed {seed}");
+            assert!(raw.contains("bucket[label]"), "{target} seed {seed}");
+            assert!(
+                raw.contains("route_info=F.__obf_proto_routes[route]"),
+                "{target} seed {seed}"
+            );
+            assert!(raw.contains("route_info[1]~=rid"), "{target} seed {seed}");
+            assert!(raw.matches("%65521").count() >= 2, "{target} seed {seed}");
+            layouts.insert(raw);
+        }
+        assert!(
+            layouts.len() >= 2,
+            "{target}: route layout did not vary by seed"
+        );
     }
 }

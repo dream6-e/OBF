@@ -55,8 +55,8 @@ fn k7_has_opaque_modulus(text: &str) -> bool {
 #[test]
 fn k7_wire_image_bytes_are_frozen() {
     for (target, seed, len, hash) in [
-        (Target::Lua51, 7001u64, 1055usize, 0xa4338b2386328f39u64),
-        (Target::Luau, 7351u64, 803usize, 0xe6d802fb591cf19fu64),
+        (Target::Lua51, 7001u64, 1159usize, 0x943c3c67c2b2e2ceu64),
+        (Target::Luau, 7351u64, 882usize, 0xf2697760790f4e9eu64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();

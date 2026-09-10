@@ -289,23 +289,82 @@ fn write_varint(out: &mut Vec<u8>, mut value: usize) {
     out.push(value as u8);
 }
 
-fn write_operands(out: &mut Vec<u8>, word: Word) -> Result<(), Diagnostic> {
+const K9_BYTE_MUL: [u32; 8] = [1, 3, 5, 7, 9, 11, 13, 15];
+
+pub(crate) fn k9_index(token: u16, prototype: u16, lane: u32, salt: u16) -> usize {
+    ((u32::from(token) * 17 + u32::from(prototype) * 31 + lane * 53 + u32::from(salt)) % 8) as usize
+}
+
+pub(crate) fn k9_add(token: u16, prototype: u16, lane: u32, add: u16, modulus: u32) -> u32 {
+    (u32::from(token) * 257 + u32::from(prototype) * 911 + lane * 193 + u32::from(add)) % modulus
+}
+
+pub(crate) fn k9_affine(
+    value: usize,
+    token: u16,
+    prototype: u16,
+    lane: u32,
+    image: &SemanticImage,
+    modulus: u32,
+) -> u32 {
+    let index = k9_index(token, prototype, lane, image.mask_salt);
+    (value as u32 * K9_BYTE_MUL[index] + k9_add(token, prototype, lane, image.mask_add, modulus))
+        % modulus
+}
+
+fn write_operands(
+    out: &mut Vec<u8>,
+    word: Word,
+    token: u16,
+    prototype: u16,
+    image: &SemanticImage,
+) -> Result<(), Diagnostic> {
     let op = word.opcode()?;
     match custom::encoding_form(op) {
-        1 => write_varint(out, word.ax()),
-        2 => write_varint(out, word.a()),
+        1 => {
+            let value = word.ax();
+            let a = k9_affine(value & 255, token, prototype, 0, image, 256);
+            let b = k9_affine((value >> 8) & 255, token, prototype, 1, image, 256);
+            let c = k9_affine((value >> 16) & 255, token, prototype, 2, image, 256);
+            write_varint(out, (a | b << 8 | c << 16) as usize);
+        }
+        2 => write_varint(
+            out,
+            k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+        ),
         3 => {
-            write_varint(out, word.a());
-            write_varint(out, word.b());
+            write_varint(
+                out,
+                k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+            );
+            write_varint(
+                out,
+                k9_affine(word.b(), token, prototype, 1, image, 256) as usize,
+            );
         }
         4 => {
-            write_varint(out, word.a());
-            write_varint(out, word.bx());
+            write_varint(
+                out,
+                k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+            );
+            write_varint(
+                out,
+                k9_affine(word.bx(), token, prototype, 1, image, 65536) as usize,
+            );
         }
         _ => {
-            write_varint(out, word.a());
-            write_varint(out, word.b());
-            write_varint(out, word.c());
+            write_varint(
+                out,
+                k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+            );
+            write_varint(
+                out,
+                k9_affine(word.b(), token, prototype, 1, image, 256) as usize,
+            );
+            write_varint(
+                out,
+                k9_affine(word.c(), token, prototype, 2, image, 256) as usize,
+            );
         }
     }
     Ok(())
@@ -1093,7 +1152,7 @@ fn encode_code(
             write_u16(&mut out, fields[slot]);
         }
         for &word in &bundle.words {
-            write_operands(&mut out, word)?;
+            write_operands(&mut out, word, token, prototype_id, image)?;
         }
     }
     Ok(out)

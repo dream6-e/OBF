@@ -1008,13 +1008,13 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
             let tuple = super::lowering::field_layout(seed).tuple_slots();
             let fetch = format!(
-                "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);sid=",
+                "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);route=",
                 tuple[1], tuple[2], tuple[0]
             );
             assert_eq!(raw.matches(&fetch).count(), 1);
             let fetch_at = raw.find(&fetch).unwrap();
             assert!(raw[fetch_at..].starts_with(&fetch));
-            assert!(raw[fetch_at..raw.len().min(fetch_at + 180)].contains(";pc=next1;w="));
+            assert!(raw[fetch_at..raw.len().min(fetch_at + 500)].contains(";pc=next1;w="));
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {
@@ -1144,7 +1144,7 @@ fn dispatch_chains_split_into_seeded_subchains() {
             // fetch/dispatch phase machine the chain may sit before or
             // after the fetch line in the text.
             let f5_at = raw
-                .find("local I,rid,sid,next1,skip1,a,b,c,k,j;local w=")
+                .find("local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w=")
                 .expect("interpreter phase machine");
             let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
             let interp = &raw[f5_at..f5_end];

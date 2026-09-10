@@ -46,8 +46,8 @@ fn pins_lua51() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 4),
-            (256, 168),
-            (65536, 100),
+            (256, 181),
+            (65536, 102),
             (16777216, 10),
             (2147483647, 27),
             (4294967296, 18),
@@ -77,7 +77,7 @@ fn pins_lua51() -> AuditPins {
         check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 76),
-        check9_stream: (15536, 1, false),
+        check9_stream: (18429, 4, false),
     }
 }
 
@@ -85,8 +85,8 @@ fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 6),
-            (256, 146),
-            (65536, 92),
+            (256, 159),
+            (65536, 94),
             (16777216, 4),
             (2147483647, 22),
             (4294967296, 16),
@@ -116,7 +116,7 @@ fn pins_luau() -> AuditPins {
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 73),
-        check9_stream: (20687, 2, false),
+        check9_stream: (23917, 2, false),
     }
 }
 
