@@ -1581,19 +1581,9 @@ fn transport_frame_decoder(params: &FrameParams, bitops: &mut crate::random::Prn
         bitops,
         &["n", "d*257", "(fk0%65536)*65536", "(fk1%65536)*17", &cookie],
     );
-    let ex1 = render_modsum(
-        bitops,
-        &[
-            "AD(B,17,16+n)",
-            "c*263",
-            "d*31",
-            "(fk0%65536)*65536",
-            "fk1%65536",
-            &tag,
-        ],
-    );
+    let ex1 = render_modsum(bitops, &["left", "right*65521", "c*17", "d*31"]);
     format!(
-        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;local fk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;local fk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;local fd={version}+{header}*256+(fk0+fk1+{descriptor})%65536*65536;local d=L32(B,1);local n=L32(B,5);local c=L32(B,9);local t=L32(B,13);local pad=(4-(16+n)%4)%4;if n>16777216 or #B~=16+n+pad or d~=fd then E()end;local ex={ex0};if c~=ex then E()end;ex={ex1};if t~=ex then E()end;for i=1,pad do if SB(B,16+n+i)~=(fk0+fk1*i+{padding})%256 then E()end end;B=SS(B,17,16+n);",
+        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;local fk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;local fk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;local fd={version}+{header}*256+(fk0+fk1+{descriptor})%65536*65536;local d=L32(B,1);local n=L32(B,5);local c=L32(B,9);local t=L32(B,13);local pad=(4-(16+n)%4)%4;if n>16777216 or #B~=16+n+pad or d~=fd then E()end;local ex={ex0};if c~=ex then E()end;local left=(fk0+{tag})%65521;local right=(fk1+{cookie})%65521;for i=17,16+n do local byte=SB(B,i);left=(left*257+byte)%65521;right=(right*263+byte+left)%65521 end;local ex={ex1};if t~=ex then E()end;for i=1,pad do if SB(B,16+n+i)~=(fk0+fk1*i+{padding})%256 then E()end end;B=SS(B,17,16+n);",
         header = TRANSPORT_FRAME_HEADER,
         version = TRANSPORT_FRAME_VERSION,
         c00 = c0[0],
