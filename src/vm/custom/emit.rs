@@ -1133,7 +1133,7 @@ end;return RD,ED,OG;"#,
         }
         let mut field = format!("[{}]=function(SB,a,b,DB,GI,LS)local A=", keys[5 + index]);
         if program.target.is_luau() {
-            field.push_str("DB and GI(LS,\"s\");A=A..\"buffer|bit32|table.freeze|debug.info\";");
+            field.push_str("DB and GI(LS,\"s\");");
         } else {
             field.push_str("DB and GI(LS,\"S\");A=A and A.source;");
         }

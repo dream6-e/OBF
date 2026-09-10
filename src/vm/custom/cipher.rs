@@ -207,11 +207,7 @@ pub(crate) fn cipher_probe_inputs(keys: &[u64]) -> [(u64, u64); 3] {
 }
 
 pub(crate) fn runtime_probe_witness(target: Target) -> u64 {
-    let source: &[u8] = if target.is_luau() {
-        b"[C]buffer|bit32|table.freeze|debug.info"
-    } else {
-        b"=[C]"
-    };
+    let source: &[u8] = if target.is_luau() { b"[C]" } else { b"=[C]" };
     source.iter().fold(0u64, |state, &byte| {
         (state * 257 + u64::from(byte)) % 2_147_483_647
     })
