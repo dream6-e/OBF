@@ -491,12 +491,12 @@ if d7+d8*65521~={fake_adler} then E()end;"
         Some(frame) => frame,
         None => compress_bytecode(&semantic_image.bytes)?,
     };
-    apply_compression_cipher(&mut payload, &shares, pv, program.target, &chacha)?;
+    apply_compression_cipher_feedback(&mut payload, &shares, pv, program.target, &chacha, true)?;
     // ChaCha8 supplies two domain-separated confidentiality passes. The
     // strict frame between them authenticates descriptor, exact length,
     // cookie, payload tag and deterministic padding before exposure.
     let framed = seal_transport_frame(&payload, &shares, pv, &frame)?;
-    let encrypted = chacha8_xor(
+    let encrypted = chacha8_feedback_encrypt(
         &framed,
         &shares,
         pv,

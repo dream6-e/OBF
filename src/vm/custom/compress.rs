@@ -334,3 +334,37 @@ pub(crate) fn apply_compression_cipher(
     frame[COMPRESSION_HEADER..].copy_from_slice(&body);
     Ok(())
 }
+
+pub(crate) fn apply_compression_cipher_feedback(
+    frame: &mut [u8],
+    shares: &[u64; 3],
+    permutation: u64,
+    target: Target,
+    params: &ChaChaParams,
+    encrypt: bool,
+) -> Result<(), Diagnostic> {
+    let header = compression_header(frame)?;
+    let body = if encrypt {
+        chacha8_feedback_encrypt(
+            &frame[COMPRESSION_HEADER..],
+            shares,
+            permutation,
+            compression_cipher_context(header),
+            CHACHA8_INNER_DOMAIN,
+            target,
+            params,
+        )
+    } else {
+        chacha8_feedback_decrypt(
+            &frame[COMPRESSION_HEADER..],
+            shares,
+            permutation,
+            compression_cipher_context(header),
+            CHACHA8_INNER_DOMAIN,
+            target,
+            params,
+        )
+    };
+    frame[COMPRESSION_HEADER..].copy_from_slice(&body);
+    Ok(())
+}

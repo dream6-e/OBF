@@ -218,6 +218,91 @@ pub(crate) fn chacha8_xor_with_attestation(
     out
 }
 
+/// Ciphertext-feedback variants used by the payload path. The existing
+/// `chacha8_xor` remains a stateless test/vector primitive; these variants make
+/// each byte depend on the preceding ciphertext byte and therefore cannot be
+/// decoded out of order.
+pub(crate) fn chacha8_feedback_encrypt(
+    bytes: &[u8],
+    shares: &[u64; 3],
+    permutation: u64,
+    context: u32,
+    domain: u32,
+    target: Target,
+    params: &ChaChaParams,
+) -> Vec<u8> {
+    chacha8_feedback(
+        bytes,
+        shares,
+        permutation,
+        context,
+        domain,
+        target,
+        params,
+        true,
+    )
+}
+
+pub(crate) fn chacha8_feedback_decrypt(
+    bytes: &[u8],
+    shares: &[u64; 3],
+    permutation: u64,
+    context: u32,
+    domain: u32,
+    target: Target,
+    params: &ChaChaParams,
+) -> Vec<u8> {
+    chacha8_feedback(
+        bytes,
+        shares,
+        permutation,
+        context,
+        domain,
+        target,
+        params,
+        false,
+    )
+}
+
+fn chacha8_feedback(
+    bytes: &[u8],
+    shares: &[u64; 3],
+    permutation: u64,
+    context: u32,
+    domain: u32,
+    target: Target,
+    params: &ChaChaParams,
+    encrypt: bool,
+) -> Vec<u8> {
+    let material = chacha_material(
+        shares,
+        permutation,
+        context,
+        domain,
+        runtime_attestation(target),
+        params,
+    );
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut previous = 0u8;
+    for (block_index, chunk) in bytes.chunks(64).enumerate() {
+        let words = chacha8_block(
+            material.key,
+            material.counter.wrapping_add(block_index as u32),
+            material.nonce,
+        );
+        let mut stream = [0u8; 64];
+        for (word, output) in words.iter().zip(stream.chunks_exact_mut(4)) {
+            output.copy_from_slice(&word.to_le_bytes());
+        }
+        for (offset, &byte) in chunk.iter().enumerate() {
+            let value = byte ^ stream[offset] ^ previous;
+            out.push(value);
+            previous = if encrypt { value } else { byte };
+        }
+    }
+    out
+}
+
 pub(crate) const CHACHA_WORD_FIELD: usize = 24;
 pub(crate) const CHACHA_QUARTER_FIELD: usize = 25;
 pub(crate) const CHACHA_BLOCK_FIELD: usize = 26;
@@ -328,7 +413,7 @@ pub(crate) fn chacha_decoder_sections(
         nonce_sums.push(render_modsum(bitops, &refs));
     }
     let stream = format!(
-        "[{}]=function(B,s1,s2,s3,pv,ctx,d,aw,CB,E,SB,NCH,TC,MF,X8)if d~=1 and d~=2 or ctx<0 or ctx>={bound} then E()end;local S={{{salts}}};local K={{{keys}}};local q=d==1 and {c0} or {c1};local N=d==1 and {{{n00},{n01},{n02}}}or{{{n10},{n11},{n12}}};local Z=CB(K,q,N);K={{Z[1],Z[2],Z[3],Z[4],Z[5],Z[6],Z[7],Z[8]}};N={{Z[9],Z[10],Z[11]}};q={q_sum};local O={{}};for p=1,#B,64 do local W=CB(K,{counter_sum},N);local n=#B-p;if n>63 then n=63 end;for i=0,n do local y=MF(W[MF(i/4)+1]/2^(8*(i%4)))%256;O[p+i]=NCH(X8(SB(B,p+i),y))end end;return TC(O)end,",
+        "[{}]=function(B,s1,s2,s3,pv,ctx,d,aw,CB,E,SB,NCH,TC,MF,X8)if d~=1 and d~=2 or ctx<0 or ctx>={bound} then E()end;local S={{{salts}}};local K={{{keys}}};local q=d==1 and {c0} or {c1};local N=d==1 and {{{n00},{n01},{n02}}}or{{{n10},{n11},{n12}}};local Z=CB(K,q,N);K={{Z[1],Z[2],Z[3],Z[4],Z[5],Z[6],Z[7],Z[8]}};N={{Z[9],Z[10],Z[11]}};q={q_sum};local O={{}};local prev=0;for p=1,#B,64 do local W=CB(K,{counter_sum},N);local n=#B-p;if n>63 then n=63 end;for i=0,n do local y=MF(W[MF(i/4)+1]/2^(8*(i%4)))%256;local ct=SB(B,p+i);O[p+i]=NCH(X8(X8(ct,y),prev));prev=ct end end;return TC(O)end,",
         keys[CHACHA_STREAM_FIELD],
         keys = key_sums.join(","),
         c0 = params.counters[0],
