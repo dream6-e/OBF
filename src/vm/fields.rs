@@ -145,7 +145,7 @@ mod tests {
                 );
                 for (before, after) in &mapping {
                     assert_ne!(*before, after);
-                    assert_eq!(after.len(), 1); // all 15 current fields fit
+                    assert_eq!(after.len(), 1); // all current fields fit
                     assert!(after.bytes().all(|b| b.is_ascii_lowercase()));
                     assert!(!lexer::is_keyword(after, target));
                 }
