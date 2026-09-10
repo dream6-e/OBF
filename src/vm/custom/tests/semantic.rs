@@ -1146,7 +1146,7 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
             )));
             assert!(raw.contains("1634760805,857760878,2036477234,1797285236"));
             assert!(raw.contains("for i=1,4 do Q(x,1,5,9,13)"));
-            assert!(raw.contains("Z[1]~=804192318"));
+            assert!(raw.contains("Z[1]~=((48*256+") && !raw.contains("Z[1]~=804192318"));
             assert_eq!(raw.matches("local aw=AH(AH,CC,CB,X8C").count(), 2);
 
             let [i0, i1, i2] = perm_indices(seed);
