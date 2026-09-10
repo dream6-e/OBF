@@ -529,7 +529,7 @@ fn compressed_body_cipher_is_an_independent_second_layer() {
         let shares = cipher_shares(&wrapper_keys(seed), &cipher, target);
         let pv = perm_term(seed);
         let mut opened = encrypted_frame.clone();
-        apply_compression_cipher(&mut opened, &shares, pv, target, &chacha_params(seed)).unwrap();
+        apply_compression_cipher_feedback(&mut opened, &shares, pv, target, &chacha_params(seed), false).unwrap();
         assert_eq!(opened, plain_frame);
         assert_eq!(decompress_bytecode(&opened).unwrap(), semantic);
         assert_eq!(decrypt_embedded(&output, target, seed).unwrap(), semantic);
@@ -539,12 +539,13 @@ fn compressed_body_cipher_is_an_independent_second_layer() {
         let mut wrong = encrypted_frame;
         let wrong_cipher = cipher_params(seed + 1);
         let wrong_shares = cipher_shares(&wrapper_keys(seed + 1), &wrong_cipher, target);
-        apply_compression_cipher(
+        apply_compression_cipher_feedback(
             &mut wrong,
             &wrong_shares,
             perm_term(seed + 1),
             target,
             &chacha_params(seed + 1),
+            false,
         )
         .unwrap();
         assert!(decompress_bytecode(&wrong).is_err());
@@ -561,12 +562,13 @@ fn compression_frame_is_seed_independent_but_its_inner_stream_is_not() {
         let shares = cipher_shares(&wrapper_keys(seed), &cipher, Target::Lua51);
         let permutation = perm_term(seed);
         let mut encrypted = plain.clone();
-        apply_compression_cipher(
+        apply_compression_cipher_feedback(
             &mut encrypted,
             &shares,
             permutation,
             Target::Lua51,
             &chacha_params(seed),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -577,12 +579,13 @@ fn compression_frame_is_seed_independent_but_its_inner_stream_is_not() {
             &encrypted[COMPRESSION_HEADER..],
             &plain[COMPRESSION_HEADER..]
         );
-        apply_compression_cipher(
+        apply_compression_cipher_feedback(
             &mut encrypted,
             &shares,
             permutation,
             Target::Lua51,
             &chacha_params(seed),
+            false,
         )
         .unwrap();
         assert_eq!(encrypted, plain);
@@ -1008,13 +1011,13 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert_eq!(raw.matches("I=code[pc];if I==nil then E()end;").count(), 1);
             let tuple = super::lowering::field_layout(seed).tuple_slots();
             let fetch = format!(
-                "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);sid=",
+                "next1=ED(I[{}],pc,fid,0);skip1=ED(I[{}],pc,fid,1);rid=RD(I[{}],pc,next1,skip1,fid);route=",
                 tuple[1], tuple[2], tuple[0]
             );
             assert_eq!(raw.matches(&fetch).count(), 1);
             let fetch_at = raw.find(&fetch).unwrap();
             assert!(raw[fetch_at..].starts_with(&fetch));
-            assert!(raw[fetch_at..raw.len().min(fetch_at + 180)].contains(";pc=next1;w="));
+            assert!(raw[fetch_at..raw.len().min(fetch_at + 500)].contains(";pc=next1;w="));
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {
@@ -1144,7 +1147,7 @@ fn dispatch_chains_split_into_seeded_subchains() {
             // fetch/dispatch phase machine the chain may sit before or
             // after the fetch line in the text.
             let f5_at = raw
-                .find("local I,rid,sid,next1,skip1,a,b,c,k,j;local w=")
+                .find("local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w=")
                 .expect("interpreter phase machine");
             let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
             let interp = &raw[f5_at..f5_end];

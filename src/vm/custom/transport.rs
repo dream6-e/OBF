@@ -347,7 +347,7 @@ pub(crate) fn embedded_outer_ciphertext(
             continue;
         }
         let cipher = &stream[4..];
-        let frame = chacha8_xor(
+        let frame = chacha8_feedback_decrypt(
             cipher,
             &shares,
             permutation_term,
@@ -361,8 +361,15 @@ pub(crate) fn embedded_outer_ciphertext(
         else {
             continue;
         };
-        if apply_compression_cipher(&mut compressed, &shares, permutation_term, target, &chacha)
-            .is_err()
+        if apply_compression_cipher_feedback(
+            &mut compressed,
+            &shares,
+            permutation_term,
+            target,
+            &chacha,
+            false,
+        )
+        .is_err()
         {
             continue;
         }
@@ -398,7 +405,7 @@ pub fn extract_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
     let params = cipher_params(seed);
     let shares = cipher_shares(&wrapper_keys(seed), &params, target);
     let permutation = perm_term(seed);
-    let frame = chacha8_xor(
+    let frame = chacha8_feedback_decrypt(
         &cipher,
         &shares,
         permutation,
@@ -416,12 +423,13 @@ pub fn decrypt_embedded(source: &str, target: Target, seed: u64) -> Result<Vec<u
     let mut payload = extract_embedded(source, target, seed)?;
     let params = cipher_params(seed);
     let shares = cipher_shares(&wrapper_keys(seed), &params, target);
-    apply_compression_cipher(
+    apply_compression_cipher_feedback(
         &mut payload,
         &shares,
         perm_term(seed),
         target,
         &chacha_params(seed),
+        false,
     )?;
     decompress_bytecode(&payload)
 }
