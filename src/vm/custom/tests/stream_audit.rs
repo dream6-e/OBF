@@ -27,9 +27,13 @@ fn stream_word_stats(bytes: &[u8]) -> (usize, usize, u32) {
 
 #[test]
 fn inner_ciphertext_words_have_no_periodic_repeats() {
+    // Word counts re-recorded for ISA16 (K12 chains the operand lane keys over
+    // the decoded record prefix, which changes varint lengths slightly). The
+    // security-relevant halves stay at zero: no repeated word, no common
+    // divisor among repeat distances.
     for (target, seed, expected) in [
-        (Target::Lua51, 7001u64, (987usize, 0usize, 0u32)),
-        (Target::Luau, 7351u64, (784usize, 0usize, 0u32)),
+        (Target::Lua51, 7001u64, (975usize, 0usize, 0u32)),
+        (Target::Luau, 7351u64, (778usize, 0usize, 0u32)),
     ] {
         let data = compile(AUDIT_PROBE, target).unwrap();
         let output = emit(&data, target, seed).unwrap();

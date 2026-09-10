@@ -738,7 +738,7 @@ return a,b,c,p end;\nend,",
 for id=0,np-1 do
  local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;{operand_profile}{field_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
- local AK=function(v,id,lane,x,m)local q=(v*17+id*31+lane*53+{k9_salt})%8+1;local ii;if m==65536 then ii=({{1,43691,52429,28087,36409,35747,20165,61167}})[q]else ii=({{1,171,205,183,57,163,197,239}})[q]end;local aa=(v*257+id*911+lane*193+{k9_add})%m;return (x-aa)*ii%m end;
+ local AK=function(v,id,lane,x,m,cl)local q=(v*17+id*31+lane*53+{k9_salt})%8+1;local ii;if m==65536 then ii=({{1,43691,52429,28087,36409,35747,20165,61167}})[q]else ii=({{1,171,205,183,57,163,197,239}})[q]end;local aa=(v*257+id*911+lane*193+{k9_add}+cl%m)%m;return (x-aa)*ii%m end;
  local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};local VR={{}};
  for z=1,nr do {dict_head}if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
   local q={{}};for qi=0,n-1 do local raw=SB(CD,p);p=p+1;if raw==nil then E()end;
@@ -746,10 +746,10 @@ for id=0,np-1 do
    if op>48 or FM[op]==nil or qi<n-1 and (op==44 or op==45 or op==46 or op==47)then E()end;q[qi+1]=op;
   end;RM[rid]=q;
  end;
- local start=D16();local code={{}};
- for at=0,F.__obf_proto_nc-1 do {record_head}local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);local recipe=RM[rid];
+ local start=D16();local code={{}};local stL=(id*{k9_init_proto}+nr*{k9_init_routes}+start*{k9_init_start}+{k9_salt})%{k9_mod};
+ for at=0,F.__obf_proto_nc-1 do {record_head}local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);stL=(stL*{k9_chain_mul}+token*{k9_chain_token}+at*{k9_chain_step}+{k9_salt})%{k9_mod};local recipe=RM[rid];
   if label==0 or code[label]~=nil or recipe==nil then E()end;local route=(label*{route_mul}+token*{route_add}+id*{route_salt})%65521;local bucket=VR[route];if bucket==nil then bucket={{}};VR[route]=bucket end;if bucket[label]~=nil then E()end;bucket[label]={{rid,#recipe}};{tuple_construct}
-  for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local form=FM[op];if form==1 then a=AK(token,id,0,a,256);b=AK(token,id,1,b,256);c=AK(token,id,2,c,256) elseif form==2 then a=AK(token,id,0,a,256) elseif form==3 then a=AK(token,id,0,a,256);b=AK(token,id,1,b,256) elseif form==4 then local kk=AK(token,id,1,b+c*256,65536);a=AK(token,id,0,a,256);b=kk%256;c=(kk-b)/256 else a=AK(token,id,0,a,256);b=AK(token,id,1,b,256);c=AK(token,id,2,c,256) end;local k=b+c*256;local j=a+k*256;
+  for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local form=FM[op];if form==1 then a=AK(token,id,0,a,256,stL);b=AK(token,id,1,b,256,stL);c=AK(token,id,2,c,256,stL) elseif form==2 then a=AK(token,id,0,a,256,stL) elseif form==3 then a=AK(token,id,0,a,256,stL);b=AK(token,id,1,b,256,stL) elseif form==4 then local kk=AK(token,id,1,b+c*256,65536,stL);a=AK(token,id,0,a,256,stL);b=kk%256;c=(kk-b)/256 else a=AK(token,id,0,a,256,stL);b=AK(token,id,1,b,256,stL);c=AK(token,id,2,c,256,stL) end;local k=b+c*256;local j=a+k*256;
    if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
   end;code[label]=I;
  end;
@@ -769,6 +769,13 @@ end;return RD,ED,OG;"#,
         route_salt = route_salt,
         k9_salt = semantic_image.mask_salt,
         k9_add = semantic_image.mask_add,
+        k9_mod = semantic::K9_CHAIN_MOD,
+        k9_chain_mul = semantic::K9_CHAIN_MUL,
+        k9_chain_token = semantic::K9_CHAIN_TOKEN_MUL,
+        k9_chain_step = semantic::K9_CHAIN_STEP_MUL,
+        k9_init_proto = semantic::K9_INIT_PROTO_MUL,
+        k9_init_routes = semantic::K9_INIT_ROUTE_MUL,
+        k9_init_start = semantic::K9_INIT_START_MUL,
         operand_getter = operand_abi.getter_lua(),
         operand_profile = operand_abi.parser_profile_lua(),
         field_profile = field_order.record_profile_lua(),

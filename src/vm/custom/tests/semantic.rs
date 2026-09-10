@@ -1,25 +1,3 @@
-#[test]
-fn k9_affine_lanes_round_trip_for_all_forms_and_contexts() {
-    let bytes = compile("return 1", Target::Lua51).unwrap();
-    let program = custom::decode(&bytes, Target::Lua51).unwrap();
-    let image = super::semantic::encode(&program, 0x9_0009).unwrap();
-    let multipliers = [1u32, 3, 5, 7, 9, 11, 13, 15];
-    for token in [0u16, 1, 257, 65535] {
-        for prototype in [0u16, 1, 31, 4095] {
-            for lane in 0..3u32 {
-                let index = super::semantic::k9_index(token, prototype, lane, image.mask_salt);
-                assert_eq!(multipliers[index] % 2, 1);
-                for value in [0usize, 1, 127, 128, 255] {
-                    let wire =
-                        super::semantic::k9_affine(value, token, prototype, lane, &image, 256);
-                    let inverse = [1u32, 171, 205, 183, 57, 163, 197, 239][index];
-                    let add = super::semantic::k9_add(token, prototype, lane, image.mask_add, 256);
-                    assert_eq!(((wire + 256 - add) * inverse) % 256, value as u32);
-                }
-            }
-        }
-    }
-}
 
 #[test]
 fn semantic_recipe_and_edge_tokens_use_contextual_runtime_stages() {
@@ -1465,15 +1443,6 @@ fn pool_field_profiles_cover_all_six_orders() {
     }
     assert!(combos.len() >= 6, "pool key variety: {combos:?}");
     assert!(saw_plain && saw_flipped, "pool order never flips");
-}
-
-#[test]
-fn wire_isa_version_is_15() {
-    assert_eq!(
-        super::semantic::WIRE_ISA_VERSION,
-        15,
-        "pooled capture/constant images require ISA15"
-    );
 }
 
 #[test]

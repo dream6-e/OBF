@@ -31,7 +31,7 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 15;
+pub(crate) const WIRE_ISA_VERSION: u32 = 16;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -291,12 +291,66 @@ fn write_varint(out: &mut Vec<u8>, mut value: usize) {
 
 const K9_BYTE_MUL: [u32; 8] = [1, 3, 5, 7, 9, 11, 13, 15];
 
+// K12/T1: the operand lane key is not a pure function of (position, static
+// constants). Every record mixes a running chain state that advances over the
+// decoded record tokens in image order, so recovering record `r` requires
+// having decoded every record before it, in order: the lane is non-commutative
+// and cannot be entered mid-stream or solved per-record. The Lua parser replays
+// the identical recurrence, and both sides derive it from these constants only.
+// Each multiplier is chosen so that its `*N+` rendering stays unique inside
+// the emitted script: the drift lock in tests/semantic.rs counts those
+// fragments, which survives the finalizer renaming every local.
+pub(crate) const K9_CHAIN_MOD: u32 = 2_147_483_647;
+pub(crate) const K9_CHAIN_MUL: u32 = 213;
+pub(crate) const K9_CHAIN_TOKEN_MUL: u32 = 1031;
+pub(crate) const K9_CHAIN_STEP_MUL: u32 = 7517;
+pub(crate) const K9_INIT_PROTO_MUL: u32 = 7919;
+pub(crate) const K9_INIT_ROUTE_MUL: u32 = 4099;
+pub(crate) const K9_INIT_START_MUL: u32 = 131;
+
+/// Per-prototype chain seed. Every input is a value the generated parser has
+/// already decoded and bounds-checked at this point (prototype id, route count,
+/// entry label) plus the per-image salt, so the runtime needs no extra static
+/// constant to replay the chain.
+pub(crate) fn k9_chain_init(prototype: u16, routes: usize, start: u16, salt: u16) -> u32 {
+    let seed = u64::from(prototype) * u64::from(K9_INIT_PROTO_MUL)
+        + routes as u64 * u64::from(K9_INIT_ROUTE_MUL)
+        + u64::from(start) * u64::from(K9_INIT_START_MUL)
+        + u64::from(salt);
+    (seed % u64::from(K9_CHAIN_MOD)) as u32
+}
+
+/// Chain advance over one decoded record. `state < 2^31` keeps the largest
+/// intermediate (2^31 * 213 + 2^16 * 1031 + records * 7517) far below 2^53, so
+/// Lua 5.1 / Luau doubles reproduce it exactly.
+pub(crate) fn k9_chain_next(state: u32, token: u16, at: u32, salt: u16) -> u32 {
+    // u64 intermediates: the runtime computes this in Lua doubles, so the
+    // 2^31 * 213 term must not wrap as u32 here.
+    let next = u64::from(state) * u64::from(K9_CHAIN_MUL)
+        + u64::from(token) * u64::from(K9_CHAIN_TOKEN_MUL)
+        + u64::from(at) * u64::from(K9_CHAIN_STEP_MUL)
+        + u64::from(salt);
+    (next % u64::from(K9_CHAIN_MOD)) as u32
+}
+
 pub(crate) fn k9_index(token: u16, prototype: u16, lane: u32, salt: u16) -> usize {
     ((u32::from(token) * 17 + u32::from(prototype) * 31 + lane * 53 + u32::from(salt)) % 8) as usize
 }
 
-pub(crate) fn k9_add(token: u16, prototype: u16, lane: u32, add: u16, modulus: u32) -> u32 {
-    (u32::from(token) * 257 + u32::from(prototype) * 911 + lane * 193 + u32::from(add)) % modulus
+pub(crate) fn k9_add(
+    token: u16,
+    prototype: u16,
+    lane: u32,
+    add: u16,
+    chain: u32,
+    modulus: u32,
+) -> u32 {
+    (u32::from(token) * 257
+        + u32::from(prototype) * 911
+        + lane * 193
+        + u32::from(add)
+        + chain % modulus)
+        % modulus
 }
 
 pub(crate) fn k9_affine(
@@ -305,10 +359,12 @@ pub(crate) fn k9_affine(
     prototype: u16,
     lane: u32,
     image: &SemanticImage,
+    chain: u32,
     modulus: u32,
 ) -> u32 {
     let index = k9_index(token, prototype, lane, image.mask_salt);
-    (value as u32 * K9_BYTE_MUL[index] + k9_add(token, prototype, lane, image.mask_add, modulus))
+    (value as u32 * K9_BYTE_MUL[index]
+        + k9_add(token, prototype, lane, image.mask_add, chain, modulus))
         % modulus
 }
 
@@ -318,52 +374,53 @@ fn write_operands(
     token: u16,
     prototype: u16,
     image: &SemanticImage,
+    chain: u32,
 ) -> Result<(), Diagnostic> {
     let op = word.opcode()?;
     match custom::encoding_form(op) {
         1 => {
             let value = word.ax();
-            let a = k9_affine(value & 255, token, prototype, 0, image, 256);
-            let b = k9_affine((value >> 8) & 255, token, prototype, 1, image, 256);
-            let c = k9_affine((value >> 16) & 255, token, prototype, 2, image, 256);
+            let a = k9_affine(value & 255, token, prototype, 0, image, chain, 256);
+            let b = k9_affine((value >> 8) & 255, token, prototype, 1, image, chain, 256);
+            let c = k9_affine((value >> 16) & 255, token, prototype, 2, image, chain, 256);
             write_varint(out, (a | b << 8 | c << 16) as usize);
         }
         2 => write_varint(
             out,
-            k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+            k9_affine(word.a(), token, prototype, 0, image, chain, 256) as usize,
         ),
         3 => {
             write_varint(
                 out,
-                k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+                k9_affine(word.a(), token, prototype, 0, image, chain, 256) as usize,
             );
             write_varint(
                 out,
-                k9_affine(word.b(), token, prototype, 1, image, 256) as usize,
+                k9_affine(word.b(), token, prototype, 1, image, chain, 256) as usize,
             );
         }
         4 => {
             write_varint(
                 out,
-                k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+                k9_affine(word.a(), token, prototype, 0, image, chain, 256) as usize,
             );
             write_varint(
                 out,
-                k9_affine(word.bx(), token, prototype, 1, image, 65536) as usize,
+                k9_affine(word.bx(), token, prototype, 1, image, chain, 65536) as usize,
             );
         }
         _ => {
             write_varint(
                 out,
-                k9_affine(word.a(), token, prototype, 0, image, 256) as usize,
+                k9_affine(word.a(), token, prototype, 0, image, chain, 256) as usize,
             );
             write_varint(
                 out,
-                k9_affine(word.b(), token, prototype, 1, image, 256) as usize,
+                k9_affine(word.b(), token, prototype, 1, image, chain, 256) as usize,
             );
             write_varint(
                 out,
-                k9_affine(word.c(), token, prototype, 2, image, 256) as usize,
+                k9_affine(word.c(), token, prototype, 2, image, chain, 256) as usize,
             );
         }
     }
@@ -1065,9 +1122,10 @@ fn encode_code(
     }
     random.shuffle(&mut dictionary);
     let mut out = Vec::new();
+    let route_count = dictionary.len();
     write_u16(
         &mut out,
-        u16::try_from(dictionary.len()).map_err(|_| error("too many recipes"))?,
+        u16::try_from(route_count).map_err(|_| error("too many recipes"))?,
     );
     for index in dictionary {
         let recipe = &recipes[index];
@@ -1090,7 +1148,8 @@ fn encode_code(
     let record_order = image
         .field_layout
         .record_slot_fields(usize::from(prototype_id));
-    for &index in &plan.physical {
+    let mut chain = k9_chain_init(prototype_id, route_count, plan.start, image.mask_salt);
+    for (at, &index) in plan.physical.iter().enumerate() {
         let bundle = &plan.bundles[index];
         let next_token = encode_edge_token(
             bundle.next,
@@ -1151,8 +1210,9 @@ fn encode_code(
         for slot in record_order {
             write_u16(&mut out, fields[slot]);
         }
+        chain = k9_chain_next(chain, token, at as u32, image.mask_salt);
         for &word in &bundle.words {
-            write_operands(&mut out, word, token, prototype_id, image)?;
+            write_operands(&mut out, word, token, prototype_id, image, chain)?;
         }
     }
     Ok(out)

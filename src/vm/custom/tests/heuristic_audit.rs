@@ -51,11 +51,19 @@ type AuditPins = (
 // Stable on both targets: M1 = 86 distinct stream bytes, KAT words
 // [0,2,0,...] (only the audited getfenv capture), M6 = (0, 0), M5 count = 5
 // (ALPHA frags stay sub-64 raw), M7 gaps stay in the hundreds.
+// 2026-09-10 ISA16 (K12/T1) re-record: the parser now carries one chained
+// recurrence per prototype and every operand lane folds the chain state, which
+// moves the value census totals (M2), the M3b count/sum, the M5 literal run and
+// the M7 gap lengths; the Luau `23` residue drops by one. Stable and still
+// required to stay: M1 = 86 distinct stream bytes, the KAT word vector
+// [0,2,0,...] (only the audited getfenv capture), M6 = (0, 0), M5 count = 5,
+// and the whole M4 residue table on Lua 5.1 -- i.e. the chain introduces no new
+// value class and no new static surface.
 const PINS_LUA51_7001: AuditPins = (
     86,
-    (1384, 1, 0, 4),
+    (1366, 1, 2, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (247, 4503953069928348, 4503599627370496),
+    (250, 4503957365277325, 4503599627370496),
     [
         (1, 455),
         (0, 393),
@@ -71,15 +79,15 @@ const PINS_LUA51_7001: AuditPins = (
         (94, 69),
     ],
     0,
-    (5, 1878),
+    (5, 1846),
     (0, 0),
-    ([567, 526, 517, 134, 134], 383),
+    ([534, 526, 518, 134, 134], 384),
 );
 const PINS_LUAU_7351: AuditPins = (
     86,
-    (1103, 2, 3, 3),
+    (1111, 1, 3, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (251, 4503934304006568, 4503599627370496),
+    (253, 4503938598973862, 4503599627370496),
     [
         (1, 454),
         (0, 391),
@@ -89,15 +97,15 @@ const PINS_LUAU_7351: AuditPins = (
         (3, 146),
         (65536, 93),
         (13, 92),
-        (23, 79),
+        (23, 78),
         (5, 76),
         (30, 54),
         (90, 54),
     ],
     32,
-    (5, 1519),
+    (5, 1575),
     (0, 0),
-    ([421, 417, 413, 134, 134], 279),
+    ([439, 438, 430, 134, 134], 296),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

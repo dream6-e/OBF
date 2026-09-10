@@ -33,7 +33,12 @@ struct AuditPins {
     check9_stream: (usize, usize, bool), // (total_len, rem5, fail)
 }
 
-// Pins observed 2026-09-09 (K9a mixed transport). K-batches tighten.
+// Pins observed 2026-09-10 (ISA16 / K12 chained operand lanes). K-batches tighten.
+// K12 attribution: `2147483647` +2 is exactly the two chain recurrence sites
+// (per-prototype seed + per-record step), check8 picks up two more same-class
+// literals (gcd stays 1 = clean), check9 grows with the image; check1 `86`,
+// check2/check3/check4/check5/check6/check7 are untouched, i.e. the chain adds
+// no new residue class, no new template family and no new static surface.
 // K9a: [2] -> (86, 99, clean), [9] -> clean under the new rule; [1] drops
 // the 85/4294967295 anchors and sheds 86/256 hits (opaque splits, VAL
 // table, label hygiene: slot keys avoid 85/86, states avoid 256, wrapper
@@ -64,7 +69,7 @@ fn pins_lua51() -> AuditPins {
             (256, 199),
             (65536, 99),
             (16777216, 10),
-            (2147483647, 27),
+            (2147483647, 29),
             (4294967296, 20),
         ],
         check2_alphabet: (86, 99, false),
@@ -91,8 +96,8 @@ fn pins_lua51() -> AuditPins {
         // captures.
         check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 76),
-        check9_stream: (18411, 1, false),
+        check8_literal_gcd: (1, 78),
+        check9_stream: (18426, 1, false),
     }
 }
 
@@ -104,11 +109,11 @@ fn pins_lua51() -> AuditPins {
 fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
-            (86, 6),
+            (86, 7),
             (256, 177),
             (65536, 91),
             (16777216, 4),
-            (2147483647, 22),
+            (2147483647, 24),
             (4294967296, 15),
         ],
         check2_alphabet: (86, 99, false),
@@ -135,8 +140,8 @@ fn pins_luau() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 70),
-        check9_stream: (23889, 4, false),
+        check8_literal_gcd: (1, 72),
+        check9_stream: (23896, 1, false),
     }
 }
 

@@ -52,11 +52,15 @@ fn k7_has_opaque_modulus(text: &str) -> bool {
 
 // K7 changes helper BODIES only: the semantic wire image for fixed
 // program/seeds is pinned (observed pre-K7) and must never move.
+/// K7 froze the wire image; K12/ISA16 deliberately moved it once (operand lane
+/// keys now chain over the decoded record prefix), so this is a regression
+/// fingerprint rather than a cross-ISA freeze claim: any further unannounced
+/// change to the image bytes trips here.
 #[test]
-fn k7_wire_image_bytes_are_frozen() {
+fn k7_wire_image_bytes_are_pinned() {
     for (target, seed, len, hash) in [
-        (Target::Lua51, 7001u64, 1159usize, 0x943c3c67c2b2e2ceu64),
-        (Target::Luau, 7351u64, 882usize, 0xf2697760790f4e9eu64),
+        (Target::Lua51, 7001u64, 1141usize, 0xd96c049c46c02c21u64),
+        (Target::Luau, 7351u64, 870usize, 0xb4e955d8ec85a75cu64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
