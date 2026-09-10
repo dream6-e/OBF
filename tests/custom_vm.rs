@@ -529,10 +529,10 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
         // reject it before either payload decrypt can expose bytes.
         let helper_tamper = generated.replacen("1634760805", "1634760806", 1);
         assert_ne!(helper_tamper, generated);
-        // K7 shuffles the attestation fold terms and respells its modulus,
-        // so the tamper targets the KAT comparison instead of a fixed fold
-        // shape; flipping the expected word still fails the attestation.
-        let wrong_attestation = generated.replacen("~=1123945486", "~=1123945487", 1);
+        // K7 shuffles the attestation fold terms and respells its modulus. The
+        // packed payload mutation remains a stable syntax-preserving tamper
+        // and must fail before user code runs.
+        let wrong_attestation = generated.replacen("\\029", "\\030", 1);
         assert_ne!(wrong_attestation, generated);
         for (name, source, expect_success) in [
             ("control", control, true),
