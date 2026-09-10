@@ -735,8 +735,8 @@ return a,b,c,p end;\nend,",
     let route_salt = 1 + route_random.next_u64() % 65520;
     let semantic_validator = format!(
         r#"{edge_decoder}{recipe_decoder}{operand_getter}
-for id=0,np-1 do
- local F=P[id];local SP=F.__obf_proto_code;local CD=SP[2];if not CD or #CD~=SP[1] then E()end;F.__obf_proto_code=CD;local p=1;{operand_profile}{field_profile}
+local DC=function(id)
+ local F=P[id];local CD=F.__obf_proto_code;if CD[0]~=nil then return CD end;local p=1;{operand_profile}{field_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
  local AK=function(v,id,lane,x,m,cl)local q=(v*17+id*31+lane*53+{k9_salt})%8+1;local ii;if m==65536 then ii=({{1,43691,52429,28087,36409,35747,20165,61167}})[q]else ii=({{1,171,205,183,57,163,197,239}})[q]end;local aa=(v*257+id*911+lane*193+{k9_add}+cl%m)%m;return (x-aa)*ii%m end;
  local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};local VR={{}};
@@ -759,8 +759,9 @@ for id=0,np-1 do
   elseif last=={ret} or last=={tail} then if next1~=0 or skip~=0 then E()end
   elseif last=={test} then if code[next1]==nil or code[skip]==nil then E()end
   elseif code[next1]==nil or skip~=0 then E()end;
- end;code[0]=start;F.__obf_proto_code=code;F.__obf_proto_routes=VR;
-end;return RD,ED,OG;"#,
+ end;code[0]=start;F.__obf_proto_code=code;F.__obf_proto_routes=VR;return code
+end;
+for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;end;return RD,ED,OG,DC;"#,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
         mask_salt = semantic_image.mask_salt,
@@ -915,11 +916,11 @@ end;return RD,ED,OG;"#,
     );
     let decode_stage = format!("{decoder_stage}es={e_bind};");
     let bind_stage = format!(
-        "P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);RD,ED,OG=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        "P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
         keys[14], keys[15], keys[2], keys[3],
     );
     let run_stage = format!(
-        "local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
+        "local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
         keys[4]
     );
     let entry_machine = state_machine(
@@ -936,12 +937,12 @@ end;return RD,ED,OG;"#,
     );
     write!(
         s,
-        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,RD,ED,OG,CV,SV,Lookup;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
+        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,RD,ED,OG,DC,CV,SV,Lookup;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
     )
     .unwrap();
     write!(
         s,
-        "[{}]=function(SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG)\n",
+        "[{}]=function(SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC)\n",
         keys[4]
     )
     .unwrap();
@@ -1071,7 +1072,7 @@ end;
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "H=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
         seed_loop = seed_loop_lua(program.target, seed),
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")

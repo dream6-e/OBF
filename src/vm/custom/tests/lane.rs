@@ -141,3 +141,56 @@ fn emitted_runtime_replays_the_operand_lane_chain() {
         );
     }
 }
+
+// T4 (K13): the per-prototype instruction words must not exist in plaintext
+// while the VM is idle. One shared decode routine `DC` is used twice: the load
+// pass decodes+validates every prototype (so malformed images still fail closed
+// before user code) and then releases the tables, keeping only the raw chained
+// code string; the interpreter materializes a prototype's words on its first
+// execution. Asserted on the raw (pre-finalizer) text, where locals keep their
+// real names.
+#[test]
+fn prototype_code_words_are_decoded_lazily_and_released_after_validation() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(
+            "local function never() return 42 end local function used(x) return x+1 end print(used(1))",
+            target,
+        )
+        .unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 7001, 7351, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            assert_eq!(
+                raw.matches("local DC=function(id)").count(),
+                1,
+                "{target} seed {seed}: decode routine duplicated"
+            );
+            // The short-circuit guard itself is rewritten into g-slots by the
+            // slot pass, so pin the release pair instead: `P[id].__obf_proto_code
+            // =SP[2]` must occur exactly twice (hand the raw string to DC, then
+            // put it back after validation).
+            assert_eq!(
+                raw.matches("P[id].__obf_proto_code=SP[2]").count(),
+                2,
+                "{target} seed {seed}: validate-then-release pair missing"
+            );
+            assert_eq!(
+                raw.matches("DC(id);").count(),
+                1,
+                "{target} seed {seed}: load pass must call DC once per prototype"
+            );
+            assert!(
+                raw.contains("DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;"),
+                "{target} seed {seed}: load pass must release decoded words after validation"
+            );
+            assert!(
+                raw.contains("if not code[0] then code=DC(fid) end"),
+                "{target} seed {seed}: interpreter must decode lazily on first execution"
+            );
+            assert!(
+                raw.contains("return RD,ED,OG,DC;"),
+                "{target} seed {seed}: DC must be exported with the token helpers"
+            );
+        }
+    }
+}
