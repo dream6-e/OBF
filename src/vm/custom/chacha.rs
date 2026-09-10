@@ -349,12 +349,20 @@ pub(crate) fn chacha_decoder_sections(
     };
     let fold_a = add(bitops, &["w*257", "SB(A,i)"]);
     let fold_b = add(bitops, &["w*257", "SB(B,i)"]);
-    let att = add(
-        bitops,
-        &["w", "804192318", "505049583", "1123945486", "255"],
-    );
+    let kat_expr = |value: u32| {
+        let bytes = value.to_be_bytes();
+        format!(
+            "(({}*256+{})*256+{})*256+{}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        )
+    };
+    let kat1 = kat_expr(804192318);
+    let kat8 = kat_expr(505049583);
+    let kat16 = kat_expr(1123945486);
+    let att_terms = ["w", kat1.as_str(), kat8.as_str(), kat16.as_str(), "255"];
+    let att = add(bitops, &att_terms);
     let anti = format!(
-        "[{}]=function(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DB,GI,LS){metadata}if SB(\"AZ\",1)~=65 or SB(\"AZ\",2)~=90 or NCH(65)~=\"A\" or TC({{\"A\",\"B\"}})~=\"AB\" or MF(15/4)~=3 or X8C(90,165)~=255 then E()end;local Z=CB({{0,0,0,0,0,0,0,0}},0,{{0,0,0}});if Z[1]~=804192318 or Z[8]~=505049583 or Z[16]~=1123945486 then E()end;local w=0;for i=1,#A do w={fold_a} end;for i=1,#B do w={fold_b} end;return {att} end,",
+        "[{}]=function(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DB,GI,LS){metadata}if SB(\"AZ\",1)~=65 or SB(\"AZ\",2)~=90 or NCH(65)~=\"A\" or TC({{\"A\",\"B\"}})~=\"AB\" or MF(15/4)~=3 or X8C(90,165)~=255 then E()end;local Z=CB({{0,0,0,0,0,0,0,0}},0,{{0,0,0}});if Z[1]~={kat1} or Z[8]~={kat8} or Z[16]~={kat16} then E()end;local w=0;for i=1,#A do w={fold_a} end;for i=1,#B do w={fold_b} end;return {att} end,",
         keys[ANTI_HOOK_FIELD]
     );
     let word_args = if target.is_luau() {
