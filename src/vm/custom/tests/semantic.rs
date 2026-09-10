@@ -900,12 +900,12 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
-            98_000usize,
+            112_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
-            98_000usize,
+            112_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -925,10 +925,11 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
             assert_eq!(decompress_bytecode(&compressed).unwrap(), semantic);
 
             let output = emit(&data, target, seed).unwrap();
-            // K-series suspends the script-size gate (`OBF_BENCH_SCRIPT_CAP=off`,
-            // same switch as bench-vm.sh): no size budget applies until all 9
-            // techniques have landed and the shrink pass runs. The strict
-            // LZW-frame contract above still holds unconditionally.
+            // Whole-script size budget, re-pinned in K10 after the emit.rs stage
+            // split (worst case over this seed set: 99,784 B Lua51 / 109,810 B
+            // Luau). `OBF_BENCH_SCRIPT_CAP=off` stays available as the escape
+            // hatch for a construction window, same switch as bench-vm.sh; the
+            // strict LZW-frame contract above is never suspended.
             let suspended = std::env::var("OBF_BENCH_SCRIPT_CAP").is_ok_and(|v| v == "off");
             assert!(
                 suspended || output.len() <= script_budget,

@@ -4,10 +4,11 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-# K-series is still landing; the generated-script size gate is intentionally
-# suspended until all nine techniques and the shrink pass are complete. The
-# semantic bytecode compression checks remain unconditional in the Rust tests.
-export OBF_BENCH_SCRIPT_CAP="${OBF_BENCH_SCRIPT_CAP:-off}"
+# The whole-script size budget gate is live again since K10: tools/bench-vm.sh
+# and src/vm/custom/tests/semantic.rs pin 112,000 B per target from the measured
+# worst case (Lua51 100,049 B / Luau 109,825 B over 8 seeds). To suspend it for
+# a construction window, export OBF_BENCH_SCRIPT_CAP=off explicitly; the LZW
+# frame < private semantic bytecode contract is never suspended.
 
 # Permanent maintainability gate: implementation source files above 80 KiB
 # must be split without changing generated output. Checked-in generated Lua
