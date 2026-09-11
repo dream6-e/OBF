@@ -1567,8 +1567,12 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                 raw.contains(&seed_arm_lua_for(target, Opcode::Test, seed).unwrap()),
                 "{target} seed {seed}: test arm missing"
             );
+            // K13b: the return arm hands its value through the per-prototype
+            // frame-release helper, which drops the activation count and
+            // re-locks the words once the prototype goes idle. The wrapper is
+            // part of the arm contract: dropping it must fail this pin.
             assert!(
-                raw.contains("return SEED(SEEDT[47],{a},2);"),
+                raw.contains("return LVE(fid,SEED(SEEDT[47],{a},2));"),
                 "{target} seed {seed}: return arm missing"
             );
             let abc_site = seed_deform::p6_permute_site("{a,b,c}", seed);

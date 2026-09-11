@@ -194,3 +194,77 @@ fn prototype_code_words_are_decoded_lazily_and_released_after_validation() {
         }
     }
 }
+// K13b (T4 step 2): decoded words must go back to sleep. Every frame
+// activation charges LVC[fid]; the last exit for a prototype restores the raw
+// chained bytes from the handle DC stashed at code[-1] and drops the route
+// array again, so a heap dump taken while a prototype is idle shows no decoded
+// words. Pins sit on the pre-finalizer text because the slot/literal passes
+// rename these locals in the shipped script.
+#[test]
+fn prototype_words_relock_when_a_prototype_goes_idle() {
+    for target in [Target::Lua51, Target::Luau] {
+        // The probe program needs a real tail call (`return g(y)`) so the
+        // tail re-entry arm is emitted at all.
+        let data = compile(
+            "local function g(x) return x end local function f(y) return g(y) end print(f(1))",
+            target,
+        )
+        .unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 7001, 7351, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            // One activation counter and one release helper per interpreter.
+            assert_eq!(
+                raw.matches("local LVC={};local LVE=function(f,v)").count(),
+                1,
+                "{target} seed {seed}: activation counter duplicated"
+            );
+            assert!(
+                raw.contains(
+                    "if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil end"
+                ),
+                "{target} seed {seed}: release must restore the raw bytes and drop the routes"
+            );
+            // DC mints one re-lock handle per decoded prototype, and the helper
+            // holds the only two other `[-1]` uses (test + restore). The g-slot
+            // pass rewrites CD into a seed-dependent slot, so pin the mint by
+            // its literal left side and count the handles overall.
+            assert_eq!(
+                raw.matches("code[0]=start;code[-1]").count(),
+                1,
+                "{target} seed {seed}: re-lock handle must be minted once per decode"
+            );
+            assert_eq!(
+                raw.matches("[-1]").count(),
+                3,
+                "{target} seed {seed}: re-lock handle needs exactly one mint and two uses"
+            );
+            assert_eq!(
+                raw.matches("LVC[fid]=(LVC[fid] or 0)+1;").count(),
+                1,
+                "{target} seed {seed}: frame must be charged exactly once per activation"
+            );
+            // Both frame exits route through the helper: the value-carrying
+            // Return arm and the host-side tail-call return.
+            assert!(
+                raw.matches("return LVE(fid,SEED(SEEDT[").count() >= 1,
+                "{target} seed {seed}: Return arm must release before leaving H"
+            );
+            // Exactly one of the two flipped tail spellings is emitted, and it
+            // must release the *outgoing* fid before `fid` is rebound.
+            assert_eq!(
+                raw.matches("LVE(fid,nil);fid,args,ups=v1,v2,v3;break;").count(),
+                1,
+                "{target} seed {seed}: tail re-entry must release the outgoing frame"
+            );
+            // Drift lock for the accounting bug this shape avoids: the tail path
+            // rebinds `fid` before breaking, so a release parked after the
+            // dispatch loop would charge the callee and leak the caller.
+            assert_eq!(
+                raw.matches("end;LVE(fid,nil);end;").count(),
+                0,
+                "{target} seed {seed}: release must not sit at the dispatch-loop tail"
+            );
+        }
+    }
+}

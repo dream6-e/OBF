@@ -59,14 +59,22 @@ type AuditPins = (
 // [0,2,0,...] (only the audited getfenv capture), M6 = (0, 0), M5 count = 5,
 // and the whole M4 residue table on Lua 5.1 -- i.e. the chain introduces no new
 // value class and no new static surface.
+// 2026-09-11 T4 K13b (idle re-lock) re-record: one frame activation now charges
+// a per-prototype counter and the last exit hands the raw chained bytes back,
+// which costs exactly six `1` tokens (`o==1`, `o-1`, `+1` and three `[-1]`
+// handle uses) plus one `0` (`or 0`) and one shifted pool index on each target:
+// Lua 5.1 M4 class 1 455 -> 461 and class 0 395 -> 396, Luau 454 -> 460 and
+// 393 -> 394. Everything else -- M1, M2, KAT, M3b, M5, M6, M7 and the other ten
+// M4 classes -- is byte-for-byte unchanged, so the re-lock adds no new value
+// class and no new static surface.
 const PINS_LUA51_7001: AuditPins = (
     86,
     (1366, 1, 2, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (250, 4503957365277325, 4503599627370496),
     [
-        (1, 455),
-        (0, 395),
+        (1, 461),
+        (0, 396),
         (2, 224),
         (256, 203),
         (3, 162),
@@ -89,8 +97,8 @@ const PINS_LUAU_7351: AuditPins = (
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (253, 4503938598973862, 4503599627370496),
     [
-        (1, 454),
-        (0, 393),
+        (1, 460),
+        (0, 394),
         (2, 227),
         (256, 179),
         (4, 177),

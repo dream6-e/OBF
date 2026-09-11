@@ -1730,9 +1730,9 @@ pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode, seed: u64) -> Option<
     if matches!(op, Opcode::TailCall) {
         // The two action checks are mutually exclusive; order is cosmetic.
         let tail = if flipped {
-            "if act==2 then return v1;elseif act==3 then fid,args,ups=v1,v2,v3;break;else E()end;"
+            "if act==2 then return LVE(fid,v1);elseif act==3 then LVE(fid,nil);fid,args,ups=v1,v2,v3;break;else E()end;"
         } else {
-            "if act==3 then fid,args,ups=v1,v2,v3;break;elseif act==2 then return v1;else E()end;"
+            "if act==3 then LVE(fid,nil);fid,args,ups=v1,v2,v3;break;elseif act==2 then return LVE(fid,v1);else E()end;"
         };
         return Some(format!(
             "local v1,v2,v3,act=SEED(SEEDT[{i}],{site},9);act=act or v2;{tail}"
@@ -1741,6 +1741,11 @@ pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode, seed: u64) -> Option<
     // Frame state arrives via H-locals; the expected action rides as the
     // trailing argument (nil means 0, 9 disables the check for Test and
     // TailCall). SEED returns value-first so Jump/Return need no locals.
+    // Both frame exits (Return, and TailCall's host-side return) wrap their
+    // value in LVE, the per-prototype activation counter that re-locks the
+    // prototype's decoded words when the last frame of it goes idle; the
+    // TailCall frame-enter path releases the *outgoing* fid before `fid` is
+    // rebound, so the count can never be charged to the callee.
     Some(match op {
         Opcode::Jump => format!("pc=SEED(SEEDT[{i}],{site},1);"),
         Opcode::Test => {
@@ -1754,7 +1759,7 @@ pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode, seed: u64) -> Option<
             format!("local av,act=SEED(SEEDT[{i}],{site},9);{tail}")
         }
         Opcode::Return => {
-            format!("return SEED(SEEDT[{i}],{site},2);")
+            format!("return LVE(fid,SEED(SEEDT[{i}],{site},2));")
         }
         _ => format!("SEED(SEEDT[{i}],{site});"),
     })

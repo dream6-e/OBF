@@ -759,7 +759,7 @@ local DC=function(id)
   elseif last=={ret} or last=={tail} then if next1~=0 or skip~=0 then E()end
   elseif last=={test} then if code[next1]==nil or code[skip]==nil then E()end
   elseif code[next1]==nil or skip~=0 then E()end;
- end;code[0]=start;F.__obf_proto_code=code;F.__obf_proto_routes=VR;return code
+ end;code[0]=start;code[-1]=CD;F.__obf_proto_code=code;F.__obf_proto_routes=VR;return code
 end;
 for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;end;return RD,ED,OG,DC;"#,
         mask_mul = semantic_image.mask_mul,
@@ -1072,7 +1072,7 @@ end;
     );
     write!(
         s,
-        "H=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
         seed_loop = seed_loop_lua(program.target, seed),
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
