@@ -59,6 +59,17 @@ type AuditPins = (
 // [0,2,0,...] (only the audited getfenv capture), M6 = (0, 0), M5 count = 5,
 // and the whole M4 residue table on Lua 5.1 -- i.e. the chain introduces no new
 // value class and no new static surface.
+// 2026-09-11 K14 (validator dispatch becomes a seeded binary search tree)
+// re-record: every arm keeps its own equality test, but the tree's internal
+// nodes carry boundary literals and the flat `elseif` runs shorten, so the M4
+// residue census redistributes -- Lua 5.1 class 1 461 -> 469, class 0 396 ->
+// 410, class 20 104 -> 74 with class 9 leaving the top table and 41 entering at
+// 68; Luau class 1 460 -> 492, class 0 394 -> 401, class 23 -> 16, and the
+// skipped-literal count 32 -> 39. Required to stay unchanged and still stable:
+// M1 = 86 distinct stream bytes, M2 = (1366/1111, 1, 2, 1), the KAT word vector
+// [0,2,0,...], M3b, M5 count = 5, M6 = (0, 0) and the M7 top5/gap pair -- i.e.
+// the restructuring adds no new repeated text block, no new value class and no
+// new suspicious-API surface; it only trades a linear scan for log2 routing.
 // 2026-09-11 T4 K13b (idle re-lock) re-record: one frame activation now charges
 // a per-prototype counter and the last exit hands the raw chained bytes back,
 // which costs exactly six `1` tokens (`o==1`, `o-1`, `+1` and three `[-1]`
@@ -73,18 +84,18 @@ const PINS_LUA51_7001: AuditPins = (
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (250, 4503957365277325, 4503599627370496),
     [
-        (1, 461),
-        (0, 396),
-        (2, 224),
-        (256, 203),
-        (3, 162),
+        (1, 469),
+        (0, 410),
+        (2, 223),
+        (256, 196),
+        (3, 158),
         (4, 126),
-        (20, 104),
-        (65536, 101),
-        (5, 81),
-        (9, 73),
+        (65536, 98),
+        (5, 83),
+        (20, 74),
         (8, 70),
         (94, 69),
+        (41, 68),
     ],
     0,
     (5, 1846),
@@ -97,20 +108,20 @@ const PINS_LUAU_7351: AuditPins = (
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (253, 4503938598973862, 4503599627370496),
     [
-        (1, 460),
-        (0, 394),
+        (1, 492),
+        (0, 401),
         (2, 227),
-        (256, 179),
-        (4, 177),
-        (3, 146),
-        (65536, 93),
-        (13, 92),
-        (23, 78),
-        (5, 76),
-        (30, 54),
-        (90, 54),
+        (256, 192),
+        (4, 179),
+        (3, 143),
+        (65536, 94),
+        (5, 81),
+        (90, 67),
+        (13, 60),
+        (30, 56),
+        (16, 53),
     ],
-    32,
+    39,
     (5, 1575),
     (0, 0),
     ([439, 438, 430, 134, 134], 296),

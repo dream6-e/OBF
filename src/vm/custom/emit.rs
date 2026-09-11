@@ -701,7 +701,13 @@ return a,b,c,p end;\nend,",
     let f3_groups = (2 + structure.next_u64() % 3) as u8;
     let validate_body = format!(
         "local ok=false;{chain}if not ok then E()end;return true",
-        chain = grouped_chain(&mut structure, f3_arms, f3_groups, "o"),
+        chain = grouped_tree(
+            &mut structure,
+            f3_arms,
+            f3_groups,
+            "o",
+            program.target.is_luau()
+        ),
     );
     let validate_body = slot_rewrite(&mut structure, &validate_body, &["ok"]);
     let validate_field = format!(

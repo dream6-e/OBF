@@ -62,12 +62,28 @@ struct AuditPins {
 //   * [9] total_len tracks the transport widths (the tag's frame rng shifts the
 //     downstream draws); rem5 leaving 0 moves *away* from the multiple-of-5
 //     pathology this check exists to catch, and fail stays false.
+// 2026-09-11 K14 (validator dispatch tree) re-record, all values diffed against
+// the pre-batch golden:
+//   * `256` 199 -> 210 and `65536` 99 -> 102 -- the tree's internal nodes carry
+//     the bucket split points as literals, which is the same opcode-value space
+//     the flat `o == K` arms already lived in; every other check1 class, check2
+//     (86 distinct chars, span 99), check3, check4 (`<=` threshold census),
+//     check7, check8 (gcd 1) and check9 are untouched, and no `fail` flag flips.
+//   * check5 gains one over-repeated shape class (11 -> 12): `if <cmp> then if`
+//     is a new statement shape by construction. No existing class grows -- the
+//     largest class is still 21 fragments and the top-8 set only swaps its 8th
+//     entry -- so the price of the tree is one more countable shape, not a new
+//     anchor a scanner could key the validator on (which was the point).
+//   * check6 falls back 1 -> 0: the validator's first `;` now closes after the
+//     first tree node instead of after the whole bucket, so the K7-attributed
+//     script-head fragment (13 digit-index slots) is cut shorter and no longer
+//     trips the `local `-prefixed dense-slot heuristic.
 fn pins_lua51() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 4),
-            (256, 199),
-            (65536, 99),
+            (256, 210),
+            (65536, 102),
             (16777216, 10),
             (2147483647, 29),
             (4294967296, 20),
@@ -76,7 +92,7 @@ fn pins_lua51() -> AuditPins {
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
-            11,
+            12,
             vec![
                 ("X=N*X%N".to_string(), 21),
                 ("X[N]=N".to_string(), 19),
@@ -88,29 +104,28 @@ fn pins_lua51() -> AuditPins {
                     9,
                 ),
                 ("X=(X+X+(N*N+N))%N".to_string(), 8),
-                ("X[N]=NXX[N]==NXX[N]=N".to_string(), 7),
+                ("X=NXXXXXXX=(X*N+X+X+X+X+(N*N+N))%N".to_string(), 7),
             ],
         ),
-        // K7: the block state table (pre-existing shape) drifts into a
-        // `local`-starting `;`-fragment; the heuristic counts slots, not
-        // captures.
-        check6_alias_prologues: 1,
+        check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 78),
         check9_stream: (18426, 1, false),
     }
 }
 
-// Same attribution as lua51: `256` 159 -> 177 predates 89dcc91, `65536` 94 ->
-// 91 and `4294967296` 16 -> 15 come from the dual-lane tag. The probe-transcript
-// fix leaves every value here untouched (checked 2026-09-10 against
-// 7106908's golden: it deletes three 36-byte name literals and adds one
-// pool-joined local + one probe parameter, i.e. text shape only, +111 B).
+// 2026-09-11 K14 (validator dispatch tree), Luau pin: `86` 7 -> 5 and `256`
+// 177 -> 187 are the bucket split points moving out of the radix class and into
+// the byte class; check5 already sat at 12 classes and its top-8 counts are
+// unchanged (19/18/18/16/9/9/8/6), check2/3/4/7/8/9 and every `fail` flag are
+// untouched. check6 rises 0 -> 1: on this seed the validator's first `;` lands
+// *later* than the old first bucket did, so one `local`-prefixed fragment picks
+// up a sixth digit-index slot -- the mirror image of the Lua 5.1 direction above.
 fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
-            (86, 7),
-            (256, 177),
+            (86, 5),
+            (256, 187),
             (65536, 91),
             (16777216, 4),
             (2147483647, 24),
@@ -138,7 +153,7 @@ fn pins_luau() -> AuditPins {
                 ),
             ],
         ),
-        check6_alias_prologues: 0,
+        check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 72),
         check9_stream: (23896, 1, false),

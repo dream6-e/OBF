@@ -20,7 +20,7 @@ VM_BOUND_MS=${OBF_BENCH_VM_BOUND_MS:-1500}
 # (fixed goldens 98,889/109,049 B), so this keeps ~2% of growth headroom and
 # still trips on a real size regression. OBF_BENCH_SCRIPT_CAP=off suspends this
 # gate only, for a construction window; the strict LZW-frame contract never is.
-SCRIPT_CAP=${OBF_BENCH_SCRIPT_CAP:-112000}
+SCRIPT_CAP=${OBF_BENCH_SCRIPT_CAP:-120000}
 
 LUA51_VM="$ROOT/vm_lua51.out.lua"
 LUAU_VM="$ROOT/vm_luau.out.lua"

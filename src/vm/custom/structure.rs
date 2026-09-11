@@ -79,20 +79,28 @@ pub(crate) fn decoy_arms(
     out
 }
 
-/// Two-level dispatch split: the arms of a dispatch chain are partitioned
-/// into a seeded number of sub-chains selected by `value_var % groups`, so
-/// the chain topology and the per-chain lengths vary per seed. Every arm
-/// lands in the sub-chain of its value's residue; each sub-chain keeps its
-/// own fail-closed `else E()end`, and a residue class no arm carries is
+/// Two-level dispatch split with a binary search tree inside each bucket: the
+/// arms of a dispatch chain are partitioned into a seeded number of sub-chains
+/// selected by `value_var % groups`, and each sub-chain's arms are then looked
+/// up through a seeded, possibly unbalanced **binary search tree** over the
+/// arm values instead of one flat `if/elseif` scan. Every arm still sits behind
+/// exactly its own equality test (`structure.dispatch_condition` spelling), so
+/// evaluating the tree means evaluating at most one arm body -- the same
+/// observable behaviour as the flat chain, with `log2` comparisons instead of a
+/// scan. Leaves keep a short linear run (seeded size) so the topology has both
+/// tree and chain shapes; every leaf and every empty residue class closes with
+/// its own fail-closed `else E()end;`, and a residue class no arm carries stays
 /// dead by construction (the selector can only be reached by validated
 /// renumbered opcodes) and simply aborts.
-pub(crate) fn grouped_chain(
+pub(crate) fn grouped_tree(
     structure: &mut crate::random::Prng,
     mut arms: Vec<(u8, String)>,
     groups: u8,
     value_var: &str,
+    luau: bool,
 ) -> String {
     structure.shuffle(&mut arms);
+    let leaf_max = 2 + (structure.next_u64() % 3) as usize;
     let mut text = String::new();
     for group in 0..groups {
         let condition = selector_condition(structure, value_var, groups, group);
@@ -102,22 +110,67 @@ pub(crate) fn grouped_chain(
             if group == 0 { "if" } else { "elseif" }
         )
         .unwrap();
-        let members: Vec<&String> = arms
+        let mut members: Vec<(u8, String)> = arms
             .iter()
             .filter(|(value, _)| value % groups == group)
-            .map(|(_, arm)| arm)
+            .map(|(value, arm)| (*value, arm.clone()))
             .collect();
         if members.is_empty() {
             text.push_str("E();");
-        } else {
-            for (index, arm) in members.iter().enumerate() {
-                write!(text, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
-            }
-            text.push_str(" else E()end;");
+            continue;
         }
+        // A value-partitioning tree needs distinct keys: equal values have to
+        // stay in one leaf so the first matching arm wins, exactly like the
+        // flat chain. The validator's callers guarantee this (renumbered
+        // opcodes are a permutation and decoy values are drawn outside the
+        // image), so a collision is a builder bug rather than a runtime case.
+        members.sort_by_key(|(value, _)| *value);
+        debug_assert!(members
+            .as_slice()
+            .windows(2)
+            .all(|pair| pair[0].0 != pair[1].0));
+        search_tree(structure, &members, value_var, luau, leaf_max, &mut text);
     }
     text.push_str(" else E()end;");
     text
+}
+
+/// One bucket's search tree. `members` must be sorted by value and hold
+/// distinct values. Internal nodes only compare `value_var` against an existing
+/// arm value (`below` picks `<`/`>=`), so each recursive call gets exactly the
+/// arms on that side of the bound; small runs collapse into the original
+/// `if/elseif ... else E()end` chain.
+fn search_tree(
+    structure: &mut crate::random::Prng,
+    members: &[(u8, String)],
+    value_var: &str,
+    luau: bool,
+    leaf_max: usize,
+    out: &mut String,
+) {
+    if members.len() <= leaf_max {
+        for (index, (_, arm)) in members.iter().enumerate() {
+            write!(out, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
+        }
+        out.push_str(" else E()end;");
+        return;
+    }
+    let split = 1 + (structure.next_u64() % (members.len() as u64 - 1)) as usize;
+    let (left, right) = members.split_at(split);
+    let bound = right[0].0;
+    // The comparator and the branch order both vary per seed; the two forms
+    // are exact complements, so the partition is the same tree either way.
+    let below = structure.next_u64() % 2 == 0;
+    let condition = structure.boundary_condition(value_var, u16::from(bound), below, luau);
+    // Exactly one side runs: `below` asks `<` and keeps the low half in the
+    // then-branch, otherwise the same partition rides as `>=` with the halves
+    // swapped. Both spellings are complements, so no value can reach both.
+    let (first, second) = if below { (left, right) } else { (right, left) };
+    write!(out, "if {condition} then ").unwrap();
+    search_tree(structure, first, value_var, luau, leaf_max, out);
+    out.push_str(" else ");
+    search_tree(structure, second, value_var, luau, leaf_max, out);
+    out.push_str(" end;");
 }
 
 /// Wide-id form used by semantic superoperators. Recipe identifiers occupy

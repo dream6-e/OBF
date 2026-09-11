@@ -112,6 +112,42 @@ impl Prng {
         }
         result
     }
+
+    /// Side-effect-free boundary test for the validator's binary search tree:
+    /// `variable < bound` (below) or its exact complement `variable >= bound`.
+    /// Each rides in one of several spellings and every bound is byte-sized, so
+    /// all forms stay exact on both targets (no double rounding is involved).
+    pub fn boundary_condition(
+        &mut self,
+        variable: &str,
+        bound: u16,
+        below: bool,
+        luau: bool,
+    ) -> String {
+        debug_assert!(variable
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
+        let literal = self.integer_literal(u64::from(bound), luau);
+        let mut result = String::new();
+        if below {
+            match self.index(5) {
+                0 => write!(result, "{variable}<{literal}"),
+                1 => write!(result, "{literal}>{variable}"),
+                2 => write!(result, "not({variable}>={literal})"),
+                3 => write!(result, "{variable}-{literal}<0"),
+                _ => write!(result, "{literal}-{variable}>0"),
+            }
+        } else {
+            match self.index(4) {
+                0 => write!(result, "{variable}>={literal}"),
+                1 => write!(result, "{literal}<={variable}"),
+                2 => write!(result, "not({variable}<{literal})"),
+                _ => write!(result, "{variable}-{literal}>=0"),
+            }
+        }
+        .unwrap();
+        result
+    }
 }
 
 /// Fresh per-generation default, not a cryptographic key. A process-random
@@ -153,6 +189,128 @@ mod tests {
             .flat_map(|thread| thread.join().unwrap())
             .collect();
         assert_eq!(seeds.len(), 1024);
+    }
+
+    /// Which of the nine `boundary_condition` spellings a text uses. Kept as a
+    /// separate classifier so the coverage assertion cannot be satisfied by a
+    /// collapsed subset.
+    fn boundary_label(text: &str) -> &'static str {
+        let trimmed = text.trim();
+        if let Some(inner) = trimmed
+            .strip_prefix("not(")
+            .and_then(|body| body.strip_suffix(')'))
+        {
+            return if inner.contains(">=") {
+                "not>="
+            } else {
+                "not<"
+            };
+        }
+        if let Some(rest) = trimmed.strip_prefix("o-") {
+            return if rest.ends_with("<0") {
+                "o-K<0"
+            } else {
+                "o-K>=0"
+            };
+        }
+        if trimmed.starts_with("o<") {
+            "o<"
+        } else if trimmed.starts_with("o>=") {
+            "o>="
+        } else if trimmed.ends_with(">o") {
+            "K>o"
+        } else if trimmed.ends_with("<=o") {
+            "K<=o"
+        } else if trimmed.ends_with(">0") {
+            "K-o>0"
+        } else {
+            panic!("unexpected boundary spelling {trimmed:?}")
+        }
+    }
+
+    /// `boundary_condition` is what the validator's search tree partitions on,
+    /// so every spelling it can emit must be an exact `<` / `>=` complement over
+    /// the whole byte range: one wrong spelling would route records to the wrong
+    /// arm (or past every arm) while still looking like a plain dispatch chain.
+    /// The parser below accepts exactly the nine forms the renderer can produce
+    /// and panics on anything else, so new spellings cannot go uncovered.
+    #[test]
+    fn boundary_conditions_partition_the_byte_range_exactly() {
+        fn literal(token: &str) -> i64 {
+            if let Some(hex) = token.strip_prefix("0x") {
+                i64::from_str_radix(hex, 16).expect("hex literal")
+            } else if let Some(bits) = token.strip_prefix("0b") {
+                i64::from_str_radix(&bits.replace('_', ""), 2).expect("binary literal")
+            } else {
+                token.parse::<i64>().expect("decimal literal")
+            }
+        }
+        fn side(token: &str, value: i64) -> i64 {
+            let token = token.trim();
+            if token == "o" {
+                return value;
+            }
+            if let Some(rest) = token.strip_prefix("o-") {
+                return value - literal(rest.trim());
+            }
+            if let Some(pos) = token.find("-o") {
+                return literal(&token[..pos]) - value;
+            }
+            literal(token)
+        }
+        fn holds(text: &str, value: i64) -> bool {
+            let trimmed = text.trim();
+            if let Some(inner) = trimmed
+                .strip_prefix("not(")
+                .and_then(|body| body.strip_suffix(')'))
+            {
+                return !holds(inner, value);
+            }
+            // `<` and `>` are checked after their inclusive siblings so a
+            // leading `<=` is never split into `<` plus a stray `=`.
+            for op in ["<=", ">=", "<", ">"] {
+                if let Some((left, right)) = trimmed.split_once(op) {
+                    let (a, b) = (side(left, value), side(right, value));
+                    return match op {
+                        "<=" => a <= b,
+                        ">=" => a >= b,
+                        "<" => a < b,
+                        _ => a > b,
+                    };
+                }
+            }
+            panic!("unparsable boundary condition {trimmed:?}");
+        }
+
+        for luau in [false, true] {
+            let mut rng = Prng::new(0xb01d_2024);
+            let mut seen = std::collections::BTreeSet::new();
+            for bound in 0..=255u16 {
+                for below in [true, false] {
+                    let text = rng.boundary_condition("o", bound, below, luau);
+                    // The bound in the text must be the requested one, and the
+                    // two families must be exact complements at every value.
+                    for value in [0i64, 1, 63, 64, 127, 128, 254, 255, 256] {
+                        let below_holds = holds(&text, value)
+                            == (if below {
+                                value < i64::from(bound)
+                            } else {
+                                value >= i64::from(bound)
+                            });
+                        assert!(below_holds, "{text} at o={value} against {bound}");
+                    }
+                    seen.insert(boundary_label(&text));
+                }
+            }
+            // Every spelling the renderer owns must actually show up, otherwise
+            // the partition check above quietly covers a subset.
+            assert_eq!(
+                seen.len(),
+                9,
+                "{target} boundary spellings: {seen:?}",
+                target = if luau { "luau" } else { "lua51" }
+            );
+        }
     }
 
     #[test]

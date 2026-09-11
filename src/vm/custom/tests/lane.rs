@@ -268,3 +268,53 @@ fn prototype_words_relock_when_a_prototype_goes_idle() {
         }
     }
 }
+
+// K14: the load-time operand validator dispatches through a seeded binary
+// search tree inside each residue bucket instead of one flat `if/elseif` scan.
+// Pinned on the pre-finalizer text (the slot pass renames `ok` away in the
+// shipped script, so the arms are counted through their ` then g[` slot write).
+// Three properties matter: no arm may be dropped or duplicated by the
+// restructuring, every node side must bottom out in a fail-closed leaf chain,
+// and the topology has to move with the seed -- a fixed tree would be a chain
+// with extra steps.
+#[test]
+fn validator_dispatch_is_a_seeded_binary_search_tree() {
+    for (target, file, arms_expected) in [
+        (Target::Lua51, "tests/fixtures/vm_lua51.lua", 48usize),
+        (Target::Luau, "tests/fixtures/vm_luau.lua", 51usize),
+    ] {
+        let source =
+            fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file))
+                .unwrap();
+        let data = compile(&source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let mut shapes = std::collections::BTreeSet::new();
+        for seed in [0u64, 7001, 7351, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            let head = "function(o,a,b,c,j,k,at,F,P,id)";
+            let start = raw.find(head).expect("{target}: validator field missing") + head.len();
+            let body = &raw[start..start + raw[start..].find(";return true").expect("validator tail")];
+            // One arm == one equality test with exactly one predicate write.
+            let arms = body.matches(" then g[").count();
+            let nodes = body.matches(" then if ").count();
+            let leaves = body.matches(" else E()end;").count();
+            assert_eq!(
+                arms, arms_expected,
+                "{target} seed {seed}: validator arms changed shape or count"
+            );
+            assert!(
+                nodes >= 20 && leaves >= nodes,
+                "{target} seed {seed}: expected a search tree over {arms} arms, got {nodes} nodes / {leaves} fail-closed leaves"
+            );
+            assert!(
+                body.matches("E()").count() >= leaves,
+                "{target} seed {seed}: a tree path without E() would accept malformed operands"
+            );
+            shapes.insert((nodes, leaves));
+        }
+        assert!(
+            shapes.len() >= 2,
+            "{target}: dispatch topology is seed-independent: {shapes:?}"
+        );
+    }
+}

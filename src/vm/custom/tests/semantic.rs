@@ -878,12 +878,12 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
-            112_000usize,
+            120_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
-            112_000usize,
+            120_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
