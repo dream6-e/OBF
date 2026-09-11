@@ -104,16 +104,31 @@ struct AuditPins {
 // and the `DC` side. check5 there is 12 -> 11 as well, check8 72 -> 78 and
 // check9 23896 -> 24126 with residue 1 -> 1 and fail=false. check2/3/4/6/7 and
 // every flag are unchanged on both targets.
+// 2026-09-11 K16 (repeated round constants become fields of the wrapper table),
+// lua51 golden 102,261 -> 101,908 B. Every moved number is the constants leaving
+// the text, never payload arriving:
+//   check1  65536 99 -> 3, 16777216 10 -> 1, 4294967296 21 -> 2. The last
+//               occurrence in each class is the table write itself, so
+//               16777216/4294967296 fall to or under one and stop being anchors at
+//               all (check1 lists only values spelled more than twice); 97 of the
+//               99 `65536` spellings became reads and the 2 left are out of reach
+//               (a nearer binding of the wrapper name, or the shell's own
+//               constructor, which evaluates before the entry assigns the field).
+//               `256` (208) is untouched by choice: a 3-byte literal costs exactly
+//               what the `t.k` read would, so the write can never be paid for.
+//               `2147483647` (29) is untouched by reach: only 2 of its spellings
+//               sit where the wrapper is visible (the prelude and validator regions
+//               re-bind the name), below the six uses the pass needs.
+//   check5   11 classes still, same counts; one family simply renames itself
+//               (`...(N*N+N))%N` -> `...(N*N+N))%X.X`) because a decoy modulus is
+//               now `<name>.<field>` and the normalizer writes that as `X.X`.
+//   check8   83 -> 49 pairs, gcd still 1: fewer literal pairs to grep, no new
+//               arithmetic regularity.
+//   check2/3/4/6/7/9 and every flag unchanged -- including check9, the string/blob
+//               stream -- so the image bytes did not move at all.
 fn pins_lua51() -> AuditPins {
     AuditPins {
-        check1_nice_fails: vec![
-            (86, 4),
-            (256, 208),
-            (65536, 99),
-            (16777216, 10),
-            (2147483647, 29),
-            (4294967296, 21),
-        ],
+        check1_nice_fails: vec![(86, 4), (256, 208), (65536, 3), (2147483647, 29)],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
@@ -129,7 +144,7 @@ fn pins_lua51() -> AuditPins {
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*N+N))%N".to_string(), 8),
+                ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
                 (
                     "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     6,
@@ -138,7 +153,7 @@ fn pins_lua51() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 83),
+        check8_literal_gcd: (1, 49),
         check9_stream: (18777, 2, false),
     }
 }
@@ -150,15 +165,26 @@ fn pins_lua51() -> AuditPins {
 // untouched. check6 rises 0 -> 1: on this seed the validator's first `;` lands
 // *later* than the old first bucket did, so one `local`-prefixed fragment picks
 // up a sixth digit-index slot -- the mirror image of the Lua 5.1 direction above.
+//
+// 2026-09-11 K16, Luau golden 112,605 -> 112,336 B: the same substitution on
+// Luau's literal mix. check1 `65536` 93 -> 3 (91 reads, one write, one use inside a
+// scope that re-binds the wrapper name) and `4294967296` 16 -> 2, which leaves the
+// anchor list; `16777216` keeps its four uses (fewer than the pass requires to pay
+// for a field), `2147483647` keeps its 24 because only 2 of them are in reach, and
+// `86`/`256` hold exactly.
+// The `0b1011_1010`-style spellings are never candidates: only canonical decimals
+// are, so digit-grouped binary survives untouched as it must. check5 stays at 11 classes
+// with the same counts and renames one family the same way, check8 drops 78 -> 57
+// pairs with gcd still 1, and check9 (24,126, residue 1, no fail) proves the
+// Luau blob did not move either.
 fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 6),
             (256, 196),
-            (65536, 93),
+            (65536, 3),
             (16777216, 4),
             (2147483647, 24),
-            (4294967296, 16),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
@@ -175,7 +201,7 @@ fn pins_luau() -> AuditPins {
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*N+N))%N".to_string(), 8),
+                ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
                 (
                     "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     6,
@@ -184,7 +210,7 @@ fn pins_luau() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 78),
+        check8_literal_gcd: (1, 57),
         check9_stream: (24126, 1, false),
     }
 }

@@ -805,8 +805,11 @@ fn opaque_true_false_branches_carry_real_but_unreachable_instructions() {
     ] {
         let data = compile(fixture, target).unwrap();
         for seed in 0..=7u64 {
-            let output = emit(&data, target, seed).unwrap();
-            assert_eq!(emit(&data, target, seed).unwrap(), output);
+            // 这一条看的是守卫谓词「怎么拼」，所以读未经字段化改写的文本：`emit` 会
+            // 把 `65536%256==0` 里的常数换成 `<包装表>.<字段>` 读取，值不变而拼写变，
+            // 拼写普查就会数不到。运行时行为由 execute_* 一组测试覆盖。
+            let output = super::emit_unlifted(&data, target, seed).unwrap();
+            assert_eq!(super::emit_unlifted(&data, target, seed).unwrap(), output);
             // Dead dispatch arms: an identifier/number equality where
             // the number sits in the impossible 200..=254 band.
             let tokens = crate::lexer::lex(&output, target).unwrap();

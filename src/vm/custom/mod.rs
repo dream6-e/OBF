@@ -41,6 +41,7 @@ mod bitops;
 mod chacha;
 mod cipher;
 mod compress;
+mod constant_fields;
 mod emit;
 mod emit_decode;
 mod emit_prelude;
@@ -88,9 +89,27 @@ pub fn emit(bytecode: &[u8], target: Target, seed: u64) -> Result<String, Diagno
     finalize(&raw, target, seed)
 }
 
+/// The same pipeline without the constant-field lift. Tests that count how a
+/// *spelling* is written (guard predicates, dead arms) need the text the field
+/// builders emitted, because the lift replaces those literal spellings with
+/// `<wrapper>.<key>` reads whose values are identical.
+#[cfg(test)]
+pub(crate) fn emit_unlifted(
+    bytecode: &[u8],
+    target: Target,
+    seed: u64,
+) -> Result<String, Diagnostic> {
+    let program = custom::decode(bytecode, target)?;
+    let raw = generate(bytecode, &program, seed)?;
+    let source = super::fields::shorten(&raw, target, seed)?;
+    crate::minify::finalize_vm(&source, target, seed)
+}
+
 // All source (including static host method adapters) is complete before
 // shortening private fields and then applying the existing final local pass.
 fn finalize(source: &str, target: Target, seed: u64) -> Result<String, Diagnostic> {
-    let source = super::fields::shorten(source, target, seed)?;
+    // 先把重复的轮常数搬进包装表的字段（脚本格式一字不动），再缩短私有字段、过命名通道。
+    let source = constant_fields::lift(source, target)?;
+    let source = super::fields::shorten(&source, target, seed)?;
     crate::minify::finalize_vm(&source, target, seed)
 }

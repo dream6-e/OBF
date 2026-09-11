@@ -92,11 +92,35 @@ type AuditPins = (
 // 393 -> 394. Everything else -- M1, M2, KAT, M3b, M5, M6, M7 and the other ten
 // M4 classes -- is byte-for-byte unchanged, so the re-lock adds no new value
 // class and no new static surface.
+// K16 (2026-09-11) -- both pins were re-recorded once more for the constant-field
+// pass, which replaces the script's repeated round constants with reads of a field
+// on the wrapper table. Every moved number is explained by that substitution and
+// nothing else changed:
+//   M3b 256 -> 228 (lua51)     28 big literals gone: 19 spellings of 4294967296
+//                              and 9 of 16777216. big_sum drops by exactly
+//                              19*4294967296 + 9*16777216 = 81,755,373,568, so no
+//                              other >=1e6 value moved; big_max is still the pool
+//                              constant 4503599627370496, which the pass leaves
+//                              spelled out because it is used too rarely to pay for
+//                              a field of its own.
+//   M4 (65536,100) -> absent    all 100 uses became reads of one field; the freed
+//                              twelfth slot refills as (8,62). No other class
+//                              changed count, so nothing new entered the script --
+//                              the 1-2 digit literals (the alphabet, the opcode
+//                              ids) are untouched by design: a 3-byte spelling is
+//                              exactly as long as the read that would replace it.
+//   Luau M3b 259 -> 244         15 spellings of 4294967296, big_sum down by
+//                              exactly 15*4294967296 = 64,424,509,440; M4 loses
+//                              (65536,91) and gains (8,58).
+//   M1, M2, M3a, M4b, M5, M6, M7 unchanged on both targets: the pass rewrites code
+//                              tokens only, so the image blob, the string census
+//                              and the outer-ciphertext statistics cannot move --
+//                              which is also the check that no payload byte did.
 const PINS_LUA51_7001: AuditPins = (
     86,
     (1413, 0, 1, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (256, 9007567732163209, 4503599627370496),
+    (228, 9007485976789641, 4503599627370496),
     [
         (1, 482),
         (0, 420),
@@ -104,18 +128,19 @@ const PINS_LUA51_7001: AuditPins = (
         (256, 203),
         (3, 162),
         (4, 140),
-        (65536, 100),
         (97, 88),
         (5, 79),
         (11, 79),
         (14, 70),
         (6, 68),
+        (8, 62),
     ],
     0,
     (5, 1914),
     (0, 0),
     ([557, 549, 540, 134, 134], 406),
 );
+
 // K13c step 2 (2026-09-11, ISA17) -- literal-by-literal census of the lua51 move:
 //   M1 86 -> 86                 alphabet unchanged (no new character classes).
 //   M2 1366 -> 1413 (+47)       stream length: the re-keyed image blob is spelled
@@ -156,7 +181,7 @@ const PINS_LUAU_7351: AuditPins = (
     86,
     (1134, 0, 2, 4),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (259, 9007548965859750, 4503599627370496),
+    (244, 9007484541350310, 4503599627370496),
     [
         (1, 480),
         (0, 415),
@@ -167,9 +192,9 @@ const PINS_LUAU_7351: AuditPins = (
         (5, 110),
         (13, 99),
         (52, 96),
-        (65536, 91),
         (76, 65),
         (38, 64),
+        (8, 58),
     ],
     42,
     (5, 1523),

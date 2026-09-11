@@ -245,7 +245,9 @@ mod tests {
                 let raw = crate::vm::custom::generate(&data, &program, seed).unwrap();
                 let mapping = names(PROTOTYPE_FIELDS, target, seed).unwrap();
                 let original = crate::minify::finalize_vm(&raw, target, seed).unwrap();
-                let output = crate::vm::custom::emit(&data, target, seed).unwrap();
+                // 只看字段缩短这一步：常数已被搬进包装表字段，token 数才会与
+                // `finalize_vm(raw)` 保持一一对应。
+                let output = crate::vm::custom::emit_unlifted(&data, target, seed).unwrap();
                 let before = lexer::lex(&original, target).unwrap();
                 let after = lexer::lex(&output, target).unwrap();
                 assert_eq!(before.len(), after.len());
