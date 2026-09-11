@@ -47,6 +47,7 @@ mod emit_prelude;
 mod lowering;
 mod seed;
 mod seed_deform;
+mod seed_routines;
 mod semantic;
 mod structure;
 #[cfg(test)]
