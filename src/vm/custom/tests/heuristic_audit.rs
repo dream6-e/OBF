@@ -96,20 +96,20 @@ const PINS_LUA51_7001: AuditPins = (
     86,
     (1413, 0, 1, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (256, 9007567732163209, 4503599627370496),
+    (194, 9007410814861999, 4503599627370496),
     [
         (1, 482),
         (0, 420),
         (2, 230),
-        (256, 203),
         (3, 162),
         (4, 140),
-        (65536, 100),
         (97, 88),
         (5, 79),
         (11, 79),
         (14, 70),
         (6, 68),
+        (8, 62),
+        (7, 56),
     ],
     0,
     (5, 1914),
@@ -156,20 +156,20 @@ const PINS_LUAU_7351: AuditPins = (
     86,
     (1134, 0, 2, 4),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (259, 9007548965859750, 4503599627370496),
+    (215, 9007420116840903, 4503599627370496),
     [
         (1, 480),
         (0, 415),
         (2, 225),
-        (256, 190),
         (4, 152),
         (3, 149),
         (5, 110),
         (13, 99),
         (52, 96),
-        (65536, 91),
         (76, 65),
         (38, 64),
+        (8, 58),
+        (16, 57),
     ],
     42,
     (5, 1523),
@@ -327,6 +327,17 @@ fn audit_metrics(target: Target, seed: u64) -> AuditPins {
     )
 }
 
+// K15 (pooled numeric literals, 2026-09-11) -- the M4/M5 block is the only
+// thing that moved, which is exactly what the pass is supposed to do: it binds
+// the script's commonest decimal literals to chunk-level locals, so the round
+// constants leave the top of the census and the "big literal" population
+// shrinks (M4 big_count 256 -> 194 on lua51, 259 -> 215 on Luau, with the sum
+// following and max unchanged at 2^52). On lua51 `256` 203 and `65536` 100 drop
+// out of M5's top-12 and are replaced by (8, 62) and (7, 56); on Luau `256` 190
+// and `65536` 91 drop out and (8, 58), (16, 57) come in. Every transport and
+// payload metric is untouched: M1 alphabet, M2 stream length and residues, M3a
+// KAT words, M6 skip count, M7, M8 and M9's base/offset block are pinned to the
+// same values as before, so no encoded byte moved.
 #[test]
 fn heuristic_surface_pins_hold_on_both_audit_configs() {
     for (target, seed) in AUDIT_CONFIGS {
@@ -339,3 +350,4 @@ fn heuristic_surface_pins_hold_on_both_audit_configs() {
         assert_eq!(actual, expected, "{target} seed {seed}: heuristic surface moved");
     }
 }
+

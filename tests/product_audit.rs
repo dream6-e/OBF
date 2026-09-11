@@ -103,24 +103,44 @@ struct AuditPins {
 // arm, and it buys those literals with `take(8)`-style skips on both the parser
 // and the `DC` side. check5 there is 12 -> 11 as well, check8 72 -> 78 and
 // check9 23896 -> 24126 with residue 1 -> 1 and fail=false. check2/3/4/6/7 and
-// every flag are unchanged on both targets.
+// 2026-09-11 K15 (pooled numeric literals), both pins. The generator now binds
+// its commonest decimal literals to chunk-level locals once each, so the
+// census of *literal spellings* thins while nothing about the payload moves.
+// Measured drift, field by field, before the pins moved:
+//   check1 lua51 loses five of its six entries. Counted over the whole shipped
+//      script with strings and comments stripped, each pooled spelling is now
+//      down to the single occurrence in the pool's own declaration: `256` 208 ->
+//      1, `65536` 99 -> 1, `16777216` 10 -> 1, `2147483647` 29 -> 1,
+//      `4294967296` 21 -> 1, and (86,4) stays because four uses are below the
+//      pool's floor. Luau behaves the same way (196/93/24/16 all -> 1) except
+//      for `16777216`, which sits at 4 uses on that target and so keeps its
+//      literal. This is the point of the batch: the masks can no longer be
+//      grepped for.
+//   check5 class count stays 11 on both targets, and every class keeps its
+//      population -- only two labels change shape because the modulus literal
+//      became a local: "X=N*X%N" -> "X=X*X%X" (21 on lua51, 16 on Luau) and
+//      "X=(X+X+(N*N+N))%N" -> "X=(X+X+(N*X+N))%X". The fold decoys are still
+//      there in the same numbers, they just read their constants from the pool
+//      now; Luau's moved class counts 8 -> 7, where one instance fell into a
+//      neighbouring class, and lua51's stayed 8.
+//   check8 gcd stays 1 on both; the pair count is the repeated-literal census
+//      shrinking with the pool: 83 -> 15 on lua51, 78 -> 28 on Luau.
+//   check9 (total_len, rem5, fail) is unchanged on both targets -- 18777/2 and
+//      24126/1, fail=false -- because the pass rewrites only code tokens, never
+//      a string, comment or the image blob. check2/check3/check4/check6/check7
+//      and every flag are likewise unchanged.
 fn pins_lua51() -> AuditPins {
     AuditPins {
-        check1_nice_fails: vec![
-            (86, 4),
-            (256, 208),
-            (65536, 99),
-            (16777216, 10),
-            (2147483647, 29),
-            (4294967296, 21),
-        ],
+        // K15: only `86` (the byte-reader name class) is still over the line;
+        // the round constants now live in the pool declaration.
+        check1_nice_fails: vec![(86, 4)],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
             11,
             vec![
-                ("X=N*X%N".to_string(), 21),
+                ("X=X*X%X".to_string(), 21),
                 ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
@@ -129,7 +149,7 @@ fn pins_lua51() -> AuditPins {
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*N+N))%N".to_string(), 8),
+                ("X=(X+X+(N*X+N))%X".to_string(), 8),
                 (
                     "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     6,
@@ -138,7 +158,7 @@ fn pins_lua51() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 83),
+        check8_literal_gcd: (1, 15),
         check9_stream: (18777, 2, false),
     }
 }
@@ -152,14 +172,9 @@ fn pins_lua51() -> AuditPins {
 // up a sixth digit-index slot -- the mirror image of the Lua 5.1 direction above.
 fn pins_luau() -> AuditPins {
     AuditPins {
-        check1_nice_fails: vec![
-            (86, 6),
-            (256, 196),
-            (65536, 93),
-            (16777216, 4),
-            (2147483647, 24),
-            (4294967296, 16),
-        ],
+        // K15: `16777216` has only four uses on this target, below the pool's
+        // floor, so it keeps its literal spelling; the rest moved into locals.
+        check1_nice_fails: vec![(86, 6), (16777216, 4)],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
@@ -169,13 +184,13 @@ fn pins_luau() -> AuditPins {
                 ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
-                ("X=N*X%N".to_string(), 16),
+                ("X=X*X%X".to_string(), 16),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*N+N))%N".to_string(), 8),
+                ("X=(X+X+(N*X+N))%X".to_string(), 7),
                 (
                     "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     6,
@@ -184,7 +199,7 @@ fn pins_luau() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 78),
+        check8_literal_gcd: (1, 28),
         check9_stream: (24126, 1, false),
     }
 }

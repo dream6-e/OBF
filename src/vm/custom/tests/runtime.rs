@@ -21,8 +21,9 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
             target,
         )
         .unwrap();
-        let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, 735).unwrap();
+        // Compare against the text finalize() actually starts from, so the
+        // pool's extra chunk-level declaration does not shift the pairing.
+        let raw = crate::vm::custom::generate_pooled(&data, target, 735).unwrap();
         let before = crate::scope::analyze(&raw, target).unwrap();
         let mut layouts = BTreeSet::new();
         for seed in [0, 1, 735, u64::MAX] {
@@ -35,7 +36,9 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
             // per-position local comparison runs against the same-seed
             // finalizer output (identical layout, renamed locals) while
             // the distinct-layout check below uses the emitted script.
-            let renamed = finalize(&raw, target, seed).unwrap();
+            // `raw` is already pooled, so the rest of finalize() runs without a
+            // second pass: the two texts stay binding-for-binding comparable.
+            let renamed = crate::vm::custom::finalize_pooled(&raw, target, seed).unwrap();
             let after = crate::scope::analyze(&renamed, target).unwrap();
             let layout_after = crate::scope::analyze(&output, target).unwrap();
             assert_eq!(before.globals, after.globals);
@@ -709,7 +712,23 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
             let output = emit(&data, target, 735).unwrap();
             assert_eq!(emit(&data, target, 735).unwrap(), output);
             let chunk = crate::parser::parse_source(&output, target).unwrap();
-            let statements = &chunk.block.statements;
+            let mut statements = chunk.block.statements.as_slice();
+            // A shipped script may open with one extra chunk-level statement:
+            // the numeric pool's `local a,b=1,2` declaration. Its shape is
+            // pinned here so nothing else can hide behind it; everything below
+            // is about the setmetatable call that follows it.
+            if statements.len() == 3 {
+                if let StatementKind::Local { bindings, values, .. } = &statements[0].kind {
+                    assert!(
+                        bindings.len() == values.len()
+                            && values
+                                .iter()
+                                .all(|value| matches!(value.kind, ExpressionKind::Number(_))),
+                        "{target}: only the numeric pool may add a leading statement: {output}"
+                    );
+                    statements = &statements[1..];
+                }
+            }
             assert_eq!(statements.len(), 2, "{target}: {output}");
             // local <short>={}
             let StatementKind::Local {
