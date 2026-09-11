@@ -427,8 +427,33 @@ fn encode_quoted(bytes: &[u8]) -> String {
     output
 }
 
+/// One byte as a decimal escape, spelled as shortly as the *following* source
+/// character allows. Both pinned lexers read `\` plus at most three digits and
+/// stop at the first non-digit, so `\28` is exact whenever nothing digit-shaped
+/// follows it; paying a fixed three digits everywhere costs a byte per escape
+/// for no added safety.
+pub(crate) fn push_decimal_escape(output: &mut String, byte: u8, next_is_digit: bool) {
+    output.push('\\');
+    if byte >= 100 || next_is_digit {
+        output.push_str(&format!("{byte:03}"));
+    } else if byte >= 10 {
+        output.push_str(&format!("{byte:02}"));
+    } else {
+        output.push(char::from(b'0' + byte));
+    }
+}
+
+/// Whether the byte after `index` will be emitted as a raw ASCII digit -- the
+/// only follower that a shorter decimal escape could swallow, because every
+/// other escape form starts with a backslash.
+pub(crate) fn next_byte_is_digit(bytes: &[u8], index: usize) -> bool {
+    bytes
+        .get(index + 1)
+        .is_some_and(|byte| byte.is_ascii_digit())
+}
+
 fn encode_content(bytes: &[u8], quote: u8, interpolation: bool, output: &mut String) {
-    for &byte in bytes {
+    for (index, &byte) in bytes.iter().enumerate() {
         if byte == quote || (interpolation && byte == b'{') {
             output.push('\\');
             output.push(byte as char);
@@ -444,7 +469,7 @@ fn encode_content(bytes: &[u8], quote: u8, interpolation: bool, output: &mut Str
             11 => output.push_str("\\v"),
             12 => output.push_str("\\f"),
             32..=126 => output.push(byte as char),
-            _ => output.push_str(&format!("\\{byte:03}")),
+            _ => push_decimal_escape(output, byte, next_byte_is_digit(bytes, index)),
         }
     }
 }

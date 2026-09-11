@@ -2,20 +2,30 @@ use super::*;
 
 /// K9a transport alphabet: per-image base86 over bytes 28..=126 (99
 /// values). The extremes {28, 29, 125, 126} are forced in, so the span is
-/// always 99 and the contiguity self-check bit stays dead; 13 further drops
+/// always 99 and the contiguity self-check bit stays dead; further drops
 /// and the full order are seed-picked. The Lua decoder reads the baked ALPHA
 /// literal, so no arithmetic digit mapping (and no 35/92/121 literals)
 /// survives in the output. `pub` so the product audit can derive the same
 /// set from the golden's seed (same test-supportive precedent as the
 /// decrypt/extract helpers).
+///
+/// `BASE86_QUOTE_HOSTILE` is excluded by construction rather than by luck:
+/// those three bytes are the only alphabet members whose *embedding* costs two
+/// source characters (`\"`, `'`, `\\`), and with a 99-wide pool each of them
+/// lands in the alphabet ~86% of the time, i.e. roughly 70 escapes per 6 KiB
+/// segment. Dropping them from the pool keeps the radix at exactly 86 symbols
+/// (so group widths, the 86^5 > 2^32 headroom and the decoder's shape are all
+/// untouched) and pays for it by dropping 3 fewer random pool bytes.
 pub(crate) const BASE86_POOL_LO: u8 = 28;
 pub(crate) const BASE86_POOL_HI: u8 = 126;
-pub(crate) const BASE86_DROPS: usize = 13;
+pub(crate) const BASE86_QUOTE_HOSTILE: [u8; 3] = [b'"', b'\'', b'\\'];
+pub(crate) const BASE86_DROPS: usize = 10;
 
 pub fn base86_image_alphabet(seed: u64) -> [u8; 86] {
     let mut rng = crate::random::Prng::new(seed ^ 0x3861_6c70_6861_6265);
     let mut pool: Vec<u8> = (BASE86_POOL_LO..=BASE86_POOL_HI)
         .filter(|byte| !matches!(*byte, 28 | 29 | 125 | 126))
+        .filter(|byte| !BASE86_QUOTE_HOSTILE.contains(byte))
         .collect();
     rng.shuffle(&mut pool);
     pool.truncate(pool.len() - BASE86_DROPS);
@@ -204,7 +214,8 @@ pub fn base86_decode_mixed(text: &str, alphabet: &[u8; 86]) -> Result<Vec<u8>, D
 }
 
 /// K9a Lua embedding: escape exactly the classes `"..."` cannot hold raw
-/// (`"` -> `\"`, `\` -> `\\`, bytes < 32 or >= 127 -> `\ddd`); the rest is
+/// (`"` -> `\"`, `\` -> `\\`, bytes < 32 or >= 127 -> a decimal escape, spelled
+/// as shortly as its follower allows -- see `push_decimal_escape`); the rest is
 /// emitted raw. The high-byte arm is load-bearing: pushing a byte >= 128 as
 /// `char` would UTF-8-encode it into two bytes (caught by the K7 vector
 /// harness). The emitted decoder reads post-escape bytes via SB(), so
@@ -212,16 +223,15 @@ pub fn base86_decode_mixed(text: &str, alphabet: &[u8; 86]) -> Result<Vec<u8>, D
 /// rules, and `slot_rewrite` is escape-aware.
 pub(crate) fn lua_escape_string(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() + 16);
-    for &byte in bytes {
+    for (index, &byte) in bytes.iter().enumerate() {
         match byte {
             34 => out.push_str("\\\""),
             92 => out.push_str("\\\\"),
-            0..=31 | 127..=255 => {
-                out.push('\\');
-                out.push((b'0' + byte / 100) as char);
-                out.push((b'0' + (byte / 10) % 10) as char);
-                out.push((b'0' + byte % 10) as char);
-            }
+            0..=31 | 127..=255 => crate::minify::push_decimal_escape(
+                &mut out,
+                byte,
+                crate::minify::next_byte_is_digit(bytes, index),
+            ),
             _ => out.push(byte as char),
         }
     }

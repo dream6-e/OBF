@@ -1,6 +1,5 @@
 use crate::random::Prng;
 use crate::Diagnostic;
-use std::fmt::Write;
 
 const SIGNATURE: &[u8; 4] = b"\x1bLua";
 const OPCODE_COUNT: usize = 38;
@@ -197,7 +196,7 @@ fn emit_private_decoder(
 
 pub(super) fn emit_byte_string(output: &mut String, value: &[u8]) {
     output.push('"');
-    for &byte in value {
+    for (index, &byte) in value.iter().enumerate() {
         match byte {
             b'"' => output.push_str("\\\""),
             b'\\' => output.push_str("\\\\"),
@@ -205,7 +204,12 @@ pub(super) fn emit_byte_string(output: &mut String, value: &[u8]) {
             b'\r' => output.push_str("\\r"),
             b'\t' => output.push_str("\\t"),
             32..=126 => output.push(byte as char),
-            _ => write!(output, "\\{byte:03}").unwrap(),
+            // Shortest unambiguous decimal escape (see `push_decimal_escape`).
+            _ => crate::minify::push_decimal_escape(
+                output,
+                byte,
+                crate::minify::next_byte_is_digit(value, index),
+            ),
         }
     }
     output.push('"');

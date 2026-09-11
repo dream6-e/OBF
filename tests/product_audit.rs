@@ -126,12 +126,27 @@ struct AuditPins {
 //               arithmetic regularity.
 //   check2/3/4/6/7/9 and every flag unchanged -- including check9, the string/blob
 //               stream -- so the image bytes did not move at all.
+// 2026-09-11 K17 (A1: decimal escapes spelled as shortly as their follower
+// allows; A2: `"`, `'` and `\` dropped from the base86 pool) -- measured lua51
+// diff, exactly one field:
+//   check4   (2, 65535, false) -> (3, 65535, false). A2 changes which symbol
+//              each group value stands for, so `base86_padded` takes the
+//              "padding fits" branch a different number of times and the shared
+//              transport RNG advances differently -- downstream per-seed labels
+//              move with it, and one more distinct `<= N` boundary is all that
+//              comes out of it on this config. The guarded property still holds
+//              (max 65,535 over 3 distinct thresholds: the density bound
+//              `max < 3 * distinct` does not come close to firing, `fail` false).
+//   check1/2/3/5/6/7/8 unchanged to the digit. Notably check2 still reads
+//              (86 distinct, span 99) -- the radix and the contiguity margin are
+//              intact -- and check9's blob stream is identical, so the payload
+//              bytes did not move: A1/A2 re-spell the embedding, nothing else.
 fn pins_lua51() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![(86, 4), (256, 208), (65536, 3), (2147483647, 29)],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
-        check4_thresholds: (2, 65535, false),
+        check4_thresholds: (3, 65535, false),
         check5_templates: (
             11,
             vec![

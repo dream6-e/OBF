@@ -136,11 +136,26 @@ const PINS_LUA51_7001: AuditPins = (
         (8, 62),
     ],
     0,
-    (5, 1914),
+    (5, 1842),
     (0, 0),
-    ([557, 549, 540, 134, 134], 406),
+    ([527, 525, 522, 134, 134], 388),
 );
 
+// K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
+// the only lua51 moves are the two measures that count *spelling*:
+//   M5 (5, 1914) -> (5, 1842)    the three blob source spans together lose 72 B;
+//                                the 134/134 pair is untouched, so nothing new
+//                                became long -- this is embedding, not payload.
+//   M7 [557,549,540,134,134] gap 406 -> [527,525,522,134,134] gap 388
+//                                decimal escapes dropped their zero padding
+//                                (`\028` -> `\28`) and the alphabet can no longer
+//                                hold `"`, `'` or `\`, so the blobs need no
+//                                two-character escape at all.
+// M1 (alphabet 86 / span 99), M2, the KAT, M3b (228 big literals, sum and max),
+// M4's whole top-12 census, M4b and M6 (no repeated u32 word) are byte-for-byte
+// unchanged: A2 only permutes which symbol stands for which value and A1 only
+// re-spells bytes, so neither can add payload, pretty constants or repeats --
+// and a fresh image-length or entropy measure here would have moved M5's count.
 // K13c step 2 (2026-09-11, ISA17) -- literal-by-literal census of the lua51 move:
 //   M1 86 -> 86                 alphabet unchanged (no new character classes).
 //   M2 1366 -> 1413 (+47)       stream length: the re-keyed image blob is spelled
@@ -177,6 +192,16 @@ const PINS_LUA51_7001: AuditPins = (
 // that ciphertext, so three such tokens disappeared/appeared. It moved only on
 // Luau and stayed 0 on 5.1, which is the check that it is blob noise rather than
 // new emitted numeric syntax (5.1 gained no token either).
+// K17 (2026-09-11) luau config: M5 (5, 1523) -> (5, 1509) and M7
+// [419,418,418,134,134] gap 284 -> [419,412,410,134,134] gap 276. Same two
+// measures as above, same reason: shorter decimal escapes plus an alphabet that
+// can no longer contain `"`, `'` or `\`. M7's first entry stays 419 while the
+// other two drop -- the segments lose escapes unevenly because the escape count
+// per blob is payload-driven (the padded control bytes 28/29 remain in the
+// alphabet by design), which is exactly what a spelling measure should track.
+// M4b stays 42 and M3b stays (244, 9007484541350310, 4503599627370496), so no
+// digit-run census moved: the alphabet permutation did not create or destroy any
+// number-looking token on this target either.
 const PINS_LUAU_7351: AuditPins = (
     86,
     (1134, 0, 2, 4),
@@ -197,9 +222,9 @@ const PINS_LUAU_7351: AuditPins = (
         (8, 58),
     ],
     42,
-    (5, 1523),
+    (5, 1509),
     (0, 0),
-    ([419, 418, 418, 134, 134], 284),
+    ([419, 412, 410, 134, 134], 276),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

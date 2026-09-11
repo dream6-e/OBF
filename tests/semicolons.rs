@@ -189,7 +189,11 @@ next line]=]
     "#;
     for target in [Target::Lua51, Target::Luau] {
         let output = differential(source, target);
-        assert!(output.contains("a b ; -- then end\\000\\255"));
+        // K17 (2026-09-11): byte 0 followed by a backslash-escape needs no zero
+        // padding any more, so the emitted spelling is `\0` rather than `\000`.
+        // The bytes themselves are pinned by the program's own
+        // `string.char(…,0,255)` equality plus the native differential above.
+        assert!(output.contains("a b ; -- then end\\0\\255"));
         assert!(output.contains("literal space ; local a=1 return a\\nnext line"));
     }
 }

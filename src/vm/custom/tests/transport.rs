@@ -1361,6 +1361,111 @@ fn k9a_mixed_codec_rejects_corrupt_text() {
 }
 
 #[test]
+fn k17_decimal_escapes_are_shortest_and_still_exact() {
+    // Every byte value, followed by every class of neighbour that could be
+    // swallowed: the emitted literal must always decode back to exactly the
+    // two payload bytes. That is the whole safety argument for spelling
+    // `\28` instead of `\028`, so it is checked exhaustively rather than by
+    // sampling (the followers include digits, both quote forms, the backslash
+    // and a printable letter, plus the end-of-string case).
+    let followers: [Option<u8>; 15] = [
+        None,
+        Some(b'0'),
+        Some(b'5'),
+        Some(b'9'),
+        Some(b'"'),
+        Some(b'\''),
+        Some(b'\\'),
+        Some(b'a'),
+        Some(b' '),
+        Some(b'\n'),
+        Some(b'{'),
+        Some(b']'),
+        Some(b')'),
+        Some(0x1f),
+        Some(0x80),
+    ];
+    for value in 0u8..=255 {
+        for follower in followers {
+            let payload: Vec<u8> = match follower {
+                Some(next) => vec![value, next],
+                None => vec![value],
+            };
+            let escaped = lua_escape_string(&payload);
+            for target in [Target::Lua51, Target::Luau] {
+                let literal = format!("\"{escaped}\"");
+                assert_eq!(
+                    crate::minify::literal_bytes(&literal, target).unwrap(),
+                    payload,
+                    "value {value} follower {follower:?} on {target}: {escaped:?}"
+                );
+            }
+        }
+        // Minimality: nothing but a digit-shaped follower may force padding.
+        let alone = lua_escape_string(&[value]);
+        let digits = if value < 10 {
+            1
+        } else if value < 100 {
+            2
+        } else {
+            3
+        };
+        let expected = 1 + digits;
+        if value == b'"' || value == b'\\' {
+            assert_eq!(alone.len(), 2, "{value} keeps its two-character escape");
+        } else if (32..=126).contains(&value) {
+            assert_eq!(alone.len(), 1, "printable {value} must not be escaped");
+        } else {
+            assert_eq!(alone.len(), expected, "value {value} uses {digits} digits");
+        }
+    }
+    // A digit follower is the only hazard: `\28` before a raw `5` would read
+    // as `\285`, so exactly there the padded form must come back.
+    let pair = lua_escape_string(&[28u8, b'5']);
+    assert_eq!(pair, "\\0285");
+    assert_eq!(crate::minify::literal_bytes(&format!("\"{pair}\""), Target::Lua51).unwrap(), vec![28, b'5']);
+}
+
+#[test]
+fn k17_alphabet_never_holds_a_quote_hostile_byte() {
+    // 2026-09-11 K17 (A2): `"`, `'` and `\` are dropped from the pool, so the
+    // embedded segment text and the baked ALPHA literal need no two-character
+    // escapes at all -- while the radix stays exactly 86 symbols over a
+    // 99-wide span (13 missing values), keeping the group widths, the
+    // 86^5 > 2^32 headroom and the contiguity self-check bit dead.
+    for seed in [0u64, 1, 7001, 7351, 4095, 65535, 123456789, u64::MAX] {
+        let alphabet = base86_image_alphabet(seed);
+        assert_eq!(alphabet.len(), 86);
+        for hostile in [b'"', b'\'', b'\\'] {
+            assert!(
+                !alphabet.contains(&hostile),
+                "seed {seed} put {hostile} in the alphabet"
+            );
+        }
+        let mut sorted = alphabet;
+        sorted.sort_unstable();
+        assert_eq!((sorted[0], sorted[85]), (28, 126), "span must stay 99");
+        let missing = (28u8..=126).filter(|byte| !alphabet.contains(byte)).count();
+        assert_eq!(missing, 13, "13 pool bytes stay absent (10 seed drops + 3 forced)");
+        // Any base86 text therefore needs only decimal escapes: `"`, `'` and
+        // `\\` cannot occur, so no two-character escape is ever emitted. The
+        // forced control bytes 28/29 do stay in the alphabet (they are what
+        // keeps the span at 99) and still cost three decimal characters.
+        let mut rng = crate::random::Prng::new(seed);
+        let payload: Vec<u8> = (0..600u32).map(|index| index as u8).collect();
+        let text = base86_encode_mixed(&payload, &alphabet, &mut rng);
+        assert!(!text.bytes().any(|byte| byte == 34 || byte == 39 || byte == 92));
+        let escaped = lua_escape_string(text.as_bytes());
+        assert_eq!(escaped.matches("\\\"").count() + escaped.matches("\\\\").count(), 0);
+        // The alphabet literal itself is likewise free of two-character escapes.
+        for chunk in alphabet.chunks(11) {
+            let bytes: Vec<u8> = chunk.to_vec();
+            assert!(!bytes.iter().any(|byte| *byte == 34 || *byte == 39 || *byte == 92));
+        }
+    }
+}
+
+#[test]
 fn k9a_opaque_split_avoids_nice_values() {
     const NICE_SMALL: [u64; 9] = [85, 86, 256, 7225, 7396, 65535, 65536, 636056, 614125];
     let mut rng = crate::random::Prng::new(7001);
@@ -1377,7 +1482,10 @@ fn k9a_opaque_split_avoids_nice_values() {
 
 #[test]
 fn k9a_lua_escapes_roundtrip_through_literal_bytes() {
-    assert_eq!(lua_escape_string(b"A\"B\\C\x01\x1f "), "A\\\"B\\\\C\\001\\031 ");
+    // 2026-09-11 K17 (A1): decimal escapes are now spelled as shortly as their
+    // follower allows, so `\x01` and `\x1f` lose their zero padding. The value
+    // is unchanged -- the assertions below still round-trip through the parser.
+    assert_eq!(lua_escape_string(b"A\"B\\C\x01\x1f "), "A\\\"B\\\\C\\1\\31 ");
     let pool: Vec<u8> = (28u8..=126).collect();
     let escaped = lua_escape_string(&pool);
     for target in [Target::Lua51, Target::Luau] {
