@@ -805,19 +805,8 @@ fn opaque_true_false_branches_carry_real_but_unreachable_instructions() {
     ] {
         let data = compile(fixture, target).unwrap();
         for seed in 0..=7u64 {
-            // The pool rebinds the constants inside these predicates, and a
-            // pooled name is textually indistinguishable from an unrelated
-            // short local, so the census runs on the pipeline with the pool
-            // skipped. The shipped script is checked where it can be checked
-            // exactly: the emitted text is deterministic and the pool's own
-            // invariant plus the payload comparison in `runtime.rs` prove the
-            // rebinding carries the same values.
-            let output = crate::vm::custom::emit_unpooled(&data, target, seed).unwrap();
-            assert_eq!(
-                crate::vm::custom::emit_unpooled(&data, target, seed).unwrap(),
-                output
-            );
-            assert_eq!(emit(&data, target, seed).unwrap(), emit(&data, target, seed).unwrap());
+            let output = emit(&data, target, seed).unwrap();
+            assert_eq!(emit(&data, target, seed).unwrap(), output);
             // Dead dispatch arms: an identifier/number equality where
             // the number sits in the impossible 200..=254 band.
             let tokens = crate::lexer::lex(&output, target).unwrap();

@@ -21,9 +21,8 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
             target,
         )
         .unwrap();
-        // Compare against the text finalize() actually starts from, so the
-        // pool's extra chunk-level declaration does not shift the pairing.
-        let raw = crate::vm::custom::generate_pooled(&data, target, 735).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        let raw = generate(&data, &program, 735).unwrap();
         let before = crate::scope::analyze(&raw, target).unwrap();
         let mut layouts = BTreeSet::new();
         for seed in [0, 1, 735, u64::MAX] {
@@ -36,9 +35,7 @@ fn custom_finalizer_changes_every_explicit_local_and_never_changes_bytecode() {
             // per-position local comparison runs against the same-seed
             // finalizer output (identical layout, renamed locals) while
             // the distinct-layout check below uses the emitted script.
-            // `raw` is already pooled, so the rest of finalize() runs without a
-            // second pass: the two texts stay binding-for-binding comparable.
-            let renamed = crate::vm::custom::finalize_pooled(&raw, target, seed).unwrap();
+            let renamed = finalize(&raw, target, seed).unwrap();
             let after = crate::scope::analyze(&renamed, target).unwrap();
             let layout_after = crate::scope::analyze(&output, target).unwrap();
             assert_eq!(before.globals, after.globals);
@@ -712,10 +709,7 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
             let output = emit(&data, target, 735).unwrap();
             assert_eq!(emit(&data, target, 735).unwrap(), output);
             let chunk = crate::parser::parse_source(&output, target).unwrap();
-            let statements = chunk.block.statements.as_slice();
-            // Still two statements: the numeric pool does not open the chunk.
-            // Its declaration belongs to a function that hands the payload
-            // table to setmetatable, so the constants stay inside the shell.
+            let statements = &chunk.block.statements;
             assert_eq!(statements.len(), 2, "{target}: {output}");
             // local <short>={}
             let StatementKind::Local {
@@ -777,11 +771,9 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
             // numeric field count. Five additional globally shuffled fields
             // compose word operations, quarter round, ChaCha8 block,
             // stream/KDF and anti-hook attestation.
-            //
-            // It is handed over by a function of the script's own, whose first
-            // statement is the numeric pool; `shell_payload` accepts the bare
-            // table too and pins the producer's shape.
-            let fields = shell_payload(setmetatable_arguments.first().unwrap(), target, &output);
+            let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
+                panic!("{target}: {output}");
+            };
             assert!((25..=27).contains(&fields.len()), "{target}: {output}");
             let mut numeric_keys = std::collections::BTreeSet::new();
             let mut entries = 0;

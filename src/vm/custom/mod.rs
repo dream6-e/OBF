@@ -45,7 +45,6 @@ mod emit;
 mod emit_decode;
 mod emit_prelude;
 mod lowering;
-mod numeric_pool;
 mod seed;
 mod seed_deform;
 mod seed_routines;
@@ -89,58 +88,9 @@ pub fn emit(bytecode: &[u8], target: Target, seed: u64) -> Result<String, Diagno
     finalize(&raw, target, seed)
 }
 
-/// The emitted script with only the numeric pool applied, which is the text the
-/// library's structural comparisons run against: it lets a test say "the
-/// finalizer renamed and re-laid-out this exact text" without the pool's extra
-/// declaration shifting the comparison.
-#[cfg(test)]
-pub(crate) fn generate_pooled(
-    bytecode: &[u8],
-    target: Target,
-    seed: u64,
-) -> Result<String, Diagnostic> {
-    let program = custom::decode(bytecode, target)?;
-    let raw = generate(bytecode, &program, seed)?;
-    numeric_pool::pool(&raw, target)
-}
-
-/// [`finalize`] applied to text that is already pooled, so a test can build the
-/// two sides of a comparison without running the pool twice.
-#[cfg(test)]
-pub(crate) fn finalize_pooled(
-    source: &str,
-    target: Target,
-    seed: u64,
-) -> Result<String, Diagnostic> {
-    let source = super::fields::shorten(source, target, seed)?;
-    crate::minify::finalize_vm(&source, target, seed)
-}
-
-/// The shipped script with the numeric pool left out: same field layout, same
-/// local renaming, literals still spelled out. Tests that attest textual
-/// shapes the pool is allowed to rebind (the opaque guard predicate, the dead
-/// dispatch arms) run against this instead of [`emit`], because a pooled name
-/// cannot be told apart from an unrelated binding that the name pass happened
-/// to reuse in a sibling scope.
-#[cfg(test)]
-pub(crate) fn emit_unpooled(
-    bytecode: &[u8],
-    target: Target,
-    seed: u64,
-) -> Result<String, Diagnostic> {
-    let program = custom::decode(bytecode, target)?;
-    let raw = generate(bytecode, &program, seed)?;
-    let source = super::fields::shorten(&raw, target, seed)?;
-    crate::minify::finalize_vm(&source, target, seed)
-}
-
 // All source (including static host method adapters) is complete before
 // shortening private fields and then applying the existing final local pass.
 fn finalize(source: &str, target: Target, seed: u64) -> Result<String, Diagnostic> {
-    // K15: fold the script's most frequent decimal literals into chunk-level
-    // locals before the name passes see them, so the locals are shortened like
-    // every other one and the shipped script loses the repeated spellings.
-    let source = numeric_pool::pool(source, target)?;
-    let source = super::fields::shorten(&source, target, seed)?;
+    let source = super::fields::shorten(source, target, seed)?;
     crate::minify::finalize_vm(&source, target, seed)
 }

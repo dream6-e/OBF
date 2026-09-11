@@ -11,7 +11,6 @@ mod native {
 
 // Keep this test module physically split: the project enforces an 80 KiB
 // source-file ceiling while `include!` preserves the existing module scope.
-include!("tests/shell.rs");
 include!("tests/runtime.rs");
 include!("tests/transport.rs");
 include!("tests/semantic.rs");
