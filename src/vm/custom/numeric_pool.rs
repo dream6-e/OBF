@@ -1,13 +1,23 @@
-//! K15: pooled numeric literals.
+//! K15: pooled numeric literals, inside the shell.
 //!
 //! The generated VM repeats the same integer spellings hundreds of times: `256`
 //! appears about 200 times and `65536` about 100 times in a shipped script,
 //! because every mask, radix, shift and range check spells its modulus out.
-//! This pass replaces the most frequent ones with chunk-level locals and
-//! rewrites every occurrence to read the local instead, which is a pure size
-//! win (one declaration, then one or two characters per use after the name pass
-//! shortens it) and changes no arithmetic: the substituted text is the *same*
-//! Lua number, so masks, folds and bounds checks stay bit-identical.
+//! This pass binds the most frequent ones to locals and rewrites every
+//! occurrence to read the local instead -- a pure size win (one declaration,
+//! then one or two characters per use once the name pass has shortened it) that
+//! changes no arithmetic: the substituted text is the *same* Lua number, so
+//! masks, folds and bounds checks stay bit-identical.
+//!
+//! The declarations are deliberately not placed in the chunk head. A shipped
+//! script is `local <t>={} return setmetatable({<sections>},<t>):<m>(...)`, that
+//! two-statement shape is attested by the tests, and a leading `local` line would
+//! also collect every mask, radix and bound on one greppable line at the top of
+//! the file. Instead the payload table is handed over by a function of the
+//! script's own -- `setmetatable((function() local <pool> return {<sections>}
+//! end)(),<t>)` -- so the pool sits inside the shell, one scope above every
+//! section function, which reaches the constants as upvalues exactly as it would
+//! if they had been chunk locals.
 //!
 //! Two properties are load-bearing and are the reason this runs on the
 //! assembled script instead of inside the field builders:
@@ -22,24 +32,30 @@
 //!   Pooled spellings must additionally be canonical (`text == value` in
 //!   decimal), which rules out zero-padded forms like `0256`.
 //!
-//! * The declarations are inserted immediately before the first real token of
-//!   the chunk, so they sit in the outermost scope and every stage arm, field
-//!   body and adapter captures the same local. Candidate names are checked
-//!   against every identifier in the script, so nothing is shadowed and no
-//!   global read changes meaning. The slot count is capped, which keeps the
-//!   chunk's local/upvalue totals far below the Lua and Luau limits.
+//! * The scope is the payload table's own byte range -- a balanced expression
+//!   that contains every stage arm, field body and adapter -- and the
+//!   declaration is spliced immediately in front of it, inside the wrapper. Each
+//!   use is therefore bound where it can be seen, and nothing outside the table
+//!   is touched. Candidate names are checked against every identifier in the
+//!   script, so nothing is shadowed and no global read changes meaning. The slot
+//!   count is capped, which keeps the wrapper's local total and every entry's
+//!   upvalue total far below the Lua and Luau limits.
 //!
 //! The pass is a pure function of the emitted text: no RNG is consumed, so
-//! output stays deterministic per (source, target, config, seed) and a program
-//! whose literals are already rare simply comes back unchanged.
+//! output stays deterministic per (source, target, config, seed). A program
+//! whose literals are already rare comes back unchanged, and so does any text
+//! without a payload table to wrap -- this is an optimization, not a validator,
+//! so an unrecognized shape costs bytes rather than failing the build.
 
 use crate::{Diagnostic, Target};
 use std::collections::BTreeMap;
+use std::ops::Range;
 
-/// Pooled spellings per script. Enough to capture the whole plateau of the
-/// measured benefit curve (the top slots carry ~2 KiB of the ~3.4 KiB total);
-/// kept small so the outermost scope never grows near a VM limit.
-const MAX_SLOTS: usize = 14;
+/// Pooled spellings per host function. Enough to capture the plateau of the
+/// measured benefit curve; deliberately small, because the host is already the
+/// script's densest function and Lua counts both locals per function and the
+/// upvalues each nested closure inherits from it.
+pub(crate) const MAX_SLOTS: usize = 14;
 /// A spelling must be this long before pooling it can pay for the declaration
 /// at all (single-digit literals are already one byte).
 const MIN_CHARS: usize = 2;
@@ -82,12 +98,18 @@ fn is_key_position(source: &str, start: usize, end: usize) -> bool {
     bytes.get(after) == Some(&b'=') && bytes.get(after + 1) != Some(&b'=')
 }
 
-/// Census over the positions this pass may bind: [`census`] minus the table
-/// keys. Selection and the faithfulness check use these counts, so a literal
-/// that only ever occurs as a key is never pooled at all.
-fn usable_counts(source: &str) -> BTreeMap<String, usize> {
+/// Census over the positions this pass may bind inside `region`: [`census`]
+/// minus table keys and minus everything outside the pooled scope. Selection and
+/// the faithfulness check use these counts, so a literal that only occurs as a
+/// key, or only outside the payload table, is never pooled at all -- a name
+/// bound inside the wrapper cannot be read from the chunk head, and a literal
+/// bound in one scope while still being spelled out in another buys nothing.
+fn usable_counts(source: &str, region: &Range<usize>) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for (start, end) in number_spans(source) {
+        if start < region.start || end > region.end {
+            continue;
+        }
         let Some(text) = canonical(source, start, end) else {
             continue;
         };
@@ -147,13 +169,13 @@ fn net_gain(text: &str, uses: usize) -> i64 {
 /// rule; the product path reaches the same logic through [`pool`].
 #[cfg(test)]
 pub(crate) fn plan(source: &str) -> Vec<Entry> {
-    plan_with_counts(source).0
+    plan_with_counts(source, &(0..source.len())).0
 }
 
-/// [`plan`] plus the usable census it was derived from, so the caller can
-/// verify the rewrite without re-scanning for selection.
-fn plan_with_counts(source: &str) -> (Vec<Entry>, BTreeMap<String, usize>) {
-    let counts = usable_counts(source);
+/// [`plan`] for one host scope, plus the census it was derived from, so the
+/// caller can verify the rewrite without re-scanning for selection.
+fn plan_with_counts(source: &str, region: &Range<usize>) -> (Vec<Entry>, BTreeMap<String, usize>) {
+    let counts = usable_counts(source, region);
     let taken = identifiers(source);
     let mut ranked: Vec<(i64, &String)> = counts
         .iter()
@@ -476,6 +498,7 @@ fn skip_quoted(bytes: &[u8], at: usize) -> usize {
 /// Byte index of the first real token: declarations inserted here land in the
 /// chunk's outermost scope, ahead of everything that uses them, while any
 /// leading comment keeps its position.
+#[cfg(test)]
 fn first_token(source: &str) -> usize {
     let bytes = source.as_bytes();
     let mut i = 0usize;
@@ -491,105 +514,223 @@ fn first_token(source: &str) -> usize {
 
 /// Rewrite `source`, pooling its most frequent decimal literals. Returns the
 /// source untouched when nothing qualifies.
+/// Pool the script's commonest literals inside the shell, not in front of it.
+///
+/// A generated script is `local <t>={} return setmetatable({<sections>},<t>):<m>(...)`.
+/// The pool is *not* placed in the chunk head -- that would both change the
+/// attested two-statement shape and hand whoever opens the file one line listing
+/// every mask, radix and bound. Instead the payload table is produced by a
+/// function of its own, `setmetatable((function() local <pool> return {<sections>}
+/// end)(),<t>)`, so the declarations sit inside the shell and every section
+/// function -- the entry, the decoders, the prelude toolbox -- closes over them
+/// like any other upvalue. Text without a payload table to wrap comes back alone:
+/// the pass is a size optimization, so a shape it does not recognise skips it
+/// rather than failing a build.
 pub(crate) fn pool(source: &str, target: Target) -> Result<String, Diagnostic> {
-    let (entries, counts) = plan_with_counts(source);
+    let Some(table) = payload_table(source, target)? else {
+        return Ok(source.to_string());
+    };
+    let (entries, counts) = plan_with_counts(source, &table);
     if entries.is_empty() {
         return Ok(source.to_string());
     }
+    let declaration = declaration(&entries);
+    if number_spans(&declaration).len() != entries.len() {
+        return Err(Diagnostic::new(
+            "numeric pooling declaration does not hold one literal per slot",
+        ));
+    }
+    let (body, table) = pool_text(source, &entries, &counts, &table)?;
+    let mut out = String::with_capacity(body.len() + declaration.len() + 24);
+    out.push_str(&body[..table.start]);
+    out.push_str("(function()");
+    out.push_str(&declaration);
+    out.push_str("return ");
+    out.push_str(&body[table.start..table.end]);
+    out.push_str(" end)()");
+    out.push_str(&body[table.end..]);
+    crate::lexer::lex(&out, target)?;
+    Ok(out)
+}
+
+/// One `local` with a name list and a value list: `local a=1,b=2` is not legal
+/// Lua, so names and literals are grouped rather than interleaved -- which is
+/// also the cheapest spelling, one keyword for the whole pool.
+fn declaration(entries: &[Entry]) -> String {
+    let mut out = String::from("local ");
+    for (index, entry) in entries.iter().enumerate() {
+        if index != 0 {
+            out.push(',');
+        }
+        out.push_str(&entry.name);
+    }
+    out.push('=');
+    for (index, entry) in entries.iter().enumerate() {
+        if index != 0 {
+            out.push(',');
+        }
+        out.push_str(&entry.text);
+    }
+    out.push(';');
+    out
+}
+
+/// [`pool`] applied to a snippet whose whole text is the scope being pooled, so
+/// the selection and rewrite rules can be tested without a generated script.
+#[cfg(test)]
+pub(crate) fn pool_at(
+    source: &str,
+    target: Target,
+    region: &Range<usize>,
+) -> Result<String, Diagnostic> {
+    let (entries, counts) = plan_with_counts(source, region);
+    if entries.is_empty() {
+        return Ok(source.to_string());
+    }
+    let declaration = declaration(&entries);
+    let (body, _) = pool_text(source, &entries, &counts, region)?;
+    let mut out = String::with_capacity(body.len() + declaration.len());
+    out.push_str(&body[..region.start]);
+    out.push_str(&declaration);
+    out.push_str(&body[region.start..]);
+    crate::lexer::lex(&out, target)?;
+    Ok(out)
+}
+
+/// The rewritten region's own extent in that text is returned with it: every
+/// byte of the substitution is inside the region, so the region's end moves by
+/// exactly the amount the script shrank (or grew), and callers must not index
+/// the new text with an offset taken from the old one.
+
+/// Rewrite the literals of `region` into the pooled names, returning the whole
+/// script with that region replaced (no declaration yet -- each caller splices
+/// its own), and verify afterwards that the substitution closed.
+///
+/// The check is global arithmetic, which needs no offset bookkeeping: one
+/// literal is removed per replacement and one added per slot by the caller, and
+/// a name can neither start nor continue a digit run (`ZQ0`'s trailing zero
+/// belongs to the identifier, which the scanner treats as glued), so no
+/// occurrence can be lost or invented. Each bound name must then appear exactly
+/// as often as the literals it replaced -- a use that fell outside the region
+/// would read a sibling scope's same-named local, or `nil`, and that is the
+/// failure worth refusing output over.
+fn pool_text(
+    source: &str,
+    entries: &[Entry],
+    counts: &BTreeMap<String, usize>,
+    region: &Range<usize>,
+) -> Result<(String, Range<usize>), Diagnostic> {
     let spans = number_spans(source);
-    let replaced: usize = spans
-        .iter()
-        .filter(|(start, end)| {
-            !is_key_position(source, *start, *end)
-                && entries
-                    .iter()
-                    .any(|e| &source[*start..*end] == e.text.as_str())
-        })
-        .count();
+    let in_region = |start: &usize, end: &usize| *start >= region.start && *end <= region.end;
     let lookup: BTreeMap<&str, &str> = entries
         .iter()
         .map(|e| (e.text.as_str(), e.name.as_str()))
         .collect();
-    // One `local` with a name list and a value list: `local a=1,b=2` is not even
-    // legal Lua, so names and literals must be grouped rather than interleaved
-    // -- which is also the cheapest spelling, one keyword for the whole pool.
-    let mut declaration = String::from("local ");
-    for (index, entry) in entries.iter().enumerate() {
-        if index != 0 {
-            declaration.push(',');
-        }
-        declaration.push_str(&entry.name);
-    }
-    declaration.push('=');
-    for (index, entry) in entries.iter().enumerate() {
-        if index != 0 {
-            declaration.push(',');
-        }
-        declaration.push_str(&entry.text);
-    }
-    declaration.push(';');
-
-    // Spans refer to the original text, so the literal-for-name rewrite runs
-    // first and the declaration is spliced in afterwards.
-    let split = first_token(source);
-    let mut body = String::with_capacity(source.len());
-    let mut last = 0usize;
-    for (start, end) in number_spans(source) {
-        if is_key_position(source, start, end) {
+    let mut replaced = 0usize;
+    let mut out = String::with_capacity(source.len());
+    out.push_str(&source[..region.start]);
+    let mut last = region.start;
+    for (start, end) in spans.iter().filter(|(s, e)| in_region(s, e)) {
+        if is_key_position(source, *start, *end) {
             continue;
         }
-        let text = &source[start..end];
-        let Some(name) = lookup.get(text) else {
+        let Some(name) = lookup.get(&source[*start..*end]) else {
             continue;
         };
-        body.push_str(&source[last..start]);
-        body.push_str(name);
-        last = end;
+        replaced += 1;
+        out.push_str(&source[last..*start]);
+        out.push_str(name);
+        last = *end;
     }
-    body.push_str(&source[last..]);
-    let mut out = String::with_capacity(declaration.len() + body.len());
-    out.push_str(&source[..split]);
-    out.push_str(&declaration);
-    out.push_str(&body[split..]);
-    // Faithfulness check, arithmetic rather than token counts: after pooling,
-    // the only decimal literals left in the script are the ones in the new
-    // declaration, and every pooled name appears once per literal it replaced
-    // plus once in the declaration.
-    let expected_spans = spans.len() - replaced + entries.len();
-    let actual_spans = number_spans(&out).len();
-    if actual_spans != expected_spans {
+    out.push_str(&source[last..]);
+    let mapped = region.start..region.end - (source.len() - out.len());
+    let expected = spans.len() - replaced;
+    let remaining = number_spans(&out).len();
+    if remaining != expected {
+        let region_spans = spans.iter().filter(|(s, e)| in_region(s, e)).count();
         return Err(Diagnostic::new(format!(
-            "numeric pooling left {actual_spans} decimal literals, expected {expected_spans}"
+            "numeric pooling left {remaining} decimal literals in the script, expected {expected} ({region_spans} in the host scope, {replaced} replaced)"
         )));
     }
-    for entry in &entries {
+    for entry in entries {
         let uses = *counts
             .get(&entry.text)
             .ok_or_else(|| Diagnostic::new("numeric pooling lost a census entry"))?;
         let seen = identifier_uses(&out, &entry.name);
-        if seen != uses + 1 {
+        if seen != uses {
             return Err(Diagnostic::new(format!(
                 "numeric pooling bound {} to {} uses, expected {}",
-                entry.name,
-                seen,
-                uses + 1
+                entry.name, seen, uses
             )));
         }
     }
-    crate::lexer::lex(&out, target)?;
-    Ok(out)
+    Ok((out, mapped))
+}
+
+/// The payload table of a generated script: the byte range of the first balanced
+/// `{...}` expression after the chunk's `return setmetatable(`. Everything the VM
+/// executes sits inside that constructor, so pooling there reaches the entry
+/// function, the section decoders and the prelude toolbox at once while the
+/// chunk keeps its two statements. All the caller needs for soundness is that
+/// the range is a balanced expression: the declaration lands immediately before
+/// it, so every use inside can see the name and nothing outside is touched.
+/// Strings, comments and long brackets are single tokens, so no brace inside the
+/// image blob can throw the walk off.
+fn payload_table(source: &str, target: Target) -> Result<Option<Range<usize>>, Diagnostic> {
+    let tokens = crate::lexer::lex(source, target)?;
+    for index in 0..tokens.len() {
+        let is_return = tokens[index].kind == crate::lexer::TokenKind::Keyword
+            && tokens[index].text(source) == "return";
+        let callee = tokens
+            .get(index + 1)
+            .is_some_and(|token| token.text(source) == "setmetatable");
+        if !is_return
+            || !callee
+            || tokens
+                .get(index + 2)
+                .map_or(true, |t| t.text(source) != "(")
+        {
+            continue;
+        }
+        let Some(open) = (index + 3..tokens.len()).find(|&i| tokens[i].text(source) == "{") else {
+            return Ok(None);
+        };
+        let mut depth = 0usize;
+        for walk in open..tokens.len() {
+            match tokens[walk].text(source) {
+                "{" => depth += 1,
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(Some(tokens[open].span.start..tokens[walk].span.end));
+                    }
+                }
+                _ => {}
+            }
+        }
+        return Ok(None);
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Pool a snippet as if the whole snippet were one host scope. `pool`
+    /// itself first has to find a host inside a generated script, and that part
+    /// has its own test; these are about the selection and rewrite rules.
+    fn pooled(source: impl AsRef<str>) -> String {
+        let source = source.as_ref();
+        pool_at(source, Target::Lua51, &(0..source.len())).unwrap()
+    }
+
     #[test]
     fn pools_repeated_decimal_literals_once_each() {
         let source = "local m=256;local a=x%256;local b=y%256;local c=z%256;local d=w%256;local e=v%256;local f=w%256;local g=v%256;local h=x%256;local i=y%256;local j=z%256;local k=w%256;";
         let counts = census(source);
         assert_eq!(counts.get("256"), Some(&12));
-        let out = pool(source, Target::Lua51).unwrap();
+        let out = pooled(&source);
         assert_eq!(out.matches("local ZQ0=256;").count(), 1, "{out}");
         // `local a=1,b=2` is not legal Lua: a multi-value pool groups the names
         // and the values into two lists.
@@ -600,7 +741,7 @@ mod tests {
         for _ in 0..12 {
             two.push_str("u=u%256;");
         }
-        let two = pool(&two, Target::Lua51).unwrap();
+        let two = pooled(&two);
         // The better-paying literal is bound first, so ZQ0 is the long one.
         assert!(two.starts_with("local ZQ0,ZQ1=65536,256;"), "{two}");
         assert_eq!(
@@ -621,7 +762,7 @@ mod tests {
         for _ in 0..8 {
             source.push_str("u=u+65536;");
         }
-        let out = pool(&source, Target::Lua51).unwrap();
+        let out = pooled(&source);
         assert!(out.starts_with("local ZQ0=65536;"), "{out}");
         assert_eq!(out.matches("t[65536]=1;").count(), 6, "{out}");
         assert!(!out.contains("u=u+65536;"), "{out}");
@@ -642,7 +783,7 @@ mod tests {
             source.push_str("u=u+99999999999999999999999;");
         }
         assert!(census(&source).is_empty(), "{:?}", census(&source));
-        assert_eq!(pool(&source, Target::Lua51).unwrap(), source);
+        assert_eq!(pooled(&source), source);
     }
 
     #[test]
@@ -651,7 +792,7 @@ mod tests {
         let counts = census(source);
         assert_eq!(counts.get("256"), Some(&6), "{counts:?}");
         assert!(!counts.contains_key("1e5") && !counts.contains_key("10"));
-        let out = pool(source, Target::Lua51).unwrap();
+        let out = pooled(&source);
         assert!(out.contains("\"x%256y\""), "{out}");
         assert!(out.contains("-- 256"), "{out}");
         assert!(out.contains("[[256]]"), "{out}");
@@ -661,7 +802,43 @@ mod tests {
     #[test]
     fn rare_or_short_literals_are_not_pooled() {
         let source = "local a=256;local b=7;local c=99999999;";
-        assert!(pool(source, Target::Lua51).unwrap() == source);
+        assert!(pooled(&source) == source);
+    }
+
+    #[test]
+    fn the_pool_is_output_by_a_function_inside_the_shell() {
+        // A generated script is `local u={} return setmetatable({...},u):m()`.
+        // The payload table is handed over by a function of its own, so the
+        // pool is inside the shell (the chunk keeps its two statements) and
+        // every section entry reads the same locals through its closure.
+        let host = "local g={};g[1]=65536;g[2]=65536;g[3]=65536;g[4]=65536;g[5]=65536;g[6]=65536;g[7]=65536;g[8]=65536;";
+        let sibling = "local e={};e[1]=65536;e[2]=65536;e[3]=65536;return e ";
+        let source = format!(
+            "local u={{}}return setmetatable({{[1]=function(a,b){host}end,[2]=function(c){sibling}end}},u):k()"
+        );
+        let out = pool(&source, Target::Lua51).unwrap();
+        assert!(
+            out.starts_with(
+                "local u={}return setmetatable((function()local ZQ0=65536;return {[1]=function(a,b)local g={};g[1]=ZQ0;"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("e[3]=ZQ0;return e end} end)(),u):k()"),
+            "{out}"
+        );
+        crate::parser::parse_source(&out, Target::Lua51).unwrap();
+    }
+
+    #[test]
+    fn text_without_a_payload_table_is_left_alone() {
+        for source in [
+            "return 1+256 ",
+            "local a=256 print(a)",
+            "local u={} return setmetatable(u.x,u):k()",
+        ] {
+            assert_eq!(pool(source, Target::Lua51).unwrap(), source, "{source}");
+        }
     }
 
     #[test]

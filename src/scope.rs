@@ -832,6 +832,56 @@ pub(crate) struct RenamePlan {
     names: Vec<Option<String>>,
 }
 
+/// The payload table of a generated script, as its fields. It is either passed
+/// to `setmetatable` directly, or handed over by a function of the script's own
+/// -- `setmetatable((function() local <pool> return {..} end)(),x)`, which is
+/// how the numeric pool stays inside the shell. An immediately invoked function
+/// counts only in that exact shape (no parameters, a single returned table), so
+/// a wrapper that hands over something else is not mistaken for it.
+fn payload_fields(expression: &ExpressionKind) -> Option<&Vec<TableField>> {
+    // Parentheses around the callee of an immediate call are their own node.
+    let mut expression = expression;
+    while let ExpressionKind::Group(inner) = expression {
+        expression = &inner.kind;
+    }
+    if let ExpressionKind::Table(fields) = expression {
+        return Some(fields);
+    }
+    let ExpressionKind::Call {
+        function,
+        method: None,
+        type_arguments,
+        arguments,
+    } = expression
+    else {
+        return None;
+    };
+    if !type_arguments.is_empty() || !arguments.is_empty() {
+        return None;
+    }
+    let mut callee = &function.kind;
+    while let ExpressionKind::Group(inner) = callee {
+        callee = &inner.kind;
+    }
+    let ExpressionKind::Function(body) = callee else {
+        return None;
+    };
+    if !body.parameters.is_empty() || body.has_vararg {
+        return None;
+    }
+    let (last, _) = body.body.statements.split_last()?;
+    let StatementKind::Return(returned) = &last.kind else {
+        return None;
+    };
+    let [only] = returned.as_slice() else {
+        return None;
+    };
+    match &only.kind {
+        ExpressionKind::Table(fields) => Some(fields),
+        _ => None,
+    }
+}
+
 impl Analysis {
     pub(crate) fn rename_plan(&self, target: Target, seed: u64) -> Result<RenamePlan, Diagnostic> {
         if !self.rename_barriers.is_empty() {
@@ -888,8 +938,10 @@ impl Analysis {
             {
                 continue;
             }
-            let Some(ExpressionKind::Table(fields)) = arguments.first().map(|value| &value.kind)
-            else {
+            let Some(first) = arguments.first() else {
+                continue;
+            };
+            let Some(fields) = payload_fields(&first.kind) else {
                 continue;
             };
             for field in fields {

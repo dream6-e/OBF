@@ -712,23 +712,10 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
             let output = emit(&data, target, 735).unwrap();
             assert_eq!(emit(&data, target, 735).unwrap(), output);
             let chunk = crate::parser::parse_source(&output, target).unwrap();
-            let mut statements = chunk.block.statements.as_slice();
-            // A shipped script may open with one extra chunk-level statement:
-            // the numeric pool's `local a,b=1,2` declaration. Its shape is
-            // pinned here so nothing else can hide behind it; everything below
-            // is about the setmetatable call that follows it.
-            if statements.len() == 3 {
-                if let StatementKind::Local { bindings, values, .. } = &statements[0].kind {
-                    assert!(
-                        bindings.len() == values.len()
-                            && values
-                                .iter()
-                                .all(|value| matches!(value.kind, ExpressionKind::Number(_))),
-                        "{target}: only the numeric pool may add a leading statement: {output}"
-                    );
-                    statements = &statements[1..];
-                }
-            }
+            let statements = chunk.block.statements.as_slice();
+            // Still two statements: the numeric pool does not open the chunk.
+            // Its declaration belongs to a function that hands the payload
+            // table to setmetatable, so the constants stay inside the shell.
             assert_eq!(statements.len(), 2, "{target}: {output}");
             // local <short>={}
             let StatementKind::Local {
@@ -790,9 +777,11 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
             // numeric field count. Five additional globally shuffled fields
             // compose word operations, quarter round, ChaCha8 block,
             // stream/KDF and anti-hook attestation.
-            let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
-                panic!("{target}: {output}");
-            };
+            //
+            // It is handed over by a function of the script's own, whose first
+            // statement is the numeric pool; `shell_payload` accepts the bare
+            // table too and pins the producer's shape.
+            let fields = shell_payload(setmetatable_arguments.first().unwrap(), target, &output);
             assert!((25..=27).contains(&fields.len()), "{target}: {output}");
             let mut numeric_keys = std::collections::BTreeSet::new();
             let mut entries = 0;
