@@ -988,9 +988,9 @@ fn stages_are_flattened_into_seeded_state_machines() {
             // `for` loop instead, so it is not counted here.
             assert_eq!(raw.matches("while true do").count(), 9);
             assert!(!raw.contains("local FMt,PT=VMS["));
-            assert!(!raw.contains("local P,np,entry=VMS["));
+            assert!(!raw.contains("local P,np,entry,KImg=VMS["));
             assert_eq!(raw.matches("FMt,PT=VMS[").count(), 1);
-            assert_eq!(raw.matches("P,np,entry=VMS[").count(), 1);
+            assert_eq!(raw.matches("P,np,entry,KImg=VMS[").count(), 1);
             assert_eq!(raw.matches("local RD=function(v,l,n,s,f)").count(), 1);
             assert_eq!(raw.matches("local ED=function(v,l,f,ek)").count(), 1);
             assert!(
@@ -1004,7 +1004,11 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert!(raw.contains("local PU=function()"));
             assert!(raw.contains("local PK=function()"));
             assert!(raw.contains("local F,R,va,RX,RF,K;"));
-            assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;"));
+            assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);"));
+            // K13c step 2: the constants are rebuilt by `DC`, so the frame may
+            // only bind `K` after it -- binding before reads a table the load
+            // pass has already released.
+            assert!(raw.contains("code=DC(fid) end;K=F.__obf_proto_k;"));
             // Graph fetch dynamically derives successors and the recipe id,
             // then routes that id into the random semantic fragment pool.
             // Tuple slots follow the per-image field order.
@@ -1079,7 +1083,7 @@ fn decoder_splits_into_seeded_random_sections() {
             )));
             assert!(raw.contains(&format!("[{}]=function", keys[22])));
             assert!(raw.contains(&format!(
-                "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,b8,b16,b32,take,str,pos,num)",
+                "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num)",
                 keys[20]
             )));
             assert!(raw.contains("function()return bp end"));
@@ -1093,7 +1097,7 @@ fn decoder_splits_into_seeded_random_sections() {
             // Wiring order must be block/outer inverse -> LZW helper(s) ->
             // compression frame -> semantic reader(s) -> semantic core.
             let wiring_at = raw.find("local C=VMS[").expect("transport wiring");
-            let wiring_end = wiring_at + raw[wiring_at..].find("P,np,entry=VMS[").unwrap();
+            let wiring_end = wiring_at + raw[wiring_at..].find("P,np,entry,KImg=VMS[").unwrap();
             let wiring = &raw[wiring_at..wiring_end];
             let lzw_at = wiring.find("local LD=VMS[").expect("LZW wiring");
             let body_at = wiring.find("local B=VMS[").expect("frame wiring");

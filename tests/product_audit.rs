@@ -78,21 +78,47 @@ struct AuditPins {
 //     first tree node instead of after the whole bucket, so the K7-attributed
 //     script-head fragment (13 digit-index slots) is cut shorter and no longer
 //     trips the `local `-prefixed dense-slot heuristic.
+// 2026-09-11 K13c step 2 (ISA17, keyed constant-pool payloads), lua51 pin.
+// Measured drift, field by field, before the pin moved:
+//   check1 `256` 210 -> 208 and `65536` 102 -> 99  (fewer round constants: the
+//      pool walk lost its per-type decode arms, which used to reuse those
+//      spellings) while `4294967296` 20 -> 21 is the new prelude `NU` decoder.
+//      Fewer round literals is the good direction for this census.
+//   check5 12 -> 11 distinct templates: the rare class
+//      "X=NXXXXXXX=(X*N+X+X+X+X+(N*N+N))%N" (7 uses) folded into the existing
+//      "X=(X+X+(N*N+N))%N" family once the pool loop became a length skip, so
+//      the top-8 list lost its tail entry. This is the one mildly negative
+//      number in the batch and it is a *count of shapes*, not a threshold:
+//      check4 (max repetition 2 / span 65535) and every `fail` flag stay as
+//      pinned, and check3/check6/check7 are untouched.
+//   check8 gcd stays 1 (no common divisor among literal values); the second
+//      entry 78 -> 83 is the literal census size, up because of the new cipher
+//      constants (119, 257, 1023, 2048, 1048576, the baked mask/modulus).
+//   check9 18426 -> 18777 (+351 B) is the stream itself growing by the new
+//      primitives; the repeat residue 1 -> 2 with fail=false, i.e. still no
+//      periodic structure.
+// The Luau config moved in the same shape but with the round-literal census
+// going *up* instead of down -- `86` 5 -> 6, `256` 187 -> 196, `65536` 91 -> 93,
+// `4294967296` 15 -> 16 -- because only Luau ships the extra 64-bit integer
+// arm, and it buys those literals with `take(8)`-style skips on both the parser
+// and the `DC` side. check5 there is 12 -> 11 as well, check8 72 -> 78 and
+// check9 23896 -> 24126 with residue 1 -> 1 and fail=false. check2/3/4/6/7 and
+// every flag are unchanged on both targets.
 fn pins_lua51() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 4),
-            (256, 210),
-            (65536, 102),
+            (256, 208),
+            (65536, 99),
             (16777216, 10),
             (2147483647, 29),
-            (4294967296, 20),
+            (4294967296, 21),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
-            12,
+            11,
             vec![
                 ("X=N*X%N".to_string(), 21),
                 ("X[N]=N".to_string(), 19),
@@ -104,13 +130,16 @@ fn pins_lua51() -> AuditPins {
                     9,
                 ),
                 ("X=(X+X+(N*N+N))%N".to_string(), 8),
-                ("X=NXXXXXXX=(X*N+X+X+X+X+(N*N+N))%N".to_string(), 7),
+                (
+                    "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
+                    6,
+                ),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 78),
-        check9_stream: (18426, 1, false),
+        check8_literal_gcd: (1, 83),
+        check9_stream: (18777, 2, false),
     }
 }
 
@@ -124,18 +153,18 @@ fn pins_lua51() -> AuditPins {
 fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
-            (86, 5),
-            (256, 187),
-            (65536, 91),
+            (86, 6),
+            (256, 196),
+            (65536, 93),
             (16777216, 4),
             (2147483647, 24),
-            (4294967296, 15),
+            (4294967296, 16),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         check4_thresholds: (2, 65535, false),
         check5_templates: (
-            12,
+            11,
             vec![
                 ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
@@ -153,10 +182,10 @@ fn pins_luau() -> AuditPins {
                 ),
             ],
         ),
-        check6_alias_prologues: 1,
+        check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 72),
-        check9_stream: (23896, 1, false),
+        check8_literal_gcd: (1, 78),
+        check9_stream: (24126, 1, false),
     }
 }
 

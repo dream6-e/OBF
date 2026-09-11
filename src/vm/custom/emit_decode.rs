@@ -21,6 +21,8 @@ pub(crate) fn pool_loops_lua(
     pool_add: u16,
     pool_multiplier: u16,
     target: Target,
+    pool_mask: u64,
+    pool_mod: u64,
 ) -> (String, String) {
     let capture = format!(
         "CU={{}};for slot=1,TU do {pool_decode}local owner=(st[sont[1]]-slot*{pm}-{pa})%65536;if owner>=np then E()end;local sl=(st[sont[2]]-owner*{pm}-slot-{pa})%65536;local OW=P[owner];if sl>=OW.__obf_proto_nu then E()end;local pay=(st[sont[3]]-sl*{pm}-owner-{pa})%65536;local tg=pay%4;local ix=(pay-tg)/4;if tg>2 or ix>255 then E()end;local T=CU[owner];if T==nil then T={{}};CU[owner]=T end;if T[sl]~=nil then E()end;T[sl]={{tg,ix}} end;",
@@ -31,24 +33,29 @@ pub(crate) fn pool_loops_lua(
     // Tag 4 (64-bit integer) exists only on Luau; on Lua 5.1 the
     // trailing `else E()end` rejects it at pool time.
     //
-    // K13c step 1 (plumbing): the constant mirror no longer stores decoded
-    // values. Each record keeps `(tag, off, len)` relative to the start of the
-    // constant region (`KBase`), the eager value is written straight into the
-    // owning prototype, and `KLen` records the region extent so the slice
-    // state can prove every record lies inside it. Values are therefore only
-    // ever *derived* from byte coordinates, which is the shape the keyed image
-    // (step 2) rebuilds from; the accepted/rejected image set is unchanged.
+    // K13c step 2: the pool walk no longer decodes constants at all. Each
+    // record contributes its tag, its extent inside the keyed constant region
+    // and the stream position its payload was keyed at; the payload bytes are
+    // skipped, never turned into values. `DC` is therefore the only place that
+    // ever holds a constant, and it rebuilds it from `__obf_proto_kimg` (the
+    // keyed region, retained per prototype) plus `__obf_proto_rec` (the
+    // coordinate record) using the same recurrence the encoder applied.
+    // `pool_mask`/`pool_mod` are baked as literals in both the parser and `DC`,
+    // so a mismatch between them and `semantic::pool_key_pair` fails the image
+    // closed instead of silently producing wrong constants.
     let tag4 = if target.is_luau() {
-        " elseif tg==4 then local lo4,hi4=b32(),b32();if not IF then E()end;val=IF(SF('%08x%08x',hi4,lo4),16);if val==nil then E()end;"
+        " elseif tg==4 then take(8);kl=8;kn=8"
     } else {
         ""
     };
     let constant = format!(
-        "KBase=pos();CK={{}};for slot=1,TK do {pool_decode}local owner=(st[sont[1]]-slot*{pm}-{pa})%65536;if owner>=np then E()end;local ix=(st[sont[2]]-owner*{pm}-slot-{pa})%65536;local OW=P[owner];if ix>=OW.__obf_proto_nk then E()end;local tg=(st[sont[3]]-ix*{pm}-owner-{pa})%65536;local ko=pos()-KBase;local val;if tg==0 then val=nil elseif tg==1 then val=b8();if val>1 then E()end;val=val==1 elseif tg==2 then val=num() elseif tg==3 or tg==5 then val=str(){tag4} else E()end;local T=CK[owner];if T==nil then T={{}};CK[owner]=T end;if T[ix]~=nil then E()end;T[ix]={{tg,ko,pos()-KBase-ko}};OW.__obf_proto_k[ix]=val;OW.__obf_proto_tags[ix]=tg end;KLen=pos()-KBase;",
+        "KBase=pos();gk=0;CK={{}};for slot=1,TK do {pool_decode}local owner=(st[sont[1]]-slot*{pm}-{pa})%65536;if owner>=np then E()end;local ix=(st[sont[2]]-owner*{pm}-slot-{pa})%65536;local OW=P[owner];if ix>=OW.__obf_proto_nk then E()end;local tg=(st[sont[3]]-ix*{pm}-owner-{pa})%65536;local ko=pos()-KBase;local kl=0;local kn=0;if tg==0 then kl=0 elseif tg==1 then take(1);kl=1;kn=1 elseif tg==2 then take(8);kl=8;kn=8 elseif tg==3 or tg==5 then local n=b32();take(n);kl=4+n;kn=n{tag4} else E()end;local ka=gk;gk=(gk+kn*257+{pmask})%{pmod};local T=CK[owner];if T==nil then T={{}};CK[owner]=T end;if T[ix]~=nil then E()end;T[ix]={{tg,ko,kl,ka}} end;KLen=pos()-KBase;KImg=SS(B,KBase,KBase+KLen-1);for ow=0,np-1 do local TT=CK[ow];if TT then P[ow].__obf_proto_rec=TT end end;",
         pool_decode = field_order.pool_decode_lua(),
         pm = pool_multiplier,
         pa = pool_add,
         tag4 = tag4,
+        pmask = pool_mask,
+        pmod = pool_mod,
     );
     if field_order.pools_flipped {
         (constant, capture)

@@ -31,7 +31,9 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-pub(crate) const WIRE_ISA_VERSION: u32 = 16;
+/// K13c step 2: the constant pool payload is keyed, so the semantic image is
+/// not byte-compatible with ISA16 -- bump the private wire version.
+pub(crate) const WIRE_ISA_VERSION: u32 = 17;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -1596,11 +1598,59 @@ fn write_capture_pool(
 /// Serialize one global constant pool: a 6-byte token header ([owner,
 /// index, tag]) plus the tag-dependent value payload. The tag travels
 /// only in the masked token; the payload carries no tag byte.
+/// K13c step 2: the constant pool payload never exists as plaintext in the
+/// durable image. Every record's payload bytes (the string/method bytes after
+/// the length prefix, the 8 double words, the 8 integer halves, the boolean
+/// byte) are shifted by a stream key; the three token slots above each record
+/// and the string/method length prefix stay in the clear so the layer state
+/// machines and `take` can still find record extents without the key.
+///
+/// The pair below is derived from the image's own pool token layer and record
+/// masks, so it is reproducible from the image alone (the independent decoder
+/// and `wrap-bytecode` paths therefore keep working), while the emitted Lua
+/// bakes the same two numbers as literals -- one source of truth, no drift.
+pub(crate) fn pool_key_pair(image: &SemanticImage) -> (u64, u64) {
+    let layer = &image.token_layers[1];
+    let mixed = (u64::from(image.mask_salt) + 1).wrapping_mul(2654435761)
+        ^ (u64::from(image.mask_mul)
+            .wrapping_mul(40503)
+            .wrapping_add(u64::from(layer.add))
+            .wrapping_mul(2246822519))
+        ^ u64::from(layer.multiplier).wrapping_mul(3266489917)
+        ^ u64::from(image.mask_add).wrapping_mul(668265263);
+    (
+        1 + (mixed >> 16) % 65_521,
+        4_294_967_291 + (mixed >> 40) % 6,
+    )
+}
+
+/// Stream position after one record. Both the writer and the emitted
+/// parser/`DC` apply exactly this recurrence, so a record's key depends on the
+/// payload size of *every earlier* record in physical pool order: the cipher is
+/// order-dependent, not a position-indexed table, and a reader that skips
+/// records cannot even align the key stream.
+pub(crate) fn pool_key_fold(acc: u64, keyed_len: u64, mask: u64, modulus: u64) -> u64 {
+    (acc + keyed_len * 257 + mask) % modulus
+}
+
+/// Per-byte shift inside one record's payload.
+pub(crate) fn pool_key_byte(acc: u64, index: u64) -> u64 {
+    (acc + index * 119) % 256
+}
+
+fn pool_key_apply(out: &mut [u8], from: usize, acc: u64) {
+    for (index, byte) in out[from..].iter_mut().enumerate() {
+        *byte = ((*byte as u64 + pool_key_byte(acc, index as u64 + 1)) % 256) as u8;
+    }
+}
+
 fn write_constant_pool(
     out: &mut Vec<u8>,
     pool: &[PooledConstant],
     image: &SemanticImage,
 ) -> Result<(), Diagnostic> {
+    let (mask, modulus) = pool_key_pair(image);
+    let mut acc = 0u64;
     for (slot, record) in pool.iter().enumerate() {
         let physical_slot =
             u16::try_from(slot + 1).map_err(|_| error("constant pool slot exceeds u16 range"))?;
@@ -1620,14 +1670,43 @@ fn write_constant_pool(
         for token_slot in image.field_layout.pool_slot_fields(slot + 1) {
             write_u16(out, tokens[token_slot]);
         }
-        match &record.constant {
-            Constant::Nil => {}
-            Constant::Boolean(value) => out.push(u8::from(*value)),
-            Constant::Number(bits) => out.extend_from_slice(&bits.to_le_bytes()),
-            Constant::String(value) => write_bytes(out, value)?,
-            Constant::Integer(value) => out.extend_from_slice(&value.to_le_bytes()),
-            Constant::Method(value) => write_bytes(out, value.as_bytes())?,
+        // Only the payload bytes are keyed: the three token slots above each
+        // record and the string/method length prefix stay in the clear, so the
+        // layer state machines and `take` can still find record extents without
+        // the key. The keyed length is what both sides fold into `acc`, and each
+        // side can compute it from the record alone.
+        let (key_at, keyed_len): (usize, u64) = match &record.constant {
+            Constant::Nil => (0, 0),
+            Constant::Boolean(value) => {
+                let at = out.len();
+                out.push(u8::from(*value));
+                (at, 1)
+            }
+            Constant::Number(bits) => {
+                let at = out.len();
+                out.extend_from_slice(&bits.to_le_bytes());
+                (at, 8)
+            }
+            Constant::String(value) => {
+                let at = out.len();
+                write_bytes(out, value)?;
+                (at + 4, value.len() as u64)
+            }
+            Constant::Integer(value) => {
+                let at = out.len();
+                out.extend_from_slice(&value.to_le_bytes());
+                (at, 8)
+            }
+            Constant::Method(value) => {
+                let at = out.len();
+                write_bytes(out, value.as_bytes())?;
+                (at + 4, value.len() as u64)
+            }
+        };
+        if keyed_len > 0 {
+            pool_key_apply(out, key_at, acc);
         }
+        acc = pool_key_fold(acc, keyed_len, mask, modulus);
         if out.len() > custom::MAX_BYTES {
             return Err(error("image exceeds size limit"));
         }

@@ -31,11 +31,12 @@ fn k9_affine_lanes_round_trip_for_all_forms_and_contexts() {
 }
 
 #[test]
-fn wire_isa_version_is_16() {
+fn wire_isa_version_is_17() {
     assert_eq!(
         super::semantic::WIRE_ISA_VERSION,
-        16,
-        "chained per-record operand lanes (K12/T1) require ISA16"
+        17,
+        "keyed constant-pool payloads (K13c step 2) require ISA17: the image no \
+         longer carries constant payloads as plaintext, so the reader contract changed"
     );
 }
 
@@ -221,7 +222,10 @@ fn prototype_words_relock_when_a_prototype_goes_idle() {
             );
             assert!(
                 raw.contains(
-                    "if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil end"
+                    // K13c step 2: the frame's decoded constants are released
+                    // with its code, so a re-lock rebuilds them from the keyed
+                    // region instead of reading a resident table.
+                    "if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_k=nil;G.__obf_proto_tags=nil end"
                 ),
                 "{target} seed {seed}: release must restore the raw bytes and drop the routes"
             );
@@ -277,11 +281,15 @@ fn prototype_words_relock_when_a_prototype_goes_idle() {
 // restructuring, every node side must bottom out in a fail-closed leaf chain,
 // and the topology has to move with the seed -- a fixed tree would be a chain
 // with extra steps.
-// K13c step 1 (constant-pool plumbing): the parse-time constant mirror carries
-// byte coordinates `(tag, off, len)` relative to the constant region, and the
-// decoded value reaches a table only through the eager write into the owning
-// prototype inside the same loop. Pinned on the pre-finalizer text, where the
-// pool locals are slot-rewritten but the arithmetic is literal.
+// K13c step 2 (keyed constant pool): the pool walk no longer decodes anything.
+// It records `(tag, off, len, key)` per slot -- byte coordinates inside the
+// retained keyed region plus the stream position that record's payload was
+// keyed at -- hands those coordinates to the owning prototype, and copies the
+// *still keyed* region out of the image. `DC` is the only reader that turns a
+// record into a value, and the values are dropped again by the load pass and by
+// `LVE`, so a constant is never resident outside a materialized frame. Pinned
+// on the pre-finalizer text, where the pool locals are slot-rewritten but the
+// arithmetic is literal.
 //
 // The last assertion is not cosmetics: `PK` is compiled as a local function in
 // the stage-definition block, so the region bookkeeping must be declared
@@ -300,15 +308,16 @@ fn constant_pool_mirror_holds_coordinates_not_values() {
         for seed in [0u64, 7001, 7351, u64::MAX] {
             let raw = generate(&data, &program, seed).unwrap();
             for marker in [
-                "KBase=pos();",
+                "KBase=pos();gk=0;",
                 "KLen=pos()-KBase;",
-                "T[ix]={tg,ko,pos()-KBase-ko}",
-                "OW.__obf_proto_k[ix]=val;OW.__obf_proto_tags[ix]=tg",
-                "if tg>5 or rec[2]+rec[3]>KLen then E()end",
-                // `F` is one of the slot-rewritten names, so this marker is
-                // pinned from the field suffix onwards.
-                "__obf_proto_k[j]==nil then E()end",
-                "local KBase,KLen=1,0;",
+                "T[ix]={tg,ko,kl,ka}",
+                "__obf_proto_rec=TT",
+                "KImg=SS(B,KBase,KBase+KLen-1)",
+                "if tg>5 or rec[2]+rec[3]>KLen or rec[4]==nil then E()end",
+                "local off,ln,ak=rec[2],rec[3],rec[4]",
+                "val=NU(UK(Q,off+1,8,ak),1)",
+                "local k=(acc+119)%256;",
+                "local KBase,gk,KLen,KImg=1,0,0,nil;",
             ] {
                 assert_eq!(
                     raw.matches(marker).count(),
@@ -318,18 +327,82 @@ fn constant_pool_mirror_holds_coordinates_not_values() {
                 );
             }
             // No decoded value survives in the mirror itself.
-            for stale in ["T[ix]={tg,val}", "local val=rec[2]", "F.__obf_proto_k[j]=val"] {
+            for stale in [
+                "T[ix]={tg,val}",
+                "T[ix]={tg,ko,pos()-KBase-ko}",
+                "OW.__obf_proto_k[ix]=val",
+                "OW.__obf_proto_tags[ix]=tg",
+                "local val=rec[2]",
+                "F.__obf_proto_k[j]=val",
+                // The pool walk must not decode: `str`/`num` belong to the
+                // record readers elsewhere, never to the constant loop.
+                "elseif tg==2 then val=num()",
+                "tg==3 or tg==5 then val=str()",
+            ] {
                 assert_eq!(
                     raw.matches(stale).count(),
                     0,
                     "{target} seed {seed}: constant mirror still holds values ({stale:?})"
                 );
             }
-            let declared = raw.find("local KBase,KLen=1,0;").unwrap();
+            let declared = raw
+                .find("local KBase,gk,KLen,KImg=1,0,0,nil;")
+                .unwrap();
             let closed_over = raw.find("local PK=function").unwrap();
             assert!(
                 declared < closed_over,
                 "{target} seed {seed}: region bookkeeping declared after the stage that closes over it"
+            );
+        }
+    }
+}
+
+// K13c step 2 (the actual hardening): the durable image must not carry a
+// constant payload in plaintext. Before this step every string/number/boolean
+// sat in the pool section as its own bytes; now only the keyed region does, so
+// an image-only attacker (the threat model of the external T4 finding) gets the
+// record *extents* -- which the reader needs to walk -- and nothing else.
+//
+// The paired text assertion is the anti-drift lock: `NU` (used by `DC`) and
+// `fin` (used by the record readers) must be the same bit-exact double
+// rebuild, so a constant decoded from the region cannot differ from one decoded
+// through the image cursor. Subnormals, NaN, +-inf and -0.0 all ride on that
+// equality; neither side is allowed to reassemble a double arithmetically.
+#[test]
+fn constant_payloads_are_not_plaintext_in_the_image() {
+    const NEEDLES: [&str; 4] = ["needle-alpha", "needle-beta-constant", "gamma-string", "delta"];
+    for target in [Target::Lua51, Target::Luau] {
+        let source = format!(
+            "local a,b,c,d={};print(a,b,c,{})",
+            NEEDLES
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            if target.is_luau() { "3" } else { "3.0" }
+        );
+        let data = compile(&source, target).unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 7001, 7351, u64::MAX] {
+            let image = super::semantic::encode(&program, seed).unwrap();
+            assert!(
+                image.bytes.len() > 64,
+                "{target} seed {seed}: empty image makes this check vacuous"
+            );
+            for needle in NEEDLES {
+                let bytes = needle.as_bytes();
+                assert!(
+                    !image.bytes.windows(bytes.len()).any(|w| w == bytes),
+                    "{target} seed {seed}: constant {needle:?} is still plaintext in the image"
+                );
+            }
+            let raw = generate(&data, &program, seed).unwrap();
+            let shared = "(1+fr/4503599627370496)*2^(ex-1023)";
+            assert_eq!(
+                raw.matches(shared).count(),
+                2,
+                "{target} seed {seed}: the region reader must reuse the cursor reader's \
+                 exact `fin` arithmetic (one in `fin`, one in `NU`)"
             );
         }
     }
@@ -376,3 +449,4 @@ fn validator_dispatch_is_a_seeded_binary_search_tree() {
         );
     }
 }
+

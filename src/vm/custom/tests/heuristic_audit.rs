@@ -94,51 +94,87 @@ type AuditPins = (
 // class and no new static surface.
 const PINS_LUA51_7001: AuditPins = (
     86,
-    (1366, 1, 2, 1),
+    (1413, 0, 1, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (250, 4503957365277325, 4503599627370496),
+    (256, 9007567732163209, 4503599627370496),
     [
-        (1, 469),
-        (0, 412),
-        (2, 223),
-        (256, 196),
-        (3, 159),
-        (4, 126),
-        (65536, 98),
-        (5, 83),
-        (20, 74),
-        (8, 70),
-        (94, 69),
-        (41, 68),
+        (1, 482),
+        (0, 420),
+        (2, 230),
+        (256, 203),
+        (3, 162),
+        (4, 140),
+        (65536, 100),
+        (97, 88),
+        (5, 79),
+        (11, 79),
+        (14, 70),
+        (6, 68),
     ],
     0,
-    (5, 1846),
+    (5, 1914),
     (0, 0),
-    ([534, 526, 518, 134, 134], 384),
+    ([557, 549, 540, 134, 134], 406),
 );
+// K13c step 2 (2026-09-11, ISA17) -- literal-by-literal census of the lua51 move:
+//   M1 86 -> 86                 alphabet unchanged (no new character classes).
+//   M2 1366 -> 1413 (+47)       stream length: the re-keyed image blob is spelled
+//                               with a different escape density; residues 0/1/3
+//                               follow arithmetically from +47.
+//   M3a [0,2,0...] unchanged   no KAT word entered the stream.
+//   M3b 250 -> 256 big literals  the six new >=1e6 spellings are the prelude
+//                               `NU` decoder (1048576 twice, 4294967296,
+//                               4503599627370496) plus the baked pool modulus
+//                               429496729x and the pool mask in the pool walk.
+//                               big_max is unchanged: none of them exceeds the
+//                               existing 4503599627370496.
+//   M4 tail churn              the cipher helpers add small integer literals
+//                               (119, 257, 1023, 2048, 256, 4, 5, 8) which
+//                               reshuffle the count-tied tail (97/11/14/6 in,
+//                               20/8/94/41 out); no class gained a large value.
+//   M4b skipped 0 -> 0          still no non-integer number tokens on 5.1, where
+//                               the blob is written as \ddd escapes.
+//   M6 (0, 0) -> (0, 0)         outer ciphertext still has no repeated u32 word.
+//   M5 1846 -> 1914 (+68)       long-string source span only: the image byte
+//                               count is pinned unchanged by
+//                               k7_wire_image_bytes_are_pinned, so this is
+//                               spelling, not new payload.
+//   M7 534/526/518 -> 557/549/540, gap 384 -> 406   same escape-density churn on
+//                               the three blobs; the two short entries (134/134)
+//                               are untouched, i.e. nothing new became long.
+// The Luau config moved the same way for the same reasons: M2 1111 -> 1134,
+// M3b 253 -> 259 (the six new spellings again, max unchanged), M5 1575 -> 1523
+// -- *down*, which is only possible for a spelling measure, not for added
+// payload -- and M7 439/438/430 -> 419/418/418 with the 134/134 pair intact.
+// M4b 39 -> 42 needs one more word: that counter skips number-looking tokens it
+// cannot parse as u64, and on Luau the embedded blob is printable text, so the
+// counter samples the ciphertext itself. Re-keying the constant pool rewrites
+// that ciphertext, so three such tokens disappeared/appeared. It moved only on
+// Luau and stayed 0 on 5.1, which is the check that it is blob noise rather than
+// new emitted numeric syntax (5.1 gained no token either).
 const PINS_LUAU_7351: AuditPins = (
     86,
-    (1111, 1, 3, 1),
+    (1134, 0, 2, 4),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (253, 4503938598973862, 4503599627370496),
+    (259, 9007548965859750, 4503599627370496),
     [
-        (1, 492),
-        (0, 403),
-        (2, 227),
-        (256, 192),
-        (4, 179),
-        (3, 144),
-        (65536, 94),
-        (5, 81),
-        (90, 67),
-        (13, 60),
-        (30, 56),
-        (16, 53),
+        (1, 480),
+        (0, 415),
+        (2, 225),
+        (256, 190),
+        (4, 152),
+        (3, 149),
+        (5, 110),
+        (13, 99),
+        (52, 96),
+        (65536, 91),
+        (76, 65),
+        (38, 64),
     ],
-    39,
-    (5, 1575),
+    42,
+    (5, 1523),
     (0, 0),
-    ([439, 438, 430, 134, 134], 296),
+    ([419, 418, 418, 134, 134], 284),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

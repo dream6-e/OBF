@@ -529,7 +529,11 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     let pu = "local PU=function()\n local UT=CU[id];if UT==nil then UT={} end;for j=0,F.__obf_proto_nu-1 do local rec=UT[j];if not rec then E()end;local tag,index=rec[1],rec[2];local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
         .to_owned();
     let mut pk = String::from(
-        "local PK=function()\n local KT=CK[id];if KT==nil then KT={} end;for j=0,F.__obf_proto_nk-1 do local rec=KT[j];if not rec then E()end;local tg=rec[1];if tg>5 or rec[2]+rec[3]>KLen then E()end;if tg~=0 and F.__obf_proto_k[j]==nil then E()end;F.__obf_proto_tags[j]=tg end;",
+        // K13c step 2: the slice state can no longer look at decoded values
+        // (none exist at parse time); it proves that every constant slot was
+        // covered by a record and that each record's extent fits inside the
+        // keyed region. `DC` re-checks the extents against the retained region.
+        "local PK=function()\n local KT=CK[id];if KT==nil then KT={} end;for j=0,F.__obf_proto_nk-1 do local rec=KT[j];if not rec then E()end;local tg=rec[1];if tg>5 or rec[2]+rec[3]>KLen or rec[4]==nil then E()end end;",
     );
     pk.push_str("\nend;\n");
     let mut defs = vec![ph, pu, pk];
@@ -538,7 +542,7 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     // definitions, not next to the state variable: `PK` is compiled as a local
     // function in that block, so a later declaration would leave its `KLen`
     // reference resolving to a global (nil) instead of the same upvalue.
-    core_text.push_str("local KBase,KLen=1,0;\n");
+    core_text.push_str("local KBase,gk,KLen,KImg=1,0,0,nil;\n");
     core_text.push('\n');
     for definition in &defs {
         core_text.push_str(definition);
@@ -550,8 +554,18 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     let segment_multiplier = semantic_image.token_layers[0].multiplier;
     let pool_add = semantic_image.token_layers[1].add;
     let pool_multiplier = semantic_image.token_layers[1].multiplier;
-    let (pool_first, pool_second) =
-        pool_loops_lua(field_order, pool_add, pool_multiplier, program.target);
+    // K13c step 2: the constant payload cipher's key pair. Baked as literals
+    // into the pool walk and into `DC`, derived from the same image that the
+    // encoder keyed with, so both Lua sides agree without a shared table.
+    let (pool_mask, pool_mod) = semantic::pool_key_pair(&semantic_image);
+    let (pool_first, pool_second) = pool_loops_lua(
+        field_order,
+        pool_add,
+        pool_multiplier,
+        program.target,
+        pool_mask,
+        pool_mod,
+    );
     core_text.push_str(&state_machine(
         &mut structure,
         "w",
@@ -583,7 +597,7 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
             ),
         ],
     ));
-    core_text.push_str("\nlocal rP,rnp,ren=P,np,entry;g=nil;return rP,rnp,ren\n");
+    core_text.push_str("\nlocal rP,rnp,ren,rKImg=P,np,entry,KImg;g=nil;return rP,rnp,ren,rKImg\n");
     core_text = slot_rewrite(
         &mut structure,
         &core_text,
@@ -593,11 +607,11 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
         ],
     );
     decoder_fields.push(format!(
-        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,b8,b16,b32,take,str,pos,num)\nlocal g={{}};{core_text}end,",
+        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num)\nlocal g={{}};{core_text}end,",
         keys[20]
     ));
     decoder_wiring.push_str(&format!(
-        "\nlocal P,np,entry=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,AD,b8,b16,b32,take,str,pos,num);",
+        "\nlocal P,np,entry,KImg=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num);",
         keys[20]
     ));
     let f3_start = s.len();
@@ -732,7 +746,26 @@ return a,b,c,p end;\nend,",
     // label-keyed table, checks every primitive operand,
     // rejects control operations in the middle of a recipe, and verifies all
     // graph successors only after the shuffled records have been read.
-    write!(s, "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX)\n", keys[2]).unwrap();
+    write!(
+        s,
+        "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX,SS,NCH,TC,IF,SF,U32,UK,NU)\n",
+        keys[2]
+    )
+    .unwrap();
+    // K13c step 2: rebuild this frame's constants from the keyed region right
+    // before the record loop (validation reads `__obf_proto_tags`). Extents and
+    // the per-record stream position come from `__obf_proto_rec`, so a frame
+    // only ever holds values while its code is materialized; `LVE` and the load
+    // pass drop them again.
+    let kimg_tag4 = if program.target.is_luau() {
+        " elseif tg==4 then if ln~=8 then E()end;local s4=UK(Q,off+1,8,ak);local lo4,hi4=U32(s4,1),U32(s4,5);if not IF then E()end;val=IF(SF('%08x%08x',hi4,lo4),16);if val==nil then E()end;kn=8"
+    } else {
+        ""
+    };
+    let kimg_pass = format!(
+        "if F.__obf_proto_nk>0 then local Q=F.__obf_proto_kimg;if Q==nil then E()end;local KX=F.__obf_proto_rec;if KX==nil then E()end;local KS,TG={{}},{{}};for kj=0,F.__obf_proto_nk-1 do local rec=KX[kj];if not rec then E()end;local tg=rec[1];if tg>5 then E()end;local off,ln,ak=rec[2],rec[3],rec[4];if off<0 or off+ln>#Q then E()end;TG[kj]=tg;local val;if tg==0 then val=nil elseif tg==1 then if ln~=1 then E()end;local b0=SB(UK(Q,off+1,1,ak),1);if not b0 or b0>1 then E()end;val=b0==1 elseif tg==2 then if ln~=8 then E()end;val=NU(UK(Q,off+1,8,ak),1){kimg_tag4} elseif tg==3 or tg==5 then local n=U32(Q,off+1);if n+4~=ln then E()end;val=UK(Q,off+5,n,ak) else E()end;KS[kj]=val end;F.__obf_proto_k=KS;F.__obf_proto_tags=TG end;",
+        kimg_tag4 = kimg_tag4,
+    );
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
     let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
     let tuple_slots = field_order.tuple_slots();
@@ -750,7 +783,7 @@ local DC=function(id)
  local F=P[id];local CD=F.__obf_proto_code;if CD[0]~=nil then return CD end;local p=1;{operand_profile}{field_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
  local AK=function(v,id,lane,x,m,cl)local q=(v*17+id*31+lane*53+{k9_salt})%8+1;local ii;if m==65536 then ii=({{1,43691,52429,28087,36409,35747,20165,61167}})[q]else ii=({{1,171,205,183,57,163,197,239}})[q]end;local aa=(v*257+id*911+lane*193+{k9_add}+cl%m)%m;return (x-aa)*ii%m end;
- local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};local VR={{}};
+ {kimg_pass} local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};local VR={{}};
  for z=1,nr do {dict_head}if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
   local q={{}};for qi=0,n-1 do local raw=SB(CD,p);p=p+1;if raw==nil then E()end;
    local op=(raw-(rid*{mask_mul}+qi*{mask_add}+{mask_salt})%64)%64;
@@ -772,7 +805,8 @@ local DC=function(id)
   elseif code[next1]==nil or skip~=0 then E()end;
  end;code[0]=start;code[-1]=CD;F.__obf_proto_code=code;F.__obf_proto_routes=VR;return code
 end;
-for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;end;return RD,ED,OG,DC;"#,
+for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;P[id].__obf_proto_k=nil;P[id].__obf_proto_tags=nil;end;return RD,ED,OG,DC;"#,
+        kimg_pass = kimg_pass,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
         mask_salt = semantic_image.mask_salt,
@@ -888,8 +922,8 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     // dependency graph are secret.
     s.push_str("\nreturn CV,SV,Lookup\nend,");
     let mut decoder_stage = decoder_wiring.replacen("local FMt,PT=", "FMt,PT=", 1);
-    decoder_stage = decoder_stage.replacen("local P,np,entry=", "P,np,entry=", 1);
-    if decoder_stage.contains("local FMt,PT=") || decoder_stage.contains("local P,np,entry=") {
+    decoder_stage = decoder_stage.replacen("local P,np,entry,KImg=", "P,np,entry,KImg=", 1);
+    if decoder_stage.contains("local FMt,PT=") || decoder_stage.contains("local P,np,entry,KImg=") {
         return Err(Diagnostic::new("entry decoder stage export rewrite failed"));
     }
     let entry_states = state_values(&mut structure, 6);
@@ -927,7 +961,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     );
     let decode_stage = format!("{decoder_stage}es={e_bind};");
     let bind_stage = format!(
-        "P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        "P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);for pi=0,np-1 do P[pi].__obf_proto_kimg=KImg end;RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX,SS,NCH,TC,IF,SF,U32,UK,NU);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
         keys[14], keys[15], keys[2], keys[3],
     );
     let run_stage = format!(
@@ -948,7 +982,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     );
     write!(
         s,
-        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,RD,ED,OG,DC,CV,SV,Lookup;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
+        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,KImg,RD,ED,OG,DC,CV,SV,Lookup;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
     )
     .unwrap();
     write!(
@@ -1083,7 +1117,7 @@ end;
     );
     write!(
         s,
-        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_k=nil;G.__obf_proto_tags=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;K=F.__obf_proto_k;LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
         seed_loop = seed_loop_lua(program.target, seed),
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")

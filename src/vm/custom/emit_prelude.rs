@@ -264,10 +264,24 @@ pub(crate) fn emit_prelude(
     s.push_str(&decl_cold);
     s.push_str("local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65521;y=(y+x)%65521 end;return x+y*65536 end;");
     s.push_str(&l32_decl);
+    // K13c step 2: the constant region primitives. `UK` shifts a byte run back
+    // into plaintext from a running stream position, `U32` reads a little-endian
+    // word out of *any* string (the image cursor cannot be used inside `DC`),
+    // and `NU` rebuilds the double -- the same `fin` arithmetic the reader
+    // cluster uses, so a number read from the region is bit-identical to one
+    // read through the cursor (subnormals, NaN and -0.0 included). All three are
+    // key-agnostic: callers pass the baked mask/modulus and the accumulator, so
+    // the parser and `DC` cannot drift into two different ciphers.
+    s.push_str(
+        "local U32=function(S,i)local a,b,c,d=SB(S,i),SB(S,i+1),SB(S,i+2),SB(S,i+3);if not d then E()end;return((d*256+c)*256+b)*256+a end;",
+    );
+    s.push_str("local UK=function(S,p,n,acc)local o={};local k=(acc+119)%256;for j=1,n do o[j]=NCH((SB(S,p+j-1)+256-k)%256);k=(k+119)%256 end;return TC(o)end;");
+    s.push_str("local NU=function(S,i)local lo,hi=U32(S,i),U32(S,i+4);local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;");
     let mut ret_order: Vec<&str> = vec![
         "SC", "Z", "U", "G", "E", "PC", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS",
         "NX", "MT", "SM", "RG", "RE", "IF", "Freeze", "DBG", "GI", "LS", "X8", "X8C", "AD", "L32",
         "B32", "BUF", "BX", "BA", "BO", "BN", "LR", "SHL", "RS", "BNE", "BW8", "BR8", "BFS", "BR3",
+        "UK", "U32", "NU",
     ];
     ret_order.extend(probe_transcript.as_ref().map(|t| t.unit));
     structure.shuffle(&mut ret_order);

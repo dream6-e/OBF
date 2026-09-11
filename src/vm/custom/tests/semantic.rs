@@ -442,7 +442,7 @@ fn operand_features_are_split_into_separate_shuffled_fields() {
             assert!(raw.contains(&format!("[{}]=function(E,SB,FM)", keys[14])));
             assert!(raw.contains(&format!("[{}]=function(E)", keys[15])));
             assert!(raw.contains(&format!(
-                "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX)",
+                "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX,SS,NCH,TC,IF,SF,U32,UK,NU)",
                 keys[2]
             )));
             assert!(raw.contains(&format!("VMS[{}](E,SB)", keys[13])));
@@ -666,7 +666,11 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
             assert_eq!(raw.matches("local RK=function(fid,R)").count(), 1);
             assert_eq!(raw.matches("local RX,RF=RK(fid,R)").count(), 1);
             assert!(raw.contains("local F,R,va,RX,RF,K;"));
-            assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);K=F.__obf_proto_k;"));
+            assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);"));
+            // K13c step 2: constants are rebuilt by `DC`, so the frame must
+            // read them only once the code (and with it the pool) is
+            // materialized -- reading before `DC` would index a released table.
+            assert!(raw.contains("code=DC(fid) end;K=F.__obf_proto_k;"));
             // P0: register-file indexing now happens only in the three seed
             // loop sites (REG read, STORE, LOAD); classic bodies are gone.
             // P5: STORE ships two spellings (inline `R[RX(stix(si))]` or

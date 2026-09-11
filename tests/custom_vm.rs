@@ -532,7 +532,16 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
         // K7 shuffles the attestation fold terms and respells its modulus. The
         // packed payload mutation remains a stable syntax-preserving tamper
         // and must fail before user code runs.
-        let wrong_attestation = generated.replacen("\\029", "\\030", 1);
+        // K13c step 2 (2026-09-11): the packed payload is emitted as `".."`-joined
+        // escape chunks in a seed-shuffled order, so "first \029 in the script text"
+        // no longer implies "first byte of the image" -- it can land in the 32-byte
+        // prefix that the fold deliberately skips, where a flip is inert. Take the
+        // middle occurrence instead: it is inside the image body, which `AD` covers.
+        let marks: Vec<usize> = generated.match_indices("\\029").map(|(at, _)| at).collect();
+        assert!(marks.len() >= 3, "no stable tamper target: {marks:?}");
+        let at = marks[marks.len() / 2];
+        assert!(at > 64, "tamper target sits in the transport header");
+        let wrong_attestation = format!("{}\\030{}", &generated[..at], &generated[at + 4..]);
         assert_ne!(wrong_attestation, generated);
         for (name, source, expect_success) in [
             ("control", control, true),

@@ -59,8 +59,11 @@ fn k7_has_opaque_modulus(text: &str) -> bool {
 #[test]
 fn k7_wire_image_bytes_are_pinned() {
     for (target, seed, len, hash) in [
-        (Target::Lua51, 7001u64, 1141usize, 0xd96c049c46c02c21u64),
-        (Target::Luau, 7351u64, 870usize, 0xb4e955d8ec85a75cu64),
+        // K13c step 2 (2026-09-11, ISA17): the image *length* is unchanged --
+        // keying only shifts payload bytes -- while the content fingerprint moves
+        // by design, exactly once, for the keyed constant pool.
+        (Target::Lua51, 7001u64, 1141usize, 0xd907c58e3ca3fb7eu64),
+        (Target::Luau, 7351u64, 870usize, 0x50d0f585b7c36b71u64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();

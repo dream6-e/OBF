@@ -31,9 +31,14 @@ fn inner_ciphertext_words_have_no_periodic_repeats() {
     // the decoded record prefix, which changes varint lengths slightly). The
     // security-relevant halves stay at zero: no repeated word, no common
     // divisor among repeat distances.
+    // Re-recorded 2026-09-11 for K13c step 2 (ISA17): the constant pool payloads
+    // are keyed, so the inner plaintext stream differs and the number of 4-byte
+    // words in it moved (lua51 975 -> 997, luau 778 -> 799). The security-relevant halves are
+    // pinned at zero and stay zero: no repeated word, no common divisor among
+    // repeat distances.
     for (target, seed, expected) in [
-        (Target::Lua51, 7001u64, (975usize, 0usize, 0u32)),
-        (Target::Luau, 7351u64, (778usize, 0usize, 0u32)),
+        (Target::Lua51, 7001u64, (997usize, 0usize, 0u32)),
+        (Target::Luau, 7351u64, (799usize, 0usize, 0u32)),
     ] {
         let data = compile(AUDIT_PROBE, target).unwrap();
         let output = emit(&data, target, seed).unwrap();
