@@ -59,6 +59,20 @@ type AuditPins = (
 // [0,2,0,...] (only the audited getfenv capture), M6 = (0, 0), M5 count = 5,
 // and the whole M4 residue table on Lua 5.1 -- i.e. the chain introduces no new
 // value class and no new static surface.
+// 2026-09-11 K13c step 1 (constant-pool records become byte coordinates)
+// re-record: the pool mirror now stores {tag, off, len} and the value is written
+// straight into the owning prototype, so exactly three emitted sites change --
+// the slice-state gate gains `tg~=0` and `rec[3]` and loses two `==1` tests,
+// `val=val==1` moves into the pool loop, and `local KBase,KLen=1,0` is added.
+// Literal census of that diff: class 0 +2 (one in the gate, one in the new
+// declaration), class 3 +1 (`rec[3]`), class 1 net 0 (+1 pool coercion, +1
+// declaration, -2 dropped `==1` comparisons), class 2 net 0 (`rec[2]` existed
+// before and still does). Observed: Lua 5.1 0 410->412 and 3 158->159, every
+// other class byte-identical. M1=86, M2, the KAT word vector, M3b, M5, M6,
+// M7's top5/gap pair are all unchanged -- no new repeated block, no new value
+// class, no new capability. Luau moves identically (0 401->403, 3 143->144) and
+// its tag4 branch adds no literal, which is the cross-check that the attribution
+// above is the whole story rather than a plausible story.
 // 2026-09-11 K14 (validator dispatch becomes a seeded binary search tree)
 // re-record: every arm keeps its own equality test, but the tree's internal
 // nodes carry boundary literals and the flat `elseif` runs shorten, so the M4
@@ -85,10 +99,10 @@ const PINS_LUA51_7001: AuditPins = (
     (250, 4503957365277325, 4503599627370496),
     [
         (1, 469),
-        (0, 410),
+        (0, 412),
         (2, 223),
         (256, 196),
-        (3, 158),
+        (3, 159),
         (4, 126),
         (65536, 98),
         (5, 83),
@@ -109,11 +123,11 @@ const PINS_LUAU_7351: AuditPins = (
     (253, 4503938598973862, 4503599627370496),
     [
         (1, 492),
-        (0, 401),
+        (0, 403),
         (2, 227),
         (256, 192),
         (4, 179),
-        (3, 143),
+        (3, 144),
         (65536, 94),
         (5, 81),
         (90, 67),

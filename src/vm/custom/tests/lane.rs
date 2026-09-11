@@ -277,6 +277,64 @@ fn prototype_words_relock_when_a_prototype_goes_idle() {
 // restructuring, every node side must bottom out in a fail-closed leaf chain,
 // and the topology has to move with the seed -- a fixed tree would be a chain
 // with extra steps.
+// K13c step 1 (constant-pool plumbing): the parse-time constant mirror carries
+// byte coordinates `(tag, off, len)` relative to the constant region, and the
+// decoded value reaches a table only through the eager write into the owning
+// prototype inside the same loop. Pinned on the pre-finalizer text, where the
+// pool locals are slot-rewritten but the arithmetic is literal.
+//
+// The last assertion is not cosmetics: `PK` is compiled as a local function in
+// the stage-definition block, so the region bookkeeping must be declared
+// *before* those definitions. Declaring it next to the state variable instead
+// leaves `KLen` resolving to a global nil inside `PK`, which aborts the script
+// with "attempt to compare nil with number" at the first record.
+#[test]
+fn constant_pool_mirror_holds_coordinates_not_values() {
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile(
+            "local x=1;local y='s';local q=0.5;local function f()return x end print(f(),y,q)",
+            target,
+        )
+        .unwrap();
+        let program = custom::decode(&data, target).unwrap();
+        for seed in [0u64, 7001, 7351, u64::MAX] {
+            let raw = generate(&data, &program, seed).unwrap();
+            for marker in [
+                "KBase=pos();",
+                "KLen=pos()-KBase;",
+                "T[ix]={tg,ko,pos()-KBase-ko}",
+                "OW.__obf_proto_k[ix]=val;OW.__obf_proto_tags[ix]=tg",
+                "if tg>5 or rec[2]+rec[3]>KLen then E()end",
+                // `F` is one of the slot-rewritten names, so this marker is
+                // pinned from the field suffix onwards.
+                "__obf_proto_k[j]==nil then E()end",
+                "local KBase,KLen=1,0;",
+            ] {
+                assert_eq!(
+                    raw.matches(marker).count(),
+                    1,
+                    "{target} seed {seed}: pool plumbing marker {marker:?} appears {} times",
+                    raw.matches(marker).count()
+                );
+            }
+            // No decoded value survives in the mirror itself.
+            for stale in ["T[ix]={tg,val}", "local val=rec[2]", "F.__obf_proto_k[j]=val"] {
+                assert_eq!(
+                    raw.matches(stale).count(),
+                    0,
+                    "{target} seed {seed}: constant mirror still holds values ({stale:?})"
+                );
+            }
+            let declared = raw.find("local KBase,KLen=1,0;").unwrap();
+            let closed_over = raw.find("local PK=function").unwrap();
+            assert!(
+                declared < closed_over,
+                "{target} seed {seed}: region bookkeeping declared after the stage that closes over it"
+            );
+        }
+    }
+}
+
 #[test]
 fn validator_dispatch_is_a_seeded_binary_search_tree() {
     for (target, file, arms_expected) in [

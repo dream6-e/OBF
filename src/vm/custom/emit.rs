@@ -529,11 +529,16 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
     let pu = "local PU=function()\n local UT=CU[id];if UT==nil then UT={} end;for j=0,F.__obf_proto_nu-1 do local rec=UT[j];if not rec then E()end;local tag,index=rec[1],rec[2];local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
         .to_owned();
     let mut pk = String::from(
-        "local PK=function()\n local KT=CK[id];if KT==nil then KT={} end;for j=0,F.__obf_proto_nk-1 do local rec=KT[j];if not rec then E()end;local tg=rec[1];if tg>5 then E()end;local val=rec[2];if tg==1 then val=val==1 end;F.__obf_proto_tags[j]=tg;F.__obf_proto_k[j]=val end;",
+        "local PK=function()\n local KT=CK[id];if KT==nil then KT={} end;for j=0,F.__obf_proto_nk-1 do local rec=KT[j];if not rec then E()end;local tg=rec[1];if tg>5 or rec[2]+rec[3]>KLen then E()end;if tg~=0 and F.__obf_proto_k[j]==nil then E()end;F.__obf_proto_tags[j]=tg end;",
     );
     pk.push_str("\nend;\n");
     let mut defs = vec![ph, pu, pk];
     structure.shuffle(&mut defs);
+    // The pool-region bookkeeping has to be declared before the stage
+    // definitions, not next to the state variable: `PK` is compiled as a local
+    // function in that block, so a later declaration would leave its `KLen`
+    // reference resolving to a global (nil) instead of the same upvalue.
+    core_text.push_str("local KBase,KLen=1,0;\n");
     core_text.push('\n');
     for definition in &defs {
         core_text.push_str(definition);

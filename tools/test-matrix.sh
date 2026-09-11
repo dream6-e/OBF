@@ -6,7 +6,7 @@ cd "$ROOT"
 
 # The whole-script size budget gate is live again since K10: tools/bench-vm.sh
 # and src/vm/custom/tests/semantic.rs pin 120,000 B per target from the measured
-# worst case (Lua 5.1 100,712 B / Luau 111,440 B over 10 seeds, K14). To suspend it for
+# worst case (Lua 5.1 100,794 B / Luau 111,528 B over 10 seeds, K13c-1). To suspend it for
 # a construction window, export OBF_BENCH_SCRIPT_CAP=off explicitly; the LZW
 # frame < private semantic bytecode contract is never suspended.
 

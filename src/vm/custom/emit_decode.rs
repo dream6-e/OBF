@@ -30,13 +30,21 @@ pub(crate) fn pool_loops_lua(
     );
     // Tag 4 (64-bit integer) exists only on Luau; on Lua 5.1 the
     // trailing `else E()end` rejects it at pool time.
+    //
+    // K13c step 1 (plumbing): the constant mirror no longer stores decoded
+    // values. Each record keeps `(tag, off, len)` relative to the start of the
+    // constant region (`KBase`), the eager value is written straight into the
+    // owning prototype, and `KLen` records the region extent so the slice
+    // state can prove every record lies inside it. Values are therefore only
+    // ever *derived* from byte coordinates, which is the shape the keyed image
+    // (step 2) rebuilds from; the accepted/rejected image set is unchanged.
     let tag4 = if target.is_luau() {
         " elseif tg==4 then local lo4,hi4=b32(),b32();if not IF then E()end;val=IF(SF('%08x%08x',hi4,lo4),16);if val==nil then E()end;"
     } else {
         ""
     };
     let constant = format!(
-        "CK={{}};for slot=1,TK do {pool_decode}local owner=(st[sont[1]]-slot*{pm}-{pa})%65536;if owner>=np then E()end;local ix=(st[sont[2]]-owner*{pm}-slot-{pa})%65536;local OW=P[owner];if ix>=OW.__obf_proto_nk then E()end;local tg=(st[sont[3]]-ix*{pm}-owner-{pa})%65536;local val;if tg==0 then val=nil elseif tg==1 then val=b8();if val>1 then E()end elseif tg==2 then val=num() elseif tg==3 or tg==5 then val=str(){tag4} else E()end;local T=CK[owner];if T==nil then T={{}};CK[owner]=T end;if T[ix]~=nil then E()end;T[ix]={{tg,val}} end;",
+        "KBase=pos();CK={{}};for slot=1,TK do {pool_decode}local owner=(st[sont[1]]-slot*{pm}-{pa})%65536;if owner>=np then E()end;local ix=(st[sont[2]]-owner*{pm}-slot-{pa})%65536;local OW=P[owner];if ix>=OW.__obf_proto_nk then E()end;local tg=(st[sont[3]]-ix*{pm}-owner-{pa})%65536;local ko=pos()-KBase;local val;if tg==0 then val=nil elseif tg==1 then val=b8();if val>1 then E()end;val=val==1 elseif tg==2 then val=num() elseif tg==3 or tg==5 then val=str(){tag4} else E()end;local T=CK[owner];if T==nil then T={{}};CK[owner]=T end;if T[ix]~=nil then E()end;T[ix]={{tg,ko,pos()-KBase-ko}};OW.__obf_proto_k[ix]=val;OW.__obf_proto_tags[ix]=tg end;KLen=pos()-KBase;",
         pool_decode = field_order.pool_decode_lua(),
         pm = pool_multiplier,
         pa = pool_add,
