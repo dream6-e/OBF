@@ -71,9 +71,34 @@ fn base86_padded(
     payload + pad * cap
 }
 
-fn base86_emit(out: &mut String, alphabet: &[u8; 86], mut value: u64, width: usize) {
+/// K19: bounds of the byte-thirds split of the marked stream (part 0 carries
+/// the transport watermark). Shared with the emitted runtime so the generator
+/// and the Lua cannot disagree about where a segment starts.
+pub(crate) fn transport_segment_bounds(total: usize) -> [usize; 2] {
+    let third = total / 3;
+    [third, third + (total - third) / 2]
+}
+
+/// K19 key feedback: the digit-table rotation the *next* segment must apply,
+/// folded out of the previous segment's decoded bytes. The emitted Lua mirrors
+/// this loop through that segment's own opaque locals (`MM` = 256, `r` = 86,
+/// each a sum of two non-nice addends), so no extra transport constant reaches
+/// the text and Lua's left-associative `*`/`%` spell the same expression. Every
+/// intermediate stays below 87k, so the fold is exact on both targets. This is
+/// the second half of T1: a segment is no longer decodable from its position,
+/// and an edit to an earlier segment re-keys every later one.
+pub(crate) fn segment_key_fold(bytes: &[u8]) -> u64 {
+    let mut acc = 0u64;
+    for &byte in bytes {
+        acc = (acc + u64::from(byte)) * 256 % 86;
+    }
+    (acc + bytes.len() as u64) % 86
+}
+
+fn base86_emit(out: &mut String, alphabet: &[u8; 86], mut value: u64, width: usize, ro: u64) {
     for _ in 0..width {
-        out.push(alphabet[(value % 86) as usize] as char);
+        let digit = ((value % 86) + 86 - ro) % 86;
+        out.push(alphabet[digit as usize] as char);
         value /= 86;
     }
     debug_assert_eq!(value, 0, "K9a: group value exceeds its width");
@@ -86,10 +111,11 @@ fn base86_emit(out: &mut String, alphabet: &[u8; 86], mut value: u64, width: usi
 /// are arbitrary), and every group carries random high padding the decoder
 /// truncates. The pad stream comes from the caller's image rng: one stream
 /// across the three parts, never restarted per part.
-pub(crate) fn base86_encode_mixed(
+pub(crate) fn base86_encode_mixed_ro(
     part: &[u8],
     alphabet: &[u8; 86],
     rng: &mut crate::random::Prng,
+    ro: u64,
 ) -> String {
     assert!(
         part.len() < (1usize << 24),
@@ -97,7 +123,7 @@ pub(crate) fn base86_encode_mixed(
     );
     let mut out = String::new();
     let prefix = base86_padded(part.len() as u64, 4, 3, rng);
-    base86_emit(&mut out, alphabet, prefix, 4);
+    base86_emit(&mut out, alphabet, prefix, 4, ro);
     let mut prev = prefix;
     let mut done = 0usize;
     let total = part.len();
@@ -105,7 +131,7 @@ pub(crate) fn base86_encode_mixed(
         let width = [4usize, 5, 6][(prev % 3) as usize];
         let take = if width == 4 { 3 } else { 4 };
         let value = base86_padded(base86_le_value(&part[done..done + take]), width, take, rng);
-        base86_emit(&mut out, alphabet, value, width);
+        base86_emit(&mut out, alphabet, value, width, ro);
         prev = value;
         done += take;
     }
@@ -113,19 +139,19 @@ pub(crate) fn base86_encode_mixed(
         4 => {
             let width = [5usize, 6][(prev % 3) as usize % 2];
             let value = base86_padded(base86_le_value(&part[done..done + 4]), width, 4, rng);
-            base86_emit(&mut out, alphabet, value, width);
+            base86_emit(&mut out, alphabet, value, width, ro);
         }
         3 => {
             let value = base86_padded(base86_le_value(&part[done..done + 3]), 4, 3, rng);
-            base86_emit(&mut out, alphabet, value, 4);
+            base86_emit(&mut out, alphabet, value, 4, ro);
         }
         2 => {
             let value = base86_padded(base86_le_value(&part[done..done + 2]), 3, 2, rng);
-            base86_emit(&mut out, alphabet, value, 3);
+            base86_emit(&mut out, alphabet, value, 3, ro);
         }
         1 => {
             let value = base86_padded(base86_le_value(&part[done..done + 1]), 2, 1, rng);
-            base86_emit(&mut out, alphabet, value, 2);
+            base86_emit(&mut out, alphabet, value, 2, ro);
         }
         0 => {}
         _ => unreachable!("K9a: bad tail remainder"),
@@ -168,10 +194,14 @@ fn base86_push_bytes(out: &mut Vec<u8>, mut value: u64, count: usize) {
 /// `pub` so integration tests corrupt and re-verify payloads with the same
 /// decoder the pipeline uses (same test-supportive precedent as the
 /// alphabet and literal parsers).
-pub fn base86_decode_mixed(text: &str, alphabet: &[u8; 86]) -> Result<Vec<u8>, Diagnostic> {
+pub fn base86_decode_mixed_ro(
+    text: &str,
+    alphabet: &[u8; 86],
+    ro: u64,
+) -> Result<Vec<u8>, Diagnostic> {
     let mut digit: [Option<u64>; 256] = [None; 256];
     for (index, &byte) in alphabet.iter().enumerate() {
-        digit[byte as usize] = Some(index as u64);
+        digit[byte as usize] = Some((index as u64 + ro) % 86);
     }
     let bytes = text.as_bytes();
     let mut pos = 0usize;
@@ -211,6 +241,10 @@ pub fn base86_decode_mixed(text: &str, alphabet: &[u8; 86]) -> Result<Vec<u8>, D
         return Err(Diagnostic::new("base86: trailing characters"));
     }
     Ok(out)
+}
+/// Strict K9a decode with an unrotated digit table (rotation zero).
+pub fn base86_decode_mixed(text: &str, alphabet: &[u8; 86]) -> Result<Vec<u8>, Diagnostic> {
+    base86_decode_mixed_ro(text, alphabet, 0)
 }
 
 /// K9a Lua embedding: escape exactly the classes `"..."` cannot hold raw
@@ -305,6 +339,44 @@ pub(crate) fn segment_literals(
     Ok(candidates)
 }
 
+/// K19: every segment order whose decode chains from head to tail. The head
+/// segment (the one carrying the transport watermark) uses an unrotated digit
+/// table; each later segment rotates by the fold of the previous segment's
+/// decoded bytes, so an order only chains if all three parts are the real
+/// stream in the real order -- decoding a segment in isolation is no longer
+/// possible. Returned streams are concatenated part bytes, in stream order.
+pub(crate) fn chained_segment_orders(
+    segments: &[Vec<u8>],
+    alphabet: &[u8; 86],
+) -> Vec<([usize; 3], Vec<Vec<u8>>)> {
+    let permutations = [
+        [0usize, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut streams = Vec::new();
+    'chain: for permutation in permutations {
+        let mut parts = Vec::with_capacity(3);
+        let mut ro = 0u64;
+        for index in permutation {
+            let text = String::from_utf8_lossy(&segments[index]);
+            let Ok(bytes) = base86_decode_mixed_ro(&text, alphabet, ro) else {
+                continue 'chain;
+            };
+            ro = segment_key_fold(&bytes);
+            parts.push(bytes);
+        }
+        let chained: Vec<u8> = parts.iter().flatten().copied().collect();
+        if chained.starts_with(b"XXS:") {
+            streams.push((permutation, parts));
+        }
+    }
+    streams
+}
+
 /// Reassemble the outer ciphertext: try all six segment orders, base86-decode,
 /// apply the outer ChaCha8 domain, authenticate frame v2, apply the independent
 /// inner domain and accept only the unique strict LZW/semantic image. Segment
@@ -322,40 +394,13 @@ pub(crate) fn embedded_outer_ciphertext(
     let shares = cipher_shares(&wrapper_keys(seed), &params, target);
     let permutation_term = perm_term(seed);
     let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
-    let permutations = [
-        [0usize, 1, 2],
-        [0, 2, 1],
-        [1, 0, 2],
-        [1, 2, 0],
-        [2, 0, 1],
-        [2, 1, 0],
-    ];
     let mut winners = Vec::new();
-    for permutation in permutations {
-        // K9a: each segment is self-contained (own length prefix, chained
-        // widths reset per segment), so decode per segment and concatenate
-        // the decoded bytes; one undecodable segment kills the order.
-        let mut stream = Vec::new();
-        let mut ok = true;
-        for index in permutation {
-            match base86_decode_mixed(&String::from_utf8_lossy(&segments[index]), &alphabet) {
-                Ok(bytes) => stream.extend_from_slice(&bytes),
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if !ok {
-            continue;
-        }
+    for (_order, parts) in chained_segment_orders(&segments, &alphabet) {
+        let stream: Vec<u8> = parts.iter().flatten().copied().collect();
         // The decoded stream must open with the fixed transport watermark;
         // everything after it is the outer ciphertext body. The watermark
         // also pins which segment is stream-first, so it strengthens the
         // order resolution on top of the full-image Adler gate.
-        if !stream.starts_with(b"XXS:") {
-            continue;
-        }
         let cipher = &stream[4..];
         let frame = chacha8_feedback_decrypt(
             cipher,

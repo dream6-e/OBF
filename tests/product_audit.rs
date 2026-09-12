@@ -168,8 +168,14 @@ struct AuditPins {
 //              structure: check2 still reads (86 distinct, span 99).
 fn pins_lua51() -> AuditPins {
     AuditPins {
+        // K19（分段密钥回灌）实测：`86` 由 4 降到 3 —— 旋转后的数字表用 `%r`，
+        // 而 r 是 c1+c2 的和式，代码区少了一处裸 86；`256` 保持 212，因为折叠累加器
+        // 复用了段内已有的 `B` 槽位，常数池没有被逼着再提升一个数字（先前用独立
+        // `RO` 局部时 `256` 涨到 220、字段数 27->28，已按「收紧生成器优先」回退）。
+        // check5 的 `X[N]=N` 19 -> 17：两处赋值被折叠语句改写成形，模板类数仍是 11；
+        // check2/3/4/6/7/8/9 一字未动。
         check1_nice_fails: vec![
-            (86, 4),
+            (86, 3),
             (256, 212),
             (65536, 3),
             (2147483647, 24),
@@ -181,10 +187,10 @@ fn pins_lua51() -> AuditPins {
         check5_templates: (
             11,
             vec![
-                ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
+                ("X[N]=N".to_string(), 17),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
@@ -241,8 +247,12 @@ fn pins_lua51() -> AuditPins {
 // Luau blob did not move either.
 fn pins_luau() -> AuditPins {
     AuditPins {
+        // K19（分段密钥回灌）实测：`86` 由 6 降到 3 处中的 4 处（Luau 侧同样少两处
+        // 裸 86：数字表旋转改成 `(x-1+B)%r`，r 是 c1+c2 的和式），其余 nice 值计数
+        // 一字未动；check5 的 `X[N]=N` 19 -> 17 与 lua51 同因（两处赋值被折叠语句
+        // 改写成形），模板类数仍是 12；check2/3/4/6/7/8/9 全部原样，`fail` 仍为 false。
         check1_nice_fails: vec![
-            (86, 6),
+            (86, 4),
             (256, 201),
             (65536, 3),
             (16777216, 4),
@@ -254,10 +264,10 @@ fn pins_luau() -> AuditPins {
         check5_templates: (
             12,
             vec![
-                ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
+                ("X[N]=N".to_string(), 17),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),

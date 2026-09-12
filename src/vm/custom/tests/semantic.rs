@@ -943,9 +943,13 @@ fn transport_watermark_is_present_checked_and_never_spelled_out() {
         // The hidden check must not leak the watermark text itself.
         assert!(!output.contains("XXS:"));
         // Exactly one segment is stream-first: its decode opens with
-        // the fixed watermark bytes.
+        // the fixed watermark bytes. K19 adds the stronger half: only the
+        // chained order decodes at all, and its head is that same segment.
         let segments = segment_literals(&output, target, 735).unwrap();
         let alphabet = base86_image_alphabet(735);
+        let orders = crate::vm::custom::transport::chained_segment_orders(&segments, &alphabet);
+        assert_eq!(orders.len(), 1, "{target}: segment order must chain uniquely");
+        assert!(orders[0].1[0].starts_with(b"XXS:"), "{target}");
         let stamped = segments
             .iter()
             .filter(|literal| {

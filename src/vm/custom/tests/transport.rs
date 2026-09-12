@@ -1236,7 +1236,7 @@ fn k9a_mixed_codec_roundtrips_all_lengths() {
             let bytes: Vec<u8> = (0..length)
                 .map(|index| ((index * 31 + length * 7) % 256) as u8)
                 .collect();
-            let text = base86_encode_mixed(&bytes, &alphabet, &mut rng);
+            let text = base86_encode_mixed_ro(&bytes, &alphabet, &mut rng, 0);
             assert!(
                 text.bytes().all(|byte| alphabet.contains(&byte)),
                 "seed {seed} len {length}: char outside the image alphabet"
@@ -1250,7 +1250,7 @@ fn k9a_mixed_codec_roundtrips_all_lengths() {
         let big: Vec<u8> = (0..5000u32)
             .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
             .collect();
-        let text = base86_encode_mixed(&big, &alphabet, &mut rng);
+        let text = base86_encode_mixed_ro(&big, &alphabet, &mut rng, 0);
         assert_eq!(base86_decode_mixed(&text, &alphabet).unwrap(), big);
     }
 }
@@ -1265,8 +1265,8 @@ fn k9a_mixed_widths_chain_and_high_padding_truncates() {
     let bytes: Vec<u8> = (0..2000u32)
         .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
         .collect();
-    let text1 = base86_encode_mixed(&bytes, &alphabet, &mut crate::random::Prng::new(11));
-    let text2 = base86_encode_mixed(&bytes, &alphabet, &mut crate::random::Prng::new(12));
+    let text1 = base86_encode_mixed_ro(&bytes, &alphabet, &mut crate::random::Prng::new(11), 0);
+    let text2 = base86_encode_mixed_ro(&bytes, &alphabet, &mut crate::random::Prng::new(12), 0);
     // Random high padding perturbs the text but truncates identically.
     assert_ne!(text1, text2);
     assert_eq!(base86_decode_mixed(&text1, &alphabet).unwrap(), bytes);
@@ -1346,7 +1346,7 @@ fn k9a_mixed_codec_rejects_corrupt_text() {
     let alphabet = base86_image_alphabet(7001);
     let mut rng = crate::random::Prng::new(7001);
     let bytes = b"hello, mixed world! padding must truncate exactly.";
-    let text = base86_encode_mixed(bytes, &alphabet, &mut rng);
+    let text = base86_encode_mixed_ro(bytes, &alphabet, &mut rng, 0);
     assert_eq!(base86_decode_mixed(&text, &alphabet).unwrap(), bytes);
     // Truncation anywhere fails closed.
     for cut in [1, 4, 5, text.len() - 1] {
@@ -1365,7 +1365,7 @@ fn k9a_mixed_codec_rejects_corrupt_text() {
     let long: Vec<u8> = (0..300u32)
         .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
         .collect();
-    let long_text = base86_encode_mixed(&long, &alphabet, &mut rng);
+    let long_text = base86_encode_mixed_ro(&long, &alphabet, &mut rng, 0);
     assert!(base86_decode_mixed(&long_text, &base86_image_alphabet(7351)).is_err());
     // Empty and prefix-short inputs fail closed.
     assert!(base86_decode_mixed("", &alphabet).is_err());
@@ -1465,7 +1465,7 @@ fn k17_alphabet_never_holds_a_quote_hostile_byte() {
         // keeps the span at 99) and still cost three decimal characters.
         let mut rng = crate::random::Prng::new(seed);
         let payload: Vec<u8> = (0..600u32).map(|index| index as u8).collect();
-        let text = base86_encode_mixed(&payload, &alphabet, &mut rng);
+        let text = base86_encode_mixed_ro(&payload, &alphabet, &mut rng, 0);
         assert!(!text.bytes().any(|byte| byte == 34 || byte == 39 || byte == 92));
         let escaped = lua_escape_string(text.as_bytes());
         assert_eq!(escaped.matches("\\\"").count() + escaped.matches("\\\\").count(), 0);
@@ -1582,12 +1582,18 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
         let output = emit(&data, target, seed).unwrap();
         let alphabet = base86_image_alphabet(seed);
         let segments = segment_literals(&output, target, seed).unwrap();
-        let mut expected: Vec<Vec<u8>> = segments
-            .iter()
-            .map(|literal| {
-                base86_decode_mixed(&String::from_utf8_lossy(literal), &alphabet).unwrap()
-            })
-            .collect();
+        // K19: the parts only decode as a chain, so they are recovered with the
+        // same resolver the audit path uses. `positions` maps a segment's file
+        // index to its stream position, which decides whether the field takes an
+        // upstream plaintext argument at all.
+        let orders = chained_segment_orders(&segments, &alphabet);
+        assert_eq!(orders.len(), 1, "{target}: chained segment order not unique");
+        let (order, chained) = orders[0].clone();
+        let mut positions = [0usize; 3];
+        for (position, slot) in order.iter().enumerate() {
+            positions[*slot] = position;
+        }
+        let mut expected: Vec<Vec<u8>> = chained.clone();
         expected.sort();
         // Extract the three segment fields by content: the finalizer renames
         // every parameter, so fields are located as the innermost
@@ -1621,7 +1627,7 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
         }
         assert!(stack.is_empty(), "{target}: unbalanced openers left");
         let mut chunks = Vec::new();
-        for literal in &segments {
+        for (index, literal) in segments.iter().enumerate() {
             let span = tokens
                 .iter()
                 .filter(|t| t.kind == crate::lexer::TokenKind::String)
@@ -1644,18 +1650,31 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
             let params = chunk["function".len()..].trim_start();
             assert!(params.starts_with('('), "{target}: {params:?}");
             let arity = params[1..params.find(')').unwrap()].split(',').count();
-            assert_eq!(arity, 7, "{target}: segment field arity moved");
+            // K19: the chain root takes seven parameters; a chained field takes
+            // an eighth -- the previous part's decoded string.
+            let want = if positions[index] == 0 { 7 } else { 8 };
+            assert_eq!(arity, want, "{target}: segment field arity moved");
             chunks.push(chunk);
         }
         assert_eq!(chunks.len(), 3, "{target}: segment field count moved");
         let mut actual = Vec::new();
         for (part, chunk) in chunks.iter().enumerate() {
             let stub = if target.is_luau() { "\"[C]\"" } else { "{what=\"C\"}" };
+            // K19: a chained field is handed the previous part's decoded bytes,
+            // exactly as the entry wiring hands it the previous field's return
+            // value, so the emitted fold loop runs here rather than being only
+            // mirrored in Rust.
+            let position = positions[part];
+            let prev_arg = if position == 0 {
+                String::new()
+            } else {
+                format!(",\"{}\"", lua_escape_string(&chained[position - 1]))
+            };
             let harness = format!(
                 "local SB=string.byte;local NCH=string.char;local TC=table.concat;\
 local E=function() error(\"boom\") end;local DB=true;local LS=function() end;\
 local GI=function() return {stub} end;local F={chunk};\
-local r=F(E,SB,NCH,TC,DB,GI,LS);local h=\"\";\
+local r=F(E,SB,NCH,TC,DB,GI,LS{prev_arg});local h=\"\";\
 for i=1,#r do h=h..string.format(\"%02x\",SB(r,i)) end;print(h)"
             );
             let workspace = native::Workspace::new();
@@ -1726,3 +1745,111 @@ fn k9a_label_draws_never_emit_nice_values() {
     assert!(slot_min < 10 && slot_max > 89, "{slot_min} {slot_max}");
     assert!(state_min < 200 && state_max > 899, "{state_min} {state_max}");
 }
+
+#[test]
+fn k19_digit_rotation_is_an_exact_inverse_at_every_rotation() {
+    // The encoder writes digit d at alphabet slot (d - ro) mod 86 and the
+    // decoder reads slot j as digit (j + ro) mod 86, so the two must be exact
+    // inverses at every rotation: otherwise a segment would decode against a
+    // different table than the one it was written with. A rotation must also
+    // be size-neutral -- it re-keys the text, it does not lengthen it.
+    let alphabet = base86_image_alphabet(7001);
+    for seed in [0u64, 1, 2, 7, 999_983] {
+        let bytes: Vec<u8> = (0..4096u32)
+            .map(|index| index.wrapping_mul(2_654_435_761 >> 13) as u8)
+            .collect();
+        for rotation in 0..86u64 {
+            let text = base86_encode_mixed_ro(&bytes, &alphabet, &mut crate::random::Prng::sfc(seed), rotation);
+            assert_eq!(
+                base86_decode_mixed_ro(&text, &alphabet, rotation).unwrap(),
+                bytes,
+                "seed {seed} rotation {rotation}"
+            );
+        }
+        let plain = base86_encode_mixed_ro(&bytes, &alphabet, &mut crate::random::Prng::sfc(seed), 0);
+        let turned = base86_encode_mixed_ro(&bytes, &alphabet, &mut crate::random::Prng::sfc(seed), 5);
+        assert_eq!(plain.len(), turned.len(), "rotation changed the footprint");
+        assert_ne!(plain, turned, "rotation is cosmetic");
+        match base86_decode_mixed_ro(&turned, &alphabet, 0) {
+            Ok(_) => panic!("seed {seed}: a stale rotation still decoded the whole segment"),
+            Err(_) => {}
+        }
+    }
+}
+
+#[test]
+fn k19_segment_key_fold_loads_every_byte_and_the_length() {
+    // The fold is the only thing a later segment keys on, so it must stay in
+    // range, react to every sampled byte and to the length. That the emitted
+    // Lua computes the same value is proven elsewhere: the chained-segment
+    // harness gate executes the real field against Rust-mirror bytes, so any
+    // drift between this loop and the generated `RO=(RO+bb)*MM%r` fails there.
+    let base: Vec<u8> = (0..512u32).map(|index| (index % 251) as u8).collect();
+    let anchor = segment_key_fold(&base);
+    assert!(anchor < 86, "fold left the table range");
+    for index in [0usize, 1, 7, 63, 255, 383, 511] {
+        let mut edited = base.clone();
+        edited[index] = edited[index].wrapping_add(1);
+        assert!(segment_key_fold(&edited) < 86);
+        assert_ne!(segment_key_fold(&edited), anchor, "byte {index} is inert");
+    }
+    assert_ne!(
+        segment_key_fold(&base[..base.len() - 1]),
+        anchor,
+        "the folded length is inert"
+    );
+    let mut swapped = base.clone();
+    swapped.swap(11, 260);
+    assert_ne!(
+        segment_key_fold(&swapped),
+        anchor,
+        "a transposition inside the segment is invisible"
+    );
+}
+
+#[test]
+fn k19_an_edit_inside_the_head_segment_never_yields_a_different_accepted_stream() {
+    // The security claim in one gate: single-symbol edits anywhere in the chain
+    // root either stay invisible (they cannot, here) or kill the whole chain --
+    // never re-key it into a different payload that still passes. Sampled
+    // positions across the segment; the fail-closed half is the hard part.
+    for target in [Target::Lua51, Target::Luau] {
+        let data = compile("local function f(x)return x+1 end print(f(41))", target).unwrap();
+        let output = emit(&data, target, 7001).unwrap();
+        let alphabet = base86_image_alphabet(7001);
+        let mut segments = segment_literals(&output, target, 7001).unwrap();
+        let orders = chained_segment_orders(&segments, &alphabet);
+        assert_eq!(orders.len(), 1, "{target}: baseline chain not unique");
+        let baseline = orders[0].1.clone();
+        let head = orders[0].0[0];
+        let original = segments[head].clone();
+        let mut fatal = 0usize;
+        let mut sampled = 0usize;
+        for position in (0..original.len()).step_by((original.len() / 64).max(1)) {
+            let slot = alphabet
+                .iter()
+                .position(|&byte| byte == original[position])
+                .expect("segment symbols come from the alphabet");
+            let mut bad = original.clone();
+            bad[position] = alphabet[(slot + 1) % 86];
+            segments[head] = bad;
+            sampled += 1;
+            match chained_segment_orders(&segments, &alphabet) {
+                found if found.is_empty() => fatal += 1,
+                found => {
+                    assert_eq!(found.len(), 1, "{target}: an edit created a second order");
+                    assert_eq!(
+                        found[0].1, baseline,
+                        "{target} position {position}: an edit changed the accepted stream"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            fatal, sampled,
+            "{target}: {}/{} sampled edits silently decoded to the same stream",
+            fatal, sampled
+        );
+    }
+}
+

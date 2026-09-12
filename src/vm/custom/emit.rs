@@ -240,9 +240,17 @@ if d7+d8*65521~={fake_adler} then E()end;"
     let alphabet = base86_image_alphabet(seed);
     let mut transport_rng = crate::random::Prng::sfc(seed ^ 0x6b39_615f_7472_616e);
     // Byte-thirds split (order-preserving: part 0 holds the watermark head).
-    let third = marked.len() / 3;
-    let split = third + (marked.len() - third) / 2;
-    let parts = [&marked[..third], &marked[third..split], &marked[split..]];
+    let [head, middle] = transport_segment_bounds(marked.len());
+    let parts = [&marked[..head], &marked[head..middle], &marked[middle..]];
+    // K19 key feedback: every segment after the head rotates its digit table by
+    // a fold of the previous segment's decoded bytes. The rotation is baked
+    // nowhere in the script -- each segment recomputes it from the string the
+    // previous one returned -- so no segment can be decoded from its position,
+    // and a one-symbol edit inside an earlier segment re-keys every later one.
+    let mut seg_ro = [0u64; 3];
+    for part in 1..3 {
+        seg_ro[part] = segment_key_fold(parts[part - 1]);
+    }
     // The baked digit table rides as sub-12 fragments (never segment
     // candidates): the decoder concatenates them into the 86-byte ALPHA.
     let alpha_literal = {
@@ -262,7 +270,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
     crate::random::Prng::sfc(seed ^ 0x7365_676d_3373_6866).shuffle(&mut hold);
     let mut segment_fields = Vec::new();
     for part in 0..3 {
-        let text = base86_encode_mixed(parts[part], &alphabet, &mut transport_rng);
+        let text = base86_encode_mixed_ro(parts[part], &alphabet, &mut transport_rng, seg_ro[part]);
         assert!(
             text.len() >= 12,
             "K9a: segment too short for the length filter"
@@ -336,10 +344,27 @@ end;if i~=#S+1 then E()end;st={k_done};",
                 (k_done, "local rr=TC(o);g=nil;return rr;".to_owned()),
             ],
         );
+        // The head segment is the chain root and keeps the plain table build;
+        // later segments fold the previous part into `B` -- a slot this function
+        // already owns and overwrites before use -- so the feedback costs no new
+        // constant: neither the accumulator's zero nor a radix is spelled out.
+        let (prev_param, fold_into_b, val_build) = if part == 0 {
+            (
+                String::new(),
+                String::new(),
+                "local VAL={};for j=1,#ALPHA do VAL[SB(ALPHA,j)]=j-1 end;".to_owned(),
+            )
+        } else {
+            (
+                ",PR".to_owned(),
+                "for j=1,#PR do B=(B+SB(PR,j))*MM%r end;B=(B+#PR)%r;".to_owned(),
+                "local VAL={};for j=1,#ALPHA do VAL[SB(ALPHA,j)]=(j-1+B)%r end;".to_owned(),
+            )
+        };
         let mut body = format!(
-            "local ALPHA={alpha};local VAL={{}};for j=1,#ALPHA do VAL[SB(ALPHA,j)]=j-1 end;\
-local S=\"{literal}\";local r={c1}+{c2};local MM={m1}+{m2};local M24={a24}+{b24};\
-local o={{}};local B=0;local R=0;local pv=0;local i=1;local st={k_prefix};{machine}",
+            "local ALPHA={alpha};local S=\"{literal}\";local r={c1}+{c2};local MM={m1}+{m2};\
+local M24={a24}+{b24};local o={{}};local B=0;local R=0;local pv=0;local i=1;\
+{fold_into_b}{val_build}local st={k_prefix};{machine}",
             alpha = alpha_literal,
             literal = literal,
             c1 = c1,
@@ -350,23 +375,26 @@ local o={{}};local B=0;local R=0;local pv=0;local i=1;local st={k_prefix};{machi
             b24 = b24,
             k_prefix = k_prefix,
             machine = machine,
+            fold_into_b = fold_into_b,
+            val_build = val_build,
         );
-        body = slot_rewrite(
-            &mut structure,
-            &body,
-            &[
-                "ALPHA", "VAL", "S", "r", "MM", "M24", "o", "B", "R", "pv", "i", "st", "vv", "mm",
-                "bb", "cc", "w", "ww", "kk", "r1",
-            ],
-        );
+        let slots: Vec<&str> = vec![
+            "ALPHA", "VAL", "S", "r", "MM", "M24", "o", "B", "R", "pv", "i", "st", "vv", "mm",
+            "bb", "cc", "w", "ww", "kk", "r1",
+        ];
+        // `PR` stays a formal parameter: only `local` declarations get bound
+        // into scratch slots, so a name in this list would silently drop the
+        // incoming argument (the emitted body reads `#PR` directly).
+        body = slot_rewrite(&mut structure, &body, &slots);
         let mut chunk = String::new();
         write!(
             chunk,
-            "[{key}]=function(E,SB,NCH,TC,DB,GI,LS)local A={probe};{gate}\
+            "[{key}]=function(E,SB,NCH,TC,DB,GI,LS{prev_param})local A={probe};{gate}\
 local g={{}};{body}end,",
             key = keys[8 + hold[part]],
             probe = probe,
             gate = gate,
+            prev_param = prev_param,
             body = body,
         )
         .unwrap();
@@ -985,7 +1013,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         cn2 = probe_order[2] + 1,
     );
     let segment_stage = format!(
-        "Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);es={e_decode};",
+        "Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y1);Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y2);local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);es={e_decode};",
         keys[8 + hold[0]],
         keys[8 + hold[1]],
         keys[8 + hold[2]],

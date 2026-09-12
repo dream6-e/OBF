@@ -140,29 +140,50 @@ type AuditPins = (
 //      became long.
 //   M6 stays (0, 0): no repeated u32 word in the outer ciphertext, which is the
 //      one thing a re-keyed stream could have broken.
+// K19 (2026-09-12, segment key feedback: the digit table is rotated by a fold
+// of the previous segment) -- measured diff, all five load-bearing invariants
+// held: M1 stays 86 (alphabet radix), M2 stays (1372,1,0,2), M3a stays
+// [0,2,0,...] (only the audited getfenv capture), M3b stays (233, ...,
+// 4503599627370496) (no new big literal, no new magnitude), M4b stays 0 (the
+// fold adds no non-integer token, i.e. it stays exact integer arithmetic on this
+// target), M6 stays (0,0) (no repeated u32 word in the outer ciphertext -- the
+// one thing a re-keyed stream could have broken).
+// What moved, and why:
+//   M4 top-12 census: `1` 502 -> 504 is exactly the two `for j=1,#PR` fold loops
+//      (the accumulator reuses the segment's existing `B` slot, so no extra `0`
+//      is spelled and `0` stays 436 -- that reuse is also why the payload table's
+//      field census stayed inside 25..=27 instead of being widened); `5` 78 -> 81
+//      is the re-keyed alphabet moving symbol runs, everything else is untouched.
+//      Tried first and rolled back: a dedicated `RO` local added two more `0`s,
+//      the constant pool lifted one more number, and the field census hit 28.
+//   M5 (5, 1794) -> (5, 1782) and M7 [512,508,506,134,134]/372 ->
+//      [507,506,501,134,134]/367: the rotated alphabet permutes symbol runs, so
+//      some long strings got 3-12 bytes shorter while the whole script grew by
+//      158 B (101,391 -> 101,549: the two fold loops and the extra parameter).
+//      The 134/134 pair is untouched, so no literal crossed into "long".
 const PINS_LUA51_7001: AuditPins = (
     86,
     (1372, 1, 0, 2),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (233, 9007492399384758, 4503599627370496),
     [
-        (1, 502),
+        (1, 504),
         (0, 436),
         (2, 236),
         (256, 205),
         (3, 154),
         (4, 127),
         (15, 86),
-        (5, 78),
+        (5, 81),
         (28, 71),
         (7, 64),
         (8, 63),
         (11, 62),
     ],
     0,
-    (5, 1794),
+    (5, 1782),
     (0, 0),
-    ([512, 508, 506, 134, 134], 372),
+    ([507, 506, 501, 134, 134], 367),
 );
 
 // K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
@@ -235,29 +256,40 @@ const PINS_LUA51_7001: AuditPins = (
 // 42 -> 39 non-integer tokens, and M5/M7 follow the long-string spans
 // (1509 -> 1809 bytes across 5 singletons; M7 top-5 419/412/410 -> 514/514/513
 // with the 134/134 pair untouched, so no literal crossed into "long").
+// K19 (same change, Luau side): M1/M2/M3a/M3b/M6 all unchanged (225 big
+// literals with the same maximum, no repeated u32 word, only the audited
+// capture), M4b stays 39 non-integer tokens -- the fold loop adds no new float
+// spelling here either; those 39 are the pre-existing `/` forms. M4's census
+// gains exactly the two `for j=1,#PR` loops (`1` 542 -> 544) plus one `2`, and
+// `0` is untouched at 418 because the accumulator reuses the segment's own `B`
+// slot; `89` 64 -> 70 is the re-keyed alphabet moving symbol runs, which also
+// reorders the top 12 (`89` now precedes `8`). M5 (5, 1809) -> (5, 1840) and
+// M7 [514,514,513,134,134]/379 -> [532,526,514,134,134]/380: the script grew
+// 268 B (110,877 -> 111,145) and the long-string spans moved with the re-keyed
+// stream; the 134/134 pair is untouched, so nothing crossed the length class.
 const PINS_LUAU_7351: AuditPins = (
     86,
     (1390, 1, 2, 0),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (225, 9007478252902593, 4503599627370496),
     [
-        (1, 542),
+        (1, 544),
         (0, 418),
-        (2, 247),
+        (2, 248),
         (256, 200),
         (3, 172),
         (4, 167),
         (5, 81),
+        (89, 70),
         (8, 65),
-        (89, 64),
         (18, 58),
         (19, 55),
         (42, 53),
     ],
     39,
-    (5, 1809),
+    (5, 1840),
     (0, 0),
-    ([514, 514, 513, 134, 134], 379),
+    ([532, 526, 514, 134, 134], 380),
 );
 
 /// Value of an integer number token in any spelling the emitter produces
