@@ -36,9 +36,14 @@ fn inner_ciphertext_words_have_no_periodic_repeats() {
     // words in it moved (lua51 975 -> 997, luau 778 -> 799). The security-relevant halves are
     // pinned at zero and stay zero: no repeated word, no common divisor among
     // repeat distances.
+    // Re-recorded 2026-09-11 for K18: the sampler became bias-free (multiply-shift
+    // instead of a remainder) and the domains split across three mixing families,
+    // so keyed varint lengths shift again (lua51 997 -> 978, luau 799 -> below).
+    // Word *count* is a length artifact; both zero halves are unchanged, and
+    // `stream_word_stats` still sees no repeat.
     for (target, seed, expected) in [
-        (Target::Lua51, 7001u64, (997usize, 0usize, 0u32)),
-        (Target::Luau, 7351u64, (799usize, 0usize, 0u32)),
+        (Target::Lua51, 7001u64, (978usize, 0usize, 0u32)),
+        (Target::Luau, 7351u64, (982usize, 0usize, 0u32)),
     ] {
         let data = compile(AUDIT_PROBE, target).unwrap();
         let output = emit(&data, target, seed).unwrap();

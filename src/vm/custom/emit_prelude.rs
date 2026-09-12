@@ -108,7 +108,7 @@ pub(crate) fn emit_prelude(
     let mut var_of: std::collections::BTreeMap<&str, String> = Default::default();
     let mut definitions: Vec<String> = Vec::new();
     for (index, name) in hidden.iter().enumerate() {
-        let expression = if structure.next_u64() % 100 < 92 {
+        let expression = if structure.index(100) < 92 {
             let indexes = name
                 .chars()
                 .map(|c| slot[&c].to_string())

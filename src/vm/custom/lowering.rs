@@ -30,15 +30,15 @@ pub(crate) const OPERAND_BINDING_FORMS: usize = 4;
 pub(crate) fn operand_layout(seed: u64) -> OperandLayout {
     // This stream is independent of section/layout randomization. Adding a new
     // handler does not silently perturb the ABI selected for existing ids.
-    let mut random = crate::random::Prng::new(seed ^ 0x6f70_6572_616e_6431);
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6f70_6572_616e_6431);
     OperandLayout {
-        family_multiplier: [1, 3][(random.next_u64() % 2) as usize],
-        family_add: (random.next_u64() % OPERAND_LAYOUT_FAMILIES as u64) as u8,
-        rotation_multiplier: [1, 2][(random.next_u64() % 2) as usize],
-        rotation_add: (random.next_u64() % OPERAND_LAYOUT_ROTATIONS as u64) as u8,
+        family_multiplier: [1, 3][(random.index(2)) as usize],
+        family_add: (random.index(OPERAND_LAYOUT_FAMILIES)) as u8,
+        rotation_multiplier: [1, 2][(random.index(2)) as usize],
+        rotation_add: (random.index(OPERAND_LAYOUT_ROTATIONS)) as u8,
         // 2,731 is prime, so every non-zero multiplier is invertible.
-        lane_multiplier: (1 + random.next_u64() % (OPERAND_LAYOUT_LANES as u64 - 1)) as u16,
-        lane_add: (random.next_u64() % OPERAND_LAYOUT_LANES as u64) as u16,
+        lane_multiplier: (1 + random.index(OPERAND_LAYOUT_LANES - 1)) as u16,
+        lane_add: (random.index(OPERAND_LAYOUT_LANES)) as u16,
     }
 }
 
@@ -146,15 +146,15 @@ pub(crate) const REGISTER_LAYOUT_UNIQUE_SPAN: usize =
     REGISTER_LAYOUT_FAMILIES * REGISTER_LAYOUT_STRIDES * REGISTER_LAYOUT_SHIFTS;
 
 pub(crate) fn register_layout(seed: u64) -> RegisterLayout {
-    let mut random = crate::random::Prng::new(seed ^ 0x7265_6769_7374_6572);
+    let mut random = crate::random::Prng::lcg(seed ^ 0x7265_6769_7374_6572);
     RegisterLayout {
-        family_multiplier: [1, 3][(random.next_u64() % 2) as usize],
-        family_add: (random.next_u64() % REGISTER_LAYOUT_FAMILIES as u64) as u8,
+        family_multiplier: [1, 3][(random.index(2)) as usize],
+        family_add: (random.index(REGISTER_LAYOUT_FAMILIES)) as u8,
         // 127 and 257 are prime, so all non-zero multipliers are invertible.
-        stride_multiplier: (1 + random.next_u64() % 126) as u8,
-        stride_add: (random.next_u64() % REGISTER_LAYOUT_STRIDES as u64) as u8,
-        shift_multiplier: (1 + random.next_u64() % 256) as u16,
-        shift_add: (random.next_u64() % REGISTER_LAYOUT_SHIFTS as u64) as u16,
+        stride_multiplier: (1 + random.index(126)) as u8,
+        stride_add: (random.index(REGISTER_LAYOUT_STRIDES)) as u8,
+        shift_multiplier: (1 + random.index(256)) as u16,
+        shift_add: (random.index(REGISTER_LAYOUT_SHIFTS)) as u16,
     }
 }
 
@@ -282,7 +282,7 @@ pub(crate) struct MetadataPositions {
 pub(crate) fn field_layout(seed: u64) -> FieldLayout {
     // Independent stream: adding a field never perturbs operand, register,
     // section, or transport randomization.
-    let mut random = crate::random::Prng::new(seed ^ 0x6669_656c_645f_3133);
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6669_656c_645f_3133);
     let units_24 = [1u8, 5, 7, 11, 13, 17, 19, 23];
     let mut meta_u32 = [0u8, 1, 2, 3];
     random.shuffle(&mut meta_u32);
@@ -293,16 +293,16 @@ pub(crate) fn field_layout(seed: u64) -> FieldLayout {
     let mut tuple = [0u8, 1, 2];
     random.shuffle(&mut tuple);
     FieldLayout {
-        record_mul: units_24[(random.next_u64() % units_24.len() as u64) as usize],
-        record_add: (random.next_u64() % FIELD_RECORD_ORDERS as u64) as u8,
-        segment_mul: [1u8, 5][(random.next_u64() % 2) as usize],
-        segment_add: (random.next_u64() % FIELD_SEGMENT_ORDERS as u64) as u8,
-        dict_flipped: random.next_u64() % 2 == 1,
+        record_mul: units_24[(random.index(units_24.len())) as usize],
+        record_add: (random.index(FIELD_RECORD_ORDERS)) as u8,
+        segment_mul: [1u8, 5][(random.index(2)) as usize],
+        segment_add: (random.index(FIELD_SEGMENT_ORDERS)) as u8,
+        dict_flipped: random.index(2) == 1,
         // ISA14 pool draws stay last: every earlier draw (and every
         // pre-existing layout value) is unchanged.
-        pool_mul: [1u8, 5][(random.next_u64() % 2) as usize],
-        pool_add: (random.next_u64() % FIELD_POOL_ORDERS as u64) as u8,
-        pools_flipped: random.next_u64() % 2 == 1,
+        pool_mul: [1u8, 5][(random.index(2)) as usize],
+        pool_add: (random.index(FIELD_POOL_ORDERS)) as u8,
+        pools_flipped: random.index(2) == 1,
         meta_u32,
         meta_u16,
         meta_u8,

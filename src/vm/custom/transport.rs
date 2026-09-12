@@ -22,7 +22,7 @@ pub(crate) const BASE86_QUOTE_HOSTILE: [u8; 3] = [b'"', b'\'', b'\\'];
 pub(crate) const BASE86_DROPS: usize = 10;
 
 pub fn base86_image_alphabet(seed: u64) -> [u8; 86] {
-    let mut rng = crate::random::Prng::new(seed ^ 0x3861_6c70_6861_6265);
+    let mut rng = crate::random::Prng::sfc(seed ^ 0x3861_6c70_6861_6265);
     let mut pool: Vec<u8> = (BASE86_POOL_LO..=BASE86_POOL_HI)
         .filter(|byte| !matches!(*byte, 28 | 29 | 125 | 126))
         .filter(|byte| !BASE86_QUOTE_HOSTILE.contains(byte))

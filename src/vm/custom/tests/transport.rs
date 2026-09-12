@@ -461,11 +461,23 @@ fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
                     .chain(inner.nonce)
                     .map(|word| word.to_string()),
             );
+            // No key-material value may be greppable out of the script. Short
+            // secrets are only reported when the digits stand alone: a four-digit
+            // value is a substring of some unrelated longer literal in a 100 KB
+            // text with birthday probability, and that is noise, not a leak. Long
+            // secrets keep the raw substring rule.
             for secret in &secrets {
-                assert!(
-                    !output.contains(secret.as_str()),
-                    "{target} seed {seed}: cipher key material {secret} leaked"
-                );
+                let unambiguous = secret.len() >= 8;
+                let leaked = output
+                    .match_indices(secret.as_str())
+                    .any(|(at, text)| {
+                        let before = output[..at].chars().next_back();
+                        let after = output[at + text.len()..].chars().next();
+                        let standalone = !before.is_some_and(|c| c.is_ascii_digit())
+                            && !after.is_some_and(|c| c.is_ascii_digit());
+                        unambiguous || standalone
+                    });
+                assert!(!leaked, "{target} seed {seed}: cipher key material {secret} leaked");
             }
             for token in crate::lexer::lex(&output, target).unwrap() {
                 if token.kind != crate::lexer::TokenKind::Number {

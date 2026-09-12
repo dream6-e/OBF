@@ -20,7 +20,16 @@ VM_BOUND_MS=${OBF_BENCH_VM_BOUND_MS:-1500}
 # (fixed goldens 98,889/109,049 B), so this keeps ~2% of growth headroom and
 # still trips on a real size regression. OBF_BENCH_SCRIPT_CAP=off suspends this
 # gate only, for a construction window; the strict LZW-frame contract never is.
-SCRIPT_CAP=${OBF_BENCH_SCRIPT_CAP:-120000}
+#
+# 2026-09-11 K18 construction window (user instruction: 完成前关闭体积门): the
+# default is now `off`, so the 120,000 B pin is reported but not enforced while
+# failure-path diversification, PRNG-family work and the scatter batch land. The
+# pin is NOT deleted: 120000 stays as CAP_PIN, and a runaway ceiling at 1.5x the
+# pin still fails the run so an explosion cannot hide inside the window. Restore
+# by setting the default back to ${OBF_BENCH_SCRIPT_CAP:-$CAP_PIN}.
+CAP_PIN=120000
+CAP_RUNAWAY=180000
+SCRIPT_CAP=${OBF_BENCH_SCRIPT_CAP:-off}
 
 LUA51_VM="$ROOT/vm_lua51.out.lua"
 LUAU_VM="$ROOT/vm_luau.out.lua"
@@ -43,12 +52,24 @@ best_ms() { # <runner> <script>
 }
 
 check() { # <name> <vm> <src> <runner> <script-cap>
-    local size cap vm_ms native_ms
+    local size cap vm_ms native_ms report
     size=$(wc -c <"$2")
     cap=$5
-    if [[ $cap != off && $size -gt $cap ]]; then
-        echo "[bench] error: $1 golden script is ${size}B, over the independent ${cap}B budget" >&2
-        exit 1
+    if [[ $cap == off ]]; then
+        # Construction window: the pin is reported, never enforced. A runaway
+        # ceiling still aborts, so a size explosion cannot hide in the window.
+        if (( size > CAP_RUNAWAY )); then
+            echo "[bench] error: $1 golden script is ${size}B, over the ${CAP_RUNAWAY}B runaway ceiling (pin ${CAP_PIN}B, gate suspended)" >&2
+            exit 1
+        fi
+        echo "[bench] WARN $1 whole-script gate suspended (pin ${CAP_PIN}B, measured ${size}B)"
+        report="${size}/${CAP_PIN}B(gate off)"
+    else
+        if [[ $size -gt $cap ]]; then
+            echo "[bench] error: $1 golden script is ${size}B, over the independent ${cap}B budget" >&2
+            exit 1
+        fi
+        report="${size}/${cap}B"
     fi
     vm_ms=$(best_ms "$4" "$2")
     native_ms=$(best_ms "$4" "$3")
@@ -56,8 +77,8 @@ check() { # <name> <vm> <src> <runner> <script-cap>
         echo "[bench] error: $1 VM best run ${vm_ms}ms exceeds the ${VM_BOUND_MS}ms bound" >&2
         exit 1
     fi
-    printf '[bench] %s script-size=%s/%sB vm-best=%sms native-best=%sms ratio=%.1fx\n' \
-        "$1" "$size" "$cap" "$vm_ms" "$native_ms" \
+    printf '[bench] %s script-size=%s vm-best=%sms native-best=%sms ratio=%.1fx\n' \
+        "$1" "$report" "$vm_ms" "$native_ms" \
         "$(awk -v a="$vm_ms" -v b="$native_ms" 'BEGIN{if(b==0)b=1;printf "%.1f", a/b}')"
 }
 

@@ -116,29 +116,53 @@ type AuditPins = (
 //                              tokens only, so the image blob, the string census
 //                              and the outer-ciphertext statistics cannot move --
 //                              which is also the check that no payload byte did.
+// 2026-09-11 K18 (bias-free sampler + per-family streams + respelled validator
+// guards) -- re-recorded from the measured surface, with the attribution the
+// header asks for:
+//   M1 stays 86: the transport alphabet is still exactly 86 symbols, and M1 is
+//      the one measure that would notice a radix or pool change.
+//   M2 (1413, 0, 1, 3) -> (1372, 1, 0, 2): the *stream* is 41 bytes shorter
+//      because the private image shrank (see the k7 image-length pin in
+//      tests/bitops.rs: 1,141 -> 1,118); the three residues are what an
+//      analyst would use to guess a fixed block size, and no residue became 0
+//      that was not already free to be - one zero moved from mod 3 to mod 4.
+//   M3a stays [0, 2, 0, ...]: still only the audited getfenv capture.
+//   M3b (228, ..., 4503599627370496) -> (233, ...): five more big literals,
+//      from the guard respellings that spell a difference (`n()-66~=0`) and
+//      from the LCG-routed structure stream picking new folded forms; max is
+//      unchanged, i.e. no new magnitude.
+//   M4 top-12 census moves with the same two causes (the `97`/`6` entries
+//      leave the top 12, `15`/`28` enter), and M4b stays 0 on this target: no
+//      non-integer number token appeared.
+//   M5 (5, 1842) -> (5, 1794) and M7 [527,525,522,..]/388 -> [512,508,506,..]/372
+//      are the image shrinking, exactly as K17's entry described: embedding and
+//      length, not new payload. The 134/134 pair is untouched, so no literal
+//      became long.
+//   M6 stays (0, 0): no repeated u32 word in the outer ciphertext, which is the
+//      one thing a re-keyed stream could have broken.
 const PINS_LUA51_7001: AuditPins = (
     86,
-    (1413, 0, 1, 3),
+    (1372, 1, 0, 2),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (228, 9007485976789641, 4503599627370496),
+    (233, 9007492399384758, 4503599627370496),
     [
-        (1, 482),
-        (0, 420),
-        (2, 230),
-        (256, 203),
-        (3, 162),
-        (4, 140),
-        (97, 88),
-        (5, 79),
-        (11, 79),
-        (14, 70),
-        (6, 68),
-        (8, 62),
+        (1, 502),
+        (0, 436),
+        (2, 236),
+        (256, 205),
+        (3, 154),
+        (4, 127),
+        (15, 86),
+        (5, 78),
+        (28, 71),
+        (7, 64),
+        (8, 63),
+        (11, 62),
     ],
     0,
-    (5, 1842),
+    (5, 1794),
     (0, 0),
-    ([527, 525, 522, 134, 134], 388),
+    ([512, 508, 506, 134, 134], 372),
 );
 
 // K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
@@ -202,29 +226,38 @@ const PINS_LUA51_7001: AuditPins = (
 // M4b stays 42 and M3b stays (244, 9007484541350310, 4503599627370496), so no
 // digit-run census moved: the alphabet permutation did not create or destroy any
 // number-looking token on this target either.
+// 2026-09-11 K18 luau config, measured: M1 stays 86 and M6 stays (0, 0); M2
+// (1134, 0, 2, 4) -> (1390, 1, 2, 0) is the same layout shift as on lua51 but in
+// the other direction (the keyed pool records got longer here), and the zero
+// residue moved from mod 3 to mod 5 - M2 pins the three residues, it is not the
+// divisibility gate, which lives in product_audit check9 (`fail` stays false).
+// M3b's count falls 244 -> 225 with max unchanged, M4's census reorders, M4b
+// 42 -> 39 non-integer tokens, and M5/M7 follow the long-string spans
+// (1509 -> 1809 bytes across 5 singletons; M7 top-5 419/412/410 -> 514/514/513
+// with the 134/134 pair untouched, so no literal crossed into "long").
 const PINS_LUAU_7351: AuditPins = (
     86,
-    (1134, 0, 2, 4),
+    (1390, 1, 2, 0),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (244, 9007484541350310, 4503599627370496),
+    (225, 9007478252902593, 4503599627370496),
     [
-        (1, 480),
-        (0, 415),
-        (2, 225),
-        (256, 190),
-        (4, 152),
-        (3, 149),
-        (5, 110),
-        (13, 99),
-        (52, 96),
-        (76, 65),
-        (38, 64),
-        (8, 58),
+        (1, 542),
+        (0, 418),
+        (2, 247),
+        (256, 200),
+        (3, 172),
+        (4, 167),
+        (5, 81),
+        (8, 65),
+        (89, 64),
+        (18, 58),
+        (19, 55),
+        (42, 53),
     ],
-    42,
-    (5, 1509),
+    39,
+    (5, 1809),
     (0, 0),
-    ([419, 412, 410, 134, 134], 276),
+    ([514, 514, 513, 134, 134], 379),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

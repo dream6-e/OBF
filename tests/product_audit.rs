@@ -141,38 +141,85 @@ struct AuditPins {
 //              (86 distinct, span 99) -- the radix and the contiguity margin are
 //              intact -- and check9's blob stream is identical, so the payload
 //              bytes did not move: A1/A2 re-spell the embedding, nothing else.
+// 2026-09-11 K18 (bias-free sampler + three mixing families + respelled validator
+// guards) -- measured lua51 diff, five fields, every `fail` flag still false:
+//   check1   (256, 208) -> (256, 212) and (2147483647, 29) -> (24, ...), plus a
+//              new entry (4294967296, 3). This census counts raw *text* occurrences
+//              of the audit's nice values, not tokens: the guard respellings of ①
+//              (`79-n()~=0`) and the LCG-routed fold choices move which spellings
+//              a fold keeps as a literal, and `2^32` crossed the ">2 occurrences"
+//              listing by one. It is the same 2^32 the IEEE-754 read-back arms
+//              already needed (K16 recorded that folding those into a field read
+//              does not pay for itself), so no *new* constant class entered the script.
+//   check4   (3, 65535, false) -> (2, 16777215, false): two distinct thresholds
+//              instead of three, the larger one now in the 2^24 class. The check
+//              guards threshold *density* (`max < 3 * distinct` would leak a state
+//              count); the ratio here is 8.4M:1, so the bound is nowhere close.
+//   check5   still 11 classes. The top-8 list reorders and one family changes
+//              identity: `X=N*X%N` 21 -> 17 while a new `X[N]=NXX[N]==NXX[N]=N`
+//              (7) appears. That is ① working as intended - the normalizer maps the
+//              respelled `not(a==b)` / `a-b~=0` guards into different template
+//              families, i.e. the head block no longer collapses onto one shape.
+//   check8   gcd stays 1 with 49 -> 51 pairs: fewer than 52 arithmetic pairs, no
+//              new regularity.
+//   check9   (18777, 2, false) -> (19017, 2, false): +240 bytes in the long-string
+//              stream, because the private image re-layouted (see the
+//              k7 image-length pin: 1,141 -> 1,118 on this config). Length, not
+//              structure: check2 still reads (86 distinct, span 99).
 fn pins_lua51() -> AuditPins {
     AuditPins {
-        check1_nice_fails: vec![(86, 4), (256, 208), (65536, 3), (2147483647, 29)],
+        check1_nice_fails: vec![
+            (86, 4),
+            (256, 212),
+            (65536, 3),
+            (2147483647, 24),
+            (4294967296, 3),
+        ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
-        check4_thresholds: (3, 65535, false),
+        check4_thresholds: (2, 16777215, false),
         check5_templates: (
             11,
             vec![
-                ("X=N*X%N".to_string(), 21),
                 ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
+                ("X=N*X%N".to_string(), 17),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
                 ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
-                (
-                    "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
-                    6,
-                ),
+                ("X[N]=NXX[N]==NXX[N]=N".to_string(), 7),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 49),
-        check9_stream: (18777, 2, false),
+        check8_literal_gcd: (1, 51),
+        check9_stream: (19017, 2, false),
     }
 }
 
+// 2026-09-11 K18 (bias-free sampler + three families + respelled guards) --
+// measured Luau diff, every `fail` flag still false:
+//   check1   (256, 196) -> (256, 201) and (2147483647, 24) -> (27): raw-text
+//              occurrences of the audit's nice values move with the fold choices
+//              the LCG-routed structure stream makes; no new value enters the list.
+//   check4   (2, 65535, false) -> (1, 65535, false). One distinct *literal*
+//              threshold survives the census because ① respelled part of the head
+//              block into side-by-side forms (`not(a==b)`, `a-b~=0`) that carry no
+//              bound literal at all - the tree still splits, it just stopped
+//              spelling every split as `< literal`. The guarded property is density
+//              (`max < 3 * distinct`), nowhere near firing: max is 65,535.
+//   check5   11 -> 12 template classes with `X=N*X%N` 16 -> 17: the normalizer now
+//              separates a family it used to merge. That is ① landing - the head
+//              block is measurably less uniform than before.
+//   check8   (1, 57) -> (1, 59): gcd still 1, no new arithmetic regularity.
+//   check9   (24126, 1, false) -> (23738, 3, false): the long-string stream is
+//              388 B shorter (the Luau private image re-layouted, 870 -> 1,126 in
+//              tests/bitops.rs) and its mod-5 residue moved 1 -> 3, so the
+//              divisibility lint still sees a length that is not a multiple of 5.
 // 2026-09-11 K14 (validator dispatch tree), Luau pin: `86` 7 -> 5 and `256`
 // 177 -> 187 are the bucket split points moving out of the radix class and into
 // the byte class; check5 already sat at 12 classes and its top-8 counts are
@@ -196,21 +243,21 @@ fn pins_luau() -> AuditPins {
     AuditPins {
         check1_nice_fails: vec![
             (86, 6),
-            (256, 196),
+            (256, 201),
             (65536, 3),
             (16777216, 4),
-            (2147483647, 24),
+            (2147483647, 27),
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
-        check4_thresholds: (2, 65535, false),
+        check4_thresholds: (1, 65535, false),
         check5_templates: (
-            11,
+            12,
             vec![
                 ("X[N]=N".to_string(), 19),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
-                ("X=N*X%N".to_string(), 16),
+                ("X=N*X%N".to_string(), 17),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
@@ -225,8 +272,8 @@ fn pins_luau() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 57),
-        check9_stream: (24126, 1, false),
+        check8_literal_gcd: (1, 59),
+        check9_stream: (23738, 3, false),
     }
 }
 

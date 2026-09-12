@@ -11,14 +11,14 @@ pub(crate) struct CipherParams {
 pub(crate) fn cipher_params(seed: u64) -> CipherParams {
     const MULTIPLIERS: [u64; 3] = [16_807, 48_271, 65_539];
     const MIXES: [u64; 4] = [31, 33, 37, 41];
-    let mut random = crate::random::Prng::new(seed ^ 0x616c_676f_7661_7237);
+    let mut random = crate::random::Prng::sfc(seed ^ 0x616c_676f_7661_7237);
     CipherParams {
-        outer: MULTIPLIERS[(random.next_u64() % MULTIPLIERS.len() as u64) as usize],
-        mix: MIXES[(random.next_u64() % MIXES.len() as u64) as usize],
+        outer: MULTIPLIERS[random.index(MULTIPLIERS.len())],
+        mix: MIXES[random.index(MIXES.len())],
         probe_rounds: [
-            3 + (random.next_u64() % 7) as u32,
-            3 + (random.next_u64() % 7) as u32,
-            3 + (random.next_u64() % 7) as u32,
+            3 + random.index(7) as u32,
+            3 + random.index(7) as u32,
+            3 + random.index(7) as u32,
         ],
     }
 }
@@ -40,8 +40,8 @@ pub(crate) struct FrameParams {
 }
 
 pub(crate) fn frame_params(seed: u64) -> FrameParams {
-    let mut random = crate::random::Prng::new(seed ^ 0x6672_616d_6532_5f32);
-    let odd = |random: &mut crate::random::Prng| 3 + 2 * (random.next_u64() % 31);
+    let mut random = crate::random::Prng::sfc(seed ^ 0x6672_616d_6532_5f32);
+    let odd = |random: &mut crate::random::Prng| 3 + 2 * random.index(31) as u64;
     let mut key_coefficients = [[0u64; 5]; 2];
     for row in &mut key_coefficients {
         for coefficient in row {
@@ -51,13 +51,13 @@ pub(crate) fn frame_params(seed: u64) -> FrameParams {
     FrameParams {
         key_coefficients,
         key_salts: [
-            random.next_u64() % 2_147_483_646,
-            random.next_u64() % 2_147_483_646,
+            random.index(2_147_483_646) as u64,
+            random.index(2_147_483_646) as u64,
         ],
-        descriptor_salt: random.next_u64() % 65_536,
-        cookie_salt: random.next_u64() % 4_294_967_296,
-        tag_salt: random.next_u64() % 4_294_967_296,
-        padding_salt: random.next_u64() % 65_536,
+        descriptor_salt: random.index(65_536) as u64,
+        cookie_salt: random.index(4_294_967_296) as u64,
+        tag_salt: random.index(4_294_967_296) as u64,
+        padding_salt: random.index(65_536) as u64,
     }
 }
 
@@ -292,12 +292,12 @@ pub(crate) fn runtime_control_mask(shares: &[u64; 3]) -> u64 {
 }
 
 pub(crate) fn perm_indices(seed: u64) -> [usize; 3] {
-    let mut random = crate::random::Prng::new(seed ^ 0x7874_6572_6d37_7333);
+    let mut random = crate::random::Prng::sfc(seed ^ 0x7874_6572_6d37_7333);
     let mut used = std::collections::BTreeSet::new();
     let mut picks = [0usize; 3];
     for pick in &mut picks {
         loop {
-            let index = (random.next_u64() % 64) as usize;
+            let index = random.index(64);
             if used.insert(index) {
                 *pick = index;
                 break;

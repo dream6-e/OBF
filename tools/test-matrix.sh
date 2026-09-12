@@ -9,6 +9,13 @@ cd "$ROOT"
 # worst case (Lua 5.1 100,794 B / Luau 111,528 B over 10 seeds, K13c-1). To suspend it for
 # a construction window, export OBF_BENCH_SCRIPT_CAP=off explicitly; the LZW
 # frame < private semantic bytecode contract is never suspended.
+#
+# 2026-09-11 K18 window: that suspension is exported for the whole run, by user
+# instruction ("在完成前关闭体积门"), so tools/bench-vm.sh and the Rust budget test
+# in src/vm/custom/tests/semantic.rs take the same switch. Delete the export to
+# restore enforcement; the pin itself stays in both places (CAP_PIN / 120_000).
+export OBF_BENCH_SCRIPT_CAP=off
+echo '[matrix] NOTE whole-script size gate suspended for the K18 construction window (pin 120000B kept, not enforced)'
 
 # Permanent maintainability gate: implementation source files above 80 KiB
 # must be split without changing generated output. Checked-in generated Lua

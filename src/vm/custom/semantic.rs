@@ -456,7 +456,7 @@ fn intern_recipe(
 
 fn random_nonzero_u16(random: &mut crate::random::Prng, used: &mut BTreeSet<u16>) -> u16 {
     loop {
-        let value = 1 + (random.next_u64() % u64::from(u16::MAX)) as u16;
+        let value = 1 + random.index(u64::from(u16::MAX) as usize) as u16;
         if used.insert(value) {
             return value;
         }
@@ -490,7 +490,7 @@ fn recipe_token_layers(
         };
         let add = random.next_u64() as u16;
         let coefficients: [u16; 5] =
-            std::array::from_fn(|_| 1 + (random.next_u64() % u64::from(u16::MAX)) as u16);
+            std::array::from_fn(|_| 1 + random.index(u64::from(u16::MAX) as usize) as u16);
         RecipeTokenLayer {
             multiplier,
             inverse: inverse_odd_u16(multiplier),
@@ -568,7 +568,7 @@ fn edge_token_layers(random: &mut crate::random::Prng) -> [EdgeTokenLayer; EDGE_
             }
         };
         let coefficients: [u16; 4] =
-            std::array::from_fn(|_| 1 + (random.next_u64() % u64::from(u16::MAX)) as u16);
+            std::array::from_fn(|_| 1 + random.index(u64::from(u16::MAX) as usize) as u16);
         EdgeTokenLayer {
             multiplier,
             inverse: inverse_odd_u16(multiplier),
@@ -633,9 +633,9 @@ fn add_decoy_prototypes(program: &mut Program, random: &mut crate::random::Prng)
     if real_count == 0 || real_count > usize::from(u16::MAX) - 4 {
         return 0;
     }
-    let count = 2 + (random.next_u64() % 3) as usize;
+    let count = 2 + (random.index(3)) as usize;
     let first = real_count;
-    let root_parent = (random.next_u64() % real_count as u64) as usize;
+    let root_parent = (random.index(real_count)) as usize;
     for offset in 0..count {
         let id = first + offset;
         let parent = if offset == 0 { root_parent } else { id - 1 };
@@ -650,7 +650,7 @@ fn add_decoy_prototypes(program: &mut Program, random: &mut crate::random::Prng)
             ])
         } else {
             constants.push(Constant::Number(
-                (1.0 + (random.next_u64() % 1024) as f64).to_bits(),
+                (1.0 + (random.index(1024)) as f64).to_bits(),
             ));
             Word([Opcode::Constant as u8, 0, 0, 0])
         };
@@ -757,7 +757,7 @@ fn choose_bundle(
     let max = (limit - pc).min(MAX_BUNDLE_WORDS);
     let mut lengths: Vec<usize> = (2..=max).collect();
     random.shuffle(&mut lengths);
-    lengths.sort_by_key(|length| std::cmp::Reverse(*length + (random.next_u64() % 2) as usize));
+    lengths.sort_by_key(|length| std::cmp::Reverse(*length + (random.index(2)) as usize));
     for length in lengths {
         if code[pc..pc + length]
             .iter()
@@ -927,7 +927,7 @@ fn inject_reachable_decoys(
     let words = if plan.prototype.registers < 256 {
         let scratch = plan.prototype.registers as u8;
         plan.prototype.registers += 1;
-        match random.next_u64() % 3 {
+        match random.index(3) {
             0 => vec![
                 Word([Opcode::Nil as u8, scratch, 0, 0]),
                 Word([Opcode::Not as u8, scratch, scratch, 0]),
@@ -976,7 +976,7 @@ fn inject_reachable_decoys(
         }
     }
     random.shuffle(&mut edge_candidates);
-    let entry_count = (2 + random.next_u64() % 3) as usize;
+    let entry_count = (2 + random.index(3)) as usize;
     let edge_count = (1 + base_count / 24)
         .min(5)
         .min(edge_candidates.len())
@@ -1053,9 +1053,9 @@ fn add_decoy_recipes(
     let mut attempts = 0usize;
     while added.len() < DECOY_RECIPES && attempts < 256 {
         attempts += 1;
-        let length = 2 + (random.next_u64() % 3) as usize;
+        let length = 2 + (random.index(3)) as usize;
         let key = (0..length)
-            .map(|_| safe[(random.next_u64() % safe.len() as u64) as usize] as u8)
+            .map(|_| safe[(random.index(safe.len())) as usize] as u8)
             .collect::<Vec<_>>();
         if by_key.contains_key(&key) {
             continue;
@@ -1892,7 +1892,7 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         .iter()
         .map(|prototype| prototype.code.len())
         .sum();
-    let mut random = crate::random::Prng::new(seed ^ 0x7365_6d61_6e74_6963);
+    let mut random = crate::random::Prng::lcg(seed ^ 0x7365_6d61_6e74_6963);
     let mut augmented = program.clone();
     let decoy_prototypes = add_decoy_prototypes(&mut augmented, &mut random);
     let (program, prototype_order) = reorder_program(&augmented, &mut random)?;
@@ -1962,8 +1962,7 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         };
         if !live {
             let replacement = loop {
-                let candidate =
-                    Opcode::ALL[(random.next_u64() % Opcode::ALL.len() as u64) as usize];
+                let candidate = Opcode::ALL[random.index(Opcode::ALL.len())];
                 if candidate.supported(program.target) && !control(candidate) {
                     break candidate;
                 }
@@ -2010,9 +2009,9 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
     let mut image = SemanticImage {
         bytes: Vec::new(),
         recipes,
-        mask_mul: [17u16, 29, 37, 43, 53, 61][(random.next_u64() % 6) as usize],
-        mask_add: [11u16, 19, 23, 31, 41, 47][(random.next_u64() % 6) as usize],
-        mask_salt: (random.next_u64() % 64) as u16,
+        mask_mul: [17u16, 29, 37, 43, 53, 61][(random.index(6)) as usize],
+        mask_add: [11u16, 19, 23, 31, 41, 47][(random.index(6)) as usize],
+        mask_salt: (random.index(64)) as u16,
         token_layers,
         edge_layers,
         field_layout: field_layout(seed),

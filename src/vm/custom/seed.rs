@@ -488,7 +488,7 @@ pub(crate) fn validate(prog: &[SeedInstr], lim: &SeedLimits) -> Result<(), SeedE
 const P2_DOMAIN_ROUTINE: u64 = 0x5031_524F_5554_494E;
 
 pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize, site_w: usize) -> String {
-    let mut rng = Prng::new(seed ^ P2_DOMAIN_ROUTINE ^ slot as u64);
+    let mut rng = Prng::lcg(seed ^ P2_DOMAIN_ROUTINE ^ slot as u64);
     // P6: remap operand lanes through the image perm (pools sized by the
     // locked consts; the width rides along so no table is consulted twice).
     let mapper = super::seed_deform::P6Mapper::new(seed, site_w, SN_EMIT, SEEDH_NAMES.len());
@@ -773,8 +773,8 @@ pub(crate) fn seed_arm_lua_for(target: Target, op: Opcode, seed: u64) -> Option<
     // P2: per-op sub-stream; only Test/TailCall have variant arms (Jump,
     // Return and the default arm are single statements with no clean
     // equivalence class, so they stay fixed and greppable).
-    let mut arm_rng = Prng::new(seed ^ P2_DOMAIN_ROUTINE ^ 0x1_0000 ^ op as u64);
-    let flipped = arm_rng.next_u64() % 2 == 1;
+    let mut arm_rng = Prng::lcg(seed ^ P2_DOMAIN_ROUTINE ^ 0x1_0000 ^ op as u64);
+    let flipped = arm_rng.index(2) == 1;
     if matches!(op, Opcode::TailCall) {
         // The two action checks are mutually exclusive; order is cosmetic.
         let tail = if flipped {
@@ -905,7 +905,14 @@ mod tests {
                 Opcode::Jump as usize,
                 super::seed_deform::p6_site_width(Opcode::Jump)
             ),
-            "{{7,1,8004e3}}"
+            // K18 (2026-09-11): every value in these three goldens is unchanged;
+            // only which spelling each one draws moved, because P1/P6 (the
+            // template-deform and site-width samplers) now ride the full-period
+            // LCG stream instead of xorshift64* and `Prng::index` became a
+            // multiply-shift instead of a remainder. The spelling pools themselves
+            // are the same pools (`p1_number_form_full`), so this is a pick, not a
+            // widening or a narrowing.
+            "{{7,1,8004000}}"
         );
         assert_eq!(
             routine_lua(
@@ -914,7 +921,7 @@ mod tests {
                 Opcode::Test as usize,
                 super::seed_deform::p6_site_width(Opcode::Test)
             ),
-            "{{2,1000e1,0xF4240},{6,10000,4},{7,1,8005000},{7,0}}"
+            "{{2,3000,10e5},{6,3e3,4},{7,1,8005000},{7,0}}"
         );
         assert_eq!(
             routine_lua(
@@ -923,7 +930,7 @@ mod tests {
                 Opcode::Return as usize,
                 super::seed_deform::p6_site_width(Opcode::Return)
             ),
-            "{{1,0x2710,1000e3},{7,2,10e3}}"
+            "{{1,30e2,1000000},{7,2,30e2}}"
         );
     }
 

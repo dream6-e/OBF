@@ -62,8 +62,15 @@ fn k7_wire_image_bytes_are_pinned() {
         // K13c step 2 (2026-09-11, ISA17): the image *length* is unchanged --
         // keying only shifts payload bytes -- while the content fingerprint moves
         // by design, exactly once, for the keyed constant pool.
-        (Target::Lua51, 7001u64, 1141usize, 0xd907c58e3ca3fb7eu64),
-        (Target::Luau, 7351u64, 870usize, 0x50d0f585b7c36b71u64),
+        // K18 (2026-09-11) re-measured both rows: the private image length moved
+        // (lua51 1141 -> 1118) because record/pool layout is drawn from the
+        // structure streams, which this batch gave a different sampler and mixing
+        // family. Both fields are pure per-seed layout artifacts of the *private*
+        // image; the public `.obf` sizes are untouched by this batch, and no
+        // semantic field count changed (see the heuristic M1/M3a/M6 rows, all
+        // pinned at the same values).
+        (Target::Lua51, 7001u64, 1118usize, 0xf146c970ae93b017u64),
+        (Target::Luau, 7351u64, 1126usize, 0x679b948b675dd1c1u64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();

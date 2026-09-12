@@ -86,10 +86,10 @@ fn generate_semantic(
     // variants in the decoder/validator, and metamethod dispatch branch
     // variants in the runtime helpers. Reuses the audited native-backend
     // variant machinery; handler order and semantics stay unchanged.
-    let mut structure = crate::random::Prng::new(seed ^ 0x6d37_7374_7275_6374);
+    let mut structure = crate::random::Prng::lcg(seed ^ 0x6d37_7374_7275_6374);
     // K7 toolbox stream: disjoint domain, so transport/crypto/parser bytes
     // stay identical and the wire image is frozen (pinned by unit test).
-    let mut bitops_rng = crate::random::Prng::new(seed ^ 0x6b37_6269_746f_7073);
+    let mut bitops_rng = crate::random::Prng::sfc(seed ^ 0x6b37_6269_746f_7073);
     // M7: integer bound-check variants (exact equivalence: the operands are
     // always varint-decoded integers, so `x>K`, `K<x` and `not(x<=K)` are
     // interchangeable; no NaN or metamethod semantics can apply).
@@ -102,12 +102,12 @@ fn generate_semantic(
     // cache branch (pure control-flow inversion, no evaluation reorder); the
     // userdata guard flips its (string-only, hence raw and commutative)
     // equality order.
-    let call_body = if structure.next_u64() % 2 == 0 {
+    let call_body = if !structure.coin() {
         "local Call=function(fn,args)local d=W[fn];if d then return H(d[1],args,d[2])else return Z(fn(U(args,1,args.n)))end end;"
     } else {
         "local Call=function(fn,args)local d=W[fn];if not d then return Z(fn(U(args,1,args.n)))end;return H(d[1],args,d[2])end;"
     };
-    let ud_check = if structure.next_u64() % 2 == 0 {
+    let ud_check = if !structure.coin() {
         "TY(object)=='userdata'"
     } else {
         "'userdata'==TY(object)"
@@ -118,7 +118,7 @@ fn generate_semantic(
     // the F3/F5 dispatch chains gain dead elseif arms keyed on opcode
     // numbers that can never occur. Both user-requested forms.
     let (opaque_true, opaque_false) = opaque_pair(&mut structure);
-    let entry_flip = structure.next_u64() % 2 == 0;
+    let entry_flip = !structure.coin();
     // Fake anchors on the entry's dead side: constructions shaped exactly
     // like the pipeline's real key material -- a packed base86 renumbering
     // string of the same 129-byte shape rebuilt into a table, LCG share
@@ -128,7 +128,7 @@ fn generate_semantic(
     // before the real one, and executing the branch is impossible.
     let mut fake_packed = String::from("\\127");
     for _ in 1..129 {
-        fake_packed.push(pack86((structure.next_u64() % 86) as u8));
+        fake_packed.push(pack86(structure.index(86) as u8));
     }
     let (fake_a, fake_b) = {
         let first = structure.next_u64() as usize % keys.len();
@@ -138,20 +138,20 @@ fn generate_semantic(
         }
         (keys[first], keys[second])
     };
-    let fake_adler = 1_000_000_000u64 + structure.next_u64() % 3_000_000_000u64;
+    let fake_adler = 1_000_000_000u64 + structure.index(3_000_000_000) as u64;
     let mut entry_decoy = format!(
         "local d1=VMS[{}](E);local d2=VMS[{}](d1,E);if d2 then E()end;\
 local d3=\"{fake_packed}\";local d4={{}};for dq=2,#d3,2 do local dx,dy=SB(d3,dq),SB(d3,dq+1);\
 d4[(dq-2)/2]=dx-35+(dy-35)*86 end;",
         keys[0], keys[1],
     );
-    if structure.next_u64() % 2 == 0 {
+    if !structure.coin() {
         entry_decoy.push_str(&format!(
             "local d5=({fake_a}*31+{fake_b})%2147483647;d5=48271*d5%2147483647;\
 d5=65539*d5%2147483647;local d6=1+(d5+31*#d3)%2147483646;"
         ));
     }
-    if structure.next_u64() % 2 == 0 {
+    if !structure.coin() {
         entry_decoy.push_str(&format!(
             "local d7,d8=1,0;for dq=1,#d3 do d7=(d7+SB(d3,dq))%65521;d8=(d8+d7)%65521 end;\
 if d7+d8*65521~={fake_adler} then E()end;"
@@ -238,7 +238,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
     marked.extend_from_slice(b"XXS:");
     marked.extend_from_slice(&encrypted);
     let alphabet = base86_image_alphabet(seed);
-    let mut transport_rng = crate::random::Prng::new(seed ^ 0x6b39_615f_7472_616e);
+    let mut transport_rng = crate::random::Prng::sfc(seed ^ 0x6b39_615f_7472_616e);
     // Byte-thirds split (order-preserving: part 0 holds the watermark head).
     let third = marked.len() / 3;
     let split = third + (marked.len() - third) / 2;
@@ -259,7 +259,7 @@ if d7+d8*65521~={fake_adler} then E()end;"
     };
     // Which of the three segment keys holds which stream part is shuffled.
     let mut hold = [0usize, 1, 2];
-    crate::random::Prng::new(seed ^ 0x7365_676d_3373_6866).shuffle(&mut hold);
+    crate::random::Prng::sfc(seed ^ 0x7365_676d_3373_6866).shuffle(&mut hold);
     let mut segment_fields = Vec::new();
     for part in 0..3 {
         let text = base86_encode_mixed(parts[part], &alphabet, &mut transport_rng);
@@ -397,8 +397,7 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
         "[{}]=function(B,s1,s2,s3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS)\nlocal aw=AH(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DBG,GI,LS);B=CC(B,s1,s2,s3,pv,#B,1,aw,CB,E,SB,NCH,TC,MF,X8);{frame_decode}return B end,",
         keys[1]
     );
-    let split_lzw_helpers =
-        crate::random::Prng::new(seed ^ 0x6c7a_775f_7370_6c38).next_u64() % 2 == 0;
+    let split_lzw_helpers = crate::random::Prng::sfc(seed ^ 0x6c7a_775f_7370_6c38).coin();
     let (compression_fields, compression_wiring) =
         compression_decoder_sections(&keys, split_lzw_helpers, &mut bitops_rng);
     // P3: per-seed reader-definition order (placeholder: canonical order).
@@ -420,7 +419,7 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
         (&["MF", "b32"], &["fin", "num"], g2),
     ];
     let base_names = ["B", "E", "SB", "SS", "MF"];
-    let cluster_count = 1 + structure.next_u64() % 2;
+    let cluster_count = 1 + structure.index(2);
     let mut bounds_set = std::collections::BTreeSet::new();
     while bounds_set.len() < (cluster_count - 1) as usize {
         bounds_set.insert(1);
@@ -481,24 +480,58 @@ local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X
         ));
         prior_exports.extend(exports);
     }
-    let mut core_text = String::from(
-        r#"if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=2 then E()end;
-"#,
+    // K18: the header's "this field must match" reads used to be one uniform
+    // `read~=value` chain across five statements, which made the whole load-time
+    // check block a single grep anchor (and let an analyst read the polarity of
+    // every guard off one search). Each term is now respelled independently by
+    // `Prng::reject_unequal`. Two rules keep this exactly equivalent: the reads
+    // stay in cursor order, because `b8()`/`b32()` advance the position, and no
+    // form evaluates a side twice, so nothing observes a different stream.
+    let header_guard = |values: &[&str], read: &str, rng: &mut crate::random::Prng| -> String {
+        values
+            .iter()
+            .map(|value| rng.reject_unequal(read, value, false))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    };
+    let mut core_text = format!(
+        "if {} then E()end;\n",
+        header_guard(&["79", "66", "70", "2"], "b8()", &mut structure)
     );
     write!(
         core_text,
-        "if b8()~={} then E()end;",
-        if program.target.is_luau() { 117 } else { 81 }
+        "if {} then E()end;",
+        structure.reject_unequal(
+            "b8()",
+            if program.target.is_luau() {
+                "117"
+            } else {
+                "81"
+            },
+            false
+        )
     )
     .unwrap();
+    let flags_guard = {
+        let parts = [
+            structure.reject_unequal("b8()", "1", false),
+            structure.reject_unequal("b8()", "1", false),
+            structure.reject_unequal("b8()", "0", false),
+            structure.reject_unequal("b32()", "32", false),
+            structure.reject_unequal("b32()", "#B", false),
+        ];
+        parts.join(" or ")
+    };
     write!(
         core_text,
         r#"
-if b8()~=1 or b8()~=1 or b8()~=0 or b32()~=32 or b32()~=#B then E()end;
-local np=b32();local entry=b32();local isa=b32();if np==0 or np>32767 or entry~=0 or isa~={} then E()end;
-local check=b32();if AD(B,33,#B)~=check then E()end;
+if {flags_guard} then E()end;
+local np=b32();local entry=b32();local isa=b32();if np==0 or np>32767 or {entry_guard} or {isa_guard} then E()end;
+local check=b32();if {ad_guard} then E()end;
 "#,
-        semantic::WIRE_ISA_VERSION
+        entry_guard = structure.reject_unequal("entry", "0", true),
+        isa_guard = structure.reject_unequal("isa", &semantic::WIRE_ISA_VERSION.to_string(), true),
+        ad_guard = structure.reject_unequal(&format!("AD(B,33,#B)"), "check", true),
     )
     .unwrap();
     // Flattened parse core: the per-prototype stages are split into local
@@ -629,7 +662,7 @@ local check=b32();if AD(B,33,#B)~=check then E()end;
         .iter()
         .map(|op| (*op as u8, custom::encoding_form(*op)))
         .collect();
-    let forms_rot = structure.next_u64() % 86;
+    let forms_rot = structure.index(86) as u64;
     let mut forms_text = String::new();
     for slot in 0..=*forms.keys().max().unwrap() {
         let packed = match forms.get(&slot) {
@@ -717,7 +750,7 @@ return a,b,c,p end;\nend,",
         })
         .collect();
     f3_arms.extend(f3_decoys);
-    let f3_groups = (2 + structure.next_u64() % 3) as u8;
+    let f3_groups = (2 + structure.index(3)) as u8;
     let validate_body = format!(
         "local ok=false;{chain}if not ok then E()end;return true",
         chain = grouped_tree(
@@ -773,10 +806,10 @@ return a,b,c,p end;\nend,",
     // indirect target table before the normal rid dispatch. The constants are
     // seed-specific, while the token and prototype id come from the checked
     // semantic image at runtime; duplicate routes fail closed during parsing.
-    let mut route_random = crate::random::Prng::new(seed ^ 0x4b38_7661_6c74_726f);
-    let route_mul = 3 + (route_random.next_u64() % 251) * 2;
-    let route_add = 1 + route_random.next_u64() % 65520;
-    let route_salt = 1 + route_random.next_u64() % 65520;
+    let mut route_random = crate::random::Prng::lcg(seed ^ 0x4b38_7661_6c74_726f);
+    let route_mul = 3 + (route_random.index(251)) * 2;
+    let route_add = 1 + route_random.index(65520);
+    let route_salt = 1 + route_random.index(65520);
     let semantic_validator = format!(
         r#"{edge_decoder}{recipe_decoder}{operand_getter}
 local DC=function(id)
@@ -883,7 +916,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     // Shuffled CALL order of the three probe functions (indices 0..=2 into
     // keys[5..8] / probe_inputs / shares).
     let mut probe_order = [0usize, 1, 2];
-    crate::random::Prng::new(seed ^ 0x6f72_6433_6873_7663).shuffle(&mut probe_order);
+    crate::random::Prng::sfc(seed ^ 0x6f72_6433_6873_7663).shuffle(&mut probe_order);
     // Structural inputs per probe: pairs of payload-table numeric keys the
     // entry passes positionally. The Rust cipher derives the same shares from
     // the same pairs, so no share or keystream state is a script literal: each
@@ -1096,7 +1129,7 @@ end;
         selected_masked_state_condition(&mut structure, "w", control_mask, k_disp, k_disp_alt);
     let v_fetch = selected_masked_state_value(k_fetch, k_fetch_alt, control_mask);
     let v_disp = selected_masked_state_value(k_disp, k_disp_alt, control_mask);
-    let dispatch_first = structure.next_u64() % 2 == 0;
+    let dispatch_first = !structure.coin();
     // Seed-ISA v1 prelude: after Make binds (so the helper pool captures
     // live values) and before H (so every arm reaches it lexically).
     let mut seed_used = 0u64;
@@ -1183,8 +1216,8 @@ end;
             fragment_arms.push((stage, format!("{condition} then {body}")));
         }
     }
-    let recipe_groups = (2 + structure.next_u64() % 3) as u8;
-    let fragment_groups = (2 + structure.next_u64() % 3) as u8;
+    let recipe_groups = (2 + structure.index(3)) as u8;
+    let fragment_groups = (2 + structure.index(3)) as u8;
     let recipe_chain = grouped_recipe_chain(&mut structure, recipe_entries, recipe_groups, "rid");
     let fragment_chain =
         grouped_recipe_chain(&mut structure, fragment_arms, fragment_groups, "sid");
@@ -1272,11 +1305,7 @@ end;
             &body[body.len().saturating_sub(60)..]
         );
         out.push_str(body);
-        out.push(if structure.next_u64() % 2 == 0 {
-            ','
-        } else {
-            ';'
-        });
+        out.push(if !structure.coin() { ',' } else { ';' });
         out.push_str(suffix);
     }
     out.push_str(&tail);

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 /// stream: the same seed reproduces the whole script while bytecode, final
 /// local names and private fields stay on their own existing streams.
 pub(crate) fn wrapper_method(target: Target, seed: u64) -> String {
-    let mut random = crate::random::Prng::new(seed ^ 0x6d65_7468_6f64_3276);
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6d65_7468_6f64_3276);
     let mut pool: Vec<char> = (b'a'..=b'z').map(char::from).collect();
     random.shuffle(&mut pool);
     let name = pool[0].to_string();
@@ -18,11 +18,11 @@ pub(crate) fn wrapper_method(target: Target, seed: u64) -> String {
 /// seed-variable LZW fields and five split ChaCha8/anti-hook fields. Separate
 /// seeded stream; same reproducibility guarantees as the method name.
 pub(crate) fn wrapper_keys(seed: u64) -> Vec<u64> {
-    let mut random = crate::random::Prng::new(seed ^ 0x6b65_7973_3276_6d35);
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6b65_7973_3276_6d35);
     let mut used = std::collections::BTreeSet::new();
     let mut keys = Vec::new();
     while keys.len() < 29 {
-        let key = 100 + random.next_u64() % 9900;
+        let key = 100 + random.index(9900) as u64;
         // K9a label hygiene: arbitrary labels must never emit audit-nice
         // values (a YARA rule for 86 must not hit a table key).
         if key == 256 || key == 7225 || key == 7396 {
@@ -45,7 +45,7 @@ pub(crate) fn opaque_pair(structure: &mut crate::random::Prng) -> (String, Strin
         ("65536%256==0", "65536%256==1"),
         ("16777216%2==0", "16777216%2==1"),
     ];
-    let index = (structure.next_u64() % TAUTOLOGIES.len() as u64) as usize;
+    let index = (structure.index(TAUTOLOGIES.len())) as usize;
     let (truthy, falsy) = TAUTOLOGIES[index];
     (truthy.to_owned(), falsy.to_owned())
 }
@@ -67,12 +67,12 @@ pub(crate) fn decoy_arms(
     let mut out = Vec::new();
     while used.len() < count {
         let opcode = loop {
-            let value = (structure.next_u64() % 256) as u8;
+            let value = (structure.index(256)) as u8;
             if !image.contains(&value) && used.insert(value) {
                 break value;
             }
         };
-        let body = bodies[(structure.next_u64() % bodies.len() as u64) as usize];
+        let body = bodies[(structure.index(bodies.len())) as usize];
         let condition = structure.dispatch_condition(u16::from(opcode), luau);
         out.push((opcode, format!("{condition} then {body}")));
     }
@@ -100,7 +100,12 @@ pub(crate) fn grouped_tree(
     luau: bool,
 ) -> String {
     structure.shuffle(&mut arms);
-    let leaf_max = 2 + (structure.next_u64() % 3) as usize;
+    // K18: a leaf may merge at most three arms. The previous 2..=4 draw let one
+    // pinned config come out a level shallower than the dispatch gate requires,
+    // so the depth floor was luck of the stream rather than a property of the
+    // construction; with three as the cap, `nodes >= 20` follows from covering
+    // 48/51 arms and stays true for every seed.
+    let leaf_max = 2 + (structure.index(2)) as usize;
     let mut text = String::new();
     for group in 0..groups {
         let condition = selector_condition(structure, value_var, groups, group);
@@ -155,12 +160,12 @@ fn search_tree(
         out.push_str(" else E()end;");
         return;
     }
-    let split = 1 + (structure.next_u64() % (members.len() as u64 - 1)) as usize;
+    let split = 1 + structure.index(members.len() - 1);
     let (left, right) = members.split_at(split);
     let bound = right[0].0;
     // The comparator and the branch order both vary per seed; the two forms
     // are exact complements, so the partition is the same tree either way.
-    let below = structure.next_u64() % 2 == 0;
+    let below = structure.index(2) == 0;
     let condition = structure.boundary_condition(value_var, u16::from(bound), below, luau);
     // Exactly one side runs: `below` asks `<` and keeps the low half in the
     // then-branch, otherwise the same partition rides as `>=` with the halves
@@ -217,7 +222,7 @@ pub(crate) fn selector_condition(
     modulus: u8,
     group: u8,
 ) -> String {
-    match structure.next_u64() % 4 {
+    match structure.index(4) {
         0 => format!("{value_var}%{modulus}=={group}"),
         1 => format!("{group}=={value_var}%{modulus}"),
         2 => format!("not({value_var}%{modulus}~={group})"),
@@ -253,7 +258,7 @@ pub(crate) fn slot_rewrite(
     let mut used = std::collections::BTreeSet::new();
     for name in vars {
         loop {
-            let key = 1 + structure.next_u64() % 99;
+            let key = 1 + structure.index(99) as u64;
             // K9a label hygiene: slot keys are arbitrary labels, so 85/86
             // are rejected (they would read as radix constants).
             if key == 85 || key == 86 {
@@ -310,7 +315,7 @@ pub(crate) fn slot_rewrite(
 pub(crate) fn state_values(structure: &mut crate::random::Prng, count: usize) -> Vec<u16> {
     let mut used = std::collections::BTreeSet::new();
     while used.len() < count {
-        let value = (100 + structure.next_u64() % 900) as u16;
+        let value = (100 + structure.index(900)) as u16;
         // K9a label hygiene: state numbers are arbitrary labels, so the
         // byte width 256 is rejected.
         if value == 256 {
@@ -328,7 +333,7 @@ pub(crate) fn state_condition(
     var: &str,
     value: u16,
 ) -> String {
-    match structure.next_u64() % 4 {
+    match structure.index(4) {
         0 => format!("{var}=={value}"),
         1 => format!("{value}=={var}"),
         2 => format!("not({var}~={value})"),
@@ -351,7 +356,7 @@ pub(crate) fn masked_state_condition(
     value: u16,
 ) -> String {
     let represented = masked_state_value(value, mask);
-    match structure.next_u64() % 4 {
+    match structure.index(4) {
         0 => format!("{var}=={represented}"),
         1 => format!("{represented}=={var}"),
         2 => format!("not({var}~={represented})"),
@@ -412,8 +417,8 @@ fn u16_expression(value: u16) -> String {
 }
 
 fn token_opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
-    let salt = u16_expression((17 + structure.next_u64() % 4_079) as u16);
-    match structure.next_u64() % 5 {
+    let salt = u16_expression((17 + structure.index(4_079)) as u16);
+    match structure.index(5) {
         0 => ("v<=v and l<=l".to_owned(), "v<v or l<l".to_owned()),
         1 => (
             format!("(n+{salt})-{salt}==n"),
@@ -436,11 +441,11 @@ fn nested_token_guard(
 ) -> String {
     for _ in 0..depth {
         let (truthy, falsy) = token_opaque_pair(structure);
-        let odd = 3 + 2 * (structure.next_u64() % 31);
-        let salt = u16_expression((101 + structure.next_u64() % 65_000) as u16);
+        let odd = 3 + 2 * (structure.index(31));
+        let salt = u16_expression((101 + structure.index(65_000)) as u16);
         let state = decoy_states[structure.next_u64() as usize % decoy_states.len()];
         let dead = format!("repeat v=(v*{odd}+l+n+s+f+{salt})%65536;q={state};break until false;");
-        live = if structure.next_u64() % 2 == 0 {
+        live = if structure.index(2) == 0 {
             format!("if {truthy} then {live}else {dead}end;")
         } else {
             format!("if {falsy} then {dead}else {live}end;")
@@ -483,7 +488,7 @@ pub(crate) fn layered_recipe_decoder(
             u16_expression(layer.inverse),
             live_states[stage + 1]
         );
-        let depth = 4 + (structure.next_u64() % 2) as usize;
+        let depth = 4 + (structure.index(2)) as usize;
         branches.push((
             live_states[stage],
             nested_token_guard(structure, body, depth, decoy_states),
@@ -495,8 +500,8 @@ pub(crate) fn layered_recipe_decoder(
     ));
     for (index, &state) in decoy_states.iter().enumerate() {
         let next = decoy_states[(index + 1) % decoy_states.len()];
-        let odd = 3 + 2 * (structure.next_u64() % 61);
-        let salt = u16_expression((1 + structure.next_u64() % 65_535) as u16);
+        let odd = 3 + 2 * (structure.index(61));
+        let salt = u16_expression((1 + structure.index(65_535)) as u16);
         branches.push((
             state,
             format!(
@@ -512,8 +517,8 @@ pub(crate) fn layered_recipe_decoder(
 }
 
 fn edge_opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
-    let salt = u16_expression((23 + structure.next_u64() % 4_057) as u16);
-    match structure.next_u64() % 4 {
+    let salt = u16_expression((23 + structure.index(4_057)) as u16);
+    match structure.index(4) {
         0 => ("v<=v and l<=l".to_owned(), "v<v or l<l".to_owned()),
         1 => (
             format!("(f+{salt})-{salt}==f"),
@@ -532,11 +537,11 @@ fn nested_edge_guard(
 ) -> String {
     for _ in 0..depth {
         let (truthy, falsy) = edge_opaque_pair(structure);
-        let odd = 3 + 2 * (structure.next_u64() % 29);
-        let salt = u16_expression((1 + structure.next_u64() % 65_535) as u16);
+        let odd = 3 + 2 * (structure.index(29));
+        let salt = u16_expression((1 + structure.index(65_535)) as u16);
         let state = decoy_states[structure.next_u64() as usize % decoy_states.len()];
         let dead = format!("repeat v=(v*{odd}+l+f+ek+{salt})%65536;q={state};break until false;");
-        live = if structure.next_u64() % 2 == 0 {
+        live = if structure.index(2) == 0 {
             format!("if {truthy} then {live}else {dead}end;")
         } else {
             format!("if {falsy} then {dead}else {live}end;")
@@ -576,7 +581,7 @@ pub(crate) fn layered_edge_decoder(
             u16_expression(layer.inverse),
             live_states[stage + 1]
         );
-        let depth = 2 + (structure.next_u64() % 2) as usize;
+        let depth = 2 + (structure.index(2)) as usize;
         branches.push((
             live_states[stage],
             nested_edge_guard(structure, body, depth, decoy_states),
@@ -588,8 +593,8 @@ pub(crate) fn layered_edge_decoder(
     ));
     for (index, &state) in decoy_states.iter().enumerate() {
         let next = decoy_states[(index + 1) % decoy_states.len()];
-        let odd = 3 + 2 * (structure.next_u64() % 47);
-        let salt = u16_expression((1 + structure.next_u64() % 65_535) as u16);
+        let odd = 3 + 2 * (structure.index(47));
+        let salt = u16_expression((1 + structure.index(65_535)) as u16);
         branches.push((
             state,
             format!(
@@ -612,11 +617,11 @@ pub(crate) fn layered_edge_decoder(
 /// slot, see the forms field) and rewrites each opcode byte while
 /// expanding the validated varint stream.
 pub(crate) fn opcode_permutation(seed: u64, slots: u8) -> Vec<u8> {
-    let mut random = crate::random::Prng::new(seed ^ 0x6f70_636f_6465_7333);
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6f70_636f_6465_7333);
     let mut taken = std::collections::BTreeSet::new();
     (0..slots)
         .map(|_| loop {
-            let value = (random.next_u64() % 256) as u8;
+            let value = (random.index(256)) as u8;
             if taken.insert(value) {
                 return value;
             }
@@ -640,7 +645,7 @@ pub(crate) fn pack86(digit: u8) -> char {
 /// raw numeric comparison has no metamethod dispatch. Only the spelling of
 /// the emitted check changes; behavior and rejection behavior are identical.
 pub(crate) fn gt(structure: &mut crate::random::Prng, value: &str, bound: &str) -> String {
-    match structure.next_u64() % 3 {
+    match structure.index(3) {
         0 => format!("{value}>{bound}"),
         1 => format!("{bound}<{value}"),
         _ => format!("not({value}<={bound})"),

@@ -23,7 +23,7 @@ use crate::random::Prng;
 const P1_DOMAIN_TEMPLATE: u64 = 0x5031_544D_504C_4154;
 
 fn p1_stream(seed: u64, region: u64) -> Prng {
-    Prng::new(seed ^ P1_DOMAIN_TEMPLATE ^ region)
+    Prng::lcg(seed ^ P1_DOMAIN_TEMPLATE ^ region)
 }
 
 /// Split one branch line (`if`/`elseif` + condition + `then` + optional body).
@@ -450,13 +450,13 @@ const P3_SV_FORMS: [&str; 2] = [
 /// Cell-value read in one of two branch orders (exact `not`-negation:
 /// same conditions, same read sequence on every path, no eval reorder).
 pub(crate) fn p3_cv_lua(seed: u64) -> &'static str {
-    let pick = Prng::new(seed ^ P3_DOMAIN_HELPER ^ 1).next_u64() % 2;
+    let pick = Prng::sfc(seed ^ P3_DOMAIN_HELPER ^ 1).index(2);
     P3_CV_FORMS[pick as usize]
 }
 
 /// Cell-value write in one of two branch orders (same argument as CV).
 pub(crate) fn p3_sv_lua(seed: u64) -> &'static str {
-    let pick = Prng::new(seed ^ P3_DOMAIN_HELPER ^ 2).next_u64() % 2;
+    let pick = Prng::sfc(seed ^ P3_DOMAIN_HELPER ^ 2).index(2);
     P3_SV_FORMS[pick as usize]
 }
 
@@ -464,7 +464,7 @@ pub(crate) fn p3_sv_lua(seed: u64) -> &'static str {
 /// the equality arms are mutually exclusive and commute freely.
 pub(crate) fn p3_lookup_order(n: usize, seed: u64) -> Vec<usize> {
     let mut order: Vec<usize> = (0..n).collect();
-    Prng::new(seed ^ P3_DOMAIN_HELPER ^ 3).shuffle(&mut order);
+    Prng::sfc(seed ^ P3_DOMAIN_HELPER ^ 3).shuffle(&mut order);
     order
 }
 
@@ -486,7 +486,7 @@ const P3_READER_DEPS: [&[usize]; 6] = [&[], &[0], &[0], &[], &[2, 3], &[]];
 /// algorithm with seeded choice among ready nodes): every order keeps each
 /// definition behind the readers it closes over, so upvalue scope is exact.
 pub(crate) fn p3_reader_group_lua(seed: u64) -> String {
-    let mut rng = Prng::new(seed ^ P3_DOMAIN_POOLS ^ 1);
+    let mut rng = Prng::sfc(seed ^ P3_DOMAIN_POOLS ^ 1);
     let mut emitted = [false; 6];
     let mut out = String::from(P3_READER_HEAD);
     for _ in 0..6 {
@@ -1325,7 +1325,7 @@ const P6_DOMAIN_SEEDH: u64 = 0x5036_5344_4848_5F4E;
 
 fn p6_shuffled(seed: u64, domain: u64, n: usize) -> Vec<usize> {
     let mut order: Vec<usize> = (0..n).collect();
-    Prng::new(seed ^ domain).shuffle(&mut order);
+    Prng::sfc(seed ^ domain).shuffle(&mut order);
     let mut sorted = order.clone();
     sorted.sort_unstable();
     assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "P6: perm not bijective");
@@ -1346,7 +1346,7 @@ pub(crate) fn p6_tmp_perm(seed: u64) -> [usize; 16] {
 /// (kind-1 range), lanes 5..=w permute freely. Widths in use: 1,2,3,4,7,8,9.
 pub(crate) fn p6_site_perm(seed: u64, w: usize) -> Vec<usize> {
     assert!((1..=9).contains(&w), "P6: site width out of range: {w}");
-    let mut rng = Prng::new(seed ^ P6_DOMAIN_SITE ^ w as u64);
+    let mut rng = Prng::lcg(seed ^ P6_DOMAIN_SITE ^ w as u64);
     let mut lanes: Vec<usize> = (1..=w).collect();
     if w >= 3 && rng.index(2) == 1 {
         lanes.swap(1, 2);

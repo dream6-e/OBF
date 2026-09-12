@@ -21,7 +21,7 @@ pub(crate) struct ChaChaMaterial {
 }
 
 pub(crate) fn chacha_params(seed: u64) -> ChaChaParams {
-    let mut random = crate::random::Prng::new(seed ^ 0x6368_6163_6861_385f);
+    let mut random = crate::random::Prng::sfc(seed ^ 0x6368_6163_6861_385f);
     let mut next = || {
         random.next_u64().to_le_bytes()[..4]
             .try_into()
