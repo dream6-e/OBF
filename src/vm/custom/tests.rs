@@ -21,3 +21,4 @@ include!("tests/bitops.rs");
 include!("tests/lane.rs");
 include!("tests/scatter.rs");
 include!("tests/dispatch_intervals.rs");
+include!("tests/anchor_floor.rs");

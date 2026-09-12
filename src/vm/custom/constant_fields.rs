@@ -55,16 +55,30 @@
 //! single letter as a name, so only the first few fields get a one-character key
 //! and the rest get two -- and the price is charged per key, which is what keeps a
 //! four-character spelling like `2000` (17 uses) out of the table while a
-//! ten-character one gets in. On the two goldens the pass ends up with five fields
-//! (Lua 5.1) and four (Luau), worth 353 and 269 bytes.
+//! ten-character one gets in. On the two goldens the pass ends up with seven fields
+//! (Lua 5.1) and six (Luau), worth 376 and 322 bytes.
 //! Reach is the other half of the story: a use only counts where the wrapper is
-//! actually visible, and 27 of the 29 spellings of `2147483647` are not -- their
-//! scope re-binds the wrapper name, or they sit in the constructor that builds the
-//! shell. That constant therefore stays spelled out, while `65536`, with two such
-//! places, is lifted 97 times. The pass is a pure function of the
+//! actually visible. On the Lua 5.1 golden `2147483647` is spelled 29 times and 23
+//! of those sit under a binder that re-shadows the wrapper name, so 6 become reads;
+//! `65536` has two such places and is lifted 96. Nothing is excluded for any other
+//! reason -- no candidate lives in the constructor or in a key position -- which is
+//! why every lifted value lands on the same floor: one write plus its out-of-reach
+//! spellings, exactly what `product_audit` check1 counts (4 for `256`, 3 for
+//! `65536`, 24 for `2147483647`). Widening reach inside shadowed scopes is the one
+//! lever left here, and it is deliberately not pulled: those binders belong to the
+//! name pass. The pass is a pure function of the
 //! emitted text: it consumes no RNG, so output stays deterministic per
 //! (source, target, config, seed), and a program whose literals are already rare
 //! simply comes back unchanged.
+//!
+//! Selection has one non-arithmetic case (K9b, see `admits`): a spelling on the
+//! audit's own nice list may enter when it costs nothing per use, because a nice
+//! value spelled a couple of hundred times is a grep handle no byte ledger shows --
+//! `256`, the weight every digit loop assembles bytes with, is that case at three
+//! bytes against a three-byte read. It is refused wherever the read would be longer
+//! than the literal (`86` under a two-character key), it still needs `MIN_CHARS` and
+//! `MIN_USES`, and such a candidate sorts to the front of the queue: one place later
+//! it would lose its one-character key and start losing bytes.
 
 use crate::ast::{Block, Expression, ExpressionKind, FunctionBody, StatementKind, TableField};
 use crate::lexer::is_keyword;
@@ -354,6 +368,29 @@ fn cost(text: &str, uses: usize, read: usize) -> i64 {
     (uses as i64) * (len - read as i64) - (read as i64 + len + 2)
 }
 
+/// True when this canonical decimal spelling is one of the values the static audit
+/// anchors on. Same list the generator's noise samplers reject through
+/// `is_nice_part`, so this pass and the label-hygiene rules cannot drift apart.
+fn audit_anchor(text: &str) -> bool {
+    text.parse::<u64>()
+        .is_ok_and(|value| super::transport::is_nice_part(value))
+}
+
+/// Whether this spelling is worth a field. Normally the answer is arithmetic: the
+/// reads have to pay for the one write. K9b adds exactly one non-arithmetic case --
+/// an audit anchor whose uses are *price neutral*: `product_audit` check1 flags any
+/// nice value spelled more than twice, and `256` (the byte-assembly weight in every
+/// digit loop) is spelled a couple of hundred times while the literal and a
+/// `<wrapper>.<key>` read cost the same three bytes, so the only price is the write
+/// itself. The door is deliberately narrow: the value has to be on the audit's own
+/// list, every use has to stay neutral or better (`text.len() >= read`, which is
+/// what refuses `86` once its key is two characters), and `MIN_USES`/`MIN_CHARS`
+/// still apply. A candidate that loses bytes per use cannot enter this way at all,
+/// so the exception cannot degrade into a size sink.
+fn admits(text: &str, uses: usize, read: usize) -> bool {
+    uses >= MIN_USES && (cost(text, uses, read) > 0 || (text.len() >= read && audit_anchor(text)))
+}
+
 /// Bytes one `<wrapper>.<key>` read costs.
 fn read_of(wrapper_len: usize, key_len: usize) -> usize {
     wrapper_len + 1 + key_len
@@ -394,33 +431,37 @@ fn plan(
     wrapper_len: usize,
 ) -> Vec<Entry> {
     let one = read_of(wrapper_len, 1);
-    let mut scored: Vec<(i64, usize, String)> = counts
+    let mut scored: Vec<(bool, i64, usize, String)> = counts
         .iter()
         .filter_map(|(text, uses)| {
-            (*uses >= MIN_USES && cost(text, *uses, one) > 0).then_some((
+            admits(text, *uses, one).then_some((
+                cost(text, *uses, one) <= 0,
                 cost(text, *uses, one),
                 *uses,
                 text.clone(),
             ))
         })
         .collect();
-    // 收益高的先入表；同分按使用数、再按拼写定序，与哈希迭代顺序无关。
+    // 收益高的先入表；**只靠审计例外进来的候选排最前**：它的收益是静态面而不是字节，
+    // 晚一名就会掉到两字母键上（每处使用反而贵一字节）而被重新定价拒掉。同分按使用数、
+    // 再按拼写定序，与哈希迭代顺序无关。
     scored.sort_by(|left, right| {
         right
             .0
             .cmp(&left.0)
             .then(right.1.cmp(&left.1))
-            .then(left.2.cmp(&right.2))
+            .then(right.2.cmp(&left.2))
+            .then(left.3.cmp(&right.3))
     });
     let names = free_names(taken, target, MAX_FIELDS);
     let mut entries = Vec::new();
-    for (_, uses, text) in scored {
+    for (_, _, uses, text) in scored {
         let Some(key) = names.get(entries.len()) else {
             break;
         };
         // 名字发到双字母后，读写各贵一字节：按实际键长再算一次，付不起的就留着
         // 原样拼写，而且它不占名字——后面的候选不受牵连。
-        if cost(&text, uses, read_of(wrapper_len, key.len())) <= 0 {
+        if !admits(&text, uses, read_of(wrapper_len, key.len())) {
             continue;
         }
         entries.push(Entry {
@@ -1069,23 +1110,81 @@ mod tests {
 
     #[test]
     fn a_spelling_too_short_or_too_rare_to_pay_is_left_spelled() {
-        // `256` 与 `w.k` 一样长，加上写入自身的花费必然亏本。
+        // `200` 与 `w.k` 一样长，加上写入自身的花费必然亏本，而且它不在审计锚点上，
+        // 所以没有任何理由入表（`256` 同价但同一段文字是 check1 的锚点，见
+        // `an_audit_anchor_...`：那条例外只给审计名单上的值）。
         let source = shell(&entry_field(&format!(
             "return {}",
-            vec!["256"; 60].join(",")
+            vec!["200"; 60].join(",")
         )));
         parses(&source);
         assert_eq!(lift(&source, Target::Lua51).unwrap(), source);
-        // 五次使用：省下的字节还不够付写入。
+        // 五次使用：省下的字节还不够付写入。`65536` 是锚点也一样被 MIN_USES 挡住
+        // ——例外只放宽「每处使用要付钱」这一条，不放宽使用次数与长度门槛。
         let source = shell(&entry_field("return 65536,65536,65536,65536,65536"));
         parses(&source);
         assert_eq!(lift(&source, Target::Lua51).unwrap(), source);
         assert_eq!(gain("256", 200, 1, 1), -8);
+        assert_eq!(gain("200", 60, 1, 1), -8);
         assert_eq!(gain("65536", 10, 1, 1), 10);
         assert_eq!(gain("65536", 5, 1, 1), 0);
         // 双字母键把读价抬到 4 字节：同样十次使用的 65536 就已经不划算了。
         assert_eq!(gain("65536", 10, 1, 2), -1);
         assert_eq!(gain("4294967296", 20, 1, 1), 125);
+    }
+
+    /// K9b：审计锚点例外——每处使用不亏字的漂亮常数可以只花一次写入就入表。
+    #[test]
+    fn an_audit_anchor_that_costs_nothing_per_use_is_lifted_even_though_it_saves_nothing() {
+        // `256` 与 `w.k` 同长：218 处明文换成 218 处读数一字节不省，唯一的花费是
+        // 写入那一句。这正是 product_audit check1 要的——锚点从数百处降到「写入 +
+        // 不可改点位」。
+        let source = shell(&entry_field(&format!(
+            "return {}",
+            vec!["256"; 60].join(",")
+        )));
+        parses(&source);
+        let out = lift(&source, Target::Lua51).unwrap();
+        let key = written_key(&out, "w");
+        assert_eq!(
+            key.len(),
+            1,
+            "锚点必须抢在一字母键上，否则每处使用反而贵一字节"
+        );
+        assert_eq!(out.matches("256").count(), 1, "只剩写入自身");
+        assert_eq!(out.matches(&format!("w.{key}")).count(), 61); // 60 处读取 + 写入自身
+        assert!(out.contains(&format!("(k,...) w.{key}=256;return")));
+        // 脚本格式一字未动：还是两条语句、空包装表、单行。
+        assert!(out.starts_with("local w={} return setmetatable({"));
+        assert!(!out.contains('\n'));
+        parses(&out);
+        // 再跑一遍无事可做：剩下的那处字面量是写入本身，不够 MIN_USES。
+        assert_eq!(lift(&out, Target::Lua51).unwrap(), out);
+    }
+
+    /// 例外只开一条缝：锚点必须「每处使用不亏」，短一字节就不许进来。
+    #[test]
+    fn the_audit_exception_refuses_any_spelling_that_loses_bytes_per_use() {
+        // `86` 只有两字节，三字节起跳的读数每处反而多付一字节；即使它有 60 次使用、
+        // 即使它是 check1 的锚点，也照样留在原样。
+        let source = shell(&entry_field(&format!(
+            "return {}",
+            vec!["86"; 60].join(",")
+        )));
+        parses(&source);
+        assert_eq!(lift(&source, Target::Lua51).unwrap(), source);
+        // 定价层的四条边界：锚点在中性价（len == read）放行，亏字（len < read）拒绝；
+        // 非锚点只认算术；使用次数与长度的门槛对两者一视同仁。
+        assert!(admits("256", MIN_USES, 3));
+        assert!(!admits("256", MIN_USES, 4));
+        assert!(!admits("86", 60, 3));
+        assert!(!admits("65535", MIN_USES - 1, 3)); // 锚点、每处不亏，但用得太稀
+        assert!(admits("65536", MIN_USES, 3)); // 算术本身就过，例外用不上
+        assert!(!admits("200", 600, 3)); // 中性价，可它不是锚点
+        assert!(!admits("256", MIN_USES - 1, 3));
+        // 分工：`admits` 只问价格与锚点，「必须是规范十进制」在 `canonical` 那一关，
+        // 所以零填充的 `0256` 根本进不到这里。
+        assert!(canonical("return 0256", 7, 11).is_none());
     }
 
     #[test]

@@ -279,14 +279,18 @@ pub(crate) fn lua_escape_string(bytes: &[u8]) -> String {
 /// nice set never touches. K7 additionally splits (2^32 + c)/2^33 for modulus
 /// spellings, so the reject list covers the audit's full nice set (the big
 /// entries are unreachable for K9a's small values: zero behavior change).
-const NICE_FULL: [u64; 17] = [
+pub(crate) const NICE_FULL: [u64; 17] = [
     85, 7225, 614125, 52200625, 86, 7396, 636056, 54700816, 256, 65535, 65536, 16777216,
     2147483648, 2147483647, 4294967295, 4294967296, 4294967297,
 ];
 
 /// An opaque-split part is "nice" (recognizable to an analyst) exactly when
 /// it lands in [`NICE_FULL`]. Shared with the K7 sandwich sampler so every
-/// noise literal in every spelling passes one predicate.
+/// noise literal in every spelling passes one predicate, and -- because that list is
+/// also what `product_audit` check1 anchors on -- with the wrapper-field pass, which
+/// may admit one of these spellings when the read costs no more than the literal
+/// (K9b). Making the list the shared source is the point: admission and rejection
+/// can never drift apart.
 pub(crate) fn is_nice_part(value: u64) -> bool {
     NICE_FULL.contains(&value)
 }

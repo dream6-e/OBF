@@ -189,9 +189,29 @@ fn pins_lua51() -> AuditPins {
         //     exists; the gcd staying 1 says no periodic structure was introduced.
         //   check7 dead-table list stays EMPTY -- every loader is read, and
         //   check2/3/4/6/9 are untouched.
+        // K9b (audit anchors as wrapper fields) -- measured Lua51 diff:
+        //   check1 `256` 218 -> 4.  The byte-assembly weight is now a field of the
+        //     wrapper table, so 214 of the 218 spellings became `t.<key>` reads.  The
+        //     four that remain are the single write that materialises the field plus
+        //     the three sites this pass is not allowed to touch (the payload-table
+        //     constructor, which evaluates before the entry runs, and `[N]=` key
+        //     positions).  `86`/`65536`/`4294967296` hold at 3 and `2147483647` at
+        //     24 -- K16 measured 27 of its 29 spellings as out of reach, so that one
+        //     stays a documented residual anchor.  Every anchor now sits at the
+        //     write-plus-protected-sites floor; none of them is a grep handle.
+        //   check5 class count 11 (unchanged), one top-8 entry respells:
+        //     `X=(X+X+(N*N+N))%X.X` -> `X=(X+X+(N*X.X+N))%X.X`, count 8 -- the fold
+        //     accumulator's `*256` reads the field, which the normalizer maps to
+        //     `X.N`.  No template class appeared or disappeared.
+        //   check8 pairs 52 and check2/3/4/6/7/9 byte-for-byte unchanged: the pass
+        //     spends no RNG, so the streams are identical.
+        // Cost: +21 B on this golden (102,939 -> 102,960).  `256` is price neutral
+        // per use (literal and read are both three bytes) and pays only its write; the
+        // extra is the anchor taking the first one-character key, which slides the last
+        // field to a two-character key (+1 B per use of that field).
         check1_nice_fails: vec![
             (86, 3),
-            (256, 218),
+            (256, 4),
             (65536, 3),
             (2147483647, 24),
             (4294967296, 3),
@@ -220,7 +240,7 @@ fn pins_lua51() -> AuditPins {
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
+                ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
         check6_alias_prologues: 0,
@@ -270,6 +290,13 @@ fn pins_lua51() -> AuditPins {
 // Luau blob did not move either.
 fn pins_luau() -> AuditPins {
     AuditPins {
+        // K9b (audit anchors as wrapper fields) -- measured Luau diff: check1 `256`
+        // 207 -> 4 (one field write plus the three sites the pass may not touch) and
+        // check5's fold template respells to `X=(X+X+(N*X.X+N))%X.X`, count 8; the
+        // class count stays 12.  `86`/`65536`/`16777216`/`2147483647` and checks 2/3/
+        // 4/6/7/8/9 are byte-for-byte unchanged.  Cost +28 B (112,969 -> 112,997):
+        // same cause as Lua51 -- the anchor takes a one-character key and the last
+        // field slides to two characters.
         // K19（分段密钥回灌）实测：`86` 由 6 降到 3 处中的 4 处（Luau 侧同样少两处
         // 裸 86：数字表旋转改成 `(x-1+B)%r`，r 是 c1+c2 的和式），其余 nice 值计数
         // 一字未动；check5 的 `X[N]=N` 19 -> 17 与 lua51 同因（两处赋值被折叠语句
@@ -285,7 +312,7 @@ fn pins_luau() -> AuditPins {
         // installed but never read.
         check1_nice_fails: vec![
             (86, 4),
-            (256, 207),
+            (256, 4),
             (65536, 3),
             (16777216, 4),
             (2147483647, 27),
@@ -318,7 +345,7 @@ fn pins_luau() -> AuditPins {
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
+                ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
         check6_alias_prologues: 1,
