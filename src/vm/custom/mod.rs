@@ -45,6 +45,7 @@ mod constant_fields;
 mod emit;
 mod emit_decode;
 mod emit_prelude;
+mod loader;
 mod lowering;
 mod seed;
 mod seed_deform;

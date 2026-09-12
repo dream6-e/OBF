@@ -19,3 +19,4 @@ include!("tests/heuristic_audit.rs");
 include!("tests/stream_audit.rs");
 include!("tests/bitops.rs");
 include!("tests/lane.rs");
+include!("tests/scatter.rs");

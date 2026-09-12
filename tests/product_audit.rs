@@ -174,9 +174,24 @@ fn pins_lua51() -> AuditPins {
         // `RO` 局部时 `256` 涨到 220、字段数 27->28，已按「收紧生成器优先」回退）。
         // check5 的 `X[N]=N` 19 -> 17：两处赋值被折叠语句改写成形，模板类数仍是 11；
         // check2/3/4/6/7/8/9 一字未动。
+        // K20 (runtime segment loading) -- measured Lua51 diff:
+        //   check1 `256` 212 -> 218.  The six added occurrences are the respelled
+        //     digit-accumulate loops: the equivalent spelling writes `a*257` as
+        //     `a+a*256`, and each respelled field exists twice (A then B), so the
+        //     literal count moves with the number of respelled loop bodies and
+        //     nothing else.  `86`, `65536`, `2147483647` and `4294967296` hold.
+        //   check5 class count 11 (unchanged); `X=X+N` enters the top-8 with 29 --
+        //     the fold statements each loader carries -- which pushes the previous
+        //     8th entry (`X[N]=NXX[N]==NXX[N]=N`, 7) below the cut.  No template
+        //     class appeared or disappeared.
+        //   check8 pairs 51 -> 52, gcd still 1: duplicating a body made one
+        //     previously unique 6+ digit literal repeat, so a new adjacent pair
+        //     exists; the gcd staying 1 says no periodic structure was introduced.
+        //   check7 dead-table list stays EMPTY -- every loader is read, and
+        //   check2/3/4/6/9 are untouched.
         check1_nice_fails: vec![
             (86, 3),
-            (256, 212),
+            (256, 218),
             (65536, 3),
             (2147483647, 24),
             (4294967296, 3),
@@ -187,6 +202,7 @@ fn pins_lua51() -> AuditPins {
         check5_templates: (
             11,
             vec![
+                ("X=X+N".to_string(), 29),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -197,12 +213,11 @@ fn pins_lua51() -> AuditPins {
                     9,
                 ),
                 ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
-                ("X[N]=NXX[N]==NXX[N]=N".to_string(), 7),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 51),
+        check8_literal_gcd: (1, 52),
         check9_stream: (19017, 2, false),
     }
 }
@@ -251,9 +266,18 @@ fn pins_luau() -> AuditPins {
         // 裸 86：数字表旋转改成 `(x-1+B)%r`，r 是 c1+c2 的和式），其余 nice 值计数
         // 一字未动；check5 的 `X[N]=N` 19 -> 17 与 lua51 同因（两处赋值被折叠语句
         // 改写成形），模板类数仍是 12；check2/3/4/6/7/8/9 全部原样，`fail` 仍为 false。
+        // K20 (runtime segment loading) -- measured Luau diff, same three causes as
+        // Lua51 and nothing else: `256` 201 -> 207 (the respelled digit loops write
+        // `a*257` as `a+a*256`, once per surviving spelling), `X=X+N` 0 -> 29 enters
+        // the top-8 and pushes the 6-count entry below the cut (template class count
+        // stays 12), check8 59 -> 60 pairs with gcd still 1 because A/B duplication
+        // repeated one previously unique long literal.  check2/3/4/6/7/9 -- including
+        // every `fail` flag and the empty dead-table list -- hold untouched, i.e. the
+        // loaders did not widen the alphabet, add a threshold, or leave a table
+        // installed but never read.
         check1_nice_fails: vec![
             (86, 4),
-            (256, 201),
+            (256, 207),
             (65536, 3),
             (16777216, 4),
             (2147483647, 27),
@@ -264,6 +288,7 @@ fn pins_luau() -> AuditPins {
         check5_templates: (
             12,
             vec![
+                ("X=X+N".to_string(), 29),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -274,15 +299,11 @@ fn pins_luau() -> AuditPins {
                     9,
                 ),
                 ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
-                (
-                    "X[N]=NXX=N,X[N]XX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
-                    6,
-                ),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 59),
+        check8_literal_gcd: (1, 60),
         check9_stream: (23738, 3, false),
     }
 }

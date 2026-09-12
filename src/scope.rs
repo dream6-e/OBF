@@ -899,6 +899,10 @@ impl Analysis {
                 };
                 if let ExpressionKind::Function(body) = &value.kind {
                     statements.extend(body.body.statements.iter());
+                    // K20 允许把 handler 从表字面量搬进入口阶段分支，在运行期用
+                    // `x[k]=function ... end` 装载。审计口径必须跟着装载点走，否则
+                    // 「十二处环境探测」会被打散成不足十二处而静默降级。
+                    collect_installed_handler_statements(&body.body, &mut statements);
                 }
             }
         }
@@ -1121,6 +1125,50 @@ impl RenamePlan {
 /// functions: exactly `debug and debug.<info|getinfo>(loadstring, <"s"|"S">)`
 /// (Luau: debug.info; Lua 5.1: debug.getinfo). Any other spelling, target
 /// mismatch, extra argument or bound local is unaudited and rejected.
+/// K20：把运行期装载的 handler 体纳入审计口径。只识别 `Name[<数字>]=function`
+/// 形态的赋值（壳表装载），并只下钻控制流块；嵌套函数体属于另一层作用域，
+/// 历史上同样不在口径内，所以不进入。
+fn collect_installed_handler_statements<'a>(block: &'a Block, out: &mut Vec<&'a Statement>) {
+    for statement in &block.statements {
+        match &statement.kind {
+            StatementKind::Assignment { targets, values } => {
+                for (target, value) in targets.iter().zip(values.iter()) {
+                    let ExpressionKind::Index { table, index } = &target.kind else {
+                        continue;
+                    };
+                    if !matches!(table.kind, ExpressionKind::Name(_))
+                        || !matches!(index.kind, ExpressionKind::Number(_))
+                    {
+                        continue;
+                    }
+                    if let ExpressionKind::Function(body) = &value.kind {
+                        out.extend(body.body.statements.iter());
+                    }
+                }
+            }
+            StatementKind::If {
+                branches,
+                else_block,
+            } => {
+                for branch in branches {
+                    collect_installed_handler_statements(&branch.body, out);
+                }
+                if let Some(nested) = else_block {
+                    collect_installed_handler_statements(nested, out);
+                }
+            }
+            StatementKind::While { body, .. } | StatementKind::Repeat { body, .. } => {
+                collect_installed_handler_statements(body, out);
+            }
+            StatementKind::Do(body) => collect_installed_handler_statements(body, out),
+            StatementKind::NumericFor { body, .. } | StatementKind::GenericFor { body, .. } => {
+                collect_installed_handler_statements(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn is_vm_probe(expression: &Expression, target: Target) -> bool {
     // The probes spell no global names: they receive the environment
     // references as parameters (threaded from the audited capture) and

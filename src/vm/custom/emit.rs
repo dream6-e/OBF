@@ -973,6 +973,39 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         );
         probe_fields.push(field);
     }
+    // K20 运行期分段装载：把可独立搬迁的 payload 字段从表字面量里摘出来，改由
+    // 入口状态机各阶段之间的注入点分多次装进壳表，同一键可以先装 A 再装等价的
+    // B（最后写入者生效，静态看不出哪份生效）。每个装载点折叠一句 `ck=ck+k`，
+    // run 段末比对总和，所以删除或复制任一装载语句都会 fail-closed。槽位编号即
+    // 执行顺序：0 = prelude 调用前，1..3 = 三个探测调用前，4..6 = 三段传输调用前，
+    // 7/8 = 水印打包/校验调用前，9 = 解码装配段前。
+    let mut scatter_pool: Vec<(usize, bool, String)> = Vec::new();
+    {
+        let mut probe_slot = [1usize, 2, 3];
+        for (pos, index) in probe_order.iter().enumerate() {
+            probe_slot[*index] = 1 + pos;
+        }
+        for (index, field) in probe_fields.into_iter().enumerate() {
+            scatter_pool.push((probe_slot[index], false, field));
+        }
+    }
+    // 三段 base86 传输字段各带一处审计段探测，同样禁止复制。
+    for (part, field) in segment_fields.into_iter().enumerate() {
+        scatter_pool.push((4 + part, false, field));
+    }
+    for (index, field) in watermark_fields.into_iter().enumerate() {
+        scatter_pool.push((7 + index, true, field));
+    }
+    // 解码簇（含 ChaCha8/压缩/反挂钩字段）保持「一份装载」：这些字段里可能出现
+    // 被 scope 审计计数的环境探测，复制一份就会让「十二处探测」变成十三处。
+    for field in decoder_fields.into_iter() {
+        scatter_pool.push((9, false, field));
+    }
+    // 形式表与操作数解码字段在解码装配段里被读，校验字段在绑定段里被读。
+    scatter_pool.push((9, true, forms_field));
+    scatter_pool.push((9, true, decode_field));
+    scatter_pool.push((10, true, validate_field));
+    let scatter = super::loader::scatter(scatter_pool, &mut structure);
     // ISA12-C entry stage graph. The dependency order remains strict, but the
     // former top-level decode -> decrypt -> decompress -> parse -> validate ->
     // execute statement chain is no longer a stable textual anchor. Six
@@ -996,15 +1029,22 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         entry_states[4],
         entry_states[5],
     );
-    let prelude_stage = format!("{ret_names}=VMS[{}]();es={e_probe};", keys[0]);
+    let prelude_stage = format!(
+        "{}{ret_names}=VMS[{}]();es={e_probe};",
+        scatter.blob(0),
+        keys[0]
+    );
     let probe_stage = format!(
-        "c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});es={e_segments};",
+        "{}c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});{}c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});{}c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});es={e_segments};",
+        scatter.blob(1),
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
         probe_inputs[probe_order[0]].1,
+        scatter.blob(2),
         keys[5 + probe_order[1]],
         probe_inputs[probe_order[1]].0,
         probe_inputs[probe_order[1]].1,
+        scatter.blob(3),
         keys[5 + probe_order[2]],
         probe_inputs[probe_order[2]].0,
         probe_inputs[probe_order[2]].1,
@@ -1013,20 +1053,35 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         cn2 = probe_order[2] + 1,
     );
     let segment_stage = format!(
-        "Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y1);Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y2);local mV=VMS[{}](Y1,E,SB);VMS[{}](mV,E);es={e_decode};",
+        "{}Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);{}Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y1);{}Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y2);{}local mV=VMS[{}](Y1,E,SB);{}VMS[{}](mV,E);es={e_decode};",
+        scatter.blob(4),
         keys[8 + hold[0]],
+        scatter.blob(5),
         keys[8 + hold[1]],
+        scatter.blob(6),
         keys[8 + hold[2]],
+        scatter.blob(7),
         keys[11],
+        scatter.blob(8),
         keys[12],
     );
-    let decode_stage = format!("{decoder_stage}es={e_bind};");
+    let decode_stage = format!("{}{decoder_stage}es={e_bind};", scatter.blob(9));
     let bind_stage = format!(
-        "P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);for pi=0,np-1 do P[pi].__obf_proto_kimg=KImg end;RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX,SS,NCH,TC,IF,SF,U32,UK,NU);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);for pi=0,np-1 do P[pi].__obf_proto_kimg=KImg end;RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX,SS,NCH,TC,IF,SF,U32,UK,NU);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        scatter.blob(10),
         keys[14], keys[15], keys[2], keys[3],
     );
+    // K20 的装载点折叠在此收口：装载语句每执行一条就累加一次被装键，run 段读到
+    // 全部字段之后比对总数；少装、多装或换序都会走 E()。
+    let scatter_check = if scatter.sites == 0 {
+        String::new()
+    } else {
+        format!("if ck~={} then E()end;", scatter.fold)
+    };
+    // 折叠检查放在 run 段的所有 handler 调用之前：装载全部到位、而用户代码还没
+    // 跑过一步，所以被篡改的壳不会先产生副作用再报错。
     let run_stage = format!(
-        "local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
+        "{scatter_check}local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
         keys[4]
     );
     let entry_machine = state_machine(
@@ -1043,7 +1098,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     );
     write!(
         s,
-        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,KImg,RD,ED,OG,DC,CV,SV,Lookup;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
+        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,KImg,RD,ED,OG,DC,CV,SV,Lookup;local ck=0;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
     )
     .unwrap();
     write!(
@@ -1308,11 +1363,8 @@ end;
         f3_chunk,
         s[f4_start..entry_start].to_owned(),
     ];
-    fields.extend(probe_fields);
-    fields.extend(segment_fields);
-    fields.extend(watermark_fields);
-    fields.extend([forms_field, decode_field, validate_field]);
-    fields.extend(decoder_fields);
+    // K20：被搬出字面量的字段已经不在这些组里，剩下烘入的字段一并回填。
+    fields.extend(scatter.kept);
     fields.extend([entry_chunk, f5_chunk]);
     structure.shuffle(&mut fields);
     let mut out = s[..header_end].to_owned();

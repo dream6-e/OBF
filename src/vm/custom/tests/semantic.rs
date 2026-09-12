@@ -737,8 +737,10 @@ fn full_code_randomization_layout_and_cipher_vary_per_seed() {
                     order.push(tokens[index + 1].text(&output).to_owned());
                 }
             }
+            // K20：字面量段函数与运行期装载语句共用同一 token 形态，这里统计的
+            // 是两者之和（同键先装 A 后装 B 会多出一条），窗口相应放宽。
             assert!(
-                (25..=28).contains(&order.len()),
+                (25..=32).contains(&order.len()),
                 "{target} seed {seed}: {} fields",
                 order.len()
             );

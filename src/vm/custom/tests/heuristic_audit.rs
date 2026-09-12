@@ -161,24 +161,42 @@ type AuditPins = (
 //      some long strings got 3-12 bytes shorter while the whole script grew by
 //      158 B (101,391 -> 101,549: the two fold loops and the extra parameter).
 //      The 134/134 pair is untouched, so no literal crossed into "long".
+// K20 (2026-09-12, 运行期分段装载：payload 段函数改由入口阶段分多次装载，同一键
+// 可以先装 A 再装等价的 B) -- re-recorded from the measured surface. Invariants
+// that held: M1 stays 86 (alphabet radix), M2 stays (1372,1,0,2), M3a stays
+// [0,2,0,...] (still only the audited getfenv capture), M4b stays 0 (the装载折叠
+// keeps integer arithmetic exact, no float token), M5/M7 stay (5,1782) and
+// ([507,506,501,134,134],367) (no literal grew longer, no long run moved), M6
+// stays (0,0).
+// What moved, and why:
+//   M3b 233 -> 234 distinct big literals is exactly one new number: the fold
+//     checkpoint's expected sum (`if ck~=156346 then`), placed before the run
+//     stage's first handler call. The maximum is untouched -- no new magnitude.
+//   M4 top-12: 256 205 -> 211 is the respelled bodies reaching the shell (the
+//     probe fold `a*257` -> `a+a*256` on each installed probe, plus W1's second
+//     packing order); 1/0/2/4/5 gain a handful because relocated sections carry
+//     their own small constants, while 3 154 -> 149 and 15 86 -> 72 drop the
+//     same way; 42 and 8 enter the top 12 and 11 leaves it. No audit-nice value
+//     (86/7225/65536/16777216/...) enters the census, so K16's invariant -- the
+//     shell exposes no new nice-value literal -- still holds.
 const PINS_LUA51_7001: AuditPins = (
     86,
     (1372, 1, 0, 2),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (233, 9007492399384758, 4503599627370496),
+    (234, 9007493881568240, 4503599627370496),
     [
-        (1, 504),
-        (0, 436),
-        (2, 236),
-        (256, 205),
-        (3, 154),
-        (4, 127),
-        (15, 86),
-        (5, 81),
+        (1, 505),
+        (0, 438),
+        (2, 238),
+        (256, 211),
+        (3, 149),
+        (4, 142),
+        (5, 90),
+        (15, 72),
         (28, 71),
         (7, 64),
-        (8, 63),
-        (11, 62),
+        (42, 55),
+        (8, 54),
     ],
     0,
     (5, 1782),
@@ -267,18 +285,28 @@ const PINS_LUA51_7001: AuditPins = (
 // M7 [514,514,513,134,134]/379 -> [532,526,514,134,134]/380: the script grew
 // 268 B (110,877 -> 111,145) and the long-string spans moved with the re-keyed
 // stream; the 134/134 pair is untouched, so nothing crossed the length class.
+// K20 (2026-09-12, 运行期分段装载) -- same construction, Luau side. Held: M1 86,
+// M2 (1390,1,2,0), M3a [0,2,0,...], M5 (5,1840), M6 (0,0), M7
+// ([532,526,514,134,134],380) -- the section text moved between regions but no
+// literal grew and no repeated u32 word appeared in the outer ciphertext.
+// Moved: M3b 225 -> 226 distinct big literals (the one new checkpoint constant) and
+// M4 census 256 200 -> 206 / 3 172 -> 175 / 4 167 -> 164 (respelled bodies),
+// M4b 39 -> 40. M4b's single extra token is the same new checkpoint number: it is
+// not a float spelling (the count of `.`/`e`-spelled number tokens is unchanged at
+// 299 -> 299, measured), i.e. the audit declines to read that one spelling as a
+// plain decimal integer; no non-integer *value* enters the shell.
 const PINS_LUAU_7351: AuditPins = (
     86,
     (1390, 1, 2, 0),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (225, 9007478252902593, 4503599627370496),
+    (226, 9007479735086075, 4503599627370496),
     [
-        (1, 544),
-        (0, 418),
-        (2, 248),
-        (256, 200),
-        (3, 172),
-        (4, 167),
+        (1, 545),
+        (0, 419),
+        (2, 249),
+        (256, 206),
+        (3, 175),
+        (4, 164),
         (5, 81),
         (89, 70),
         (8, 65),
@@ -286,7 +314,7 @@ const PINS_LUAU_7351: AuditPins = (
         (19, 55),
         (42, 53),
     ],
-    39,
+    40,
     (5, 1840),
     (0, 0),
     ([532, 526, 514, 134, 134], 380),

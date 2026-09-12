@@ -790,13 +790,15 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
                 _ => panic!("{target}: {output}"),
             }
             // The payload table has one string-keyed entry and a seed-variable
-            // numeric field count. Five additional globally shuffled fields
-            // compose word operations, quarter round, ChaCha8 block,
-            // stream/KDF and anti-hook attestation.
+            // numeric field count. K20 moved most section functions out of the
+            // literal: they now arrive through runtime installs in the entry
+            // stage arms, so only the bootstrapping fields (environment
+            // capture, prelude, head guards, entry, interpreter) stay baked.
+            // The census of *both* kinds lives in `scatter.rs`.
             let ExpressionKind::Table(fields) = &setmetatable_arguments[0].kind else {
                 panic!("{target}: {output}");
             };
-            assert!((25..=27).contains(&fields.len()), "{target}: {output}");
+            assert!((5..=8).contains(&fields.len()), "{target}: {output}");
             let mut numeric_keys = std::collections::BTreeSet::new();
             let mut entries = 0;
             for field in fields {
@@ -825,7 +827,7 @@ fn whole_output_is_a_setmetatable_method_call_over_split_section_functions() {
                 }
             }
             assert_eq!(entries, 1);
-            assert!((24..=26).contains(&numeric_keys.len()));
+            assert!((4..=7).contains(&numeric_keys.len()));
             // The wrapper is not just structural: it runs the program.
             let workspace = native::Workspace::new();
             let path = workspace.0.join("wrapped.lua");
