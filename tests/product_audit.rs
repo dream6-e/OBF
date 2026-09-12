@@ -198,7 +198,15 @@ fn pins_lua51() -> AuditPins {
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
-        check4_thresholds: (2, 16777215, false),
+        // K21 (interval opcode dispatch) -- measured Lua51 diff, the only move:
+        //   check4 (2, 16777215, false) -> (12, 16777215, false). The dispatch chains
+        //     now carry 44 range tests; 10 of them spell `x<=B`/`(v)<=B` with a
+        //     distinct bound each, 7 spell `x-B<=0` (threshold 0) and the rest use
+        //     `>=`/`not(x>B)`, which this census does not look at. max stays the
+        //     pre-existing 0xffffff mask constant, the density fail flag stays false,
+        //     and check1/2/3/5/6/7/8/9 are byte-for-byte unchanged -- no new constant
+        //     class reached the shell, and the threshold census got *more* varied.
+        check4_thresholds: (12, 16777215, false),
         check5_templates: (
             11,
             vec![
@@ -284,7 +292,19 @@ fn pins_luau() -> AuditPins {
         ],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
-        check4_thresholds: (1, 65535, false),
+        // K21 (interval opcode dispatch) -- measured Luau diff, two moves, and no
+        // `fail` flag is affected:
+        //   check4 (1, 65535, false) -> (14, 65535, false): the chains now carry 44
+        //     range tests; the `x<=B`/`(v)<=B` spellings contribute 10 distinct bounds
+        //     and `x-B<=0` contributes the 0, while the `>=`/`not(x>B)` spellings are
+        //     outside what this census reads.
+        //   check6 0 -> 1: one *head* statement (the slot-alias prologue `local j=..
+        //     x=.. i=..`) now carries a sixth digit-index slot, because the structure
+        //     stream downstream of the chain re-draws where that block's first `end;`
+        //     falls. Same seed-accident direction K14 recorded in mirror image (Lua
+        //     5.1 fell 1 -> 0 there); the prologue already had five slots, so no new
+        //     construct appears. check1/2/3/5/7/8/9 are byte-for-byte unchanged.
+        check4_thresholds: (14, 65535, false),
         check5_templates: (
             12,
             vec![
@@ -301,7 +321,7 @@ fn pins_luau() -> AuditPins {
                 ("X=(X+X+(N*N+N))%X.X".to_string(), 8),
             ],
         ),
-        check6_alias_prologues: 0,
+        check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 60),
         check9_stream: (23738, 3, false),

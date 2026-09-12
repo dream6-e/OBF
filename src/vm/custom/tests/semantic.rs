@@ -1090,7 +1090,10 @@ fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
                 "{target} seed {seed}: textual fusion retired with the classic bodies"
             );
             assert_eq!(forwarded_reads, 0);
-            assert!((2..=4).contains(&raw.matches("sid%").count()));
+            // K21：fragment 池不再按余数切子链，改成数字区间（见
+            // `dispatch_intervals.rs` 的 census 与真机门）。这里改钉「选择器确实没了」，
+            // 区间节点数下限由 K21 那条门按双目标多种子把守。
+            assert_eq!(raw.matches("sid%").count(), 0);
             let output = emit(&data, target, seed).unwrap();
             assert!(!output.contains("__obf_fl"));
             assert!(!output.contains("__obf_fv"));

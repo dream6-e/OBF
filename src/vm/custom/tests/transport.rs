@@ -1152,10 +1152,12 @@ fn decoder_splits_into_seeded_random_sections() {
 
 #[test]
 fn dispatch_chains_split_into_seeded_subchains() {
-    // Three dispatch dimensions: operand validation is partitioned by `o %
-    // groups`, recipe-to-entry routing by `rid % groups`, and the global
-    // semantic fragment pool by `sid % groups`. Every sub-chain keeps its own
-    // fail-closed else; group counts and arm layouts vary per seed.
+    // K21 之后这三条链的划分口径不同了：操作数校验仍按 `o % groups` 取余切子链，
+    // 而语义解释器的两级分派（`rid` 选入口状态、`sid` 选 fragment）改成**数字区间**
+    // ——桶边界是区间测试，桶内是按边界值二分的区间树。这里钉的是「划分随种子变」
+    // 与「同一 seed 逐字节可复现」，外加整段程序在真机上仍逐字节跑出同样结果；
+    // 区间本身的语义（单调切割、边界不泄露 opcode、挪边界不会换 handler）在
+    // `dispatch_intervals.rs` 里逐条把守。
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
@@ -1171,41 +1173,44 @@ fn dispatch_chains_split_into_seeded_subchains() {
                 .expect("bounds closure");
             let vld_end = vld_at + raw[vld_at..].find("E()end;return true").unwrap();
             let bounds = &raw[vld_at..vld_end];
-            // Interpreter chain: from the fetch line to the H return.
-            // Anchor on the hoisted fetch locals: with the
-            // fetch/dispatch phase machine the chain may sit before or
-            // after the fetch line in the text.
-            let f5_at = raw
-                .find("local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w=")
-                .expect("interpreter phase machine");
-            let f5_end = f5_at + raw[f5_at..].find("return H").unwrap();
-            let interp = &raw[f5_at..f5_end];
-            let mut chain_groups = Vec::new();
-            for (chain, selector) in [(bounds, "o%"), (interp, "rid%"), (interp, "sid%")] {
-                let mut modulus = None;
-                let mut selectors = 0usize;
-                let mut at = 0usize;
-                while let Some(found) = chain[at..].find(selector) {
-                    let value_at = at + found + selector.len();
-                    let digits = chain[value_at..]
-                        .chars()
-                        .take_while(char::is_ascii_digit)
-                        .count();
-                    let value: u8 = chain[value_at..value_at + digits].parse().unwrap();
-                    assert!((2..=4).contains(&value), "selector modulus {value}");
-                    match modulus {
-                        Some(seen) => assert_eq!(seen, value, "mixed sub-chain moduli"),
-                        None => modulus = Some(value),
-                    }
-                    selectors += 1;
-                    at = value_at;
+            let mut modulus = None;
+            let mut selectors = 0usize;
+            let mut cursor = 0usize;
+            while let Some(found) = bounds[cursor..].find("o%") {
+                let value_at = cursor + found + 2;
+                let digits = bounds[value_at..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .count();
+                let value: u8 = bounds[value_at..value_at + digits].parse().unwrap();
+                assert!((2..=4).contains(&value), "selector modulus {value}");
+                match modulus {
+                    Some(seen) => assert_eq!(seen, value, "mixed sub-chain moduli"),
+                    None => modulus = Some(value),
                 }
-                let groups = modulus.expect("no sub-chain selector");
-                assert_eq!(selectors, groups as usize, "one selector per group");
-                chain_groups.push(groups);
+                selectors += 1;
+                cursor = value_at;
             }
-            assert_ne!(chain_groups[0], 0);
-            topologies.insert((chain_groups[0], chain_groups[1], chain_groups[2]));
+            let groups = modulus.expect("no sub-chain selector");
+            assert_eq!(selectors, groups as usize, "one selector per group");
+            // Interpreter chain: the residue selectors are gone, the interval
+            // partition takes their place. Counted on the whole raw text because
+            // `rid`/`sid` appear nowhere else.
+            let mut nodes = [0usize; 2];
+            for (index, var) in ["rid", "sid"].iter().enumerate() {
+                assert!(
+                    !raw.contains(&format!("{var}%")),
+                    "{target} seed {seed}: {var} still carries a residue selector"
+                );
+                let (equality, _, order) = scan_dispatch_chain(&raw, target, var);
+                assert!(
+                    equality.len() >= 4,
+                    "{target} seed {seed}: {var} tests only {} arms",
+                    equality.len()
+                );
+                nodes[index] = order.len();
+            }
+            topologies.insert((groups, nodes[0], nodes[1]));
             // Same seed must reproduce the identical topology.
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
         }

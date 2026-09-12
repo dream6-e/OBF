@@ -320,6 +320,66 @@ impl Prng {
         .unwrap();
         result
     }
+
+    /// One numeric-interval test for the semantic interpreter's opcode dispatch:
+    /// `variable <= bound` (`below`) or its exact complement `variable > bound`,
+    /// so an interval partition can be walked with either polarity and both
+    /// spellings cut the value domain in the same place.
+    ///
+    /// Three of the eight forms hide the dispatch variable behind the constant
+    /// tautology `(v<=v and v or K)`, which is the identity for any number and
+    /// therefore cannot change which interval a real dispatch value lands in.
+    /// The point is that no raw `rid<=1234` survives as a grep anchor: a reader
+    /// has to prove the guard is an identity before the bounds mean anything. If
+    /// `v` were nil or false the guard yields `K`, a plain number, so such a
+    /// value still reaches exactly one leaf - and every leaf keeps its own
+    /// equality test and closes with `else E()end`, so an unforeseen value
+    /// aborts instead of selecting a handler.
+    pub fn interval_condition(
+        &mut self,
+        variable: &str,
+        bound: u16,
+        noise: u16,
+        below: bool,
+    ) -> String {
+        debug_assert!(variable
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
+        // Both numbers are plain decimals by construction: a bound is not a
+        // value the chain ever tests for equality, so its only job is to look
+        // like every other three-to-five digit number in the shell, where hex
+        // and grouped binary would cost 1-15 extra bytes apiece without hiding
+        // anything (contrast `dispatch_condition`, whose literals *are* opcodes
+        // and therefore gain from an unusual spelling).
+        let literal = bound.to_string();
+        let guard = format!("({variable}<={variable} and {variable} or {noise})");
+        let mut result = String::new();
+        if below {
+            match self.index(8) {
+                0 => write!(result, "{variable}<={literal}"),
+                1 => write!(result, "{literal}>={variable}"),
+                2 => write!(result, "not({variable}>{literal})"),
+                3 => write!(result, "{variable}-{literal}<=0"),
+                4 => write!(result, "{literal}-{variable}>=0"),
+                5 => write!(result, "{guard}<={literal}"),
+                6 => write!(result, "not({guard}>{literal})"),
+                _ => write!(result, "{guard}-{literal}<=0"),
+            }
+        } else {
+            match self.index(8) {
+                0 => write!(result, "{variable}>{literal}"),
+                1 => write!(result, "{literal}<{variable}"),
+                2 => write!(result, "not({variable}<={literal})"),
+                3 => write!(result, "{variable}-{literal}>0"),
+                4 => write!(result, "{literal}-{variable}<0"),
+                5 => write!(result, "{guard}>{literal}"),
+                6 => write!(result, "not({guard}<={literal})"),
+                _ => write!(result, "{guard}-{literal}>0"),
+            }
+        }
+        .unwrap();
+        result
+    }
 }
 
 /// Fresh per-generation default, not a cryptographic key. A process-random

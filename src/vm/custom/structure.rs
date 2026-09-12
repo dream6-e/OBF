@@ -178,39 +178,241 @@ fn search_tree(
     out.push_str(" end;");
 }
 
-/// Wide-id form used by semantic superoperators. Recipe identifiers occupy
-/// the full nonzero u16 range rather than the byte-sized opcode image.
-pub(crate) fn grouped_recipe_chain(
+/// Audit-nice values that an arbitrary label in the dispatch region must never
+/// spell (same K9a hygiene rule `wrapper_keys` and `state_values` follow). The
+/// interval builder below draws its bounds and its tautology fallbacks through
+/// this filter, so the nice-constant census cannot move by luck of where a
+/// split happened to fall, and a bound never reads as a radix hint.
+const NICE_LABELS: [u16; 4] = [86, 256, 7225, 7396];
+
+/// A bound strictly between two neighbouring arm values: never an arm value
+/// itself, never an audit-nice label. `None` when the gap is too narrow, which
+/// is what keeps adjacent opcodes inside one leaf run instead of forcing a
+/// bound onto a number the chain already tests below it.
+fn interval_bound(structure: &mut crate::random::Prng, low: u16, high: u16) -> Option<u16> {
+    let gap = high.checked_sub(low)?;
+    if gap < 2 {
+        return None;
+    }
+    let mut bound = low + 1 + structure.index((gap - 1) as usize) as u16;
+    if NICE_LABELS.contains(&bound) {
+        // Slide inside the same gap; the partition stays exact either way.
+        if bound + 1 < high && !NICE_LABELS.contains(&(bound + 1)) {
+            bound += 1;
+        } else if bound > low + 1 && !NICE_LABELS.contains(&(bound - 1)) {
+            bound -= 1;
+        } else {
+            return None;
+        }
+    }
+    Some(bound)
+}
+
+/// Split positions this arm list allows: indices whose left and right neighbours
+/// leave room for a bound. Recomputed per node, so a dense run (the fragment
+/// states live in a 900-wide window) naturally grows its leaves instead of
+/// emitting a bound that equals an arm value.
+fn gap_positions(members: &[(u16, String)]) -> Vec<usize> {
+    (1..members.len())
+        .filter(|&index| members[index].0.saturating_sub(members[index - 1].0) >= 2)
+        .collect()
+}
+
+/// Choose the node's split: closest to the middle (plus a small seeded jitter,
+/// so the depth is not exactly `log2` and the tree shape varies per seed), and
+/// the bound drawn inside that gap. Falls back to the other gap positions if the
+/// nearest one has no acceptable bound.
+fn interval_split(
+    structure: &mut crate::random::Prng,
+    members: &[(u16, String)],
+    positions: &[usize],
+    target: usize,
+) -> Option<(usize, u16)> {
+    let jitter = (structure.index(5) as usize).saturating_sub(2);
+    let center = target.wrapping_add(jitter).max(1).min(members.len() - 2);
+    let mut ordered: Vec<(usize, usize)> = positions
+        .iter()
+        .copied()
+        .map(|at| (at.abs_diff(center), at))
+        .collect();
+    ordered.sort();
+    for (_, at) in ordered {
+        if let Some(bound) = interval_bound(structure, members[at - 1].0, members[at].0) {
+            return Some((at, bound));
+        }
+    }
+    None
+}
+
+/// A plain integer for the `(v<=v and v or K)` guard's fallback branch. At most
+/// three digits keeps it in the same visual class as the state numbers, and
+/// filtered through `NICE_LABELS`, so the noise cannot move the nice-constant
+/// census; it never selects a handler because every leaf still tests the dispatch
+/// value itself.
+fn dispatch_noise(structure: &mut crate::random::Prng) -> u16 {
+    loop {
+        let value = 1 + structure.index(999) as u16;
+        if !NICE_LABELS.contains(&value) {
+            return value;
+        }
+    }
+}
+
+/// One leaf: the arm's own equality tests, in a seeded order, closed fail-closed.
+/// `open` says whether the run starts its own statement (`if ...`) or continues
+/// the interval chain it sits at the tail of (`elseif ...`) -- continuing it is
+/// what saves the ` end;` a nested `else` block would otherwise need.
+fn leaf_run(
+    structure: &mut crate::random::Prng,
+    members: &[(u16, String)],
+    out: &mut String,
+    open: bool,
+) {
+    let distinct = members.windows(2).all(|pair| pair[0].0 != pair[1].0);
+    let mut order: Vec<usize> = (0..members.len()).collect();
+    if distinct && members.len() > 1 {
+        structure.shuffle(&mut order);
+    }
+    for (step, which) in order.iter().enumerate() {
+        let keyword = match (step, open) {
+            (0, true) => "if",
+            _ => "elseif",
+        };
+        write!(out, "{keyword} {}", members[*which].1).unwrap();
+    }
+    out.push_str(" else E()end;");
+}
+
+/// One bucket's interval chain. Internal nodes decide with a numeric range test
+/// against a bound no arm carries, and a node's other half rides on as `elseif`
+/// instead of a nested `else if ... end;`: same partition, one ` end;` cheaper per
+/// node and one level shallower for the parser. Each recursive call receives
+/// exactly the arms whose value lies on that side of the bound, so the intervals
+/// refine down to a single opcode instead of scanning a chain of equality tests.
+fn interval_tree(
+    structure: &mut crate::random::Prng,
+    mut members: &[(u16, String)],
+    value_var: &str,
+    leaf_max: usize,
+    out: &mut String,
+    open: bool,
+) {
+    let mut open = open;
+    loop {
+        let mut split = None;
+        if members.len() > leaf_max {
+            let positions = gap_positions(members);
+            split = interval_split(structure, members, &positions, members.len() / 2);
+        }
+        let Some((at, bound)) = split else {
+            leaf_run(structure, members, out, open);
+            return;
+        };
+        let (left, right) = members.split_at(at);
+        let noise = dispatch_noise(structure);
+        // Either polarity cuts the domain at the same place; which one a node
+        // gets is a per-seed choice, and the two halves swap with it so no
+        // value can reach both sides.
+        let below = structure.index(2) == 0;
+        let condition = structure.interval_condition(value_var, bound, noise, below);
+        let (first, second) = if below { (left, right) } else { (right, left) };
+        write!(
+            out,
+            "{} {condition} then ",
+            if open { "if" } else { "elseif" }
+        )
+        .unwrap();
+        interval_tree(structure, first, value_var, leaf_max, out, true);
+        open = false;
+        members = second;
+    }
+}
+
+/// The semantic interpreter's two lookup levels (recipe id, then fragment state)
+/// dispatched by **numeric interval**: the arms are sorted by value, split into a
+/// seeded number of contiguous buckets whose boundaries are themselves range
+/// tests, and each bucket is then searched with a seeded binary interval tree.
+///
+/// This replaces the old `value % groups == residue` selector plus one flat
+/// `if/elseif` equality scan per residue class. Two things change on purpose: the
+/// *boundaries between instructions* are now numbers the chain never tests for
+/// equality (so the opcode set cannot be read off as "the values appearing after
+/// `then`", it has to be recovered by solving the intervals), and an arm costs
+/// `log2` range tests instead of a scan of its bucket. Everything else is kept
+/// exactly: every arm still sits behind its own equality test, every leaf and
+/// every interval that carries no arm closes with `else E()end;`, so an unknown
+/// dispatch value still aborts rather than running a neighbour, and the emitted
+/// order inside a leaf stays seeded so the chain shape keeps varying per seed.
+pub(crate) fn grouped_interval_chain(
     structure: &mut crate::random::Prng,
     mut arms: Vec<(u16, String)>,
     groups: u8,
     value_var: &str,
 ) -> String {
-    structure.shuffle(&mut arms);
+    // Numeric order is what makes an interval test meaningful; the seeded
+    // randomness rides in the split choices, the bounds, the comparison spelling
+    // and the order inside each leaf, not in the arm order.
+    arms.sort_by_key(|(value, _)| *value);
+    if arms.is_empty() {
+        return "E();".to_owned();
+    }
+    // Leaf size is the size/depth trade: a node costs one interval test, a leaf
+    // run costs none beyond the arms it already carried, so the chain grows by
+    // (roughly) one test per leaf rather than per arm. With 137 recipe arms and
+    // ~410 fragment arms per target, runs of 16..=28 keep the whole interval
+    // overlay near 1.5 KB while cutting a lookup to log2(leaves) + leaf scan --
+    // several times fewer tests than the flat scan it replaces. K18's argument
+    // still applies to the depth floor: with these arm counts even the smallest
+    // draw leaves `nodes >= 20` per chain as a property of the construction.
+    let leaf_max = 16 + structure.index(13) as usize;
+    let positions = gap_positions(&arms);
+    // Bucket boundaries: one range test per cut, so the cascade costs strictly
+    // fewer tests than the modulo selector it replaces (groups-1 against groups),
+    // while every bucket keeps its own fail-closed leaf tail below.
+    let mut cuts: Vec<(usize, u16)> = Vec::new();
+    for rank in 1..usize::from(groups) {
+        let target = arms.len() * rank / usize::from(groups);
+        if let Some((at, bound)) = interval_split(structure, &arms, &positions, target) {
+            if !cuts.iter().any(|(seen, _)| *seen == at) {
+                cuts.push((at, bound));
+            }
+        }
+    }
+    cuts.sort_by_key(|(at, _)| *at);
     let mut text = String::new();
-    for group in 0..groups {
-        let condition = selector_condition(structure, value_var, groups, group);
+    let mut start = 0usize;
+    for (index, (at, bound)) in cuts.iter().enumerate() {
+        let noise = dispatch_noise(structure);
+        // The cascade is monotone: `v <= B1` then `v <= B2` with growing bounds,
+        // so the `elseif` run is an exact interval partition even when the
+        // individual test is spelled as a difference or a negation.
+        let condition = structure.interval_condition(value_var, *bound, noise, true);
         write!(
             text,
             "{} {condition} then ",
-            if group == 0 { "if" } else { "elseif" }
+            if index == 0 { "if" } else { "elseif" }
         )
         .unwrap();
-        let members: Vec<&String> = arms
-            .iter()
-            .filter(|(value, _)| value % u16::from(groups) == u16::from(group))
-            .map(|(_, arm)| arm)
-            .collect();
-        if members.is_empty() {
-            text.push_str("E();");
-        } else {
-            for (index, arm) in members.iter().enumerate() {
-                write!(text, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
-            }
-            text.push_str(" else E()end;");
-        }
+        interval_tree(
+            structure,
+            &arms[start..*at],
+            value_var,
+            leaf_max,
+            &mut text,
+            true,
+        );
+        start = *at;
     }
-    text.push_str(" else E()end;");
+    text.push_str(" else ");
+    interval_tree(
+        structure,
+        &arms[start..],
+        value_var,
+        leaf_max,
+        &mut text,
+        true,
+    );
+    text.push_str(" end;");
     text
 }
 

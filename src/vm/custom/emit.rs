@@ -1301,9 +1301,12 @@ end;
     }
     let recipe_groups = (2 + structure.index(3)) as u8;
     let fragment_groups = (2 + structure.index(3)) as u8;
-    let recipe_chain = grouped_recipe_chain(&mut structure, recipe_entries, recipe_groups, "rid");
+    // K21: both lookup levels decide by numeric interval (bucket cascade plus a
+    // seeded binary interval tree per bucket) instead of `value % groups` plus a
+    // flat equality scan.
+    let recipe_chain = grouped_interval_chain(&mut structure, recipe_entries, recipe_groups, "rid");
     let fragment_chain =
-        grouped_recipe_chain(&mut structure, fragment_arms, fragment_groups, "sid");
+        grouped_interval_chain(&mut structure, fragment_arms, fragment_groups, "sid");
     let init_condition = state_condition(&mut structure, "sid", semantic_init);
     write!(
         s,
