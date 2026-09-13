@@ -588,10 +588,17 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
 // callers either identify the watermark carrier by decoding or keep the
 // three longest spans, which are the payload segments.
 fn segment_spans(source: &str, target: Target, seed: u64) -> Vec<(usize, usize)> {
-    let alphabet = vm::custom::base86_image_alphabet(seed);
+    // K3-FULL 第二步: each payload segment is baked in its own digit table, so
+    // this mirror of `transport::segment_literals` admits the **union** of the
+    // three tables exactly like production does. Which span belongs to which
+    // segment stays unknown here on purpose -- the callers re-identify the
+    // stream-first one by decoding it with the head table, and per-segment
+    // tables make that test decisive instead of merely length-based.
     let mut member = [false; 256];
-    for &byte in &alphabet {
-        member[byte as usize] = true;
+    for part in 0..3 {
+        for &byte in &vm::custom::base86_segment_alphabet(seed, part) {
+            member[byte as usize] = true;
+        }
     }
     let mut spans = Vec::new();
     for token in obf::lexer::lex(source, target).unwrap() {
@@ -763,6 +770,19 @@ fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
             .unwrap_or_else(|| panic!("{target}: stream-first segment missing"));
         let mut mutation_offsets = BTreeSet::new();
         for (index, &(start, end)) in spans.iter().enumerate() {
+            // K3-FULL 第二步: a mutant has to be swapped for a symbol from the
+            // table that actually *owns* this segment (each payload segment is
+            // baked in its own digit table now). `segment_spans` admits the union
+            // of the three, so this lookup is exact rather than heuristic -- and
+            // its exactness is the depooling claim, asserted here as well.
+            let owner = (0..3)
+                .find(|part| {
+                    let table = vm::custom::base86_segment_alphabet(735, *part);
+                    span_bytes(&generated, target, (start, end))
+                        .iter()
+                        .all(|&byte| table.contains(&byte))
+                })
+                .expect("a segment is not readable in exactly one table");
             // Spread raw offsets across the literal, snapped to plain
             // (non-escape) chars so every mutant stays valid Lua. Any flip
             // desyncs the chained widths or corrupts ciphertext, and some
@@ -789,9 +809,9 @@ fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
                 }
             }
             assert!(!usable.is_empty(), "{target}: no plain mutant offsets");
-            mutation_offsets.insert(usable[0]);
-            mutation_offsets.insert(usable[usable.len() / 2]);
-            mutation_offsets.insert(usable[usable.len() - 1]);
+            mutation_offsets.insert((usable[0], owner));
+            mutation_offsets.insert((usable[usable.len() / 2], owner));
+            mutation_offsets.insert((usable[usable.len() - 1], owner));
         }
 
         let workspace = Workspace::new();
@@ -804,9 +824,10 @@ fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
         assert!(control.status.success(), "{target}: control failed");
         assert_eq!(control.stdout, b"MUST_NOT_RUN\n");
 
-        for (case, offset) in mutation_offsets.into_iter().enumerate() {
+        for (case, (offset, owner)) in mutation_offsets.into_iter().enumerate() {
             let mut damaged = generated.clone();
-            let replacement = adjacent_plain(generated.as_bytes()[offset], &alphabet);
+            let table = vm::custom::base86_segment_alphabet(735, owner);
+            let replacement = adjacent_plain(generated.as_bytes()[offset], &table);
             damaged.replace_range(offset..offset + 1, &(replacement as char).to_string());
             let path = workspace.0.join(format!("chacha-corrupt-{case}.lua"));
             fs::write(&path, damaged).unwrap();

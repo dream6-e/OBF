@@ -236,7 +236,9 @@ if d7+d8*65521~={fake_adler} then E()end;"
     let mut marked = Vec::with_capacity(encrypted.len() + 4);
     marked.extend_from_slice(b"XXS:");
     marked.extend_from_slice(&encrypted);
-    let alphabet = base86_image_alphabet(seed);
+    // K3-FULL 第二步: one digit table per logical segment, shared with the audit
+    // through `base86_segment_alphabets` (single source of truth).
+    let alphabets = base86_segment_alphabets(seed);
     let mut transport_rng = crate::random::Prng::sfc(seed ^ 0x6b39_615f_7472_616e);
     // Byte-thirds split (order-preserving: part 0 holds the watermark head).
     let [head, middle] = transport_segment_bounds(marked.len());
@@ -250,26 +252,29 @@ if d7+d8*65521~={fake_adler} then E()end;"
     for part in 1..3 {
         seg_ro[part] = segment_key_fold(parts[part - 1]);
     }
-    // The baked digit table rides as sub-12 fragments (never segment
-    // candidates): the decoder concatenates them into the 86-byte ALPHA.
-    let alpha_literal = {
-        let mut lit = String::new();
-        for (index, frag) in alphabet.chunks(11).enumerate() {
-            if index > 0 {
-                lit.push_str("..");
-            }
-            lit.push('"');
-            lit.push_str(&lua_escape_string(frag));
-            lit.push('"');
-        }
-        lit
-    };
     // Which of the three segment keys holds which stream part is shuffled.
     let mut hold = [0usize, 1, 2];
     crate::random::Prng::sfc(seed ^ 0x7365_676d_3373_6866).shuffle(&mut hold);
     let mut segment_fields = Vec::new();
     for part in 0..3 {
-        let text = base86_encode_mixed_ro(parts[part], &alphabet, &mut transport_rng, seg_ro[part]);
+        let alphabet = &alphabets[part];
+        // The baked digit table rides as sub-12 fragments (never segment
+        // candidates): the decoder concatenates them into the 86-byte ALPHA.
+        // Per-segment since K3-FULL 第二步 -- three *distinct* tables, so the
+        // fragment text is no longer a shared literal either.
+        let alpha_literal = {
+            let mut lit = String::new();
+            for (index, frag) in alphabet.chunks(11).enumerate() {
+                if index > 0 {
+                    lit.push_str("..");
+                }
+                lit.push('"');
+                lit.push_str(&lua_escape_string(frag));
+                lit.push('"');
+            }
+            lit
+        };
+        let text = base86_encode_mixed_ro(parts[part], alphabet, &mut transport_rng, seg_ro[part]);
         assert!(
             text.len() >= 12,
             "K9a: segment too short for the length filter"

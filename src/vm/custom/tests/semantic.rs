@@ -891,7 +891,14 @@ fn transport_watermark_is_present_checked_and_never_spelled_out() {
         // chained order decodes at all, and its head is that same segment.
         let segments = segment_literals(&output, target, 735).unwrap();
         let alphabet = base86_image_alphabet(735);
-        let orders = crate::vm::custom::transport::chained_segment_orders(&segments, &alphabet);
+        // K3-FULL 第二步 strengthens what follows: the isolated decode below reads
+        // each found literal with the **head** table only, so a segment written in
+        // another table no longer decodes at all -- the watermark is not the only
+        // thing left that separates the head from its siblings.
+        let orders = crate::vm::custom::transport::chained_segment_orders(
+            &segments,
+            &crate::vm::custom::transport::base86_segment_alphabets(735),
+        );
         assert_eq!(orders.len(), 1, "{target}: segment order must chain uniquely");
         assert!(orders[0].1[0].starts_with(b"XXS:"), "{target}");
         let stamped = segments

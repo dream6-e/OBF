@@ -243,8 +243,27 @@ fn pins_lua51() -> AuditPins {
         //     satisfied, it is being *avoided*.
         //   check2 (86, 99, false), check3 0, check7 empty and check8 (1, 52) are
         //     byte-for-byte where K9b left them.
+        // K3-FULL 第二步 (2026-09-13, per-segment digit tables) -- measured moves:
+        //   check2 (86, 99, false) -> (96, 99, true). `distinct` is the symbol count of
+        //     the whole stream, and the stream is now written in three tables, so it
+        //     spans 96 of the 99 printable pool bytes; the third cell is the derived
+        //     `span - distinct <= 12` predicate, so its flip is arithmetic over the first
+        //     two, not a relaxed criterion. Read as a static-surface claim it is a gain:
+        //     86 was the fingerprint of "one alphabet explains everything", and no single
+        //     table explains 96 symbols (each drops 13 of the pool, seeded per segment).
+        //   check5 first class `X=X+N` 29 -> 28 and check6 0 -> 1: **not** transport-only.
+        //     Loader slot numbers and several `if z~=N` gate constants are folds over the
+        //     produced text, so redrawing the segment bodies re-rolls the downstream
+        //     shapes as well (documented as measured; the image and the public `.obf`
+        //     stayed byte-for-byte identical -- `stream_audit`/`private_fields` pin those
+        //     and passed). check6 = 1 on this config is the same phenomenon already pinned
+        //     for Luau in K21 (the validator's first `;` lands inside an alias prologue);
+        //     re-salting the segment tables could roll it back to 0, and that would be
+        //     picking a seed for the census rather than fixing anything, so it is left at
+        //     the measured value. check1 (all three classes), check3, check4 (9, max,
+        //     density flag), check7, check8 and check9 (19765, 0, false) are unchanged.
         check1_nice_fails: vec![(256, 4), (2147483647, 24), (4294967296, 3)],
-        check2_alphabet: (86, 99, false),
+        check2_alphabet: (96, 99, true),
         check3_noise_pairs: 0,
         // K21 (interval opcode dispatch) -- measured Lua51 diff, the only move:
         //   check4 (2, 16777215, false) -> (12, 16777215, false). The dispatch chains
@@ -258,7 +277,7 @@ fn pins_lua51() -> AuditPins {
         check5_templates: (
             13,
             vec![
-                ("X=X+N".to_string(), 29),
+                ("X=X+N".to_string(), 28),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -271,7 +290,7 @@ fn pins_lua51() -> AuditPins {
                 ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
-        check6_alias_prologues: 0,
+        check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 52),
         check9_stream: (19765, 0, false),
@@ -367,7 +386,19 @@ fn pins_luau() -> AuditPins {
         // both moved back when those locals stopped being slots, and the surviving `86`
         // count is recorded as a cap in `anchor_floor`'s Luau table.
         check1_nice_fails: vec![(86, 3), (256, 4), (16777216, 4), (2147483647, 27)],
-        check2_alphabet: (86, 99, false),
+        // K3-FULL 第二步 (2026-09-13, per-segment digit tables) -- luau moves two cells.
+        //   check2 (86, 99, false) -> (96, 99, true): the stream's symbol set is the
+        //     union of the three per-segment tables (96 of 99 printable pool bytes), and
+        //     the third cell is the derived `span - distinct <= 12` predicate -- flip is
+        //     arithmetic, and a single 86-symbol table no longer explains the stream.
+        //   check5 `X=X+N` 29 -> 27, from the loader's fold-sensitive slot numbers and
+        //     gate constants re-rolling (see the lua51 block: same mechanism, measured not
+        //     inferred). Everything else is byte-for-byte: **check1 including its `86`
+        //     cell at 3** (the radix constant stayed where K9b left it), check3, check4
+        //     (8, 65535, false), check6 (stays 0 on this target), check7, check8 (1, 60)
+        //     and check9 (24603, 3, false -- the *decoded* stream length is untouched, so
+        //     the golden's 269 B drop is source-level escape and statement churn only).
+        check2_alphabet: (96, 99, true),
         check3_noise_pairs: 0,
         // K21 (interval opcode dispatch) -- measured Luau diff, two moves, and no
         // `fail` flag is affected:
@@ -385,7 +416,7 @@ fn pins_luau() -> AuditPins {
         check5_templates: (
             12,
             vec![
-                ("X=X+N".to_string(), 29),
+                ("X=X+N".to_string(), 27),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -459,13 +490,19 @@ fn string_inners(body: &str, target: Target) -> Vec<(usize, usize, Vec<u8>)> {
 }
 
 /// The three payload segment literals (same filters as `segment_literals`:
-/// decoded length, image-alphabet membership, longest three win; mixed
-/// groups make divisibility meaningless).
+/// decoded length, alphabet membership, longest three win; mixed groups make
+/// divisibility meaningless). K3-FULL 第二步 widened the membership filter to
+/// the **union** of the three per-segment tables -- that is a deliberate
+/// loosening here (the audit cannot know a literal's segment until the chain
+/// resolves) and it is *paired* with `k3s2_baked_alpha_tables_are_per_segment_in_the_script`
+/// on the unit side, which asserts every segment is writable in exactly one
+/// table. Record the change rather than pretending the filter is unchanged.
 fn segments(inners: &[(usize, usize, Vec<u8>)], seed: u64) -> Vec<Vec<u8>> {
-    let alphabet = obf::vm::custom::base86_image_alphabet(seed);
     let mut member = [false; 256];
-    for &byte in &alphabet {
-        member[byte as usize] = true;
+    for part in 0..3 {
+        for &byte in &obf::vm::custom::base86_segment_alphabet(seed, part) {
+            member[byte as usize] = true;
+        }
     }
     let mut candidates: Vec<Vec<u8>> = inners
         .iter()

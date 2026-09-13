@@ -21,8 +21,25 @@ pub(crate) const BASE86_POOL_HI: u8 = 126;
 pub(crate) const BASE86_QUOTE_HOSTILE: [u8; 3] = [b'"', b'\'', b'\\'];
 pub(crate) const BASE86_DROPS: usize = 10;
 
-pub fn base86_image_alphabet(seed: u64) -> [u8; 86] {
-    let mut rng = crate::random::Prng::sfc(seed ^ 0x3861_6c70_6861_6265);
+/// K3-FULL 第二步: every payload segment now draws **its own** digit table, so
+/// recovering one segment's `ALPHA` no longer hands over all three. Before this
+/// batch the segments differed only through the K19 key fold (`seg_ro` is a
+/// rotation of the *same* set); the set itself was shared.
+///
+/// `part` is the **logical** segment index (0 = the `XXS:` watermark head), not
+/// the script field position: which field carries which part is itself shuffled
+/// by `emit.rs`'s `hold`, so the table has to follow the stream part for the
+/// audit's chain walk to find it.
+///
+/// Part 0 deliberately keeps the pre-K3s2 stream (salt `0`):
+/// `base86_image_alphabet` stays an alias instead of a second implementation,
+/// and this batch's diff redraws only parts 1 and 2 -- the audit surface can be
+/// attributed segment by segment rather than "everything moved".
+pub fn base86_segment_alphabet(seed: u64, part: usize) -> [u8; 86] {
+    const PART_SALTS: [u64; 3] = [0, 0x7365_67315f_3836, 0x7365_67325f_3836];
+    let mut rng = crate::random::Prng::sfc(
+        seed ^ 0x3861_6c70_6861_6265 ^ PART_SALTS[part % PART_SALTS.len()],
+    );
     let mut pool: Vec<u8> = (BASE86_POOL_LO..=BASE86_POOL_HI)
         .filter(|byte| !matches!(*byte, 28 | 29 | 125 | 126))
         .filter(|byte| !BASE86_QUOTE_HOSTILE.contains(byte))
@@ -34,6 +51,24 @@ pub fn base86_image_alphabet(seed: u64) -> [u8; 86] {
     assert_eq!(alphabet.len(), 86, "K9a: alphabet pool miscounted");
     rng.shuffle(&mut alphabet);
     alphabet.try_into().unwrap()
+}
+
+/// The three per-segment tables, indexed by logical part (0 = chain head).
+/// Both the emitter and the audit walk this one array, so "each segment has its
+/// own alphabet" has a single source of truth.
+pub(crate) fn base86_segment_alphabets(seed: u64) -> [[u8; 86]; 3] {
+    [
+        base86_segment_alphabet(seed, 0),
+        base86_segment_alphabet(seed, 1),
+        base86_segment_alphabet(seed, 2),
+    ]
+}
+
+/// Alias for the head segment's table. Kept because it is the alphabet the
+/// watermark/chain-root material is written in, and because every codec
+/// property in the suite is stated over "an" 86/99 table.
+pub fn base86_image_alphabet(seed: u64) -> [u8; 86] {
+    base86_segment_alphabet(seed, 0)
 }
 
 /// Powers of the radix; 86^6 < 2^39, so every group value (and every Lua
@@ -308,7 +343,8 @@ pub(crate) fn opaque_split(rng: &mut crate::random::Prng, value: u64) -> (u64, u
 
 /// The three payload segment literals of a generated VM script: decoded
 /// string literals at least 12 bytes long whose bytes all belong to the
-/// image alphabet, longest three win. The baked ALPHA table is emitted as
+/// one of the three per-segment alphabets (union admission, K3-FULL 第二步),
+/// longest three win. The baked ALPHA table is emitted as
 /// eight sub-12 fragments so it can never enter the top three; short
 /// literals such as format strings or probe tags never reach it either. No
 /// divisibility rule: mixed groups make length residues meaningless (T9).
@@ -317,10 +353,20 @@ pub(crate) fn segment_literals(
     target: Target,
     seed: u64,
 ) -> Result<Vec<Vec<u8>>, Diagnostic> {
-    let alphabet = base86_image_alphabet(seed);
+    // K3-FULL 第二步: membership is tested against the **union** of the three
+    // per-segment tables. The audit cannot know which literal is which segment
+    // until the chain resolves, so the admission filter stays permissive and the
+    // chain itself does the disambiguating -- `chained_segment_orders` decodes
+    // chain position `k` with segment `k`'s own table, and a symbol outside that
+    // table fails the decode. Since each table is 86 of the same 99 characters, a
+    // foreign segment's text lands inside a given table with probability around
+    // (86/99)^length, i.e. dead for every length the filter admits (>= 12).
+    let alphabets = base86_segment_alphabets(seed);
     let mut member = [false; 256];
-    for &byte in &alphabet {
-        member[byte as usize] = true;
+    for alphabet in &alphabets {
+        for &byte in alphabet {
+            member[byte as usize] = true;
+        }
     }
     let mut candidates = Vec::new();
     for token in crate::lexer::lex(source, target)? {
@@ -348,10 +394,14 @@ pub(crate) fn segment_literals(
 /// table; each later segment rotates by the fold of the previous segment's
 /// decoded bytes, so an order only chains if all three parts are the real
 /// stream in the real order -- decoding a segment in isolation is no longer
-/// possible. Returned streams are concatenated part bytes, in stream order.
+/// possible. K3-FULL 第二步 adds a second per-order constraint: chain position
+/// `k` is decoded with segment `k`'s **own** table (`alphabets[k]`, indexed by
+/// logical part, since the emitter baked part `k` in that table), so a wrong
+/// order has to survive both the fold chain and an alphabet it was not
+/// written in. Returned streams are concatenated part bytes, in stream order.
 pub(crate) fn chained_segment_orders(
     segments: &[Vec<u8>],
-    alphabet: &[u8; 86],
+    alphabets: &[[u8; 86]; 3],
 ) -> Vec<([usize; 3], Vec<Vec<u8>>)> {
     let permutations = [
         [0usize, 1, 2],
@@ -365,9 +415,9 @@ pub(crate) fn chained_segment_orders(
     'chain: for permutation in permutations {
         let mut parts = Vec::with_capacity(3);
         let mut ro = 0u64;
-        for index in permutation {
+        for (position, index) in permutation.into_iter().enumerate() {
             let text = String::from_utf8_lossy(&segments[index]);
-            let Ok(bytes) = base86_decode_mixed_ro(&text, alphabet, ro) else {
+            let Ok(bytes) = base86_decode_mixed_ro(&text, &alphabets[position], ro) else {
                 continue 'chain;
             };
             ro = segment_key_fold(&bytes);
@@ -391,7 +441,7 @@ pub(crate) fn embedded_outer_ciphertext(
     seed: u64,
 ) -> Result<Vec<u8>, Diagnostic> {
     let segments = segment_literals(source, target, seed)?;
-    let alphabet = base86_image_alphabet(seed);
+    let alphabets = base86_segment_alphabets(seed);
     let params = cipher_params(seed);
     let chacha = chacha_params(seed);
     let frame_params = frame_params(seed);
@@ -399,7 +449,7 @@ pub(crate) fn embedded_outer_ciphertext(
     let permutation_term = perm_term(seed);
     let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
     let mut winners = Vec::new();
-    for (_order, parts) in chained_segment_orders(&segments, &alphabet) {
+    for (_order, parts) in chained_segment_orders(&segments, &alphabets) {
         let stream: Vec<u8> = parts.iter().flatten().copied().collect();
         // The decoded stream must open with the fixed transport watermark;
         // everything after it is the outer ciphertext body. The watermark

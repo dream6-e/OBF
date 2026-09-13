@@ -25,3 +25,4 @@ include!("tests/dispatch_intervals.rs");
 include!("tests/anchor_floor.rs");
 include!("tests/operand_fields.rs");
 include!("tests/depooled_recipe.rs");
+include!("tests/segment_alphabets.rs");

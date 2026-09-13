@@ -16,7 +16,10 @@ fn k19_an_edit_inside_the_head_segment_never_yields_a_different_accepted_stream(
         let output = emit(&data, target, 7001).unwrap();
         let alphabet = base86_image_alphabet(7001);
         let mut segments = segment_literals(&output, target, 7001).unwrap();
-        let orders = chained_segment_orders(&segments, &alphabet);
+        let orders = chained_segment_orders(
+            &segments,
+            &base86_segment_alphabets(7001),
+        );
         assert_eq!(orders.len(), 1, "{target}: baseline chain not unique");
         let baseline = orders[0].1.clone();
         let head = orders[0].0[0];
@@ -32,7 +35,10 @@ fn k19_an_edit_inside_the_head_segment_never_yields_a_different_accepted_stream(
             bad[position] = alphabet[(slot + 1) % 86];
             segments[head] = bad;
             sampled += 1;
-            match chained_segment_orders(&segments, &alphabet) {
+            match chained_segment_orders(
+            &segments,
+            &base86_segment_alphabets(7001),
+        ) {
                 found if found.is_empty() => fatal += 1,
                 found => {
                     assert_eq!(found.len(), 1, "{target}: an edit created a second order");

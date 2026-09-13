@@ -223,8 +223,24 @@ type AuditPins = (
 //     66..72 B（镜像 +146 B 的分摊）；`134` 那一对是打包串的旧长度，如今只剩 `17`
 //     （描述子串含 `\127` 前缀与引号的源长）——**打包串这一类静态锚点整体消失**，这正是
 //     本批要买的静态面，不是退化。
+// K3-FULL 第二步 (2026-09-13, per-segment digit tables) -- lua51 moves two cells:
+//   M1 86 -> 96. M1 counts distinct stream bytes and had been pinned at 86 on both
+//     targets since K9a *because* the whole stream was written in one 86-symbol
+//     alphabet. Three segments now use three tables, so their union covers 96 of
+//     the 99 printable pool bytes. The pin direction is reversed on purpose:
+//     >= 87 is the evidence of the split, and a fall back to exactly 86 would mean
+//     the tables silently collapsed onto one another again.
+//   M7 top-5 [573,560,545,134,17] gap 411 -> [568,560,550,134,17] gap 416. Only the
+//     two redrawn segments move: the tables for parts 1/2 got new permutations, so
+//     the density of the four forced-low symbols (each costs a 3-char decimal escape
+//     in source) changed; part 0 keeps the pre-K3s2 table (identity salt) and is
+//     byte-identical at 560, which is what makes the diff attributable per segment.
+//     M2's decoded stream (1523 B) is untouched -> no payload grew, this is escape
+//     expansion only. M3b, the KAT words, M4's census, M4b, M5 (4,1812) and M6 all
+//     stayed byte-for-byte: a per-segment permutation cannot add a value class, a
+//     pretty constant or a repeated word.
 const PINS_LUA51_7001: AuditPins = (
-    86,
+    96,
     (1523, 2, 3, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (234, 9007493881568240, 4503599627370496),
@@ -245,7 +261,7 @@ const PINS_LUA51_7001: AuditPins = (
     0,
     (4, 1812),
     (0, 0),
-    ([573, 560, 545, 134, 17], 411),
+    ([568, 560, 550, 134, 17], 416),
 );
 
 // K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
@@ -363,8 +379,18 @@ const PINS_LUA51_7001: AuditPins = (
 //   M5 (5,1840) -> (4,1821)、M7 [532,526,514,134,134]/380 -> [576,569,542,134,15]/408：
 //     两条打包串塌成一条 7 字符描述子 ⇒ 孤例少一枚；段 blob 各涨 40..44 B（镜像变长的
 //     分摊），`134` 那一类打包串长度只剩 `15`。
+// K3-FULL 第二步 (2026-09-13, per-segment digit tables) -- luau, same three cells as
+// lua51 and the same attribution: M1 86 -> 96 (union of the three per-segment tables
+// over the stream; >= 87 is now the requirement, 86 would mean the tables collapsed).
+// M5 (4,1821) -> (4,1781) and M7 [576,569,542,134,15] gap 408 ->
+// [567,542,538,134,15] gap 404: the two *redrawn* segment bodies lost 40 B of source
+// (their new permutations put the four forced-low symbols -- one decimal escape each
+// -- in slightly less crowded positions), while 542 survives unchanged because it is
+// part 0's body, whose table this batch deliberately left alone. M2's decoded stream
+// (1550 B), M3b, the KAT words, M4's whole census, M4b (38) and M6 are byte-for-byte
+// unchanged -> no new literal class, no new pretty constant, no repeated word.
 const PINS_LUAU_7351: AuditPins = (
-    86,
+    96,
     (1550, 2, 2, 0),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (226, 9007479735086075, 4503599627370496),
@@ -383,9 +409,9 @@ const PINS_LUAU_7351: AuditPins = (
         (6, 50),
     ],
     38,
-    (4, 1821),
+    (4, 1781),
     (0, 0),
-    ([576, 569, 542, 134, 15], 408),
+    ([567, 542, 538, 134, 15], 404),
 );
 
 /// Value of an integer number token in any spelling the emitter produces
@@ -420,10 +446,15 @@ fn audit_metrics(target: Target, seed: u64) -> AuditPins {
 
     // M1/M2: the base86 stream (transport surface, template-independent).
     let segments = transport::segment_literals(&output, target, seed).unwrap();
-    let image_alphabet = transport::base86_image_alphabet(seed);
+    // K3-FULL 第二步: `segment_literals` admits the union of the three
+    // per-segment tables, and M1 re-derives that filter, so it unions too. The
+    // "exactly one table can write this segment" claim is pinned in
+    // `segment_alphabets.rs`/`transport.rs`, not here.
     let mut member = [false; 256];
-    for &byte in &image_alphabet {
-        member[byte as usize] = true;
+    for part in 0..3 {
+        for byte in transport::base86_segment_alphabet(seed, part) {
+            member[byte as usize] = true;
+        }
     }
     assert_eq!(segments.len(), 3, "{target} seed {seed}: segment count moved");
     let mut distinct = [false; 256];

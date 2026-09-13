@@ -1233,21 +1233,6 @@ fn dispatch_chains_split_into_seeded_subchains() {
     }
 }
 
-#[test]
-fn k9a_image_alphabet_is_seeded_noncontiguous() {
-    let a = base86_image_alphabet(7001);
-    assert_eq!(a, base86_image_alphabet(7001));
-    assert_ne!(a, base86_image_alphabet(7351));
-    let mut sorted = a;
-    sorted.sort_unstable();
-    assert_eq!((sorted[0], sorted[85]), (28, 126), "span must be exactly 99");
-    let mut deduped = sorted.to_vec();
-    deduped.dedup();
-    assert_eq!(deduped.len(), 86);
-    assert!(a.iter().all(|&byte| (28..=126).contains(&byte)));
-    // Order is permuted, not sorted (1/86! to fluke; pinned by seed).
-    assert_ne!(a.to_vec(), sorted.to_vec());
-}
 
 #[test]
 fn k9a_mixed_codec_roundtrips_all_lengths() {
@@ -1468,7 +1453,8 @@ fn k17_alphabet_never_holds_a_quote_hostile_byte() {
     // 99-wide span (13 missing values), keeping the group widths, the
     // 86^5 > 2^32 headroom and the contiguity self-check bit dead.
     for seed in [0u64, 1, 7001, 7351, 4095, 65535, 123456789, u64::MAX] {
-        let alphabet = base86_image_alphabet(seed);
+        for part in 0..3 {
+        let alphabet = base86_segment_alphabet(seed, part);
         assert_eq!(alphabet.len(), 86);
         for hostile in [b'"', b'\'', b'\\'] {
             assert!(
@@ -1495,6 +1481,7 @@ fn k17_alphabet_never_holds_a_quote_hostile_byte() {
         for chunk in alphabet.chunks(11) {
             let bytes: Vec<u8> = chunk.to_vec();
             assert!(!bytes.iter().any(|byte| *byte == 34 || *byte == 39 || *byte == 92));
+        }
         }
     }
 }
@@ -1569,12 +1556,24 @@ fn k9a_embedded_roundtrip_holds_across_seeds_and_targets() {
                     wire(&data, target, seed),
                     "{target} seed {seed} probe {probe:?}"
                 );
-                let alphabet = base86_image_alphabet(seed);
                 let segments = segment_literals(&output, target, seed).unwrap();
                 assert_eq!(segments.len(), 3);
                 for segment in &segments {
                     assert!(segment.len() >= 12);
-                    assert!(segment.iter().all(|&byte| alphabet.contains(&byte)));
+                    // K3-FULL 第二步: the filter admits the union of the three
+                    // tables, and every segment turns out to be writable in
+                    // exactly **one** of them -- so the tables really are
+                    // per-segment and a wrong one cannot read it at all.
+                    let owners = (0..3)
+                        .filter(|part| {
+                            let alphabet = base86_segment_alphabet(seed, *part);
+                            segment.iter().all(|&byte| alphabet.contains(&byte))
+                        })
+                        .count();
+                    assert_eq!(
+                        owners, 1,
+                        "{target} seed {seed}: a segment is readable in {owners} tables"
+                    );
                     // Forced extremes 28/29 guarantee escapes bite somewhere.
                     assert!(
                         segment.iter().any(|&byte| byte == 34 || byte == 92 || byte < 32),
@@ -1602,13 +1601,12 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
     for (target, seed) in [(Target::Lua51, 7001u64), (Target::Luau, 7351u64)] {
         let data = compile("local function f(x)return x+1 end print(f(41))", target).unwrap();
         let output = emit(&data, target, seed).unwrap();
-        let alphabet = base86_image_alphabet(seed);
         let segments = segment_literals(&output, target, seed).unwrap();
         // K19: the parts only decode as a chain, so they are recovered with the
         // same resolver the audit path uses. `positions` maps a segment's file
         // index to its stream position, which decides whether the field takes an
         // upstream plaintext argument at all.
-        let orders = chained_segment_orders(&segments, &alphabet);
+        let orders = chained_segment_orders(&segments, &base86_segment_alphabets(seed));
         assert_eq!(orders.len(), 1, "{target}: chained segment order not unique");
         let (order, chained) = orders[0].clone();
         let mut positions = [0usize; 3];

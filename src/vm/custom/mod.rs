@@ -71,7 +71,8 @@ pub(crate) use seed::*;
 pub(crate) use structure::*;
 pub(crate) use transport::*;
 pub use transport::{
-    base86_decode_mixed, base86_image_alphabet, decrypt_embedded, extract_embedded,
+    base86_decode_mixed, base86_image_alphabet, base86_segment_alphabet, decrypt_embedded,
+    extract_embedded,
 };
 
 pub fn compile(source: &str, target: Target) -> Result<Vec<u8>, Diagnostic> {
