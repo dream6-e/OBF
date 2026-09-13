@@ -41,8 +41,12 @@ pub(crate) fn with_options(
     finalize(source, target, options, false)
 }
 
-/// Called only by `vm::virtualize` after all crate-owned VM source has been
-/// assembled. The checked generated-VM policy is NOT available to user source.
+/// Called by `vm::virtualize`, and by the XXS shell wrapper (`src/shell.rs`), both
+/// after all crate-owned VM source has been assembled. The checked generated-VM
+/// policy is NOT available to user source: it demands the fixed environment capture
+/// and rejects any spelled-out reflection name outside it, which is exactly the
+/// contract a crate-owned final script must satisfy (short random local names,
+/// one physical line, reparse-verified).
 pub(crate) fn finalize_vm(source: &str, target: Target, seed: u64) -> Result<String, Diagnostic> {
     finalize(source, target, Options::seeded(seed), true)
 }

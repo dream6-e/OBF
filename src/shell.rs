@@ -436,7 +436,9 @@ pub fn wrap(source: &str, target: Target, seed: u64) -> Result<Shell, Diagnostic
         )));
     }
 
-    let script = emit_shell(&payload, &alphabet);
+    // 与两份 golden 走同一个 finalizer：随机 1-2 字母短名 + 词法单行化 + 重解析复验。
+    // 传进去的是上面那份可读的多行开发形态；出来的才是交付物。
+    let script = crate::minify::finalize_vm(&emit_shell(&payload, &alphabet), target, seed)?;
     Ok(Shell {
         script,
         source_bytes: data.len(),
@@ -472,11 +474,21 @@ fn count_tokens(stream: &[u8]) -> usize {
     tokens
 }
 
-/// 外壳正文。格式镜像用户提供的那份装载器（别名行、`for O = 0, 255` 式的字符表、环境
-/// 探针块、`[0] = 1` 幂表、7997 一块的 `string.char(unpack(...))` 串接、
-/// `loadstring(chunk, "XXS    ")`、`assert(..., "XXS decompression error: ...")`）；
-/// 解码算法是本模块的 DP/LZ token 流。逐行 push，不用 `format!`，免得 Lua 的 `{}` 要写成
-/// `{{}}` 这类可读性灾难（K3 那批踩过一次四重括号）。
+/// 外壳正文（**未过 finalizer 的开发形态**：多行、缩进、名字固定，便于 diff 与读）。
+///
+/// 格式镜像用户提供的那份装载器：别名行、`for p = 1, 85` 建数字表、`[0] = 1` 幂表、环境探针块、
+/// 7997 一块的 `string.char(unpack(...))` 串接、`loadstring(chunk, "XXS" .. string.rep(" ", 4))`、
+/// `"XXS decompression error: "`、`end)(...)`。
+///
+/// 两处是为了接入 `crate::minify::finalize_vm`（与两份 golden 同一套「随机 1–2 字母名 + 词法单行化 +
+/// 重解析复验」策略）而存在的，都不是装饰：
+/// * 首行是 VM 的固定环境捕获形状（逐字等于 `src/vm/custom/emit_prelude.rs` 发的那行）。审计要求
+///   `getfenv`/`_G` 恰好三处且全在捕获之内，因此这一行必须拼得一模一样。
+/// * 所有库函数经捕获表取，且**不得**出现 `loadstring` / `load`（连字面量拼接的键都不行，见上面的
+///   注释）：它们在 `is_rename_barrier` 名单里，一旦出现就超出「三处 barrier 全在捕获内」而被拒绝。
+///   所以下面的探针块顺带负责检查「捕获表里没有 loader」这种情况。
+/// 解码算法是本模块的 DP/LZ token 流，与参考件无关。逐行 push，不用 `format!`，免得 Lua 的 `{}`
+/// 要写成 `{{}}` 这类可读性灾难（K3 那批踩过一次四重括号）。
 fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     let alphabet_text = std::str::from_utf8(alphabet).expect("base85 alphabet is ASCII");
     let mut out = String::with_capacity(payload.len() + 2048);
@@ -488,8 +500,14 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
         out.push_str(text);
         out.push('\n');
     };
+    // VM 的固定环境捕获（finalizer 会把它连同其它显式绑定一起改成随机短名）。
+    line(0, "local G=(getfenv and getfenv(1))or _G;", &mut out);
     out.push_str("return (function(...)\n");
-    line(1, "local G, Z, Y, u, k, W, R = string.byte, string.char, unpack or table.unpack, assert, tostring, type, loadstring or load;", &mut out);
+    line(1, "local Q, Z, Y, u, k, W = G.string.byte, G.string.char, G.unpack or G.table.unpack, G.assert, G.tostring, G.type;", &mut out);
+    // loader 名必须**运行期**拼出来：`is_rename_barrier` 里有 `load`/`loadstring`，而
+    // `static_string` 连字面量拼接都会解析（`G["load".."string"]` 一样被当成反射名）。
+    // 与 VM 把 `debug`/`loadstring` 当参数穿过审计捕获的做法同源，顺带让成品里查不到这两个词。
+    line(1, "local R = G[Z(108, 111, 97, 100, 115, 116, 114, 105, 110, 103)] or G[Z(108, 111, 97, 100)];", &mut out);
     line(1, "local V = {};", &mut out);
     line(1, &format!("local D = [=[{alphabet_text}]=];"), &mut out);
     line(
@@ -499,7 +517,8 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     );
     line(1, "local T = {[0] = 1, 256, 65536, 16777216};", &mut out);
     // 环境探针：借参考件这块的格式，内容换成本外壳真正需要的前置检查。被 hook 坏的
-    // string.char/string.byte 会让整份解码静默错位，所以在碰负载之前先试出来。
+    // string.char/string.byte 会让整份解码静默错位，而缺 loader（或它不在捕获表里）会在
+    // 最后一步才炸——都在这里先死，报错更好读。
     line(1, "local L = 0;", &mut out);
     line(1, "do", &mut out);
     line(2, "local O = {65, 97, 255, 0};", &mut out);
@@ -507,25 +526,25 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(3, "local c = Z(O[p]);", &mut out);
     line(
         3,
-        "if not c or G(c, 1, 1) ~= O[p] then L = 1; break; end;",
+        "if not c or Q(c, 1, 1) ~= O[p] then L = 1; break; end;",
         &mut out,
     );
     line(2, "end;", &mut out);
     line(2, "if L == 0 and not (R and Y) then L = 2; end;", &mut out);
     line(1, "end;", &mut out);
-    line(1, "if L ~= 0 then error(\"XXS shell error: unsupported environment (\" .. L .. \")\", 0) end;", &mut out);
+    line(1, "if L ~= 0 then G.error(\"XXS shell error: unsupported environment (\" .. L .. \")\", 0) end;", &mut out);
     line(1, &format!("local E = [=[{payload}]=];"), &mut out);
     // 数字表按 D 的位置建：D 是种子置换过的 85 字符 ⇒ 通用 base85 解码器读不出来。
-    line(1, "for p = 1, 85 do V[G(D, p, p)] = p - 1; end;", &mut out);
+    line(1, "for p = 1, 85 do V[Q(D, p, p)] = p - 1; end;", &mut out);
     // 5 字符 -> 4 字节，逐组展开成字节表 b（大端，与 S/T 两张幂表一致）。
     line(1, "local b, n = {}, 0;", &mut out);
     line(1, "for p = 1, #E, 5 do", &mut out);
     line(2, "local v = 0;", &mut out);
     line(2, "for q = 0, 4 do", &mut out);
-    line(3, "local d = V[G(E, p + q, p + q)];", &mut out);
+    line(3, "local d = V[Q(E, p + q, p + q)];", &mut out);
     line(
         3,
-        "if not d then error(\"XXS shell error: symbol outside the digit table\", 0) end;",
+        "if not d then G.error(\"XXS shell error: symbol outside the digit table\", 0) end;",
         &mut out,
     );
     line(3, "v = v * 85 + d;", &mut out);
@@ -544,7 +563,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(2, "w = w + 1;", &mut out);
     line(
         2,
-        "if w > z then error(\"XXS shell error: truncated stream\", 0) end;",
+        "if w > z then G.error(\"XXS shell error: truncated stream\", 0) end;",
         &mut out,
     );
     line(2, "return b[w];", &mut out);
@@ -553,7 +572,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(1, "for _ = 1, 5 do M = M * 256 + P(); end;", &mut out);
     line(
         1,
-        "if M < 0 or M > 67108864 then error(\"XXS shell error: bad length\", 0) end;",
+        "if M < 0 or M > 67108864 then G.error(\"XXS shell error: bad length\", 0) end;",
         &mut out,
     );
     line(
@@ -563,7 +582,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     );
     line(
         1,
-        "local ga, gc = P() * 256 + P(), P() * 256 + P();",
+        "local ea, ec = P() * 256 + P(), P() * 256 + P();",
         &mut out,
     );
     // token 流：每 8 个一个 header，bit=1 是裸字节，bit=0 是 Link（大端 stride + 255 进位的 span）。
@@ -581,7 +600,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(4, "local s = P() * 256 + P();", &mut out);
     line(
         4,
-        "if s < 1 or s > o then error(\"XXS shell error: bad link distance\", 0) end;",
+        "if s < 1 or s > o then G.error(\"XXS shell error: bad link distance\", 0) end;",
         &mut out,
     );
     line(4, "local p = 3;", &mut out);
@@ -591,7 +610,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(4, "until t < 255;", &mut out);
     line(
         4,
-        "if o + p > M then error(\"XXS shell error: link past the end\", 0) end;",
+        "if o + p > M then G.error(\"XXS shell error: link past the end\", 0) end;",
         &mut out,
     );
     line(4, "for _ = 1, p do", &mut out);
@@ -599,7 +618,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(5, "local v = d[o - s];", &mut out);
     line(
         5,
-        "if not v then error(\"XXS shell error: bad link source\", 0) end;",
+        "if not v then G.error(\"XXS shell error: bad link source\", 0) end;",
         &mut out,
     );
     line(5, "d[o] = v;", &mut out);
@@ -612,22 +631,22 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(3, "if o >= M then break; end;", &mut out);
     line(2, "end;", &mut out);
     line(1, "end;", &mut out);
-    line(1, "if o ~= M or a ~= ga or c ~= gc then error(\"XXS shell error: integrity mismatch\", 0) end;", &mut out);
+    line(1, "if o ~= M or a ~= ea or c ~= ec then G.error(\"XXS shell error: integrity mismatch\", 0) end;", &mut out);
     // 负载表与解码表先释放，再拼字符串：参考件用一记 pcall 副作用做到同一件事，这里直接置 nil。
     line(1, "b = nil;", &mut out);
-    line(1, "local C, m = \"\", #d;", &mut out);
-    line(1, "for p = 1, m, 7997 do", &mut out);
+    line(1, "local N, x = \"\", #d;", &mut out);
+    line(1, "for p = 1, x, 7997 do", &mut out);
     line(2, "local q = p + 7996;", &mut out);
-    line(2, "if q > m then q = m; end;", &mut out);
-    line(2, "C = C .. Z(Y(d, p, q));", &mut out);
+    line(2, "if q > x then q = x; end;", &mut out);
+    line(2, "N = N .. Z(Y(d, p, q));", &mut out);
     line(1, "end;", &mut out);
     line(1, "d = nil;", &mut out);
     line(
         1,
-        "local ok, f = pcall(R, C, \"XXS\" .. string.rep(\" \", 4));",
+        "local ok, f = G.pcall(R, N, \"XXS\" .. G.string.rep(\" \", 4));",
         &mut out,
     );
-    line(1, "u(ok and f and W(f) == \"function\", \"XXS decompression error: \" .. k(ok and f or f) .. \" (does your environment support load/loadstring?)\");", &mut out);
+    line(1, "u(ok and f and W(f) == \"function\", \"XXS decompression error: \" .. k(ok and f or f) .. \" (no chunk loader in this environment)\");", &mut out);
     line(1, "return f(...);", &mut out);
     out.push_str("end)(...);\n");
     out

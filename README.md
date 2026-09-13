@@ -164,12 +164,15 @@ Rust API：`ir::compile/lower`、`bytecode::custom::{encode,decode,serialize}`�
 
 | 压缩外壳文件 | 输入 | seed | 大小 | 比率 |
 |---|---|---:|---:|---:|
-| `vm_lua51.shell.out.lua` | `vm_lua51.out.lua` | 7001 | **67,564 B** | 0.657 |
-| `vm_luau.shell.out.lua` | `vm_luau.out.lua` | 7351 | **76,374 B** | 0.681 |
+| `vm_lua51.shell.out.lua` | `vm_lua51.out.lua` | 7001 | **67,010 B** | 0.651 |
+| `vm_luau.shell.out.lua` | `vm_luau.out.lua` | 7351 | **75,820 B** | 0.676 |
+
+外壳成品与两份 golden 走**同一个** finalizer：显式 `local` 全改成随机 1–2 个小写字母、词法单行化、重解析复验，
+且反射名 `load`/`loadstring` 在成品里不成明文（loader 由 `string.char` 逐码点运行期拼出）。
 
 外壳由 `obf shell --target lua51|luau --seed N -o OUT IN.lua` 生成：DP/LZ 压缩 + base85（z85 符号集，按种子置换）+ 自解码 `loadstring` 外壳；完整性校验在 `loadstring` **之前**，改一个符号即死。它在 OBF 容器与私有镜像之外，不改 `.obf`、不改 ISA，也不参与整脚本体积门（自己的上限见 `tools/test-matrix.sh` 的 XXS 步骤）。
 
-脚本 SHA-256：Lua51 `080a8b606a4af5d94428d805fbf9178c2bf17e8bcce32c0708a4430c48d38e93`；Luau `6fdb80c5efeeeb56c7860b38a01ef192539e2b624ab4dc1c3d441bc92bbb6957`（2026-09-13 K3-FULL 第二步后复核，与当前构建逐字节 `cmp` 一致；两份压缩外壳产物是 `6591c1d209d67cb53b131428014c28817923ea1829834872bfb00ae148fc1178` / `b258fcfed42e65975564cd556b665b423a0a91d52ec77fbb10031a578931567b`；K20 的 `ec9970e9…538535`/`6580c7bf…dca25d3b` 与 K21 的 `1042b81f…`/`3b00fda6…` 均已作废；K19 的 `0c02bb10…`/`32ab460e…` 已作废；K18 的 `3e90e9b9…`/`7bbbb57d…` 已作废；K17 的 `fc0e3303…`/`d9c27544…`、K16 的 `21f0f649…`/`14d3d430…`、K13c 第二步的 `43f86a71…`/`891bdb4b…`、第一步期的 `4d9ee226…`/`b1a37291…`、K14 期的 `13c34a7a…`/`05842492…`、K13b 期的 `486963e5…`/`0402d8c4…` 与 K12/K13 期的 `18ead8b3…`/`5aa72862…` 已作废）。对应公开 `.obf` 仍为 5,525 / 6,575 B，SHA-256 `a33b5dcb81b02d1f9f2e00ce71c10d55706020e2b28fd516fc69f6444bb81140` / `def67d59b5c79832709c4dbaa33293058195c2dc347f9578c8aaf61cd45fa1d7`，自 varint 批次起未变。
+脚本 SHA-256：Lua51 `080a8b606a4af5d94428d805fbf9178c2bf17e8bcce32c0708a4430c48d38e93`；Luau `6fdb80c5efeeeb56c7860b38a01ef192539e2b624ab4dc1c3d441bc92bbb6957`（2026-09-13 K3-FULL 第二步后复核，与当前构建逐字节 `cmp` 一致；两份压缩外壳产物是 `c6bd9c1f30f3e66f0d7288550059ddfb49167b219b26728f54c4a4eaa472fa4e` / `252bd3c839057a68e5f762ab6feb150b593ce649319a166c206db5dd5e02406f`（2026-09-13 外壳改过 finalizer 后重录，首录的 `6591c1d2…` / `b258fcfe…` 作废）；K20 的 `ec9970e9…538535`/`6580c7bf…dca25d3b` 与 K21 的 `1042b81f…`/`3b00fda6…` 均已作废；K19 的 `0c02bb10…`/`32ab460e…` 已作废；K18 的 `3e90e9b9…`/`7bbbb57d…` 已作废；K17 的 `fc0e3303…`/`d9c27544…`、K16 的 `21f0f649…`/`14d3d430…`、K13c 第二步的 `43f86a71…`/`891bdb4b…`、第一步期的 `4d9ee226…`/`b1a37291…`、K14 期的 `13c34a7a…`/`05842492…`、K13b 期的 `486963e5…`/`0402d8c4…` 与 K12/K13 期的 `18ead8b3…`/`5aa72862…` 已作废）。对应公开 `.obf` 仍为 5,525 / 6,575 B，SHA-256 `a33b5dcb81b02d1f9f2e00ce71c10d55706020e2b28fd516fc69f6444bb81140` / `def67d59b5c79832709c4dbaa33293058195c2dc347f9578c8aaf61cd45fa1d7`，自 varint 批次起未变。
 
 生成器、命名或分隔策略变更后必须再生成两份 golden，**然后**用固定种子重出两份压缩外壳产物（顺序不可颠倒：外壳的输入就是 golden）。矩阵比较默认生成、独立 compile/wrap、debug/release 及 golden 的逐字节一致性。**压缩大小的唯一硬契约**是：完整 LZW frame（包括 16-byte header）必须严格小于其压缩前 private semantic bytecode；Lua decoder、ChaCha8、anti-hook、包装和最终整份 `.lua` 均不进入该比较。`tools/bench-vm.sh` 的 117,000/117,000 B（K10 由 98,000 B 重钉为 112,000 B，K14 按用户指示重钉 120,000 B，2026-09-12 K3-FULL 按实测收缩为 117,000 B 并恢复 enforce）仅是独立的整脚本膨胀预算，不用于判断压缩是否成功；不可压缩输入由生成器拒绝。
 

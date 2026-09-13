@@ -421,11 +421,21 @@ for shell_pair in "lua51 7001 vm:lua51:ok" "luau 7351 vm:luau:ok"; do
         cat "$tmp/shell-${shell_target}.out" >&2
         exit 1
     }
-    # 记录值 2026-09-13：Lua 5.1 67,564 B / Luau 76,374 B（golden 102,863 / 112,219 B）。
-    # 只许变小、不许变大——外壳是交付期可换的一层，体积回退必须显式记录。
+    # 外壳成品必须与两份 golden 同形：单物理行、无 tab。
+    # 与两份 golden 同口径：零换行字节、零 tab（成品是"一行且不带结尾换行"）。
+    shell_newlines=$(tr -cd '\n' <"$shell_committed" | wc -c)
+    shell_tabs=$(tr -cd '\t' <"$shell_committed" | wc -c)
+    if [[ $shell_newlines -ne 0 || $shell_tabs -ne 0 ]]; then
+        printf 'error: XXS shell for %s is not one physical line (newlines=%s tabs=%s)\n' \
+            "$shell_target" "$shell_newlines" "$shell_tabs" >&2
+        exit 1
+    fi
+    # 记录值 2026-09-13（外壳也过 finalizer 之后）：Lua 5.1 最坏 67,021 B / Luau 75,831 B
+    # （各四个被采样种子；golden 102,863 / 112,219 B）。上限从 70,000/79,000 **收紧**到
+    # 68,000/77,000：只许变小、不许变大——外壳是交付期可换的一层，体积回退必须显式记录。
     shell_bytes=$(wc -c <"$shell_committed")
-    shell_limit=70000
-    if [[ "$shell_target" == luau ]]; then shell_limit=79000; fi
+    shell_limit=68000
+    if [[ "$shell_target" == luau ]]; then shell_limit=77000; fi
     if [[ $shell_bytes -gt $shell_limit ]]; then
         printf 'error: XXS shell for %s is %sB over the recorded %sB budget\n' \
             "$shell_target" "$shell_bytes" "$shell_limit" >&2
