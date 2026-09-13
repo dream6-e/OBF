@@ -172,10 +172,36 @@ fn shell_static_surface_is_portable_and_renamed() {
             script.contains("string.rep(\" \",4)"),
             "{target}: the XXS chunkname padding is missing"
         );
+        // 用户指定保留的那一整段尾部文本必须逐字在（它不属于"其他 error 信息"）。
+        for kept in [
+            "XXS decompression error: ",
+            "(no chunk loader in this environment)",
+        ] {
+            assert!(
+                script.contains(kept),
+                "{target}: the kept tail text {kept:?} was shortened away"
+            );
+        }
+        // 其余 error 一律缩成错误码：旧的长前缀必须消失，码必须一枚不少。
         assert!(
-            script.contains("XXS decompression error:"),
-            "{target}: XXS assert message is missing"
+            !script.contains("XXS shell error"),
+            "{target}: a long shell error message survived"
         );
+        assert!(
+            script.contains("\"XXS e\""),
+            "{target}: the probe's concatenated error code is missing"
+        );
+        for (code, _) in shell::SHELL_ERROR_CODES {
+            if code <= 2 {
+                continue; // e1/e2 由 `"XXS e" .. L` 拼出，不是字面量
+            }
+            let marker = format!("\"XXS e{code}\"");
+            assert_eq!(
+                script.matches(&marker).count(),
+                1,
+                "{target}: error code {marker} must appear exactly once"
+            );
+        }
         // loader 是运行期拼出来的，所以这些词在成品里必须一个都不出现。
         for forbidden in [
             "string.pack",
@@ -282,6 +308,15 @@ fn shell_tampering_dies_before_user_code_runs() {
                 output.stdout.is_empty(),
                 "{target}: {case} tampering leaked output"
             );
+            // 两种"能过语法检查"的篡改必须由解码器自己报错（带错误码），
+            // 而不是在别处炸掉——否则说明缩短把可诊断性弄丢了。
+            if case != "truncated" {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    stderr.contains("XXS e"),
+                    "{target}: {case} tampering did not report a shell error code: {stderr}"
+                );
+            }
         }
     }
 }

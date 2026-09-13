@@ -474,11 +474,30 @@ fn count_tokens(stream: &[u8]) -> usize {
     tokens
 }
 
+/// 外壳里的错误码 = 唯一真源。交付物只带 `"XXS e<N>"`：外壳正文不进 base85 负载，每个字符都是净体积，
+/// 所以说明留在源码与 `项目交接总结.md` 的外层小节里，不跟着下发。e1/e2 由探针的 `L` 拼出，
+/// 其余是字面量（因此测试对 e3..e9 逐枚计数，对 e1/e2 只锚 `"XXS e" ..` 这一处拼接）。
+pub const SHELL_ERROR_CODES: [(u32, &str); 9] = [
+    (1, "string.byte/string.char 往返被 hook 坏（探针块 O 循环）"),
+    (2, "捕获表里没有 chunk loader，或没有 unpack/table.unpack"),
+    (3, "base85 符号不在置换过的数字表里"),
+    (4, "token 流读到负载末尾之外（截断）"),
+    (5, "头部长度域非法（0 或超过 64 MiB）"),
+    (6, "Link 的 distance 越界（s < 1 或 s > 已产出长度）"),
+    (7, "Link 跨过目标长度 M（span 与 o 之和超界）"),
+    (8, "Link 指向的源字节不存在"),
+    (
+        9,
+        "keyed Adler 两 lane 折叠与头部期望值不符（篡改/换种子负载）",
+    ),
+];
+
 /// 外壳正文（**未过 finalizer 的开发形态**：多行、缩进、名字固定，便于 diff 与读）。
 ///
 /// 格式镜像用户提供的那份装载器：别名行、`for p = 1, 85` 建数字表、`[0] = 1` 幂表、环境探针块、
 /// 7997 一块的 `string.char(unpack(...))` 串接、`loadstring(chunk, "XXS" .. string.rep(" ", 4))`、
-/// `"XXS decompression error: "`、`end)(...)`。
+/// `"XXS decompression error: "`、`end)(...)`。八处内部 `error` 的文本按用户要求缩成 `"XXS e<N>"` 错误码
+/// （见 [`SHELL_ERROR_CODES`]）；尾部那一整段 `G.pcall` + `u(...)` 的文本**逐字保留**，不参与缩短。
 ///
 /// 两处是为了接入 `crate::minify::finalize_vm`（与两份 golden 同一套「随机 1–2 字母名 + 词法单行化 +
 /// 重解析复验」策略）而存在的，都不是装饰：
@@ -532,7 +551,12 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(2, "end;", &mut out);
     line(2, "if L == 0 and not (R and Y) then L = 2; end;", &mut out);
     line(1, "end;", &mut out);
-    line(1, "if L ~= 0 then G.error(\"XXS shell error: unsupported environment (\" .. L .. \")\", 0) end;", &mut out);
+    // 探针失败按 `L` 分档：e1 = `string.byte`/`string.char` 往返被 hook 坏，e2 = 没有 loader 或没有 unpack。
+    line(
+        1,
+        "if L ~= 0 then G.error(\"XXS e\" .. L, 0) end;",
+        &mut out,
+    );
     line(1, &format!("local E = [=[{payload}]=];"), &mut out);
     // 数字表按 D 的位置建：D 是种子置换过的 85 字符 ⇒ 通用 base85 解码器读不出来。
     line(1, "for p = 1, 85 do V[Q(D, p, p)] = p - 1; end;", &mut out);
@@ -542,11 +566,8 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(2, "local v = 0;", &mut out);
     line(2, "for q = 0, 4 do", &mut out);
     line(3, "local d = V[Q(E, p + q, p + q)];", &mut out);
-    line(
-        3,
-        "if not d then G.error(\"XXS shell error: symbol outside the digit table\", 0) end;",
-        &mut out,
-    );
+    // e3：符号不在置换过的数字表里（负载被改写，或贴进来的文本不属于本字母表）。
+    line(3, "if not d then G.error(\"XXS e3\", 0) end;", &mut out);
     line(3, "v = v * 85 + d;", &mut out);
     line(2, "end;", &mut out);
     line(2, "for q = 3, 0, -1 do", &mut out);
@@ -561,18 +582,16 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(1, "local z, w = n, 0;", &mut out);
     line(1, "local P = function()", &mut out);
     line(2, "w = w + 1;", &mut out);
-    line(
-        2,
-        "if w > z then G.error(\"XXS shell error: truncated stream\", 0) end;",
-        &mut out,
-    );
+    // e4：负载被截断，游标越过长度假设。
+    line(2, "if w > z then G.error(\"XXS e4\", 0) end;", &mut out);
     line(2, "return b[w];", &mut out);
     line(1, "end;", &mut out);
     line(1, "local M = 0;", &mut out);
     line(1, "for _ = 1, 5 do M = M * 256 + P(); end;", &mut out);
+    // e5：头部长度域非法（0 或超过 64 MiB）。
     line(
         1,
-        "if M < 0 or M > 67108864 then G.error(\"XXS shell error: bad length\", 0) end;",
+        "if M < 0 or M > 67108864 then G.error(\"XXS e5\", 0) end;",
         &mut out,
     );
     line(
@@ -598,9 +617,10 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(4, "c = (c + a) % 65521;", &mut out);
     line(3, "else", &mut out);
     line(4, "local s = P() * 256 + P();", &mut out);
+    // e6：distance 越界（<=0 或超过已产出长度）。
     line(
         4,
-        "if s < 1 or s > o then G.error(\"XXS shell error: bad link distance\", 0) end;",
+        "if s < 1 or s > o then G.error(\"XXS e6\", 0) end;",
         &mut out,
     );
     line(4, "local p = 3;", &mut out);
@@ -608,19 +628,13 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(5, "local t = P();", &mut out);
     line(5, "p = p + t;", &mut out);
     line(4, "until t < 255;", &mut out);
-    line(
-        4,
-        "if o + p > M then G.error(\"XXS shell error: link past the end\", 0) end;",
-        &mut out,
-    );
+    // e7：span 会把输出推过目标长度 M。
+    line(4, "if o + p > M then G.error(\"XXS e7\", 0) end;", &mut out);
     line(4, "for _ = 1, p do", &mut out);
     line(5, "o = o + 1;", &mut out);
     line(5, "local v = d[o - s];", &mut out);
-    line(
-        5,
-        "if not v then G.error(\"XXS shell error: bad link source\", 0) end;",
-        &mut out,
-    );
+    // e8：链接指向还没产出的位置。
+    line(5, "if not v then G.error(\"XXS e8\", 0) end;", &mut out);
     line(5, "d[o] = v;", &mut out);
     line(5, "a = (a + v) % 65521;", &mut out);
     line(5, "c = (c + a) % 65521;", &mut out);
@@ -631,7 +645,12 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(3, "if o >= M then break; end;", &mut out);
     line(2, "end;", &mut out);
     line(1, "end;", &mut out);
-    line(1, "if o ~= M or a ~= ea or c ~= ec then G.error(\"XXS shell error: integrity mismatch\", 0) end;", &mut out);
+    // e9：长度或 keyed Adler 两 lane 与头部期望值不符（篡改，或换了种子的负载）。
+    line(
+        1,
+        "if o ~= M or a ~= ea or c ~= ec then G.error(\"XXS e9\", 0) end;",
+        &mut out,
+    );
     // 负载表与解码表先释放，再拼字符串：参考件用一记 pcall 副作用做到同一件事，这里直接置 nil。
     line(1, "b = nil;", &mut out);
     line(1, "local N, x = \"\", #d;", &mut out);
