@@ -74,6 +74,44 @@ fn shell_runs_the_wrapped_golden_identically_on_both_targets() {
     }
 }
 
+/// 入库的两份压缩产物必须就是「当前实现 + 固定种子 + 对应 golden」的产物：
+/// 交付时上传的是它们，不是临时文件，所以过期必须红灯（与 golden 的 `cmp` 同一口径）。
+#[test]
+fn checked_in_shell_artifacts_are_the_golden_regeneration() {
+    for (target, golden, shell_name, seed) in [
+        (
+            Target::Lua51,
+            "vm_lua51.out.lua",
+            "vm_lua51.shell.out.lua",
+            7001u64,
+        ),
+        (
+            Target::Luau,
+            "vm_luau.out.lua",
+            "vm_luau.shell.out.lua",
+            7351u64,
+        ),
+    ] {
+        let source = read_golden(golden);
+        let expected = shell::wrap(&source, target, seed)
+            .unwrap_or_else(|error| panic!("{target}: {error}"))
+            .script;
+        let path = support::root().join(shell_name);
+        let committed = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{shell_name} is not checked in: {error}"));
+        assert_eq!(
+            committed.as_bytes(),
+            expected.as_bytes(),
+            "{shell_name} is stale; rebuild with `obf shell --target {target} --seed {seed}` (§10.2)"
+        );
+        // 入库产物本身就是可执行外壳：行数与形态也钉住（91 行、首尾行固定）。
+        let lines: Vec<&str> = committed.lines().collect();
+        assert_eq!(lines.len(), 91, "{shell_name}: unexpected line count");
+        assert_eq!(lines[0], "return (function(...)", "{shell_name}: head");
+        assert_eq!(lines[lines.len() - 1], "end)(...);", "{shell_name}: tail");
+    }
+}
+
 /// 同一份输入 + 同一种子必须逐字节一致（外壳自己也要是可复现的产物）。
 #[test]
 fn shell_is_reproducible_and_seed_dependent() {

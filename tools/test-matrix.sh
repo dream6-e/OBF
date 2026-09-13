@@ -396,21 +396,26 @@ printf '[matrix] Legacy/reference opcode coverage: Lua 5.1=%s/38, Luau core=%s/9
     "$lua51_opcode_count" "$luau_opcode_count"
 printf '[matrix] VM sizes: Lua 5.1=%s bytes, Luau=%s bytes\n' \
     "$(wc -c <"$tmp/vm51.lua")" "$(wc -c <"$tmp/vmluau.lua")"
-# XXS 压缩外壳（src/shell.rs）：在成品脚本之外再套一层自解码 loader。这里只查
-# "同种子逐字节可复现 + 两端真机跑通 + 体积不超过记录值"；篡改必死、静态面等细节门
-# 在 cargo test --test shell（矩阵按仓库约定不跑 cargo test，两者互补）。
+# XXS 压缩外壳（src/shell.rs）：在成品脚本之外再套一层自解码 loader。这里查
+# "入库的两份 .shell.out.lua 逐字节等于当前实现 + 固定种子的产物 + 入库产物两端真机跑通 +
+# 体积不超过记录值"（交付时除 vm_*.out.lua 外还上传这两份，2026-09-13 用户指示）；
+# 篡改必死、静态面等细节门在 cargo test --test shell（矩阵按约定不跑 cargo test，两者互补）。
 printf '%s\n' '[matrix] XXS shell wrapper'
 for shell_pair in "lua51 7001 vm:lua51:ok" "luau 7351 vm:luau:ok"; do
     read -r shell_target shell_seed shell_want <<<"$shell_pair"
     shell_golden="$ROOT/vm_${shell_target}.out.lua"
+    shell_committed="$ROOT/vm_${shell_target}.shell.out.lua"
+    [[ -f "$shell_committed" ]] || {
+        printf 'error: missing checked-in shell artifact %s\n' "$shell_committed" >&2
+        exit 1
+    }
     "$OBF" shell --target "$shell_target" --seed "$shell_seed" \
         -o "$tmp/shell-${shell_target}.lua" "$shell_golden" 2>"$tmp/shell-${shell_target}.stats"
-    "$OBF" shell --target "$shell_target" --seed "$shell_seed" \
-        -o "$tmp/shell-${shell_target}-again.lua" "$shell_golden" 2>/dev/null
-    cmp "$tmp/shell-${shell_target}.lua" "$tmp/shell-${shell_target}-again.lua"
+    # 入库的那份压缩产物必须就是当前实现 + 固定种子的产物（交付时上传的是它）。
+    cmp "$tmp/shell-${shell_target}.lua" "$ROOT/vm_${shell_target}.shell.out.lua"
     shell_runner=$LUA
     if [[ "$shell_target" == luau ]]; then shell_runner=$LUAU; fi
-    "$shell_runner" "$tmp/shell-${shell_target}.lua" >"$tmp/shell-${shell_target}.out" 2>&1
+    "$shell_runner" "$shell_committed" >"$tmp/shell-${shell_target}.out" 2>&1
     tail -1 "$tmp/shell-${shell_target}.out" | grep -qx "$shell_want" || {
         printf 'error: the XXS shell for %s did not print %s\n' "$shell_target" "$shell_want" >&2
         cat "$tmp/shell-${shell_target}.out" >&2
@@ -418,7 +423,7 @@ for shell_pair in "lua51 7001 vm:lua51:ok" "luau 7351 vm:luau:ok"; do
     }
     # 记录值 2026-09-13：Lua 5.1 67,564 B / Luau 76,374 B（golden 102,863 / 112,219 B）。
     # 只许变小、不许变大——外壳是交付期可换的一层，体积回退必须显式记录。
-    shell_bytes=$(wc -c <"$tmp/shell-${shell_target}.lua")
+    shell_bytes=$(wc -c <"$shell_committed")
     shell_limit=70000
     if [[ "$shell_target" == luau ]]; then shell_limit=79000; fi
     if [[ $shell_bytes -gt $shell_limit ]]; then

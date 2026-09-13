@@ -12,6 +12,10 @@
 *.out.lua
 !/vm_lua51.out.lua
 !/vm_luau.out.lua
+# 交付时同样上传的两份「压缩外壳」产物（2026-09-13 用户指示：以后除原两份输出文件外，
+# 这两份新的压缩输出文件也一并入库）。它们由 `obf shell` 从上面两份 golden + 固定种子生成。
+!/vm_lua51.shell.out.lua
+!/vm_luau.shell.out.lua
 
 # Generated custom bytecode; keep checked-in tests source-driven.
 *.obf
