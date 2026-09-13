@@ -40,6 +40,7 @@ fn run() -> Result<(), Diagnostic> {
             | "compile"
             | "dump-ir"
             | "wrap-bytecode"
+            | "shell"
     ) {
         return Err(Diagnostic::new(format!("unknown command '{command}'")));
     }
@@ -106,9 +107,14 @@ fn run() -> Result<(), Diagnostic> {
         input.ok_or_else(|| Diagnostic::new("input file is required (use '-' for stdin)"))?;
     let data = read_input(&input)?;
 
-    if seed_was_set && !matches!(command.as_str(), "minify" | "virtualize" | "wrap-bytecode") {
+    if seed_was_set
+        && !matches!(
+            command.as_str(),
+            "minify" | "virtualize" | "wrap-bytecode" | "shell"
+        )
+    {
         return Err(Diagnostic::new(
-            "--seed is only valid for 'minify', 'virtualize' or 'wrap-bytecode'",
+            "--seed is only valid for 'minify', 'virtualize', 'wrap-bytecode' or 'shell'",
         ));
     }
     if seed_was_set && no_rename {
@@ -128,7 +134,10 @@ fn run() -> Result<(), Diagnostic> {
 
     if !seed_was_set
         && !no_rename
-        && matches!(command.as_str(), "minify" | "virtualize" | "wrap-bytecode")
+        && matches!(
+            command.as_str(),
+            "minify" | "virtualize" | "wrap-bytecode" | "shell"
+        )
     {
         seed = vm::Options::default().seed;
         // Keep stdout a pure single-line script, while making default random
@@ -176,6 +185,20 @@ fn run() -> Result<(), Diagnostic> {
         "wrap-bytecode" => {
             let source = vm::custom::emit(&data, target, seed)?;
             write_output(output, source.as_bytes())
+        }
+        "shell" => {
+            let source = decode_source(&data)?;
+            let shell = obf::shell::wrap(source, target, seed)?;
+            eprintln!(
+                "shell: target={} source={}B compressed={}B base85={}B tokens={} ratio={:.3}",
+                target,
+                shell.source_bytes,
+                shell.compressed_bytes,
+                shell.encoded_bytes,
+                shell.tokens,
+                shell.ratio()
+            );
+            write_output(output, shell.script.as_bytes())
         }
         "inspect-bytecode" => {
             if output.is_some() {
@@ -297,12 +320,16 @@ obf virtualize --target <lua51|luau> [--backend ast|native] [--seed N] [-o FILE]
 obf dump-ir --target <lua51|luau> [-o FILE] <input|->\n  \
 obf compile --target <lua51|luau> [-o FILE] <input|->\n  \
 obf wrap-bytecode --target <lua51|luau> [--seed N] [-o FILE] <input.obf|->\n  \
+obf shell --target <lua51|luau> [--seed N] [-o FILE] <input.lua|->\n  \
 obf inspect-bytecode --target <lua51|luau> <input|->\n\n\
 Default virtualize: AST -> IR -> OBF v2 -> private register VM (see the image header ISA field).\n\
 Canonical compile output has a 32-byte header and 7-bit varint instructions; no encryption or compression.\n\
 Generated VM scripts use bounded lossless LZW, split ChaCha8, runtime anti-hook gates, and randomized private layout.\n\
 compile emits binary bytecode; dump-ir emits typed register IR.\n\
 wrap-bytecode validates OBF v2 and emits its single-line register VM.\n\
+shell wraps an already-generated VM script in one more layer: DP/LZ tokens, 4-byte-groups \
+base85 (seeded digit table), and a self-decoding loadstring loader that verifies a keyed fold \
+before compiling. It is outside the OBF container and does not change the private ISA.\n\
 inspect-bytecode accepts OBF v2 and native target bytecode.\n\
 --backend native explicitly selects the legacy external-compiler OBF v1 path.\n\
 Generated scripts receive randomized 1-2 letter locals only after assembly.\n\

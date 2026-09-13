@@ -13,6 +13,7 @@ pub mod minify;
 pub mod parser;
 mod random;
 pub mod scope;
+pub mod shell;
 pub mod target;
 pub mod vm;
 
