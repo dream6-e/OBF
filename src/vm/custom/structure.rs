@@ -189,17 +189,29 @@ const NICE_LABELS: [u16; 4] = [86, 256, 7225, 7396];
 /// itself, never an audit-nice label. `None` when the gap is too narrow, which
 /// is what keeps adjacent opcodes inside one leaf run instead of forcing a
 /// bound onto a number the chain already tests below it.
-fn interval_bound(structure: &mut crate::random::Prng, low: u16, high: u16) -> Option<u16> {
+fn interval_bound(
+    structure: &mut crate::random::Prng,
+    low: u16,
+    high: u16,
+    avoid: &[u16],
+) -> Option<u16> {
     let gap = high.checked_sub(low)?;
     if gap < 2 {
         return None;
     }
+    // A bound must not read as any value that the same variable is compared against
+    // elsewhere in the script: an interval boundary that collides with a state number
+    // (K3-FULL: the loop-back state of the very machine whose handlers are being
+    // partitioned) would make the boundary ambiguous even though the partition over
+    // the arm values themselves stays exact. `avoid` carries those extra values;
+    // `NICE_LABELS` keeps applying, since a nice bound is an anchor either way.
+    let taken = |value: u16| NICE_LABELS.contains(&value) || avoid.contains(&value);
     let mut bound = low + 1 + structure.index((gap - 1) as usize) as u16;
-    if NICE_LABELS.contains(&bound) {
+    if taken(bound) {
         // Slide inside the same gap; the partition stays exact either way.
-        if bound + 1 < high && !NICE_LABELS.contains(&(bound + 1)) {
+        if bound + 1 < high && !taken(bound + 1) {
             bound += 1;
-        } else if bound > low + 1 && !NICE_LABELS.contains(&(bound - 1)) {
+        } else if bound > low + 1 && !taken(bound - 1) {
             bound -= 1;
         } else {
             return None;
@@ -227,6 +239,7 @@ fn interval_split(
     members: &[(u16, String)],
     positions: &[usize],
     target: usize,
+    avoid: &[u16],
 ) -> Option<(usize, u16)> {
     let jitter = (structure.index(5) as usize).saturating_sub(2);
     let center = target.wrapping_add(jitter).max(1).min(members.len() - 2);
@@ -237,7 +250,7 @@ fn interval_split(
         .collect();
     ordered.sort();
     for (_, at) in ordered {
-        if let Some(bound) = interval_bound(structure, members[at - 1].0, members[at].0) {
+        if let Some(bound) = interval_bound(structure, members[at - 1].0, members[at].0, avoid) {
             return Some((at, bound));
         }
     }
@@ -296,13 +309,14 @@ fn interval_tree(
     leaf_max: usize,
     out: &mut String,
     open: bool,
+    avoid: &[u16],
 ) {
     let mut open = open;
     loop {
         let mut split = None;
         if members.len() > leaf_max {
             let positions = gap_positions(members);
-            split = interval_split(structure, members, &positions, members.len() / 2);
+            split = interval_split(structure, members, &positions, members.len() / 2, avoid);
         }
         let Some((at, bound)) = split else {
             leaf_run(structure, members, out, open);
@@ -322,7 +336,7 @@ fn interval_tree(
             if open { "if" } else { "elseif" }
         )
         .unwrap();
-        interval_tree(structure, first, value_var, leaf_max, out, true);
+        interval_tree(structure, first, value_var, leaf_max, out, true, avoid);
         open = false;
         members = second;
     }
@@ -348,6 +362,7 @@ pub(crate) fn grouped_interval_chain(
     mut arms: Vec<(u16, String)>,
     groups: u8,
     value_var: &str,
+    avoid: &[u16],
 ) -> String {
     // Numeric order is what makes an interval test meaningful; the seeded
     // randomness rides in the split choices, the bounds, the comparison spelling
@@ -372,7 +387,7 @@ pub(crate) fn grouped_interval_chain(
     let mut cuts: Vec<(usize, u16)> = Vec::new();
     for rank in 1..usize::from(groups) {
         let target = arms.len() * rank / usize::from(groups);
-        if let Some((at, bound)) = interval_split(structure, &arms, &positions, target) {
+        if let Some((at, bound)) = interval_split(structure, &arms, &positions, target, avoid) {
             if !cuts.iter().any(|(seen, _)| *seen == at) {
                 cuts.push((at, bound));
             }
@@ -400,6 +415,7 @@ pub(crate) fn grouped_interval_chain(
             leaf_max,
             &mut text,
             true,
+            avoid,
         );
         start = *at;
     }
@@ -411,6 +427,7 @@ pub(crate) fn grouped_interval_chain(
         leaf_max,
         &mut text,
         true,
+        avoid,
     );
     text.push_str(" end;");
     text

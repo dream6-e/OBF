@@ -38,40 +38,37 @@ fn decimal_spells(text: &str, value: u64) -> usize {
 /// noise, the third spelling is what an analyst would pattern on.
 const CHECK1_FREE: usize = 2;
 
-/// Per-value maxima on the Lua 5.1 golden, measured after K9b. The values at 3 or 4
-/// are a wrapper-field write plus the sites the pass may not touch; `2147483647` is
-/// the documented residual -- 23 of its 29 spellings sit under a binder that
-/// re-shadows the wrapper name, so only 6 became reads. A count may fall as reach
-/// grows; it may not rise, and a value missing from this table has to stay at or
-/// below [`CHECK1_FREE`].
-const SPELLING_MAXIMA_LUA51: [(u64, usize); 10] = [
-    (85, 1),
+/// Per-value maxima on the Lua 5.1 golden, measured after K3-FULL. Three values are
+/// still above check1's threshold and each is at its floor: `256` (one field write
+/// plus the three shadowed-scope spellings K9b measured), `4294967296` (write plus two
+/// shadowed) and `2147483647` (K16's residual -- 23 of its 29 spellings sit under a
+/// binder that re-shadows the wrapper name). **Every other nice value must stay at or
+/// below [`CHECK1_FREE`]**, which is what this batch tightened: before K3-FULL, `86`
+/// (3) and `65536` (3) also needed table entries, because the form/renumbering field
+/// spelled both radix constants while rebuilding the tables; with the tables gone, both
+/// fall under the threshold. A count may fall further; it may not rise, and adding a row
+/// here requires the measurement and the per-site reason in the commit message.
+const SPELLING_MAXIMA_LUA51: [(u64, usize); 3] =
+    [(256, 4), (4294967296, 3), (2147483647, 24)];
+
+/// Same census on the Luau golden. `16777216` keeps its four spellings because four uses
+/// is under `MIN_USES`, so a wrapper field would lose bytes there (K16's curve), and
+/// `4294967296` sits at two because Luau's pool has one fewer out-of-reach spelling.
+/// `86` needs a row here where the Lua 5.1 golden does not: three spellings survive on
+/// this target, all of them inside the transport's own radix machinery (the count has
+/// moved between 2 and 4 across K19/K3 as the stream re-drew, so it is recorded as a cap,
+/// and it is one spelling above check1's threshold -- the smallest possible anchor.
+const SPELLING_MAXIMA_LUAU: [(u64, usize); 4] = [
     (86, 3),
     (256, 4),
-    (65535, 2),
-    (65536, 3),
-    (16777216, 1),
-    (2147483648, 2),
-    (2147483647, 24),
-    (4294967295, 1),
-    (4294967296, 3),
+    (16777216, 4),
+    (2147483647, 27),
 ];
 
-/// Same census on the Luau golden. `16777216` sits at four because the pass leaves it
-/// spelled there (four uses is under `MIN_USES`, so a field would lose bytes), and
-/// `4294967296` at two because Luau has one fewer out-of-reach spelling to work with.
-const SPELLING_MAXIMA_LUAU: [(u64, usize); 10] = [
-    (85, 1),
-    (86, 4),
-    (256, 4),
-    (65535, 2),
-    (65536, 3),
-    (16777216, 4),
-    (2147483648, 2),
-    (2147483647, 27),
-    (4294967295, 1),
-    (4294967296, 2),
-];
+/// The two `256` floors K9b measured are the *only* nice-value anchor the byte-assembly
+/// weight still has; K3-FULL re-checked that the shape no longer re-enters through the
+/// reader, hence this exact-equality half of the gate below.
+const ANCHOR_FLOOR_256: usize = 4;
 
 #[test]
 fn every_audit_anchor_sits_at_the_wrapper_field_floor_in_the_goldens() {
@@ -106,7 +103,7 @@ fn every_audit_anchor_sits_at_the_wrapper_field_floor_in_the_goldens() {
         // not allowed to rewrite -- on both targets.
         assert_eq!(
             decimal_spells(&body, 256),
-            4,
+            ANCHOR_FLOOR_256,
             "{target:?}: `256` moved off the measured floor -- re-run the census, put the per-site attribution next to this assertion, and re-record it from the numbers"
         );
     }

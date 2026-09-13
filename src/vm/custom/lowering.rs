@@ -475,7 +475,10 @@ impl FieldLayout {
             .map(|&field| names[field as usize])
             .collect();
         format!(
-            "local I={{{},{},{},PT[recipe[#recipe]],#recipe}};",
+            // K3-FULL: the dictionary already carries the renumbered id (plus the
+            // operand form in its high bits), so the tuple takes the id straight from
+            // the slot -- no permutation table read per materialized record.
+            "local I={{{},{},{},recipe[#recipe]%256,#recipe}};",
             slots[0], slots[1], slots[2]
         )
     }

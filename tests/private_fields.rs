@@ -23,8 +23,11 @@ fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
     assert_eq!(image[6], 1, "generated scripts require private encoding 1");
     assert_eq!(
         u32::from_le_bytes(image[24..28].try_into().unwrap()),
-        17,
-        "generated scripts require private ISA17 keyed constant-pool images"
+        18,
+        "generated scripts require private ISA18 images: keyed constant-pool payloads \
+         (K13c) plus the K3-FULL recipe dictionary, whose slots carry the renumbered \
+         opcode and the operand form as a byte pair, so the runtime rebuilds no form or \
+         permutation table"
     );
 }
 

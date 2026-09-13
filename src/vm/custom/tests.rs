@@ -14,6 +14,7 @@ mod native {
 include!("tests/runtime.rs");
 include!("tests/transport.rs");
 include!("tests/semantic.rs");
+include!("tests/transport_chain.rs");
 include!("tests/seed_v1.rs");
 include!("tests/heuristic_audit.rs");
 include!("tests/stream_audit.rs");
@@ -22,3 +23,5 @@ include!("tests/lane.rs");
 include!("tests/scatter.rs");
 include!("tests/dispatch_intervals.rs");
 include!("tests/anchor_floor.rs");
+include!("tests/operand_fields.rs");
+include!("tests/depooled_recipe.rs");

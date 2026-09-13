@@ -196,7 +196,6 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // per-seed slots (the entry derives it from the forms field's output
     // before calling the decrypt field).
     let pv = perm_term(seed);
-    let pv_slots = perm_indices(seed);
     // Compress the complete private semantic image before any cipher. The
     // bounded LZW frame is emitted only when it is strictly smaller; its body
     // is protected by the inner ChaCha8 domain. Encrypting after compression
@@ -460,15 +459,11 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
     // Forms first yields the permutation term. Five shuffled crypto fields
     // are then composed locally; both anti-hook gates run before ChaCha8.
     let mut decoder_wiring = format!(
-        "local FMt,PT=VMS[{forms}](E,SB);\
-local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;\
+        "local pv=VMS[{forms}](E,SB);\
 {crypto_wiring}\
 local C=VMS[{decrypt}](SS(Y1..Y2..Y3,5),c1,c2,c3,pv,CC,AH,CB,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS);\
 {compression_wiring}",
         forms = keys[13],
-        i0 = pv_slots[0],
-        i1 = pv_slots[1],
-        i2 = pv_slots[2],
         decrypt = keys[1],
         crypto_wiring = crypto_wiring,
         compression_wiring = compression_wiring,
@@ -686,47 +681,32 @@ local check=b32();if {ad_guard} then E()end;
     // from a packed, per-seed rotated one-char-per-opcode string over the
     // backslash-free base86 alphabet, unused opcode slots encoding an
     // invalid form so unknown opcodes are still rejected before dispatch.
-    let forms: std::collections::BTreeMap<u8, u8> = primitive_ops
-        .iter()
-        .map(|op| (*op as u8, custom::encoding_form(*op)))
-        .collect();
-    let forms_rot = structure.index(86) as u64;
-    let mut forms_text = String::new();
-    for slot in 0..=*forms.keys().max().unwrap() {
-        let packed = match forms.get(&slot) {
-            Some(form) => (u64::from(form - 1) + forms_rot) % 86,
-            None => (5 + forms_rot) % 86,
-        };
-        forms_text.push(pack86(packed as u8));
+    // K3-FULL: neither the form table nor the renumbering table is built any more.
+    // What used to be two packed base86 blobs expanded into 64-entry lookup tables is
+    // now (a) the recipe dictionary's own bytes -- the renumbered id and the operand
+    // form ride in the image, one byte pair per slot -- and (b) this field, which
+    // folds a six-symbol witness descriptor into the payload key term. The shipped
+    // script no longer contains the permutation as data at all: the renumbering
+    // survives only as the dispatch arm keys, so enumerating it from the shell is no
+    // longer a single table read. `pv` keeps its B1 role -- the payload seed carries a
+    // term the entry has to rebuild from an alphabet-validated descriptor.
+    // The fold base is 87, not 86: the descriptor's symbols come from the same
+    // backslash-free printable alphabet the packed strings have always used, but
+    // spelling `86` here would put another radix constant in the code region, which is
+    // exactly what the transport label hygiene avoids (product_audit check1).
+    let mut witness = String::new();
+    for digit in perm_digits(seed) {
+        witness.push(pack86(digit as u8));
     }
-    // The per-seed opcode renumbering rides along as a second packed
-    // string: two base86 chars per canonical slot (value%86, value/86).
-    let mut perm_text = String::new();
-    for slot in 0..64u8 {
-        let value = perm[slot as usize];
-        perm_text.push(pack86(value % 86));
-        perm_text.push(pack86(value / 86));
-    }
-    // A byte-127 marker prefixes both packed strings: it is outside the
-    // 28..=126 transport pool, so the payload-segment audit (which collects
-    // the three longest alphabet-only literals) never mistakes them for
-    // transport segments however small the program is.
     let mut forms_body = format!(
-        "local t={{}};local p={{}};local S=\"\\127{text}\";for i=2,#S do local b=SB(S,i);\
-if b==92 or b<35 or b>121 then E()end;if b>92 then b=b-1 end;t[i-2]=(b-35-{rot})%86+1 end;\
-local U=\"\\127{renum}\";for i=2,#U,2 do local x=SB(U,i);local y=SB(U,i+1);\
-if x==92 or x<35 or x>121 or y==92 or y<35 or y>121 then E()end;\
-if x>92 then x=x-1 end;if y>92 then y=y-1 end;p[(i-2)/2]=x-35+(y-35)*86 end;\
-local rt,rp=t,p;g=nil;return rt,rp;",
-        text = forms_text,
-        rot = forms_rot,
-        renum = perm_text,
+        "local d={{}};local S=\"\\127{text}\";for i=1,6 do local b=SB(S,i+1);\
+if b==92 or b<35 or b>121 then E()end;if b>92 then b=b-1 end;d[i]=b-35 end;\
+local r=1+((d[1]+d[2]*87)*31+(d[3]+d[4]*87)*7+(d[5]+d[6]*87))%2147483646;g=nil;return r;",
+        text = witness,
     );
-    forms_body = slot_rewrite(
-        &mut structure,
-        &forms_body,
-        &["t", "p", "S", "U", "b", "x", "y"],
-    );
+    // `i` is the loop control variable, so it stays out of the slot list (a slot name
+    // is a table field, and `for g[7]=1,6 do` is not a loop).
+    forms_body = slot_rewrite(&mut structure, &forms_body, &["d", "S", "b"]);
     let forms_field = format!(
         "[{key}]=function(E,SB)local g={{}};{body}end,",
         key = keys[13],
@@ -736,30 +716,49 @@ local rt,rp=t,p;g=nil;return rt,rp;",
     // use sites: the recipe dictionary supplies a context-specific opcode
     // sequence, and this closure reads only the operands for one advertised
     // primitive form.
+    // K3-FULL: the typed read, specialised per operand shape and driven by the form
+    // the record carries. Before this, the caller looked the shape up in a shared
+    // form table (`FM[op]`), and the `256`/`65536` widths plus the operand-lane decode
+    // lived in the semantic parser next to a second shared table (the renumbering
+    // `PT`). Now `AK` and the five bound-checked shapes live here, the widths are baked
+    // into each shape, and the caller hands in `f` -- so a decoded instruction costs no
+    // shared-table lookup at all. The specialisation is per *shape* rather than per
+    // opcode because width and gap are properties of the shape: copying identical
+    // bodies across the 49 renumbered ids would spend about a kilobyte for nothing.
+    // The bound checks keep their four spellings and their order (read, then check),
+    // and `p2` threads the stream position instead of reusing `p`.
+    // The fifth shape is spelled like the other four (and an unlisted value reaches
+    // `E()`), so the reader is self-contained: it never treats "anything else" as shape
+    // five, which is what lets the parser-side form check stay a cheap range test.
     let mut decode_body = format!(
-        "[{key}]=function(E,SB,FM)local g={{}};\nlocal Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
+        "[{key}]=function(E,SB)local g={{}};\nlocal Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*128;if w<128 and v<128 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*16384;if w<128 and v<16384 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*2097152;if v<2097152 then E()end;\
-if w>=128 then E()end;end;end;end;return v,p end;\nreturn function(CD,p,o)local f=FM[o];if f==nil or f>5 then E()end;\
-if f==1 then j,p=Dv(CD,p);if {jx} then E()end;a=j%256;local k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;\
-elseif f==2 then a,p=Dv(CD,p);if {ax} then E()end;b=0;c=0;\
-elseif f==3 then a,p=Dv(CD,p);b,p=Dv(CD,p);if {ax} or {bx} then E()end;c=0;\
-elseif f==4 then a,p=Dv(CD,p);if {ax} then E()end;k2,p=Dv(CD,p);if {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;\
-else a,p=Dv(CD,p);b,p=Dv(CD,p);c,p=Dv(CD,p);if {ax} or {bx} or {cx} then E()end end;\
-return a,b,c,p end;\nend,",
+if w>=128 then E()end;end;end;end;return v,p end;\n local AK=function(kv,kid,klane,kx,km,kcl)local kq=(kv*17+kid*31+klane*53+{k9_salt})%8+1;local kii;if km==65536 then kii=({{1,43691,52429,28087,36409,35747,20165,61167}})[kq]else kii=({{1,171,205,183,57,163,197,239}})[kq]end;local kaa=(kv*257+kid*911+klane*193+{k9_add}+kcl%km)%km;return (kx-kaa)*kii%km end;\nreturn function(CD,p,sf,token,id,cl)local a,b,c,j,k2,kk,p2;\
+if sf==1 then j,p2=Dv(CD,p);if {jx} then E()end;a=j%256;k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);c=AK(token,id,2,c,256,cl);\
+elseif sf==2 then a,p2=Dv(CD,p);if {ax} then E()end;b=0;c=0;a=AK(token,id,0,a,256,cl);\
+elseif sf==3 then a,p2=Dv(CD,p);b,p2=Dv(CD,p2);if {ax} or {bx} then E()end;c=0;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);\
+elseif sf==4 then a,p2=Dv(CD,p);k2,p2=Dv(CD,p2);if {ax} or {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;kk=AK(token,id,1,b+c*256,65536,cl);a=AK(token,id,0,a,256,cl);b=kk%256;c=(kk-b)/256;\
+elseif sf==5 then a,p2=Dv(CD,p);b,p2=Dv(CD,p2);c,p2=Dv(CD,p2);if {ax} or {bx} or {cx} then E()end;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);c=AK(token,id,2,c,256,cl);\
+else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
         key = keys[14],
         jx = jx,
         ax = ax,
         bx = bx,
         kx = kx,
         cx = cx,
+        k9_salt = semantic_image.mask_salt,
+        k9_add = semantic_image.mask_add,
     );
-    decode_body = slot_rewrite(
-        &mut structure,
-        &decode_body,
-        &["w", "v", "f", "a", "b", "c", "j", "k2"],
-    );
+    // Only the varint reader's scratch keeps the slot treatment (as before this batch).
+    // The shape branch works in plain locals instead: `slot_rewrite` turns `local x`
+    // into a table write, and this closure runs once per decoded operand, so the hot
+    // values stay locals. `sf` is a parameter (a slot target in a parameter list is not
+    // Lua at all), and a declaration with no initialiser stays a plain local -- a
+    // slotted one would have to be rewritten into `g[k],g[k]=nil,nil`, which the
+    // emitted-token pass then glues onto the following keyword.
+    decode_body = slot_rewrite(&mut structure, &decode_body, &["w", "v"]);
     let decode_field = decode_body;
     let mut f3_arms: Vec<(u8, String)> = primitive_ops
         .iter()
@@ -809,7 +808,7 @@ return a,b,c,p end;\nend,",
     // graph successors only after the shuffled records have been read.
     write!(
         s,
-        "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX,SS,NCH,TC,IF,SF,U32,UK,NU)\n",
+        "[{}]=function(P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU)\n",
         keys[2]
     )
     .unwrap();
@@ -843,19 +842,19 @@ return a,b,c,p end;\nend,",
 local DC=function(id)
  local F=P[id];local CD=F.__obf_proto_code;if CD[0]~=nil then return CD end;local p=1;{operand_profile}{field_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
- local AK=function(v,id,lane,x,m,cl)local q=(v*17+id*31+lane*53+{k9_salt})%8+1;local ii;if m==65536 then ii=({{1,43691,52429,28087,36409,35747,20165,61167}})[q]else ii=({{1,171,205,183,57,163,197,239}})[q]end;local aa=(v*257+id*911+lane*193+{k9_add}+cl%m)%m;return (x-aa)*ii%m end;
  {kimg_pass} local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};local VR={{}};
  for z=1,nr do {dict_head}if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
   local q={{}};for qi=0,n-1 do local raw=SB(CD,p);p=p+1;if raw==nil then E()end;
-   local op=(raw-(rid*{mask_mul}+qi*{mask_add}+{mask_salt})%64)%64;
-   if op>48 or FM[op]==nil or qi<n-1 and (op==44 or op==45 or op==46 or op==47)then E()end;q[qi+1]=op;
+   local op=(raw-(rid*{mask_mul}+(qi*2)*{mask_add}+{mask_salt})%256)%256;
+   local fr=SB(CD,p);p=p+1;if fr==nil then E()end;fr=(fr-(rid*{mask_mul}+(qi*2+1)*{mask_add}+{mask_salt})%8)%8;
+   if fr>4 or qi<n-1 and (op=={ctl44} or op=={ctl45} or op=={ctl46} or op=={ctl47})then E()end;q[qi+1]=op+fr*256;
   end;RM[rid]=q;
  end;
  local start=D16();local code={{}};local stL=(id*{k9_init_proto}+nr*{k9_init_routes}+start*{k9_init_start}+{k9_salt})%{k9_mod};
  for at=0,F.__obf_proto_nc-1 do {record_head}local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);stL=(stL*{k9_chain_mul}+token*{k9_chain_token}+at*{k9_chain_step}+{k9_salt})%{k9_mod};local recipe=RM[rid];
   if label==0 or code[label]~=nil or recipe==nil then E()end;local route=(label*{route_mul}+token*{route_add}+id*{route_salt})%65521;local bucket=VR[route];if bucket==nil then bucket={{}};VR[route]=bucket end;if bucket[label]~=nil then E()end;bucket[label]={{rid,#recipe}};{tuple_construct}
-  for qi=1,#recipe do local op=recipe[qi];local a,b,c,p2=dec(CD,p,op);p=p2;local form=FM[op];if form==1 then a=AK(token,id,0,a,256,stL);b=AK(token,id,1,b,256,stL);c=AK(token,id,2,c,256,stL) elseif form==2 then a=AK(token,id,0,a,256,stL) elseif form==3 then a=AK(token,id,0,a,256,stL);b=AK(token,id,1,b,256,stL) elseif form==4 then local kk=AK(token,id,1,b+c*256,65536,stL);a=AK(token,id,0,a,256,stL);b=kk%256;c=(kk-b)/256 else a=AK(token,id,0,a,256,stL);b=AK(token,id,1,b,256,stL);c=AK(token,id,2,c,256,stL) end;local k=b+c*256;local j=a+k*256;
-   if not vld(PT[op],a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
+  for qi=1,#recipe do local r=recipe[qi];local op=r%256;local a,b,c,j,k,p2=dec(CD,p,(r-op)/256+1,token,id,stL);p=p2;
+   if not vld(op,a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
   end;code[label]=I;
  end;
  if p~=#CD+1 or start==0 or code[start]==nil then E()end;
@@ -875,7 +874,6 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         route_add = route_add,
         route_salt = route_salt,
         k9_salt = semantic_image.mask_salt,
-        k9_add = semantic_image.mask_add,
         k9_mod = semantic::K9_CHAIN_MOD,
         k9_chain_mul = semantic::K9_CHAIN_MUL,
         k9_chain_token = semantic::K9_CHAIN_TOKEN_MUL,
@@ -892,6 +890,10 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         tuple_next = tuple_slots[1],
         tuple_skip = tuple_slots[2],
         operand_store = OperandLayout::parser_store_lua(),
+        ctl44 = perm[44],
+        ctl45 = perm[45],
+        ctl46 = perm[46],
+        ctl47 = perm[47],
         jump = perm[Opcode::Jump as usize],
         test = perm[Opcode::Test as usize],
         ret = perm[Opcode::Return as usize],
@@ -1015,9 +1017,9 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     // de-self-documenting measure, not a claim that the shipped inverses or
     // dependency graph are secret.
     s.push_str("\nreturn CV,SV,Lookup\nend,");
-    let mut decoder_stage = decoder_wiring.replacen("local FMt,PT=", "FMt,PT=", 1);
+    let mut decoder_stage = decoder_wiring.replacen("local pv=", "pv=", 1);
     decoder_stage = decoder_stage.replacen("local P,np,entry,KImg=", "P,np,entry,KImg=", 1);
-    if decoder_stage.contains("local FMt,PT=") || decoder_stage.contains("local P,np,entry,KImg=") {
+    if decoder_stage.contains("local pv=") || decoder_stage.contains("local P,np,entry,KImg=") {
         return Err(Diagnostic::new("entry decoder stage export rewrite failed"));
     }
     let entry_states = state_values(&mut structure, 6);
@@ -1067,7 +1069,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     );
     let decode_stage = format!("{}{decoder_stage}es={e_bind};", scatter.blob(9));
     let bind_stage = format!(
-        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB,FMt);local vld=VMS[{}](E);for pi=0,np-1 do P[pi].__obf_proto_kimg=KImg end;RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,PT,FMt,NX,SS,NCH,TC,IF,SF,U32,UK,NU);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E);for pi=0,np-1 do P[pi].__obf_proto_kimg=KImg end;RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
         scatter.blob(10),
         keys[14], keys[15], keys[2], keys[3],
     );
@@ -1098,7 +1100,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     );
     write!(
         s,
-        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,FMt,PT,P,np,entry,KImg,RD,ED,OG,DC,CV,SV,Lookup;local ck=0;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
+        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,pv,P,np,entry,KImg,RD,ED,OG,DC,CV,SV,Lookup;local ck=0;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
     )
     .unwrap();
     write!(
@@ -1304,9 +1306,27 @@ end;
     // K21: both lookup levels decide by numeric interval (bucket cascade plus a
     // seeded binary interval tree per bucket) instead of `value % groups` plus a
     // flat equality scan.
-    let recipe_chain = grouped_interval_chain(&mut structure, recipe_entries, recipe_groups, "rid");
-    let fragment_chain =
-        grouped_interval_chain(&mut structure, fragment_arms, fragment_groups, "sid");
+    // K3-FULL: the `sid` tree must also stay clear of the *machine's own* state
+    // numbers, not just the arm values it partitions -- the loop-back state and the
+    // init state are compared against the same variable elsewhere in the entry, and a
+    // boundary landing on one of those would read as an ambiguous split even though the
+    // partition over the handlers is exact. `rid` needs nothing extra: its arm list is
+    // the recipe-token state pool, so every value the variable is tested against is
+    // already excluded by the gap rule.
+    let sid_states: Vec<u16> = fragment_states
+        .iter()
+        .copied()
+        .chain(std::iter::once(semantic_init))
+        .collect();
+    let recipe_chain =
+        grouped_interval_chain(&mut structure, recipe_entries, recipe_groups, "rid", &[]);
+    let fragment_chain = grouped_interval_chain(
+        &mut structure,
+        fragment_arms,
+        fragment_groups,
+        "sid",
+        &sid_states,
+    );
     let init_condition = state_condition(&mut structure, "sid", semantic_init);
     write!(
         s,

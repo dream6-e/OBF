@@ -291,24 +291,19 @@ pub(crate) fn runtime_control_mask(shares: &[u64; 3]) -> u64 {
     shares.iter().sum::<u64>() % 65_520
 }
 
-pub(crate) fn perm_indices(seed: u64) -> [usize; 3] {
+/// The six base86 digits of the entry's key-term descriptor (K3-FULL). They used to
+/// be three *slots of the renumbering table*, which the entry rebuilt and published as
+/// a 64-entry table; the script now carries only the six-symbol witness and the
+/// permutation itself survives only as the dispatch arm keys.
+pub(crate) fn perm_digits(seed: u64) -> [u64; 6] {
     let mut random = crate::random::Prng::sfc(seed ^ 0x7874_6572_6d37_7333);
-    let mut used = std::collections::BTreeSet::new();
-    let mut picks = [0usize; 3];
-    for pick in &mut picks {
-        loop {
-            let index = random.index(64);
-            if used.insert(index) {
-                *pick = index;
-                break;
-            }
-        }
-    }
-    picks
+    std::array::from_fn(|_| random.index(86) as u64)
 }
 
 pub(crate) fn perm_term(seed: u64) -> u64 {
-    let perm = opcode_permutation(seed, 64);
-    let [a, b, c] = perm_indices(seed);
-    1 + (u64::from(perm[a]) * 31 + u64::from(perm[b]) * 7 + u64::from(perm[c])) % 2_147_483_646
+    let d = perm_digits(seed);
+    // 87, not the alphabet size: the fold must not spell a radix constant in the
+    // emitted script (see `perm_digits` and product_audit check1).
+    let fold = |pair: &[u64]| pair[0] + pair[1] * 87;
+    1 + (fold(&d[0..2]) * 31 + fold(&d[2..4]) * 7 + fold(&d[4..6])) % 2_147_483_646
 }

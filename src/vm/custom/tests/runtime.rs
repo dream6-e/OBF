@@ -314,13 +314,14 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
             };
             dictionary.insert(rid);
             assert!((1..=4).contains(&len));
-            cursor += 3 + len;
+            // K3-FULL: every recipe slot is a byte pair (renumbered id, operand form).
+            cursor += 3 + 2 * len;
         }
         let start_label = cursor;
         let first_record = start_label + 2;
         assert!(first_record + 8 <= code_len);
         let first_len = usize::from(code_bytes[first_recipe + if flipped { 0 } else { 2 }]);
-        let second_recipe = first_recipe + 3 + first_len;
+        let second_recipe = first_recipe + 3 + 2 * first_len;
         let recipe_operands: std::collections::BTreeMap<u16, usize> = image
             .recipes
             .iter()
@@ -374,9 +375,23 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
 
         let len_offset = if flipped { 0 } else { 2 };
         let rid_offset = if flipped { 1 } else { 0 };
+
         let mut corruptions = Vec::new();
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
             code[first_recipe + len_offset] = 0; // empty recipe
+        }));
+        // K3-FULL: a recipe slot now carries its operand form next to the renumbered
+        // id, and the form is bounded before anything is read. Push slot 0's form byte
+        // out of range (decoded value 5, above the five shapes) and require the same
+        // fail-closed death.
+        let first_rid =
+            u16::from_le_bytes(code_bytes[first_recipe + rid_offset..first_recipe + rid_offset + 2].try_into().unwrap());
+        let form_mask = (u64::from(first_rid) * u64::from(image.mask_mul)
+            + u64::from(image.mask_add)
+            + u64::from(image.mask_salt))
+            % 8;
+        corruptions.push(mutate_semantic_code(&image, 0, |code| {
+            code[first_recipe + 4] = ((5 + form_mask) % 8) as u8; // form out of range
         }));
         corruptions.push(mutate_semantic_code(&image, 0, |code| {
             let duplicate = code[first_recipe + rid_offset..first_recipe + rid_offset + 2].to_vec();
@@ -858,7 +873,8 @@ fn target_decoder_rejects_field_order_confusion_on_both_targets() {
         for _ in 0..recipes {
             let len = usize::from(code_bytes[cursor + len_offset]);
             assert!((1..=4).contains(&len));
-            cursor += 3 + len;
+            // K3-FULL: two bytes per recipe slot (renumbered id + operand form).
+            cursor += 3 + 2 * len;
         }
         let first_record = cursor + 2;
         let record_slots = field.record_field_slots(0);

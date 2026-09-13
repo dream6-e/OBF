@@ -21,15 +21,25 @@ VM_BOUND_MS=${OBF_BENCH_VM_BOUND_MS:-1500}
 # still trips on a real size regression. OBF_BENCH_SCRIPT_CAP=off suspends this
 # gate only, for a construction window; the strict LZW-frame contract never is.
 #
-# 2026-09-11 K18 construction window (user instruction: 完成前关闭体积门): the
-# default is now `off`, so the 120,000 B pin is reported but not enforced while
-# failure-path diversification, PRNG-family work and the scatter batch land. The
-# pin is NOT deleted: 120000 stays as CAP_PIN, and a runaway ceiling at 1.5x the
-# pin still fails the run so an explosion cannot hide inside the window. Restore
-# by setting the default back to ${OBF_BENCH_SCRIPT_CAP:-$CAP_PIN}.
-CAP_PIN=120000
-CAP_RUNAWAY=180000
-SCRIPT_CAP=${OBF_BENCH_SCRIPT_CAP:-off}
+# 2026-09-11 K18 opened a construction window (user instruction: 完成前关闭体积门): the
+# default became `off`, so the 120,000 B pin was reported but not enforced while
+# failure-path diversification, PRNG-family work and the scatter batch landed. The pin
+# was NOT deleted (120000 stayed as CAP_PIN, plus a runaway ceiling at 1.5x it, so an
+# explosion could not hide inside the window).
+#
+# 2026-09-12 K3-FULL closes the window and re-pins, on the user's instruction to shrink
+# the gate once K3's tests passed. Enforced again: the default below is $CAP_PIN, and
+# tools/test-matrix.sh no longer exports the suspension. Measured worst case over every
+# seed the gates sample -- 10-seed sweeps (Lua51 7001..7010 worst 103,581 B, Luau
+# 7351..7360 worst 113,837 B) plus the budget test's own five seeds (Lua51 max 104,452 B
+# at seed u64::MAX, Luau max 113,850 B at seed 735) and seeds 1/2/3/4242 (max 113,006 B)
+# -- so 117,000 B leaves 2.8% of headroom over 19 sampled seeds on the larger target
+# (12.0% on Lua51) while the K3-FULL goldens themselves sit at 102,840/112,488 B.
+# Nothing was skipped to reach that number: the batch's own size change is -120/-509 B
+# on the goldens and +2.5%..+0.8% on the worst luau seed, both measured per seed.
+CAP_PIN=117000
+CAP_RUNAWAY=175500
+SCRIPT_CAP=${OBF_BENCH_SCRIPT_CAP:-$CAP_PIN}
 
 LUA51_VM="$ROOT/vm_lua51.out.lua"
 LUAU_VM="$ROOT/vm_luau.out.lua"

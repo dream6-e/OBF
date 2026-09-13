@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
 /// K13c step 2: the constant pool payload is keyed, so the semantic image is
 /// not byte-compatible with ISA16 -- bump the private wire version.
-pub(crate) const WIRE_ISA_VERSION: u32 = 17;
+pub(crate) const WIRE_ISA_VERSION: u32 = 18;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -115,6 +115,11 @@ pub(crate) struct SemanticImage {
     pub constant_pool_indices: Vec<usize>,
     pub pools_interleaved: bool,
     pub referenced_recipe_ids: BTreeSet<u16>,
+    /// K3-FULL: the opcode renumbering, encoder-side only and never serialized.
+    /// The recipe dictionary now carries the *renumbered* id, so the runtime
+    /// needs no permutation table -- and the shipped script no longer publishes
+    /// one. Kept on the image because `serialize` runs without the seed.
+    pub opcode_perm: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -1100,12 +1105,29 @@ fn add_decoy_recipes(
     added
 }
 
+/// One recipe-slot byte pair (K3-FULL). The id byte carries the *renumbered*
+/// opcode, so the generated parser never consults a permutation table to know which
+/// dispatch arm a record belongs to; the second byte carries the operand form, which
+/// used to come from a form table built the same way. Both fold the same
+/// (recipe, position) mask the operand stream does, and the position advances by two
+/// per slot so the two bytes of a pair never share a mask.
 fn encode_masked_opcode(op: Opcode, id: u16, position: usize, image: &SemanticImage) -> u8 {
+    let slot = position * 2;
     let mask = (u64::from(id) * u64::from(image.mask_mul)
-        + position as u64 * u64::from(image.mask_add)
+        + slot as u64 * u64::from(image.mask_add)
         + u64::from(image.mask_salt))
-        % 64;
-    ((u64::from(op as u8) + mask) % 64) as u8
+        % 256;
+    let permuted = u64::from(image.opcode_perm[usize::from(op as u8)]);
+    ((permuted + mask) % 256) as u8
+}
+
+fn encode_masked_form(op: Opcode, id: u16, position: usize, image: &SemanticImage) -> u8 {
+    let slot = position * 2 + 1;
+    let mask = (u64::from(id) * u64::from(image.mask_mul)
+        + slot as u64 * u64::from(image.mask_add)
+        + u64::from(image.mask_salt))
+        % 8;
+    ((u64::from(custom::encoding_form(op)) - 1 + mask) % 8) as u8
 }
 
 fn encode_code(
@@ -1144,6 +1166,7 @@ fn encode_code(
         }
         for (position, &op) in recipe.descriptor_ops.iter().enumerate() {
             out.push(encode_masked_opcode(op, recipe.id, position, image));
+            out.push(encode_masked_form(op, recipe.id, position, image));
         }
     }
     write_u16(&mut out, plan.start);
@@ -2008,6 +2031,7 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
     let edge_layers = edge_token_layers(&mut random);
     let mut image = SemanticImage {
         bytes: Vec::new(),
+        opcode_perm: crate::vm::custom::structure::opcode_permutation(seed, 64),
         recipes,
         mask_mul: [17u16, 29, 37, 43, 53, 61][(random.index(6)) as usize],
         mask_add: [11u16, 19, 23, 31, 41, 47][(random.index(6)) as usize],

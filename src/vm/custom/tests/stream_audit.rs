@@ -41,9 +41,16 @@ fn inner_ciphertext_words_have_no_periodic_repeats() {
     // so keyed varint lengths shift again (lua51 997 -> 978, luau 799 -> below).
     // Word *count* is a length artifact; both zero halves are unchanged, and
     // `stream_word_stats` still sees no repeat.
+    // Re-recorded 2026-09-12 for K3-FULL (ISA18): every recipe slot gained a second
+    // byte (the operand form rides in the image instead of being looked up in a form
+    // table the script builds), so the inner plaintext stream is longer and the word
+    // count moves with it (lua51 978 -> 1093, luau 982 -> 1094). Both zero halves stay
+    // zero: still no repeated 4-byte word and no common divisor among repeat
+    // distances -- the added byte is a 3-bit value per slot, which is exactly the kind
+    // of structure a repeat census would catch, and it does not produce one.
     for (target, seed, expected) in [
-        (Target::Lua51, 7001u64, (978usize, 0usize, 0u32)),
-        (Target::Luau, 7351u64, (982usize, 0usize, 0u32)),
+        (Target::Lua51, 7001u64, (1093usize, 0usize, 0u32)),
+        (Target::Luau, 7351u64, (1094usize, 0usize, 0u32)),
     ] {
         let data = compile(AUDIT_PROBE, target).unwrap();
         let output = emit(&data, target, seed).unwrap();

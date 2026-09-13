@@ -423,70 +423,6 @@ fn global_function_segment_pool_is_decoder_coupled_interleaved_and_exact() {
 }
 
 #[test]
-fn operand_features_are_split_into_separate_shuffled_fields() {
-    // The operand-form map (`[0]=3,[1]=4,...` sequential-key literal),
-    // the varint reader with its `if f==1 elseif f==2 ...` shape chain
-    // and the per-opcode bounds arms used to be one field's static
-    // signature. They must now be three separate payload fields, with
-    // the form map rebuilt from a per-seed rotated packed string.
-    for target in [Target::Lua51, Target::Luau] {
-        let source = "local function add(a,b)return a+b end print(add(1,2))";
-        let data = compile(source, target).unwrap();
-        let program = custom::decode(&data, target).unwrap();
-        let mut packed_strings = BTreeSet::new();
-        for seed in [0u64, 1, 735, u64::MAX] {
-            let raw = generate(&data, &program, seed).unwrap();
-            let keys = wrapper_keys(seed);
-            assert!(!raw.contains("local FM={"), "{target} seed {seed}");
-            assert!(raw.contains(&format!("[{}]=function(E,SB)", keys[13])));
-            assert!(raw.contains(&format!("[{}]=function(E,SB,FM)", keys[14])));
-            assert!(raw.contains(&format!("[{}]=function(E)", keys[15])));
-            assert!(raw.contains(&format!(
-                "[{}]=function(P,np,SB,E,dec,vld,PT,FM,NX,SS,NCH,TC,IF,SF,U32,UK,NU)",
-                keys[2]
-            )));
-            assert!(raw.contains(&format!("VMS[{}](E,SB)", keys[13])));
-            // The packed form strings are the only short `g[key]="..."`
-            // literals in the raw script (segment fields carry long
-            // base86 text); their bytes must rotate with the seed.
-            let mut at = 0usize;
-            while let Some(found) = raw[at..].find("g[") {
-                let base = at + found;
-                let mut digits = base + 2;
-                let bytes = raw.as_bytes();
-                while digits < bytes.len() && bytes[digits].is_ascii_digit() {
-                    digits += 1;
-                }
-                if raw[digits..].starts_with("]=\"") {
-                    let start = digits + 3;
-                    if let Some(end) = raw[start..].find('"').map(|n| n + start) {
-                        if end - start <= 96 {
-                            packed_strings.insert(raw[start..end].to_owned());
-                        }
-                        at = end;
-                        continue;
-                    }
-                }
-                at = base + 2;
-            }
-            let output = emit(&data, target, seed).unwrap();
-            assert_eq!(blob(&output, target, seed), wire(&data, target, seed));
-        }
-        assert!(
-            packed_strings.len() >= 2,
-            "{target}: packed form strings identical across seeds"
-        );
-        // The split layout still runs the program unchanged.
-        let workspace = native::Workspace::new();
-        let path = workspace.0.join("split_features.lua");
-        fs::write(&path, source).unwrap();
-        let expected = native::compile_and_run(target, &path);
-        fs::write(&path, emit(&data, target, 735).unwrap()).unwrap();
-        assert_eq!(expected, native::compile_and_run(target, &path));
-    }
-}
-
-#[test]
 fn per_prototype_operand_abi_breaks_the_static_slot_handler_bridge() {
     // The ISA11 report recovered every real operation from one global rule:
     // `I[6+3*i..8+3*i] -> a/b/c -> actual-op marker -> plaintext handler`.
@@ -887,12 +823,18 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
-            120_000usize,
+            // K3-FULL re-pin, enforced again after the K18 construction window: measured
+            // worst case over these five seeds is 104,452 B (Lua 5.1, seed u64::MAX) and
+            // 113,850 B (Luau, seed 735), and the 10-seed sweeps add nothing above that;
+            // 117,000 B keeps ~2.8% of headroom on the larger target while still tripping
+            // on a real regression. Both rows carry the same number as tools/bench-vm.sh's
+            // CAP_PIN, which is the point of pinning them together.
+            117_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
-            120_000usize,
+            117_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -1144,9 +1086,25 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
             assert!(raw.contains("Z[1]~=") && !raw.contains("Z[1]~=804192318"));
             assert_eq!(raw.matches("local aw=AH(AH,CC,CB,X8C").count(), 2);
 
-            let [i0, i1, i2] = perm_indices(seed);
-            let pv_line = format!("local pv=1+(PT[{i0}]*31+PT[{i1}]*7+PT[{i2}])%2147483646;");
-            let pv_at = raw.find(&pv_line).expect("entry permutation term");
+            // K3-FULL re-anchored: the term is no longer a fold over three slots of an
+            // assembled renumbering table (the script carries no such table any more).
+            // It is the six-symbol descriptor fold inside the field the entry calls, so
+            // the gate keeps the same three claims -- the term is dynamic (it reads the
+            // descriptor through the byte accessor, after an alphabet check, so no
+            // constant folding recovers it), and it is ordered before both stream calls.
+            // The wiring line is already hoisted in `generate` (the stage graph exports
+            // it), so the anchor is the exported form, and its position is what the
+            // ordering assertions below depend on.
+            let pv_line = format!("pv=VMS[{}](E,SB);", keys[13]);
+            let fold = "local r=1+((g[";
+            assert!(
+                raw.contains(fold)
+                    && raw.contains("for i=1,6 do")
+                    && raw.contains(")%2147483646;g=nil;return r;"),
+                "{target} seed {seed}: the key-term descriptor lost its six-symbol fold, \
+                 its accessor, or its scratch clear"
+            );
+            let pv_at = raw.find(&pv_line).expect("entry key term");
             let outer_call = raw
                 .find("c1,c2,c3,pv,CC,AH,CB,E,SB")
                 .expect("outer ChaCha8 call passes dynamic inputs");

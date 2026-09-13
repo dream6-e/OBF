@@ -31,12 +31,15 @@ fn k9_affine_lanes_round_trip_for_all_forms_and_contexts() {
 }
 
 #[test]
-fn wire_isa_version_is_17() {
+fn wire_isa_version_is_18() {
     assert_eq!(
         super::semantic::WIRE_ISA_VERSION,
-        17,
-        "keyed constant-pool payloads (K13c step 2) require ISA17: the image no \
-         longer carries constant payloads as plaintext, so the reader contract changed"
+        18,
+        "K3-FULL requires ISA18: the recipe dictionary now carries the renumbered \
+         opcode plus the operand form as a byte pair, so the reader contract changed \
+         (the generated parser rebuilds neither a form table nor a permutation table). \
+         K13c step 2's ISA17 requirement -- keyed constant payloads, no plaintext \
+         constants in the image -- still holds underneath it"
     );
 }
 

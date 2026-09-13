@@ -4,18 +4,14 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-# The whole-script size budget gate is live again since K10: tools/bench-vm.sh
-# and src/vm/custom/tests/semantic.rs pin 120,000 B per target from the measured
-# worst case (Lua 5.1 100,794 B / Luau 111,528 B over 10 seeds, K13c-1). To suspend it for
-# a construction window, export OBF_BENCH_SCRIPT_CAP=off explicitly; the LZW
-# frame < private semantic bytecode contract is never suspended.
-#
-# 2026-09-11 K18 window: that suspension is exported for the whole run, by user
-# instruction ("在完成前关闭体积门"), so tools/bench-vm.sh and the Rust budget test
-# in src/vm/custom/tests/semantic.rs take the same switch. Delete the export to
-# restore enforcement; the pin itself stays in both places (CAP_PIN / 120_000).
-export OBF_BENCH_SCRIPT_CAP=off
-echo '[matrix] NOTE whole-script size gate suspended for the K18 construction window (pin 120000B kept, not enforced)'
+# The whole-script size budget gate: tools/bench-vm.sh and
+# src/vm/custom/tests/semantic.rs pin 117,000 B per target (re-pinned by K3-FULL on
+# 2026-09-12 from the measured worst case across every seed the gates sample: Lua 5.1
+# 104,452 B / Luau 113,850 B; the K13c-1 era pin was 120,000 B at 100,794/111,528 B).
+# To suspend it for a construction window, export OBF_BENCH_SCRIPT_CAP=off explicitly --
+# K18 did exactly that from 2026-09-11 until this batch, by user instruction; the export
+# is now deleted and the gate is enforced again. The LZW frame < private semantic bytecode
+# contract is never suspended.
 
 # Permanent maintainability gate: implementation source files above 80 KiB
 # must be split without changing generated output. Checked-in generated Lua

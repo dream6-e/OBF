@@ -209,13 +209,41 @@ fn pins_lua51() -> AuditPins {
         // per use (literal and read are both three bytes) and pays only its write; the
         // extra is the anchor taking the first one-character key, which slides the last
         // field to a two-character key (+1 B per use of that field).
-        check1_nice_fails: vec![
-            (86, 3),
-            (256, 4),
-            (65536, 3),
-            (2147483647, 24),
-            (4294967296, 3),
-        ],
+        // K3-FULL (de-pooled typed reads, ISA18) -- measured Lua51 diff:
+        //   check1 shrinks from five entries to three: `86` (3 -> 2) and `65536`
+        //     (3 -> 2) leave the anchor list entirely. Both had been sitting at the
+        //     field-write floor K9b recorded; the spellings holding them there lived in
+        //     the form/renumbering field's arithmetic (`%86`, `(b-35-rot)`, `m==65536`),
+        //     and that arithmetic is gone -- the operand shape now rides in the recipe
+        //     dictionary and the widths are baked into each shape. `256` holds at 4 and
+        //     `4294967296` at 3; `2147483647` holds at 24, the documented out-of-reach
+        //     residual from K16.
+        //   check4 (12, ..) -> (13, ..): the dictionary's form bound adds one
+        //     threshold spelling (`fr>4` class); max and the density flag unchanged.
+        //   check5 class count stays 11, one entry grows by two: `X[N]=N` 17 -> 19.
+        //     Measured source: the typed reader's zero-initialised slot locals
+        //     (`x[71]=0;` +2, `x[77]=0;` +1, `x[88]=0,` +1, `x[43]=0;` -1) -- scratch
+        //     slots the shape branch needs declared before it runs, not a new
+        //     instruction pattern.
+        //   check6 stays 0 and `X[N]=N` lands at 16 (one *below* K9b's 17) because the
+        //     typed reader keeps its temporaries as plain locals declared without an
+        //     initialiser: the first cut of this batch routed them through the field's
+        //     scratch slots, which added four `x[NN]=0;` writes and a sixth digit-index
+        //     slot in a prologue fragment; both effects are gone with that rewrite.
+        //   check5 11 -> 13 classes: the flip side of the same rewrite. Slot writes carry
+        //     a distinct key per variable, so the five shapes' `AK(...)` assignments were
+        //     spread over template classes; with plain locals they normalise into two
+        //     uniform families (`X=X(N,N,N,X,N,N);`-shaped), which the repetition bar
+        //     counts. Recorded as measured -- the batch's 120/509 B size drop and the
+        //     reader leaving the slot machinery are what bought it.
+        //   check9 (19017, 2, false) -> (19765, 0, false): the embedded stream is 748 B
+        //     longer (one byte per recipe slot, plus the re-encoded base86 text), and
+        //     the length's residues are no longer a multiple of the group size -- more
+        //     mixed, with the fail flag clear, so the divisibility lint is not being
+        //     satisfied, it is being *avoided*.
+        //   check2 (86, 99, false), check3 0, check7 empty and check8 (1, 52) are
+        //     byte-for-byte where K9b left them.
+        check1_nice_fails: vec![(256, 4), (2147483647, 24), (4294967296, 3)],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         // K21 (interval opcode dispatch) -- measured Lua51 diff, the only move:
@@ -226,15 +254,15 @@ fn pins_lua51() -> AuditPins {
         //     pre-existing 0xffffff mask constant, the density fail flag stays false,
         //     and check1/2/3/5/6/7/8/9 are byte-for-byte unchanged -- no new constant
         //     class reached the shell, and the threshold census got *more* varied.
-        check4_thresholds: (12, 16777215, false),
+        check4_thresholds: (9, 16777215, false),
         check5_templates: (
-            11,
+            13,
             vec![
                 ("X=X+N".to_string(), 29),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
-                ("X[N]=N".to_string(), 17),
+                ("X[N]=N".to_string(), 16),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
@@ -246,7 +274,7 @@ fn pins_lua51() -> AuditPins {
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 52),
-        check9_stream: (19017, 2, false),
+        check9_stream: (19765, 0, false),
     }
 }
 
@@ -310,13 +338,35 @@ fn pins_luau() -> AuditPins {
         // every `fail` flag and the empty dead-table list -- hold untouched, i.e. the
         // loaders did not widen the alphabet, add a threshold, or leave a table
         // installed but never read.
-        check1_nice_fails: vec![
-            (86, 4),
-            (256, 4),
-            (65536, 3),
-            (16777216, 4),
-            (2147483647, 27),
-        ],
+        // K3-FULL (de-pooled typed reads, ISA18) -- measured Luau diff, the same three
+        // causes as Lua51 and nothing else: check1 `86` 4 -> 2 and `65536` 3 -> 2, both
+        // leaving the anchor list (the arithmetic that spelled them lived in the
+        // form/renumbering field, which no longer exists); check4 14 -> 12 distinct
+        // thresholds (the deleted `%86`/`%64` bound spellings leave the census, and the
+        // dictionary's form bound adds two fewer than before); check5 stays at 12
+        // classes with `X[N]=N` 17 -> 19 (the reader's zero-initialised slot locals,
+        // measured: `x[71]=0;`-class writes +2/+1/+1, -1 elsewhere). check9 23738 ->
+        // 24603 with the same residue count 3: +865 B of embedded stream from one byte
+        // per recipe slot plus the re-encoded base86 text, with the divisibility lint
+        // still clear. check2 (86, 99, false), check3 0, check6 1, check7 empty and
+        // check8 (1, 60) are byte-for-byte unchanged; `256` holds at 4 (K9b's floor),
+        // `16777216` at 4 and `2147483647` at 27 for the same reach reasons as before.
+        // K3-FULL (both cuts, measured on the final text): `86` comes back to 3 -- the
+        // reader's radix fold and slot keys moved which spellings survive -- while
+        // `65536` (3 -> 2) leaves the anchor list, so check1 goes 5 entries -> 4.
+        // check4 14 -> 8 distinct thresholds (the deleted form/renumbering field carried
+        // more bound spellings than the byte-pair split needs), check5 keeps 12 classes
+        // with `X[N]=N` 17 -> 16, check6 1 -> 0 (the sixth digit-index slot in the head
+        // prologue that K21 recorded disappears once the reader stops writing slots),
+        // check9 23738 -> 24603 at residue 3 (+865 B of embedded stream from one byte per
+        // recipe slot, lint still clear), and check2 (86, 99, false), check3 0, check7
+        // empty, check8 (1, 60) are byte-for-byte where K9b left them. `256` holds at 4
+        // (K9b's floor), `16777216` at 4 and `2147483647` at 27 for the same reach reasons.
+        // The batch's first cut -- reader temporaries routed through the field's scratch
+        // slots with a zero initialiser -- measured `X[N]=N` 17 -> 19 and check6 0 -> 1;
+        // both moved back when those locals stopped being slots, and the surviving `86`
+        // count is recorded as a cap in `anchor_floor`'s Luau table.
+        check1_nice_fails: vec![(86, 3), (256, 4), (16777216, 4), (2147483647, 27)],
         check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         // K21 (interval opcode dispatch) -- measured Luau diff, two moves, and no
@@ -331,7 +381,7 @@ fn pins_luau() -> AuditPins {
         //     falls. Same seed-accident direction K14 recorded in mirror image (Lua
         //     5.1 fell 1 -> 0 there); the prologue already had five slots, so no new
         //     construct appears. check1/2/3/5/7/8/9 are byte-for-byte unchanged.
-        check4_thresholds: (14, 65535, false),
+        check4_thresholds: (8, 65535, false),
         check5_templates: (
             12,
             vec![
@@ -339,7 +389,7 @@ fn pins_luau() -> AuditPins {
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
-                ("X[N]=N".to_string(), 17),
+                ("X[N]=N".to_string(), 16),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
@@ -348,10 +398,10 @@ fn pins_luau() -> AuditPins {
                 ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
-        check6_alias_prologues: 1,
+        check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 60),
-        check9_stream: (23738, 3, false),
+        check9_stream: (24603, 3, false),
     }
 }
 

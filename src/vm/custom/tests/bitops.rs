@@ -69,8 +69,14 @@ fn k7_wire_image_bytes_are_pinned() {
         // image; the public `.obf` sizes are untouched by this batch, and no
         // semantic field count changed (see the heuristic M1/M3a/M6 rows, all
         // pinned at the same values).
-        (Target::Lua51, 7001u64, 1118usize, 0xf146c970ae93b017u64),
-        (Target::Luau, 7351u64, 1126usize, 0x679b948b675dd1c1u64),
+        // K3-FULL (2026-09-12, ISA18) -- both rows move *by design*: the recipe
+        // dictionary now writes two bytes per slot (renumbered id, then the operand
+        // form), so this probe's image grows 1118 -> 1264 (lua51, +146 B = 73 slots)
+        // and 1126 -> 1260 (luau, +134 B = 67 slots). The fingerprints change once, for
+        // that single encoding decision; the public `.obf` bytes are untouched (this
+        // probe's canonical image is unchanged), and no semantic field count moved.
+        (Target::Lua51, 7001u64, 1264usize, 0x0d7a445afbd605f7u64),
+        (Target::Luau, 7351u64, 1260usize, 0x17c8f04d5b648210u64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
