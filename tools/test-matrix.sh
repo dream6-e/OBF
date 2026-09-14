@@ -4,14 +4,17 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-# The whole-script size budget gate: tools/bench-vm.sh and
-# src/vm/custom/tests/semantic.rs pin 117,000 B per target (re-pinned by K3-FULL on
-# 2026-09-12 from the measured worst case across every seed the gates sample: Lua 5.1
-# 104,452 B / Luau 113,850 B; the K13c-1 era pin was 120,000 B at 100,794/111,528 B).
-# To suspend it for a construction window, export OBF_BENCH_SCRIPT_CAP=off explicitly --
-# K18 did exactly that from 2026-09-11 until this batch, by user instruction; the export
-# is now deleted and the gate is enforced again. The LZW frame < private semantic bytecode
-# contract is never suspended.
+# The artifact-size gates: since K4 (2026-09-14, user instruction 体积门设置为压缩后的大小)
+# the deliverable budget is the *compressed* shell's byte count -- pinned in the appended
+# "[matrix] XXS shell wrapper" step below (68,000 / 77,000 B) and in tools/bench-vm.sh and
+# src/vm/custom/tests/semantic.rs. The uncompressed vm_<target>.out.lua keeps a static
+# anti-runaway ceiling of 160,000 B per target (the number it carried from K3-FULL on was
+# 117,000 B per target, measured worst case across every sampled seed: Lua 5.1 104,452 B /
+# Luau 113,850 B); 117,000 B is still in the git history and the loosening is on the record
+# in tools/bench-vm.sh, together with the 24-seed measurement showing no seed needed it.
+# To suspend that raw ceiling for a construction window, export OBF_BENCH_SCRIPT_CAP=off
+# explicitly -- that switch never suspends the compressed cap, nor the LZW frame < private
+# semantic bytecode contract.
 
 # Permanent maintainability gate: implementation source files above 80 KiB
 # must be split without changing generated output. Checked-in generated Lua
@@ -433,6 +436,10 @@ for shell_pair in "lua51 7001 vm:lua51:ok" "luau 7351 vm:luau:ok"; do
     # 记录值 2026-09-13（外壳也过 finalizer 之后）：Lua 5.1 最坏 67,021 B / Luau 75,831 B
     # （各四个被采样种子；golden 102,863 / 112,219 B）。上限从 70,000/79,000 **收紧**到
     # 68,000/77,000：只许变小、不许变大——外壳是交付期可换的一层，体积回退必须显式记录。
+    # 2026-09-14 K4 起这枚上限就是**交付体积门**（用户口径：体积门按压缩后的大小设）。
+    # K4 没有抬它：函数级布局落地后按 24 枚种子重测，最坏 67,733 / 76,013 B（逐种子
+    # +10..+220 B），仍在 68,000/77,000 B 内；raw golden 侧同步重测最坏 104,576 /
+    # 114,641 B，被降级为 160,000 B 静态防失控门（见 tools/bench-vm.sh 与本文件开头）。
     shell_bytes=$(wc -c <"$shell_committed")
     shell_limit=68000
     if [[ "$shell_target" == luau ]]; then shell_limit=77000; fi

@@ -819,22 +819,30 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
     // only with its uncompressed private semantic bytecode. Generated Lua size
     // is a separate regression budget; decoder/ChaCha/anti-hook source is never
     // counted as compressed bytecode and is not compared with an older ISA.
-    for (target, fixture, script_budget) in [
+    // K4 (2026-09-14) moved the deliverable budget onto the compressed artifact, by
+    // user instruction (体积门设置为压缩后的大小): the hard number below is the byte
+    // count of the shell that ships, and the uncompressed script keeps a loose static
+    // ceiling whose only job is to fail an explosion. The ceiling is *loosened* from
+    // 117,000 to 160,000 B, so the measurement is recorded: over 24 seeds sampled per
+    // target the function-layout pass moves the raw script by -175..+1,240 B and the
+    // peak stays at 104,576 (Lua51) / 114,641 (Luau) B, i.e. 11% under the old pin --
+    // no seed needed the loosening. The compressed cap was NOT raised (worst case
+    // 67,733 / 76,013 B against 68,000 / 77,000 B, +10..+220 B per seed), it just
+    // became the gate that matters, and the compensation gates are tests/shell.rs's
+    // ratio pin, the pinned image/`.obf` bytes, and the real-machine differential gate
+    // in tests/layout.rs.
+    for (target, fixture, script_ceiling, shell_budget) in [
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
-            // K3-FULL re-pin, enforced again after the K18 construction window: measured
-            // worst case over these five seeds is 104,452 B (Lua 5.1, seed u64::MAX) and
-            // 113,850 B (Luau, seed 735), and the 10-seed sweeps add nothing above that;
-            // 117,000 B keeps ~2.8% of headroom on the larger target while still tripping
-            // on a real regression. Both rows carry the same number as tools/bench-vm.sh's
-            // CAP_PIN, which is the point of pinning them together.
-            117_000usize,
+            160_000usize,
+            68_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
-            117_000usize,
+            160_000usize,
+            77_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -854,17 +862,24 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
             assert_eq!(decompress_bytecode(&compressed).unwrap(), semantic);
 
             let output = emit(&data, target, seed).unwrap();
-            // Whole-script size budget, re-pinned in K10 after the emit.rs stage
-            // split (worst case over this seed set: 99,784 B Lua51 / 109,810 B
-            // Luau). `OBF_BENCH_SCRIPT_CAP=off` stays available as the escape
-            // hatch for a construction window, same switch as bench-vm.sh; the
-            // strict LZW-frame contract above is never suspended.
+            // The compressed deliverable: pinned ceiling, no escape hatch --
+            // OBF_BENCH_SCRIPT_CAP=off suspends the raw ceiling below and nothing
+            // else, same switch as bench-vm.sh.
+            let shell = crate::shell::wrap(&output, target, seed).expect("shell wraps the script");
+            assert!(
+                shell.script.len() <= shell_budget,
+                "{target} seed {seed}: compressed deliverable {}B exceeds the {}B budget                  (uncompressed script {}B)",
+                shell.script.len(),
+                shell_budget,
+                output.len()
+            );
             let suspended = std::env::var("OBF_BENCH_SCRIPT_CAP").is_ok_and(|v| v == "off");
             assert!(
-                suspended || output.len() <= script_budget,
-                "{target} seed {seed}: generated script {}B exceeds independent {}B budget",
+                suspended || output.len() <= script_ceiling,
+                "{target} seed {seed}: generated script {}B exceeds the {}B anti-runaway                  ceiling (compressed deliverable {}B)",
                 output.len(),
-                script_budget
+                script_ceiling,
+                shell.script.len()
             );
         }
     }

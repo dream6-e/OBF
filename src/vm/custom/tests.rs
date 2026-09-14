@@ -12,6 +12,7 @@ mod native {
 // Keep this test module physically split: the project enforces an 80 KiB
 // source-file ceiling while `include!` preserves the existing module scope.
 include!("tests/runtime.rs");
+include!("tests/semantic_corruption.rs");
 include!("tests/transport.rs");
 include!("tests/semantic.rs");
 include!("tests/transport_chain.rs");
@@ -26,3 +27,4 @@ include!("tests/anchor_floor.rs");
 include!("tests/operand_fields.rs");
 include!("tests/depooled_recipe.rs");
 include!("tests/segment_alphabets.rs");
+include!("tests/layout.rs");

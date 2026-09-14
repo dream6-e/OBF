@@ -2,8 +2,11 @@
 # ISA11 runtime-witness/control + global-segment/LZW VM benchmark.
 #
 # Reports per-target VM/native run times (best of N, milliseconds) and enforces
-# two whole-script regression gates that are independent of compression:
-#   1. script budget -- golden bytes <= documented cap (raise deliberately)
+# the artifact-size budgets and a smoke bound. Since K4 the byte budget lives on
+# the *compressed* deliverable; the uncompressed golden keeps a static
+# anti-runaway ceiling so an explosion still fails, off-by-default:
+#   1. deliverable budget -- the compressed shell's bytes <= documented cap, and
+#      the uncompressed golden bytes <= a static anti-runaway ceiling (K4)
 #   2. smoke timing  -- a single VM run stays under the catastrophe bound
 #
 # The compression contract is tested in Rust at the correct boundary: the
@@ -37,11 +40,34 @@ VM_BOUND_MS=${OBF_BENCH_VM_BOUND_MS:-1500}
 # (12.0% on Lua51) while the K3-FULL goldens themselves sit at 102,840/112,488 B.
 # Nothing was skipped to reach that number: the batch's own size change is -120/-509 B
 # on the goldens and +2.5%..+0.8% on the worst luau seed, both measured per seed.
-CAP_PIN=117000
-CAP_RUNAWAY=175500
+#
+# 2026-09-14 K4 moves the *deliverable* size gate onto the compressed artifact, by user
+# instruction (体积门设置为压缩后的大小). What this file enforces now:
+#   * the shipped `vm_<target>.shell.out.lua` byte count, against SHELL_CAP below --
+#     never suspendable, and deliberately NOT raised: worst case over 24 seeds sampled
+#     per target is 67,733 B (Lua51) / 76,013 B (Luau), inside the 68,000/77,000 B caps
+#     that the shell batch pinned on 2026-09-13.
+#   * the *uncompressed* `vm_<target>.out.lua` byte count, now a static anti-runaway
+#     ceiling only, 117,000 -> 160,000 B. That is a deliberate loosening, so the
+#     measurement is on the record: the function-layout pass costs -175..+1,240 B of raw
+#     text per seed, and across the same 24 seeds the raw file still peaks at 104,576
+#     (Lua51) / 114,641 (Luau) B -- 11% below the old pin, i.e. no seed needed the
+#     loosening to pass. It is loosened so the next layout batch is not gated on a
+#     number that measures an intermediate artifact; the regression pressure stays on the
+#     compressed size, where the cost actually lands (+10..+220 B per seed), together
+#     with the shell ratio pin in tests/shell.rs, the pinned image bytes, and a
+#     real-machine differential gate for the laid-out script.
+CAP_PIN=160000
+CAP_RUNAWAY=240000
 SCRIPT_CAP=${OBF_BENCH_SCRIPT_CAP:-$CAP_PIN}
 
 LUA51_VM="$ROOT/vm_lua51.out.lua"
+# The compressed pair: this is the artifact a user ships, so this is where the
+# byte budget lives. Caps are per target (the Luau shell carries a longer
+# runtime preamble) and are re-measured, not re-pinned, by K4 -- both numbers
+# are the ones the shell batch recorded.
+SHELL_CAP_LUA51=68000
+SHELL_CAP_LUAU=77000
 LUAU_VM="$ROOT/vm_luau.out.lua"
 LUA51_SRC="$ROOT/tests/fixtures/vm_lua51.lua"
 LUAU_SRC="$ROOT/tests/fixtures/vm_luau.lua"
@@ -59,6 +85,17 @@ best_ms() { # <runner> <script>
         if [[ -z $best || $elapsed -lt $best ]]; then best=$elapsed; fi
     done
     printf '%s' "$best"
+}
+
+check_shell() { # <name> <shell-script> <cap>
+    local size
+    size=$(wc -c <"$2")
+    if [[ $size -gt $3 ]]; then
+        echo "[bench] error: $1 compressed deliverable is ${size}B, over the ${3}B budget" >&2
+        exit 1
+    fi
+    printf '[bench] %s compressed-size=%s/%sB (raw %sB)\n' \
+        "$1" "$size" "$3" "$(wc -c <"$ROOT/vm_${1}.out.lua")"
 }
 
 check() { # <name> <vm> <src> <runner> <script-cap>
@@ -103,4 +140,6 @@ check() { # <name> <vm> <src> <runner> <script-cap>
 
 check lua51 "$LUA51_VM" "$LUA51_SRC" "$LUA51_BIN" "$SCRIPT_CAP"
 check luau "$LUAU_VM" "$LUAU_SRC" "$LUAU_BIN" "$SCRIPT_CAP"
+check_shell lua51 "$ROOT/vm_lua51.shell.out.lua" "$SHELL_CAP_LUA51"
+check_shell luau "$ROOT/vm_luau.shell.out.lua" "$SHELL_CAP_LUAU"
 echo '[bench] PASS'

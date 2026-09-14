@@ -45,6 +45,7 @@ mod constant_fields;
 mod emit;
 mod emit_decode;
 mod emit_prelude;
+mod layout;
 mod loader;
 mod lowering;
 mod seed;
@@ -103,6 +104,9 @@ pub(crate) fn emit_unlifted(
 ) -> Result<String, Diagnostic> {
     let program = custom::decode(bytecode, target)?;
     let raw = generate(bytecode, &program, seed)?;
+    // K4: the layout pass runs on both sides of this comparison, so the size the
+    // ratchet measures is the constant-field pass's own, not the layout pass's.
+    let raw = layout::restructure(&raw, target, seed)?;
     let source = super::fields::shorten(&raw, target, seed)?;
     crate::minify::finalize_vm(&source, target, seed)
 }
@@ -110,6 +114,24 @@ pub(crate) fn emit_unlifted(
 // All source (including static host method adapters) is complete before
 // shortening private fields and then applying the existing final local pass.
 fn finalize(source: &str, target: Target, seed: u64) -> Result<String, Diagnostic> {
+    // K4：先重排生成脚本里的函数级布局（内联/外提/声明顺序），再走下面那三段。
+    // 它只改写文本，语义镜像与容器一字不动，所以 `obf compile` 的 `.obf` 与 image
+    // pin 必须逐字节不变；行为等价性由 `tests/layout.rs` 的真机差分把门。
+    let source = layout::restructure(source, target, seed)?;
+    finalize_unlaid(&source, target, seed)
+}
+
+/// The three stages that follow the layout pass, i.e. everything after the one
+/// text-level rewrite. Split out because the gates that compare bindings one for
+/// one have to see the text these stages actually received, and the layout pass
+/// *adds* bindings (a hoisted helper plus its parameters), so a comparison
+/// anchored on the pre-layout text misaligns by construction. The production
+/// pipeline has exactly one caller: `finalize` above, which is this plus layout.
+pub(crate) fn finalize_unlaid(
+    source: &str,
+    target: Target,
+    seed: u64,
+) -> Result<String, Diagnostic> {
     // 先把重复的轮常数搬进包装表的字段（脚本格式一字不动），再缩短私有字段、过命名通道。
     let source = constant_fields::lift(source, target)?;
     let source = super::fields::shorten(&source, target, seed)?;

@@ -1619,14 +1619,22 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
         // every parameter, so fields are located as the innermost
         // `function...end` chunks containing the segment literals. Openers
         // pair over the lexer's keyword stream (strings are single tokens,
-        // so payload text can never desynchronize the depth count); `do`
-        // belongs to for/while here, never a bare block, and the compile
-        // gate below fails closed if that ever changes.
+        // so payload text can never desynchronize the depth count). A loop's
+        // `do` belongs to the for/while opener already on the stack; since K4 a
+        // *bare* `do ... end` block also occurs, because expanding a call into
+        // its body's statements needs a block that cannot leak locals, and that
+        // one is its own opener. The compile gate below fails closed either way.
         let tokens = crate::lexer::lex(&output, target).unwrap();
         let mut stack: Vec<(&str, usize)> = Vec::new();
         let mut functions: Vec<(usize, usize)> = Vec::new();
         for token in tokens.iter().filter(|t| t.kind == crate::lexer::TokenKind::Keyword) {
             match token.text(&output) {
+                "do" => {
+                    if !matches!(stack.last().map(|(opener, _)| *opener), Some("for") | Some("while"))
+                    {
+                        stack.push(("do", token.span.start));
+                    }
+                }
                 "function" | "for" | "if" | "while" | "repeat" => {
                     stack.push((token.text(&output), token.span.start));
                 }
