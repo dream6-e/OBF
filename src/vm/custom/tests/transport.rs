@@ -1050,7 +1050,13 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert_eq!(raw.matches(&fetch).count(), 1);
             let fetch_at = raw.find(&fetch).unwrap();
             assert!(raw[fetch_at..].starts_with(&fetch));
-            assert!(raw[fetch_at..raw.len().min(fetch_at + 500)].contains(";pc=next1;w="));
+            // K22: the fetch tail advances `pc`, re-seeds the rolling context key and
+            // publishes the entry wire token before flipping the dispatch flag, so
+            // the window is a little wider and the pin checks the two anchors
+            // separately instead of one contiguous spelling.
+            let tail = &raw[fetch_at..raw.len().min(fetch_at + 900)];
+            assert!(tail.contains(";pc=next1;"), "fetch tail missing pc advance");
+            assert!(tail.contains("w="), "fetch tail missing dispatch flag");
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {

@@ -831,18 +831,28 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
     // became the gate that matters, and the compensation gates are tests/shell.rs's
     // ratio pin, the pinned image/`.obf` bytes, and the real-machine differential gate
     // in tests/layout.rs.
+    // K22 (2026-09-14, rolling context chain: keyed wire tokens + operand digest) -- measured
+    // over the same five seeds per target: script 104,041..106,730 / 114,178..116,858 B and
+    // shell 66,068..68,808 / 74,663..77,023 B. The chain rewrites every arm's successor from a
+    // plain stage number (`f=614;`) into a masked, key-compensated one (`f=48164-m;`, 544 sites
+    // per golden); that is what makes the delivered artifact ~1.0 KB larger. By user
+    // instruction the caps move to the measured worst plus margin (68,808 -> 69,300 and
+    // 77,023 -> 77,600 B) and the measurement is recorded here instead of being widened
+    // silently. tests/shell.rs's ratio pin still holds unchanged (measured 0.6305..0.6503 /
+    // 0.6516..0.6673 against 0.655 / 0.679) and the committed artifacts stay inside both
+    // numbers (67,978 / 76,768 B at seeds 7001 / 7351).
     for (target, fixture, script_ceiling, shell_budget) in [
         (
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
             160_000usize,
-            68_000usize,
+            69_300usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
             160_000usize,
-            77_000usize,
+            77_600usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();

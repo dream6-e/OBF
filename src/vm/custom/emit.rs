@@ -1210,6 +1210,17 @@ end;
         .collect();
     debug_assert_eq!(state_cursor, fragment_count);
 
+    // K22: the rolling execution-context key. Its own stream, so the rest of the
+    // emitted script stays byte-identical and this batch's diff is exactly the
+    // new statements plus the wire-space successor writes.
+    // The plan needs the stage list: the masked literal of a stage is what ships
+    // inside the arms, and mask hygiene is defined against exactly that set.
+    let mut ctx_stages: Vec<u16> = fragment_states.clone();
+    ctx_stages.push(semantic_init);
+    let context = context::ContextPlan::new(program.target, seed, &ctx_stages);
+    let ctx_reset = context.reset_stmt(semantic_init);
+    let ctx_decode = context.decode_stmt();
+    let ctx_roll = context.roll_stmt();
     let fsv = state_values(&mut structure, 4);
     let (k_fetch, k_disp, k_fetch_alt, k_disp_alt) = (fsv[0], fsv[1], fsv[2], fsv[3]);
     let control_mask = "P.__obf_proto_control";
@@ -1230,18 +1241,22 @@ end;
     }
     s.push_str(&seed_prelude_lua_v1(program.target, seed, seed_used));
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);route=(pc*{route_mul}+I[{tuple_token}]*{route_add}+fid*{route_salt})%65521;route_info=F.__obf_proto_routes[route];if route_info==nil then E()end;route_info=route_info[pc];if not route_info or route_info[1]~=rid or route_info[2]<1 or route_info[2]>4 then E()end;rid=route_info[1];sid={semantic_init};pc=next1;w={v_disp};",
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);route=(pc*{route_mul}+I[{tuple_token}]*{route_add}+fid*{route_salt})%65521;route_info=F.__obf_proto_routes[route];if route_info==nil then E()end;route_info=route_info[pc];if not route_info or route_info[1]~=rid or route_info[2]<1 or route_info[2]>4 then E()end;rid=route_info[1];pc=next1;{ctx_reset}w={v_disp};",
         tuple_next = tuple_slots[1],
         tuple_skip = tuple_slots[2],
         tuple_token = tuple_slots[0],
         route_mul = route_mul,
         route_add = route_add,
         route_salt = route_salt,
+        ctx_reset = ctx_reset,
     );
     write!(
         s,
-        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_k=nil;G.__obf_proto_tags=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;K=F.__obf_proto_k;LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_k=nil;G.__obf_proto_tags=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;K=F.__obf_proto_k;LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};local {wire},{key},{control}=0,0,P.__obf_proto_control;\n  while true do\n   {machine_open}",
         seed_loop = seed_loop_lua(program.target, seed),
+        wire = context::WIRE_VAR,
+        key = context::KEY_VAR,
+        control = context::CONTROL_VAR,
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {
@@ -1270,7 +1285,7 @@ end;
             structure.dispatch_condition_for("rid", recipe.id, program.target.is_luau());
         recipe_entries.push((
             recipe.id,
-            format!("{entry_condition} then sid={};", chunks[0].2),
+            format!("{entry_condition} then {};", context.successor(chunks[0].2)),
         ));
         for (chunk_index, &(start, length, stage)) in chunks.iter().enumerate() {
             let mut body = String::new();
@@ -1296,9 +1311,9 @@ end;
             );
             if !exits_frame {
                 if let Some(next) = chunks.get(chunk_index + 1) {
-                    write!(body, "sid={};", next.2).unwrap();
+                    write!(body, "{};", context.successor(next.2)).unwrap();
                 } else {
-                    write!(body, "sid={semantic_init};").unwrap();
+                    write!(body, "{};", context.successor(semantic_init)).unwrap();
                 }
             }
             let condition =
@@ -1329,13 +1344,18 @@ end;
         &mut structure,
         fragment_arms,
         fragment_groups,
-        "sid",
+        context::STATE_VAR,
         &sid_states,
     );
-    let init_condition = state_condition(&mut structure, "sid", semantic_init);
+    let init_condition = state_condition(&mut structure, context::STATE_VAR, semantic_init);
+    // K22: the loop-back is tested in wire space. The arms write the successor
+    // wire instead of the state, so the state is still the *previous* block's
+    // when this line runs -- testing it would either re-fetch right after the
+    // recipe entry or re-enter the recipe after its tail.
+    let recipe_end = context.recipe_end_condition(semantic_init);
     write!(
         s,
-        "if {init_condition} then {recipe_chain}else {fragment_chain}end;if {init_condition} then w={v_fetch};end;"
+        "{ctx_decode}{ctx_roll}if {init_condition} then {recipe_chain}else {fragment_chain}end;if {recipe_end} then w={v_fetch};end;"
     )
     .unwrap();
     if dispatch_first {

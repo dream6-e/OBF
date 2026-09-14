@@ -185,6 +185,13 @@ fn search_tree(
 /// split happened to fall, and a bound never reads as a radix hint.
 const NICE_LABELS: [u16; 4] = [86, 256, 7225, 7396];
 
+/// K22: the same filter, exposed to the context-key planner so the dispatch
+/// weights can never be an audit-nice label either. Kept as one function over
+/// `u64` because the key ring is wider than the label space.
+pub(crate) fn nice_label(value: u64) -> bool {
+    value <= u64::from(u16::MAX) && NICE_LABELS.contains(&(value as u16))
+}
+
 /// A bound strictly between two neighbouring arm values: never an arm value
 /// itself, never an audit-nice label. `None` when the gap is too narrow, which
 /// is what keeps adjacent opcodes inside one leaf run instead of forcing a

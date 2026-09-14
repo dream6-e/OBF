@@ -239,6 +239,16 @@ type AuditPins = (
 //     expansion only. M3b, the KAT words, M4's census, M4b, M5 (4,1812) and M6 all
 //     stayed byte-for-byte: a per-segment permutation cannot add a value class, a
 //     pretty constant or a repeated word.
+// K22 (2026-09-14, rolling context chain: keyed wire tokens + operand digest) --
+// measured Lua51 diff: the *only* moved cells are inside the M4a literal census.
+// `0` 436 -> 440 and `70` 53 -> 54, with the previous 12th entry `73`/50 falling
+// below the cut and `6`/50 entering: the batch adds one 0 (the conditional-add
+// spelling's `or 0`), and its 5-digit wire literals plus the digest weights make the
+// small-value classes marginally more common. M1 (96, per-segment tables), M2's
+// decoded stream (1523 B), M3b/KAT words, M4's big-value census, M4b (0 skipped),
+// M5 (4, 1812), M6 (0 pairs) and M7 ([568, 560, 550, 134, 17] gap 416) are
+// byte-for-byte unchanged -> no new API word, no new pretty constant, no repeated
+// ciphertext word: the chain buys its static surface with literals already in class.
 const PINS_LUA51_7001: AuditPins = (
     96,
     (1523, 2, 3, 3),
@@ -246,7 +256,7 @@ const PINS_LUA51_7001: AuditPins = (
     (234, 9007493881568240, 4503599627370496),
     [
         (1, 502),
-        (0, 433),
+        (0, 440),
         (2, 231),
         (3, 147),
         (4, 127),
@@ -255,8 +265,8 @@ const PINS_LUA51_7001: AuditPins = (
         (28, 71),
         (7, 63),
         (8, 56),
-        (70, 53),
-        (73, 50),
+        (70, 54),
+        (6, 50),
     ],
     0,
     (4, 1812),
@@ -389,6 +399,10 @@ const PINS_LUA51_7001: AuditPins = (
 // part 0's body, whose table this batch deliberately left alone. M2's decoded stream
 // (1550 B), M3b, the KAT words, M4's whole census, M4b (38) and M6 are byte-for-byte
 // unchanged -> no new literal class, no new pretty constant, no repeated word.
+// K22 (2026-09-14, rolling context chain) -- measured Luau diff, same attribution as
+// Lua51: M4a `0` 407 -> 410 only (the 12th entry `6`/50 is byte-identical on both
+// targets, so the two goldens moved for the same reason), M1/M2/M3b/M4b/M5/M6/M7
+// unchanged. M7's top-5 already sat at gap 404 after K3s2 and does not move here.
 const PINS_LUAU_7351: AuditPins = (
     96,
     (1550, 2, 2, 0),
@@ -396,7 +410,7 @@ const PINS_LUAU_7351: AuditPins = (
     (226, 9007479735086075, 4503599627370496),
     [
         (1, 520),
-        (0, 405),
+        (0, 410),
         (2, 241),
         (3, 168),
         (4, 162),

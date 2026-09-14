@@ -42,6 +42,7 @@ mod chacha;
 mod cipher;
 mod compress;
 mod constant_fields;
+mod context;
 mod emit;
 mod emit_decode;
 mod emit_prelude;

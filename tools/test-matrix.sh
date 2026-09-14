@@ -441,8 +441,10 @@ for shell_pair in "lua51 7001 vm:lua51:ok" "luau 7351 vm:luau:ok"; do
     # +10..+220 B），仍在 68,000/77,000 B 内；raw golden 侧同步重测最坏 104,576 /
     # 114,641 B，被降级为 160,000 B 静态防失控门（见 tools/bench-vm.sh 与本文件开头）。
     shell_bytes=$(wc -c <"$shell_committed")
-    shell_limit=68000
-    if [[ "$shell_target" == luau ]]; then shell_limit=77000; fi
+    # K22 起按实测最坏值+余量抬高（68,808 -> 69,300 / 77,023 -> 77,600），归因见
+    # src/vm/custom/tests/semantic.rs 里同一段记录。
+    shell_limit=69300
+    if [[ "$shell_target" == luau ]]; then shell_limit=77600; fi
     if [[ $shell_bytes -gt $shell_limit ]]; then
         printf 'error: XXS shell for %s is %sB over the recorded %sB budget\n' \
             "$shell_target" "$shell_bytes" "$shell_limit" >&2

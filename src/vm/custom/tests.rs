@@ -28,3 +28,4 @@ include!("tests/operand_fields.rs");
 include!("tests/depooled_recipe.rs");
 include!("tests/segment_alphabets.rs");
 include!("tests/layout.rs");
+include!("tests/context_key.rs");

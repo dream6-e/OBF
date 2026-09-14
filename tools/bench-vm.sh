@@ -66,8 +66,9 @@ LUA51_VM="$ROOT/vm_lua51.out.lua"
 # byte budget lives. Caps are per target (the Luau shell carries a longer
 # runtime preamble) and are re-measured, not re-pinned, by K4 -- both numbers
 # are the ones the shell batch recorded.
-SHELL_CAP_LUA51=68000
-SHELL_CAP_LUAU=77000
+# K22（滚动上下文链）起：实测最坏 68,808 / 77,023 B，按用户指示抬到最坏值+余量。
+SHELL_CAP_LUA51=69300
+SHELL_CAP_LUAU=77600
 LUAU_VM="$ROOT/vm_luau.out.lua"
 LUA51_SRC="$ROOT/tests/fixtures/vm_lua51.lua"
 LUAU_SRC="$ROOT/tests/fixtures/vm_luau.lua"
