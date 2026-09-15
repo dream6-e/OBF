@@ -5,8 +5,10 @@
 use super::seed::{
     KIND_HELPER, KIND_OPVAL, KIND_PSEUDO, KIND_REG, KIND_SCONST, KIND_TMP, OP_BR, OP_CALL, OP_RET,
 };
+use super::{add, add_const, modulo_field, rewrite_guards, sub_nonneg, MbaNames};
 use crate::bytecode::custom::Opcode;
 use crate::random::Prng;
+use crate::Target;
 
 // ---- P1 per-seed template deformation -----------------------------------
 // Every image seed gets a textually distinct but semantically identical
@@ -385,7 +387,17 @@ fn p1_respell_numbers(src: &str, rng: &mut Prng) -> String {
     out
 }
 
-pub(crate) fn p1_deform_template(body: &str, seed: u64) -> String {
+/// The same pipeline with the P7 micro-op MBA layer switched off. Layer locks
+/// (P4 chain permutations, P5 drift twins) assert on *this* stage: P7
+/// re-spells the very sites those locks pin, and their own gates
+/// (`tests/mba.rs`) pin the P7 surface. Nothing in the emitted artifact uses
+/// the P6 stage.
+pub(crate) fn p1_deform_template_upto(
+    body: &str,
+    target: Target,
+    seed: u64,
+    micro_op_mba: bool,
+) -> String {
     let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
     let line_count = lines.len();
     p1_deform_op_chain(&mut lines, &mut p1_stream(seed, 1));
@@ -425,8 +437,128 @@ pub(crate) fn p1_deform_template(body: &str, seed: u64) -> String {
         line_count + inserted,
         "P1: line-count accounting drifted"
     );
+    let mba = if micro_op_mba {
+        p7_mba_forms(&mut lines, target, seed)
+    } else {
+        0
+    };
+    assert_eq!(
+        lines.len(),
+        line_count + inserted,
+        "P7: MBA pass changed the line count"
+    );
+    debug_assert!(mba >= P7_MIN_REWRITES || !micro_op_mba);
     let joined = lines.join("\n");
     p1_respell_numbers(&joined, &mut p1_stream(seed, 5))
+}
+
+// ---- P7: micro-op MBA layer (goal 3) ------------------------------------
+//
+// The seed ISA's own primitives -- the instruction-pointer steps, the packed
+// operand-reference unpacking, the site/temp lane arithmetic and the
+// `oi5`/`vo`/`vi` guards the VM runs on itself -- stop reading as
+// `w+q` / `w%q` / `w==q`. The pass rewrites the *deformed* template (after
+// P1/P4/P5, so every branch and chain permutation is already final) and runs
+// before the number respeller, so the drawn coefficients take part in the
+// number-spelling draw like every other literal.
+//
+// Deliberately out of scope, both documented in `mba.rs`:
+//   * value-operand arithmetic and comparisons (`r=x+y`, `r=(x==y)`, ...) --
+//     those run on arbitrary Lua values, so string coercion, metamethod
+//     dispatch and the raised error text must survive byte for byte;
+//   * validation traps on unvalidated image fields (`op==8`, `nargs<0`, ...)
+//     -- their modular rewrites are equivalences only inside a bound the
+//     check itself is trying to establish, so a rewritten trap would stop
+//     firing for adversarial values inside the wrap window.
+// A gate in `tests/mba.rs` pins both boundaries.
+
+/// Rewrites the pass must find on every seed. The floor fails closed if a
+/// template edit starves the layer.
+const P7_MIN_REWRITES: usize = 48;
+
+/// Replace every `needle` in `line` with an independently drawn spelling.
+/// The inserted text is never re-scanned (the tail after each match is
+/// carried over verbatim), so a spelling that happens to contain the needle
+/// cannot recurse.
+fn p7_replace<F>(line: &mut String, needle: &str, rng: &mut Prng, build: F) -> usize
+where
+    F: Fn(&mut Prng) -> String,
+{
+    let mut hits = 0usize;
+    let mut out = String::with_capacity(line.len() + 64);
+    let mut rest = line.as_str();
+    while let Some(at) = rest.find(needle) {
+        out.push_str(&rest[..at]);
+        out.push_str(&build(rng));
+        rest = &rest[at + needle.len()..];
+        hits += 1;
+    }
+    if hits == 0 {
+        return 0;
+    }
+    out.push_str(rest);
+    *line = out;
+    hits
+}
+
+fn p7_mba_forms(lines: &mut Vec<String>, target: Target, seed: u64) -> usize {
+    // `names` may draw the bit family: every operand it spells has already
+    // been through the VM's own integer validation. `plain` may not: the
+    // packed-reference fields are only type-checked, so the poly family keeps
+    // them exact for any number the chain may carry.
+    let names = MbaNames::emit(target);
+    let plain = MbaNames::plain(target);
+    let mut rng = p1_stream(seed, 11);
+    let mut rewrites = 0usize;
+    for line in lines.iter_mut() {
+        // Guards first, on the pristine line: every right-hand side the guard
+        // matcher sees is the audited literal, never a number a needle rewrite
+        // below just drew (reading the leading `2` of `2*BO(nargs,5)` as a
+        // literal used to cut that expression in half).
+        let (rewritten, count) = rewrite_guards(line, &mut rng, &names);
+        if count > 0 {
+            *line = rewritten;
+            rewrites += count;
+        }
+        // Instruction-pointer steps. P5 already drew `ip=ip+1` vs `ip=1+ip`;
+        // both orders collapse into the MBA spelling.
+        rewrites += p7_replace(line, "ip=ip+1", &mut rng, |rng| {
+            format!("ip={}", add_const(rng, &names, "ip", 1))
+        });
+        rewrites += p7_replace(line, "ip=1+ip", &mut rng, |rng| {
+            format!("ip={}", add_const(rng, &names, "ip", 1))
+        });
+        // Site/temp lane reads: `site[vi+1]`, `STAB[vi+1]`, `SEEDH[vi+1]`.
+        rewrites += p7_replace(line, "vi+1", &mut rng, |rng| {
+            add_const(rng, &names, "vi", 1)
+        });
+        // The constant lane is a lane value plus the reference offset, and the
+        // register lane the same through the `RX` wrapper.
+        rewrites += p7_replace(line, "sl+vo", &mut rng, |rng| add(rng, &plain, "sl", "vo"));
+        // CALL argument lanes.
+        rewrites += p7_replace(line, "5+i", &mut rng, |rng| add_const(rng, &names, "i", 5));
+        rewrites += p7_replace(line, "5+nargs", &mut rng, |rng| {
+            add_const(rng, &names, "nargs", 5)
+        });
+        // Packed-reference unpacking: the three decimal fields.
+        rewrites += p7_replace(line, "(re-vo)", &mut rng, |rng| {
+            format!("({})", sub_nonneg(rng, &plain, "re", "vo"))
+        });
+        rewrites += p7_replace(line, "(t1-vi)", &mut rng, |rng| {
+            format!("({})", sub_nonneg(rng, &plain, "t1", "vi"))
+        });
+        rewrites += p7_replace(line, "re%1000", &mut rng, |rng| {
+            modulo_field(rng, &plain, "re", 1000)
+        });
+        rewrites += p7_replace(line, "t1%1000", &mut rng, |rng| {
+            modulo_field(rng, &plain, "t1", 1000)
+        });
+    }
+    assert!(
+        rewrites >= P7_MIN_REWRITES,
+        "P7: micro-op MBA layer lost its sites ({rewrites} rewrites)"
+    );
+    rewrites
 }
 
 // ---- P1 Batch-3: helper + reader-group emission variants ----------------
@@ -816,7 +948,7 @@ fn p4_chain_perms(lines: &mut Vec<String>, rng: &mut Prng) {
             chain.pinned < operands.len(),
             "P4: chain over-pinned: {needle}"
         );
-        let (head, mut tail) = operands.split_at(chain.pinned);
+        let (head, tail) = operands.split_at(chain.pinned);
         let mut tail = tail.to_vec();
         rng.shuffle(&mut tail);
         let mut reordered = head.to_vec();

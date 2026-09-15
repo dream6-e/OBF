@@ -166,6 +166,13 @@ struct AuditPins {
 //              stream, because the private image re-layouted (see the
 //              k7 image-length pin: 1,141 -> 1,118 on this config). Length, not
 //              structure: check2 still reads (86 distinct, span 99).
+// 2026-09-14 目标 3（P7 微操作 MBA 层）实测 Lua51 diff，只动一项：
+//   check8 相邻字面量对数 52 -> 62，gcd 仍为 1。P7 为每个被改写的微操作站点抽
+//     系数对 `(p, p+1)`（poly 家族 `x*(p+1)-x*p`），于是代码区多了若干多位数相邻
+//     对；gcd 保持 1 说明没有引入周期性结构。check1/2/3/4/5/6/7/9 一字未动：层里
+//     的字面量按「非漂亮值」抽取（`transport::is_nice_part` 拒绝采样），模数只写成
+//     `2^32`/`(2^16*2^16)` 这类无十进制数字串的形式或 nice-free 的两项和，所以漂亮
+//     值计数与锚点门（`anchor_floor`）都保持在各自的地板上。
 fn pins_lua51() -> AuditPins {
     AuditPins {
         // K19（分段密钥回灌）实测：`86` 由 4 降到 3 —— 旋转后的数字表用 `%r`，
@@ -292,7 +299,7 @@ fn pins_lua51() -> AuditPins {
         ),
         check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 52),
+        check8_literal_gcd: (1, 62),
         check9_stream: (19765, 0, false),
     }
 }
@@ -431,7 +438,9 @@ fn pins_luau() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 60),
+        // P7（2026-09-14 目标 3）：与 Lua51 同一原因，check8 相邻字面量对数
+        // 60 -> 64、gcd 仍为 1（系数对 `(p,p+1)` 的抽取）；其余八项与上一档逐字相同。
+        check8_literal_gcd: (1, 64),
         check9_stream: (24603, 3, false),
     }
 }

@@ -249,24 +249,53 @@ type AuditPins = (
 // M5 (4, 1812), M6 (0 pairs) and M7 ([568, 560, 550, 134, 17] gap 416) are
 // byte-for-byte unchanged -> no new API word, no new pretty constant, no repeated
 // ciphertext word: the chain buys its static surface with literals already in class.
+// P7 (2026-09-14, goal-3 micro-op MBA layer) -- measured Lua51 diff: the moved
+// cells are exactly the large-literal census and the counts of the small values it
+// shares terms with. M3b count 234 -> 390 and its sum grows by ~1.2e11: every drawn
+// coefficient pair and modulus spelling (`1000003..301000002`, `100003..999982`) is
+// a new literal >= 1e6, which is the point of the layer -- an analyst reading the
+// template no longer sees `sl+vo`, `ip+1`, `#q~=3` or `vo~=0`, and the price is
+// algebra that carries its own coefficients. M4a counts rise correspondingly (`1`
+// 502 -> 545, `0` 440 -> 478, `2` 231 -> 248), and the 12th entry is unchanged
+// (`6`/50, so no value class enters or leaves the top 12). M1 = 96, M2's decoded
+// stream (1523 B), the KAT words (only the audited getfenv capture), M4b (0
+// skipped), M5 (4, 1812), M6 (0 pairs) and M7 ([568, 560, 550, 134, 17], gap 416)
+// are byte-for-byte unchanged -> no new API word, no new pretty constant, no
+// repeated ciphertext word, no new string class.
+// P7 final draw shape (same batch, 2026-09-14) -- the layer's two literal draws were
+// re-specified after the anchor census and the measured diff is M3b/M4a only:
+//   M3b (390, 9007611512925197, 2^52) -> (378, 9007550309607896, 2^52). Coefficients
+//     are now drawn from 1e6..1.2e6 instead of 1e6..3.01e8 (`mba::coefficient_pair`),
+//     because the packed-reference field sites fold operands that reach ~9e6 and
+//     `9e6 * 1.2e6 < 2^53` keeps every product exact; 12 spellings fall below the 1e6
+//     gate and the sum follows (the payload's 2^52 max is untouched).
+//   M4a `2` 248 -> 330, `15` 73 -> 88, `8` 56 -> 68, `16`/73 enters the top-12 and
+//     `6`/50 leaves; `1` 545 -> 531. Two spelling sources move the small-value census:
+//     the poly form now carries 7-digit coefficients, and the modulus/half sum forms
+//     delegate to the shared `transport::opaque_split` (its parts are drawn under
+//     `is_nice_part` rejection, which is the same predicate the anchor floor uses, so
+//     the two layers can no longer disagree about what an anchor is) -- those parts are
+//     often small. `0` (478), `3`, `4`, `5`, `28`, `7`, `70` are unchanged, so no new
+//     value class, no new API word: M1 = 96, M2's decoded stream, the KAT words, M4b,
+//     M5, M6 and M7 are byte-for-byte identical.
 const PINS_LUA51_7001: AuditPins = (
     96,
     (1523, 2, 3, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (234, 9007493881568240, 4503599627370496),
+    (378, 9007550309607896, 4503599627370496),
     [
-        (1, 502),
-        (0, 440),
-        (2, 231),
-        (3, 147),
-        (4, 127),
-        (5, 93),
-        (15, 73),
+        (1, 531),
+        (0, 478),
+        (2, 330),
+        (3, 151),
+        (4, 129),
+        (5, 95),
+        (15, 88),
+        (16, 73),
         (28, 71),
+        (8, 68),
         (7, 63),
-        (8, 56),
         (70, 54),
-        (6, 50),
     ],
     0,
     (4, 1812),
@@ -403,24 +432,39 @@ const PINS_LUA51_7001: AuditPins = (
 // Lua51: M4a `0` 407 -> 410 only (the 12th entry `6`/50 is byte-identical on both
 // targets, so the two goldens moved for the same reason), M1/M2/M3b/M4b/M5/M6/M7
 // unchanged. M7's top-5 already sat at gap 404 after K3s2 and does not move here.
+// P7 (2026-09-14, goal-3 micro-op MBA layer) -- measured Luau diff, same
+// attribution as Lua51: M3b count 226 -> 330 with the drawn coefficient literals,
+// M4a `1` 520 -> 558, `0` 410 -> 448, `2` 241 -> 254, `3` 168 -> 174, `4` 162 -> 163,
+// `5` 80 -> 82, `8` 67 -> 68 (the bit-family spellings share the same coefficient
+// pool, so the class mix is the Lua51 one), 12th entry `6`/50 byte-identical. M1/M2
+// (1550 B)/KAT words/M4b (38)/M5 (4, 1781)/M6/M7 ([567, 542, 538, 134, 15], gap 404)
+// unchanged.
+// P7 final draw shape (same batch, 2026-09-14) -- Luau moves for exactly the Lua51
+// reasons (narrower coefficient draws, `opaque_split`-drawn modulus sums) and on the
+// same two cells: M3b (330, 9007583562583119, 2^52) -> (318, 9007524907854693, 2^52),
+// and M4a `2` 254 -> 322, `8` 68 -> 78, `16`/60 enters the top-12 while `6`/50 leaves,
+// `1` 558 -> 550. The bit-family spellings share the same coefficient pool on this
+// target, so the class mix tracks Lua51's (there `2`/330 and `16`/73). `0` (448), `3`,
+// `4`, `5`, `42`, `89`, `18`, `22` and M1/M2 (1550 B)/KAT words/M4b (38)/M5
+// (4, 1781)/M6/M7 ([567, 542, 538, 134, 15], gap 404) are byte-for-byte unchanged.
 const PINS_LUAU_7351: AuditPins = (
     96,
     (1550, 2, 2, 0),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (226, 9007479735086075, 4503599627370496),
+    (318, 9007524907854693, 4503599627370496),
     [
-        (1, 520),
-        (0, 410),
-        (2, 241),
-        (3, 168),
-        (4, 162),
-        (5, 80),
+        (1, 550),
+        (0, 448),
+        (2, 322),
+        (3, 174),
+        (4, 163),
+        (5, 82),
+        (8, 78),
         (42, 77),
         (89, 71),
-        (8, 67),
+        (16, 60),
         (18, 59),
         (22, 52),
-        (6, 50),
     ],
     38,
     (4, 1781),

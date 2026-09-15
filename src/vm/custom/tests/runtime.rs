@@ -1367,7 +1367,8 @@ fn seed_ops_direct_differential_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
         for dseed in [0u64, 1, 2, 3, 735, 7001, 7351, u64::MAX] {
         let source = format!(
-            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "{}{}\n{}\n{}\n{}\n{}\n{}\n",
+            seed_shell_prefix(target),
             SEED_DIRECT_POOLS,
             seed_loop_lua(target, dseed),
             p6_lua_head(dseed, 7, 3, 5),

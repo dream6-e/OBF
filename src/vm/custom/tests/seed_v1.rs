@@ -136,7 +136,8 @@ fn seed_v1_ops_direct_differential_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
         for dseed in [0u64, 735, 7001, u64::MAX] {
         let source = format!(
-            "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {{n=select('#',...),...}}end;\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "{}{}\n{}\n{}\n{}\n{}\n{}\n",
+            seed_shell_prefix(target),
             SEED_V1_POOLS,
             seed_loop_lua(target, dseed),
             p6_lua_head(dseed, 9, 3, 4),
@@ -744,6 +745,14 @@ fn p3_lookup_wiring_pins_chain_order() {
     }
 }
 
+/// The P6 stage of the fragment (P7 micro-op MBA layer off). The P4/P5 locks
+/// below pin spellings that P7 deliberately re-spells (`(re-vo)`, `sl+vo`,
+/// `#q~=N`, ...), so they measure *their own* stage; the P7 surface has its
+/// own gates in `tests/mba.rs`. Layer isolation, not a weaker lock.
+fn seed_layer_lua(target: Target, seed: u64) -> String {
+    seed_loop_lua_upto(target, seed, false)
+}
+
 /// P4 gate (RED until Batch-4): comparison-duality spellings appear across
 /// seeds (`x<y` <-> `y>x`, `x<=y` <-> `y>=x`; exact by language definition).
 #[test]
@@ -751,7 +760,7 @@ fn p4_dual_forms_appear() {
     let mut gt = false;
     let mut ge = false;
     for seed in 0..64u64 {
-        let body = seed_loop_lua(Target::Lua51, seed);
+        let body = seed_layer_lua(Target::Lua51, seed);
         gt |= body.contains(">x");
         ge |= body.contains(">=x");
     }
@@ -833,7 +842,7 @@ fn p4_chain_orders_vary() {
     let mut seen: Vec<BTreeSet<String>> = vec![BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
     let witnesses = ["seedfail(32)", "seedfail(34)", "seedfail(7)", "seedfail(10)"];
     for seed in 0..64u64 {
-        let body = seed_loop_lua(Target::Lua51, seed);
+        let body = seed_layer_lua(Target::Lua51, seed);
         for (set, w) in seen.iter_mut().zip(witnesses) {
             // Skeletons: spelling variation must not pose as order variation.
             set.insert(p4_canon_numbers(body.lines().find(|l| l.contains(w)).unwrap()));
@@ -850,7 +859,7 @@ fn p4_chain_orders_vary() {
 fn p4_split_forms_appear() {
     let mut seen = false;
     for seed in 0..64u64 {
-        seen |= seed_loop_lua(Target::Lua51, seed).contains("local u");
+        seen |= seed_layer_lua(Target::Lua51, seed).contains("local u");
     }
     assert!(seen, "split temps never appear across 64 seeds");
 }
@@ -861,7 +870,7 @@ fn p4_split_forms_appear() {
 fn p4_dead_temps_appear() {
     let mut seen = false;
     for seed in 0..64u64 {
-        let body = seed_loop_lua(Target::Lua51, seed);
+        let body = seed_layer_lua(Target::Lua51, seed);
         seen |= (1..=6).any(|n| body.contains(&format!("local q{n}=")));
     }
     assert!(seen, "dead temps never appear across 64 seeds");
@@ -873,7 +882,7 @@ fn p4_dead_temps_appear() {
 fn p4_insertion_locks() {
     for target in [Target::Lua51, Target::Luau] {
         for seed in P1_DIALECT_SEEDS {
-            let body = seed_loop_lua(target, seed);
+            let body = seed_layer_lua(target, seed);
             let lines: Vec<&str> = body.lines().collect();
             assert!(
                 (104..=110).contains(&lines.len()),
@@ -1029,7 +1038,7 @@ fn p5_variants_appear() {
     for target in [Target::Lua51, Target::Luau] {
         let mut seen = vec![false; witnesses.len()];
         for seed in 0..64u64 {
-            let body = seed_loop_lua(target, seed);
+            let body = seed_layer_lua(target, seed);
             let lines: Vec<&str> = body.lines().collect();
             for (idx, alts) in witnesses.iter().enumerate() {
                 if seen[idx] {
@@ -1063,7 +1072,7 @@ fn p5_variants_appear() {
 fn p5_insertion_locks() {
     for target in [Target::Lua51, Target::Luau] {
         for seed in 0..16u64 {
-            let body = seed_loop_lua(target, seed);
+            let body = seed_layer_lua(target, seed);
             let total = |a: &str, b: &str| body.matches(a).count() + body.matches(b).count();
             assert_eq!(total("#q~=3", "3~=#q"), 5, "P5: q3 drift seed={seed}");
             assert_eq!(total("#q~=4", "4~=#q"), 2, "P5: q4 drift seed={seed}");

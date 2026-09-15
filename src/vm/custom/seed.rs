@@ -629,9 +629,17 @@ end seedfail(35);end;"#;
 /// `local SEED=function(prog,site,expect)...end;` (spliced inside H,
 /// R/RX/K arrive as H-locals so arms carry only the site block).
 pub(crate) fn seed_loop_lua(target: Target, seed: u64) -> String {
+    seed_loop_lua_upto(target, seed, true)
+}
+
+/// The fragment *before* the P7 micro-op MBA layer. Only the layer locks in
+/// `tests/seed_v1.rs` use it (P7 re-spells the P4/P5 sites those locks pin);
+/// it is never spliced into an artifact. The shell contract below still
+/// applies.
+pub(crate) fn seed_loop_lua_upto(target: Target, seed: u64, micro_op_mba: bool) -> String {
     let fdiv = if target.is_luau() { "x//y" } else { "MF(x/y)" };
     let body = SEED_LOOP.replace("{FDIV}", fdiv);
-    let deformed = super::seed_deform::p1_deform_template(&body, seed);
+    let deformed = super::seed_deform::p1_deform_template_upto(&body, target, seed, micro_op_mba);
     // P4 dead temps add lines (exact count asserted inside the deformer);
     // only the bound is checked here.
     assert!(
@@ -641,6 +649,23 @@ pub(crate) fn seed_loop_lua(target: Target, seed: u64) -> String {
     assert!(deformed.contains("100000"), "P1: fuel budget lost");
     assert!(!deformed.contains("{FDIV}"), "P1: FDIV placeholder leaked");
     deformed
+}
+
+/// The fragment's shell contract: helpers `seed_loop_lua` arms may call, as
+/// bound by the emitted shell (`emit.rs` splices the fragment inside the
+/// interpreter body, whose locals are these names).
+///
+/// `E`/`MF`/`TY`/`PC`/`U`/`Z` are covered by every differential fixture; the
+/// K7 bit captures `BX`/`BA`/`BO`/`BN` are what the goal-3 micro-op layer
+/// draws on Luau (`bit32.bxor/.band/.bor/.bnot`), so a Luau fixture that
+/// splices the fragment in must bind them too. Lua 5.1 has no bit library and
+/// its fragment uses pure arithmetic only, so the captures stay unbound there.
+pub(crate) fn seed_shell_prefix(target: Target) -> &'static str {
+    if target.is_luau() {
+        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;local BX,BA,BO,BN=bit32.bxor,bit32.band,bit32.bor,bit32.bnot;\n"
+    } else {
+        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;\n"
+    }
 }
 
 /// Bit for an op in the routine-table usage mask.
@@ -1039,6 +1064,27 @@ mod tests {
         assert!(lua51.contains("MF("), "lua51 template lacks floor");
         assert!(luau.contains("//"), "luau template lacks //");
         assert!(!luau.contains("MF("), "luau template uses MF");
+        // Goal-3 micro-op layer: the bit family is Luau-only and must go
+        // through the K7 capture names (a foreign identifier would be a free
+        // global in the emitted shell); Lua 5.1 must not draw it at all.
+        for name in ["BX(", "BA(", "BO(", "BN("] {
+            assert!(
+                !lua51.contains(name),
+                "lua51 template draws the bit family: {name}"
+            );
+        }
+        if ["BX(", "BA(", "BO(", "BN("]
+            .iter()
+            .any(|name| luau.contains(name))
+        {
+            let shell = seed_shell_prefix(Target::Luau);
+            for name in ["BX", "BA", "BO", "BN"] {
+                assert!(
+                    shell.contains(&format!("{name},")) || shell.contains(&format!("{name}=bit32")),
+                    "luau shell contract does not bind {name}"
+                );
+            }
+        }
         // Both must carry the fail-closed budget and validator.
         for (name, body) in [("lua51", lua51.as_str()), ("luau", luau.as_str())] {
             assert!(body.contains("seedfail"), "{name} lacks seedfail");

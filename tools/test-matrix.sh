@@ -6,7 +6,9 @@ cd "$ROOT"
 
 # The artifact-size gates: since K4 (2026-09-14, user instruction 体积门设置为压缩后的大小)
 # the deliverable budget is the *compressed* shell's byte count -- pinned in the appended
-# "[matrix] XXS shell wrapper" step below (68,000 / 77,000 B) and in tools/bench-vm.sh and
+# "[matrix] XXS shell wrapper" step below (81,000 / 81,000 B since the goal-3 batch,
+# user instruction 体积门改为 81 KB（最终压缩后的）; K22 to that batch it was 69,300 / 77,600 B,
+# and K4..K21 68,000 / 77,000 B) and in tools/bench-vm.sh and
 # src/vm/custom/tests/semantic.rs. The uncompressed vm_<target>.out.lua keeps a static
 # anti-runaway ceiling of 160,000 B per target (the number it carried from K3-FULL on was
 # 117,000 B per target, measured worst case across every sampled seed: Lua 5.1 104,452 B /
@@ -441,10 +443,9 @@ for shell_pair in "lua51 7001 vm:lua51:ok" "luau 7351 vm:luau:ok"; do
     # +10..+220 B），仍在 68,000/77,000 B 内；raw golden 侧同步重测最坏 104,576 /
     # 114,641 B，被降级为 160,000 B 静态防失控门（见 tools/bench-vm.sh 与本文件开头）。
     shell_bytes=$(wc -c <"$shell_committed")
-    # K22 起按实测最坏值+余量抬高（68,808 -> 69,300 / 77,023 -> 77,600），归因见
-    # src/vm/custom/tests/semantic.rs 里同一段记录。
-    shell_limit=69300
-    if [[ "$shell_target" == luau ]]; then shell_limit=77600; fi
+    # 2026-09-14（目标 3/5 批次）：按用户指示统一改为 81,000 B/目标（取代 K22 的
+    # 69,300 / 77,600 B），归因见 src/vm/custom/tests/semantic.rs 里同一段记录。
+    shell_limit=81000
     if [[ $shell_bytes -gt $shell_limit ]]; then
         printf 'error: XXS shell for %s is %sB over the recorded %sB budget\n' \
             "$shell_target" "$shell_bytes" "$shell_limit" >&2

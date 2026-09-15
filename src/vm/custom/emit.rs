@@ -1087,8 +1087,17 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     };
     // 折叠检查放在 run 段的所有 handler 调用之前：装载全部到位、而用户代码还没
     // 跑过一步，所以被篡改的壳不会先产生副作用再报错。
+    // Goal-3 micro-op layer: on Luau the interpreter section additionally
+    // receives the validated `bit32` captures, so the MBA renderers can draw
+    // the mixed boolean-arithmetic family there (Lua 5.1 has no bit library,
+    // so it stays pure arithmetic -- the same split the K7 word toolbox uses).
+    let mba_bits = if program.target.is_luau() {
+        ",BX,BA,BO,BN"
+    } else {
+        ""
+    };
     let run_stage = format!(
-        "{scatter_check}local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
+        "{scatter_check}local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC{mba_bits});local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
         keys[4]
     );
     let entry_machine = state_machine(
@@ -1110,7 +1119,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     .unwrap();
     write!(
         s,
-        "[{}]=function(SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC)\n",
+        "[{}]=function(SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC{mba_bits})\n",
         keys[4]
     )
     .unwrap();

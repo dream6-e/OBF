@@ -147,7 +147,7 @@ fn k22_read_plan(raw: &str, target: Target, seed: u64) -> K22Plan {
         if statement.contains("rid") {
             let tokens = crate::lexer::lex(statement, target).unwrap();
             let mut ids: Vec<u64> = Vec::new();
-            for (index, token) in tokens.iter().enumerate() {
+            for token in tokens.iter() {
                 if token.kind == crate::lexer::TokenKind::Keyword && token.text(statement) == "and" {
                     digest_terms += 1;
                 }
@@ -173,12 +173,6 @@ fn k22_read_plan(raw: &str, target: Target, seed: u64) -> K22Plan {
             }
             dispatch_rolls += 1;
             roll_text = statement.to_owned();
-            let name_at = |index: usize| -> Option<String> {
-                tokens
-                    .get(index)
-                    .filter(|token| token.kind == crate::lexer::TokenKind::Identifier)
-                    .map(|token| token.text(statement).to_owned())
-            };
             for (index, token) in tokens.iter().enumerate() {
                 if token.kind != crate::lexer::TokenKind::Number {
                     continue;
