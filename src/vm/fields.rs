@@ -9,9 +9,15 @@ use crate::{Diagnostic, Target};
 use std::collections::BTreeMap;
 
 pub(super) const PREFIX: &str = "__obf_proto_";
+/// Goal 5 removed three schema entries with the constant pool they served:
+/// `k` (the rebuilt constant table), `kimg` (the retained keyed region) and
+/// `rec` (the per-constant coordinate record). Every entry listed here is
+/// emitted by the current template -- the completeness gate in
+/// `complete_vm_changes_only_marked_fields_even_after_final_local_renaming`
+/// asserts exactly that.
 pub(super) const PROTOTYPE_FIELDS: &[&str] = &[
-    "k", "tags", "u", "parent", "m", "p", "flags", "nu", "nk", "nc", "shared", "self", "code",
-    "cached", "control", "routes", "kimg", "rec",
+    "tags", "u", "parent", "m", "p", "flags", "nu", "nk", "nc", "shared", "self", "code", "cached",
+    "control", "routes",
 ];
 
 fn error(message: &str) -> Diagnostic {
@@ -167,7 +173,7 @@ mod tests {
     #[test]
     fn aliases_constructor_keys_and_field_reads_use_the_same_mapping_only() {
         let source = r#"
-            local F={__obf_proto_k={},__obf_proto_tags={},__obf_proto_u={}}
+            local F={__obf_proto_nk={},__obf_proto_tags={},__obf_proto_u={}}
             F.__obf_proto_code='code tags flags __obf_proto_code'
             local alias=F alias.__obf_proto_tags[0]=F.__obf_proto_code
             local user={code='code',tags='tags',__mode='k'}
@@ -182,7 +188,7 @@ mod tests {
             crate::parse(&short, target).unwrap();
             assert!(short.contains(&format!(
                 "F={{{}={{}},{}={{}},{}={{}}}}",
-                mapping["k"], mapping["tags"], mapping["u"]
+                mapping["nk"], mapping["tags"], mapping["u"]
             )));
             assert!(short.contains(&format!(
                 "alias.{}[0]=F.{}",

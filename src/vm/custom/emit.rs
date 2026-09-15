@@ -563,19 +563,19 @@ local check=b32();if {ad_guard} then E()end;
     )
     .unwrap();
     // Flattened parse core: the per-prototype stages are split into local
-    // functions -- header read/validate (PH), upvalue wiring (PU), constant
-    // pool (PK) -- whose definition order shuffles per seed, driven by a
-    // seeded state machine (next/header+commit -> pool A -> pool B ->
-    // slice -> finish). The pool states read the two global shuffled
-    // pools (captures/constants, order baked per image) into CU/CK tables;
-    // the slice state wires each prototype from those tables; the finish
+    // functions -- header read/validate (PH), upvalue wiring (PU) -- whose
+    // definition order shuffles per seed, driven by a seeded state machine
+    // (next/header+commit -> capture pool -> slice -> finish). The pool state
+    // reads the one remaining global shuffled pool (captures; goal 5 removed
+    // the constant pool with its `CK`/record table) into the CU table; the
+    // slice state wires each prototype from that table; the finish
     // state reads the one global shuffled code-segment graph, validates
     // masked ids/owners/roots/next links and exact coverage, then
     // reconstructs each stream before semantic parsing.
-    let csv = state_values(&mut structure, 5);
-    let (c_next, c_pool_a, c_pool_b, c_slice, c_fin) = (csv[0], csv[1], csv[2], csv[3], csv[4]);
+    let csv = state_values(&mut structure, 4);
+    let (c_next, c_pool_a, c_slice, c_fin) = (csv[0], csv[1], csv[2], csv[3]);
     let mut ph = format!(
-        "local PH=function()\n local F={{__obf_proto_k={{}},__obf_proto_tags={{}},__obf_proto_u={{}}}};{}\n",
+        "local PH=function()\n local F={{__obf_proto_tags={{}},__obf_proto_u={{}}}};{}\n",
         field_order.metadata_reads_lua()
     );
     ph.push_str(
@@ -589,27 +589,17 @@ local check=b32();if {ad_guard} then E()end;
     ph.push_str("\n return F,VMCS,RT\nend;\n");
     let pu = "local PU=function()\n local UT=CU[id];if UT==nil then UT={} end;for j=0,F.__obf_proto_nu-1 do local rec=UT[j];if not rec then E()end;local tag,index=rec[1],rec[2];local parent=P[F.__obf_proto_parent];\n  if tag>2 or not parent or tag~=1 and index>=parent.__obf_proto_m or tag==1 and index>=parent.__obf_proto_nu then E()end;\n  if tag==2 then if not F.__obf_proto_shared or F.__obf_proto_self~=nil then E()end;F.__obf_proto_self=j end;\n  F.__obf_proto_u[j]={tag,index};\n end;\nend;\n"
         .to_owned();
-    let mut pk = String::from(
-        // K13c step 2: the slice state can no longer look at decoded values
-        // (none exist at parse time); it proves that every constant slot was
-        // covered by a record and that each record's extent fits inside the
-        // keyed region. `DC` re-checks the extents against the retained region.
-        "local PK=function()\n local KT=CK[id];if KT==nil then KT={} end;for j=0,F.__obf_proto_nk-1 do local rec=KT[j];if not rec then E()end;local tg=rec[1];if tg>5 or rec[2]+rec[3]>KLen or rec[4]==nil then E()end end;",
-    );
-    pk.push_str("\nend;\n");
-    let mut defs = vec![ph, pu, pk];
+    // Goal 5: the constant stage (`PK`) is gone with the pool it validated --
+    // see the `capture_pool_lua` note. The slice state just wires captures; the
+    // constant block is validated by `DC`, the only place that ever sees a
+    // prototype's region.
+    let mut defs = vec![ph, pu];
     structure.shuffle(&mut defs);
-    // The pool-region bookkeeping has to be declared before the stage
-    // definitions, not next to the state variable: `PK` is compiled as a local
-    // function in that block, so a later declaration would leave its `KLen`
-    // reference resolving to a global (nil) instead of the same upvalue.
-    core_text.push_str("local KBase,gk,KLen,KImg=1,0,0,nil;\n");
-    core_text.push('\n');
     for definition in &defs {
         core_text.push_str(definition);
     }
     core_text.push_str(&format!(
-        "local P={{}};local work=0;local id=0;local TU,TK=0,0;local w={c_next};\n"
+        "local P={{}};local work=0;local id=0;local TU=0;local w={c_next};\n"
     ));
     let segment_add = semantic_image.token_layers[0].add;
     let segment_multiplier = semantic_image.token_layers[0].multiplier;
@@ -619,14 +609,7 @@ local check=b32();if {ad_guard} then E()end;
     // into the pool walk and into `DC`, derived from the same image that the
     // encoder keyed with, so both Lua sides agree without a shared table.
     let (pool_mask, pool_mod) = semantic::pool_key_pair(&semantic_image);
-    let (pool_first, pool_second) = pool_loops_lua(
-        field_order,
-        pool_add,
-        pool_multiplier,
-        program.target,
-        pool_mask,
-        pool_mod,
-    );
+    let capture_pool = capture_pool_lua(field_order, pool_add, pool_multiplier);
     core_text.push_str(&state_machine(
         &mut structure,
         "w",
@@ -634,20 +617,16 @@ local check=b32();if {ad_guard} then E()end;
             (
                 c_next,
                 format!(
-                    "if id>=np then w={c_pool_a} else F,VMCS,RT=PH();TU=TU+F.__obf_proto_nu;TK=TK+F.__obf_proto_nk;work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;F.__obf_proto_code={{VMCS,RT}};P[id]=F;id=id+1;w={c_next}; end;"
+                    "if id>=np then w={c_pool_a} else F,VMCS,RT=PH();TU=TU+F.__obf_proto_nu;work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;F.__obf_proto_code={{VMCS,RT}};P[id]=F;id=id+1;w={c_next}; end;"
                 ),
             ),
             (
                 c_pool_a,
-                format!("{pool_first}w={c_pool_b};"),
-            ),
-            (
-                c_pool_b,
-                format!("{pool_second}w={c_slice};"),
+                format!("{capture_pool}w={c_slice};"),
             ),
             (
                 c_slice,
-                format!("for fid=0,np-1 do id=fid;F=P[id];PU();PK() end;w={c_fin};"),
+                format!("for fid=0,np-1 do id=fid;F=P[id];PU() end;w={c_fin};"),
             ),
             (
                 c_fin,
@@ -658,7 +637,7 @@ local check=b32();if {ad_guard} then E()end;
             ),
         ],
     ));
-    core_text.push_str("\nlocal rP,rnp,ren,rKImg=P,np,entry,KImg;g=nil;return rP,rnp,ren,rKImg\n");
+    core_text.push_str("\nlocal rP,rnp,ren=P,np,entry;g=nil;return rP,rnp,ren\n");
     core_text = slot_rewrite(
         &mut structure,
         &core_text,
@@ -672,7 +651,7 @@ local check=b32();if {ad_guard} then E()end;
         keys[20]
     ));
     decoder_wiring.push_str(&format!(
-        "\nlocal P,np,entry,KImg=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num);",
+        "\nlocal P,np,entry=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num);",
         keys[20]
     ));
     let f3_start = s.len();
@@ -813,24 +792,18 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
     // graph successors only after the shuffled records have been read.
     write!(
         s,
-        "[{}]=function(P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU)\n",
+        "[{}]=function(P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC)\n",
         keys[2]
     )
     .unwrap();
-    // K13c step 2: rebuild this frame's constants from the keyed region right
-    // before the record loop (validation reads `__obf_proto_tags`). Extents and
-    // the per-record stream position come from `__obf_proto_rec`, so a frame
-    // only ever holds values while its code is materialized; `LVE` and the load
-    // pass drop them again.
-    let kimg_tag4 = if program.target.is_luau() {
-        " elseif tg==4 then if ln~=8 then E()end;local s4=UK(Q,off+1,8,ak);local lo4,hi4=U32(s4,1),U32(s4,5);if not IF then E()end;val=IF(SF('%08x%08x',hi4,lo4),16);if val==nil then E()end;kn=8"
-    } else {
-        ""
-    };
-    let kimg_pass = format!(
-        "if F.__obf_proto_nk>0 then local Q=F.__obf_proto_kimg;if Q==nil then E()end;local KX=F.__obf_proto_rec;if KX==nil then E()end;local KS,TG={{}},{{}};for kj=0,F.__obf_proto_nk-1 do local rec=KX[kj];if not rec then E()end;local tg=rec[1];if tg>5 then E()end;local off,ln,ak=rec[2],rec[3],rec[4];if off<0 or off+ln>#Q then E()end;TG[kj]=tg;local val;if tg==0 then val=nil elseif tg==1 then if ln~=1 then E()end;local b0=SB(UK(Q,off+1,1,ak),1);if not b0 or b0>1 then E()end;val=b0==1 elseif tg==2 then if ln~=8 then E()end;val=NU(UK(Q,off+1,8,ak),1){kimg_tag4} elseif tg==3 or tg==5 then local n=U32(Q,off+1);if n+4~=ln then E()end;val=UK(Q,off+5,n,ak) else E()end;KS[kj]=val end;F.__obf_proto_k=KS;F.__obf_proto_tags=TG end;",
-        kimg_tag4 = kimg_tag4,
-    );
+    // Goal 5: the constants are no longer rebuilt into a `__obf_proto_k` table.
+    // The block is *validated* here -- one seed-mode walk over all entries, whose
+    // returned extent must cover exactly the block and whose entry count must be
+    // `nk` -- and only the tag vector survives, because the validator's
+    // ReadGlobal/WriteGlobal arms need to know which slots are strings. Values
+    // are synthesized per use by `KGC` inside the interpreter, so nothing in the
+    // parse path ever holds one.
+    let kimg_pass = "local kend=#CD-4;if kend<0 then E()end;local ke=kend-U32(CD,kend+1);if ke<0 then E()end;if F.__obf_proto_nk>0 then local KS,KT={{}},{{}};local eo,ei=KGC(CD,F.__obf_proto_nk,nil,KS,KT);if eo~=kend-ke or ei~=F.__obf_proto_nk then E()end;F.__obf_proto_tags=KT else F.__obf_proto_tags={{}} end;";
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
     let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
     let tuple_slots = field_order.tuple_slots();
@@ -862,7 +835,7 @@ local DC=function(id)
    if not vld(op,a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
   end;code[label]=I;
  end;
- if p~=#CD+1 or start==0 or code[start]==nil then E()end;
+ if p~=ke+1 or start==0 or code[start]==nil then E()end;
  for label,I in NX,code do local next1=ED(I[{tuple_next}],label,id,0);local skip=ED(I[{tuple_skip}],label,id,1);local last=I[4];local n=I[5];local a,b,c,k,j=OG(id,I,n,0);
   if last=={jump} then if next1~=0 or skip~=0 or code[j]==nil then E()end
   elseif last=={ret} or last=={tail} then if next1~=0 or skip~=0 then E()end
@@ -870,7 +843,7 @@ local DC=function(id)
   elseif code[next1]==nil or skip~=0 then E()end;
  end;code[0]=start;code[-1]=CD;F.__obf_proto_code=code;F.__obf_proto_routes=VR;return code
 end;
-for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;P[id].__obf_proto_k=nil;P[id].__obf_proto_tags=nil;end;return RD,ED,OG,DC;"#,
+for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;P[id].__obf_proto_tags=nil;end;return RD,ED,OG,DC;"#,
         kimg_pass = kimg_pass,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
@@ -1023,8 +996,8 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     // dependency graph are secret.
     s.push_str("\nreturn CV,SV,Lookup\nend,");
     let mut decoder_stage = decoder_wiring.replacen("local pv=", "pv=", 1);
-    decoder_stage = decoder_stage.replacen("local P,np,entry,KImg=", "P,np,entry,KImg=", 1);
-    if decoder_stage.contains("local pv=") || decoder_stage.contains("local P,np,entry,KImg=") {
+    decoder_stage = decoder_stage.replacen("local P,np,entry=", "P,np,entry=", 1);
+    if decoder_stage.contains("local pv=") || decoder_stage.contains("local P,np,entry=") {
         return Err(Diagnostic::new("entry decoder stage export rewrite failed"));
     }
     let entry_states = state_values(&mut structure, 6);
@@ -1072,9 +1045,16 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         scatter.blob(8),
         keys[12],
     );
+    // Goal 5: `KGC` is declared with the other wrapper-method locals and
+    // *assigned* here -- after the prelude has bound `U32`/`UK`/`NU`/`SB`/`E`
+    // and before the decoder binds every prototype (`DC` validates each
+    // prototype's constant block through it). A `local` in this branch would be
+    // scoped to the state machine's arm, so this must be an assignment.
+    let walker = constant_walker_lua(&mut structure, program.target, pool_mask, pool_mod);
+    let decoder_stage = format!("{walker}{decoder_stage}");
     let decode_stage = format!("{}{decoder_stage}es={e_bind};", scatter.blob(9));
     let bind_stage = format!(
-        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E);for pi=0,np-1 do P[pi].__obf_proto_kimg=KImg end;RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E);RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
         scatter.blob(10),
         keys[14], keys[15], keys[2], keys[3],
     );
@@ -1087,8 +1067,17 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     };
     // 折叠检查放在 run 段的所有 handler 调用之前：装载全部到位、而用户代码还没
     // 跑过一步，所以被篡改的壳不会先产生副作用再报错。
+    // Goal-3 micro-op layer: on Luau the interpreter section additionally
+    // receives the validated `bit32` captures, so the MBA renderers can draw
+    // the mixed boolean-arithmetic family there (Lua 5.1 has no bit library,
+    // so it stays pure arithmetic -- the same split the K7 word toolbox uses).
+    let mba_bits = if program.target.is_luau() {
+        ",BX,BA,BO,BN"
+    } else {
+        ""
+    };
     let run_stage = format!(
-        "{scatter_check}local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC);local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
+        "{scatter_check}local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC,KGC{mba_bits});local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
         keys[4]
     );
     let entry_machine = state_machine(
@@ -1105,12 +1094,12 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     );
     write!(
         s,
-        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names};local c1,c2,c3,Y1,Y2,Y3,pv,P,np,entry,KImg,RD,ED,OG,DC,CV,SV,Lookup;local ck=0;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
+        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names},KGC;local c1,c2,c3,Y1,Y2,Y3,pv,P,np,entry,RD,ED,OG,DC,CV,SV,Lookup;local ck=0;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
     )
     .unwrap();
     write!(
         s,
-        "[{}]=function(SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC)\n",
+        "[{}]=function(SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC,KGC{mba_bits})\n",
         keys[4]
     )
     .unwrap();
@@ -1210,6 +1199,17 @@ end;
         .collect();
     debug_assert_eq!(state_cursor, fragment_count);
 
+    // K22: the rolling execution-context key. Its own stream, so the rest of the
+    // emitted script stays byte-identical and this batch's diff is exactly the
+    // new statements plus the wire-space successor writes.
+    // The plan needs the stage list: the masked literal of a stage is what ships
+    // inside the arms, and mask hygiene is defined against exactly that set.
+    let mut ctx_stages: Vec<u16> = fragment_states.clone();
+    ctx_stages.push(semantic_init);
+    let context = context::ContextPlan::new(program.target, seed, &ctx_stages);
+    let ctx_reset = context.reset_stmt(semantic_init);
+    let ctx_decode = context.decode_stmt();
+    let ctx_roll = context.roll_stmt();
     let fsv = state_values(&mut structure, 4);
     let (k_fetch, k_disp, k_fetch_alt, k_disp_alt) = (fsv[0], fsv[1], fsv[2], fsv[3]);
     let control_mask = "P.__obf_proto_control";
@@ -1230,18 +1230,22 @@ end;
     }
     s.push_str(&seed_prelude_lua_v1(program.target, seed, seed_used));
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);route=(pc*{route_mul}+I[{tuple_token}]*{route_add}+fid*{route_salt})%65521;route_info=F.__obf_proto_routes[route];if route_info==nil then E()end;route_info=route_info[pc];if not route_info or route_info[1]~=rid or route_info[2]<1 or route_info[2]>4 then E()end;rid=route_info[1];sid={semantic_init};pc=next1;w={v_disp};",
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);route=(pc*{route_mul}+I[{tuple_token}]*{route_add}+fid*{route_salt})%65521;route_info=F.__obf_proto_routes[route];if route_info==nil then E()end;route_info=route_info[pc];if not route_info or route_info[1]~=rid or route_info[2]<1 or route_info[2]>4 then E()end;rid=route_info[1];pc=next1;{ctx_reset}w={v_disp};",
         tuple_next = tuple_slots[1],
         tuple_skip = tuple_slots[2],
         tuple_token = tuple_slots[0],
         route_mul = route_mul,
         route_add = route_add,
         route_salt = route_salt,
+        ctx_reset = ctx_reset,
     );
     write!(
         s,
-        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_k=nil;G.__obf_proto_tags=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;K=F.__obf_proto_k;LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};\n  while true do\n   {machine_open}",
+        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_tags=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;K=code[-1];LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};local {wire},{key},{control}=0,0,P.__obf_proto_control;\n  while true do\n   {machine_open}",
         seed_loop = seed_loop_lua(program.target, seed),
+        wire = context::WIRE_VAR,
+        key = context::KEY_VAR,
+        control = context::CONTROL_VAR,
         machine_open = if dispatch_first {
             format!("if {c_disp} then ")
         } else {
@@ -1270,7 +1274,7 @@ end;
             structure.dispatch_condition_for("rid", recipe.id, program.target.is_luau());
         recipe_entries.push((
             recipe.id,
-            format!("{entry_condition} then sid={};", chunks[0].2),
+            format!("{entry_condition} then {};", context.successor(chunks[0].2)),
         ));
         for (chunk_index, &(start, length, stage)) in chunks.iter().enumerate() {
             let mut body = String::new();
@@ -1296,9 +1300,9 @@ end;
             );
             if !exits_frame {
                 if let Some(next) = chunks.get(chunk_index + 1) {
-                    write!(body, "sid={};", next.2).unwrap();
+                    write!(body, "{};", context.successor(next.2)).unwrap();
                 } else {
-                    write!(body, "sid={semantic_init};").unwrap();
+                    write!(body, "{};", context.successor(semantic_init)).unwrap();
                 }
             }
             let condition =
@@ -1329,13 +1333,18 @@ end;
         &mut structure,
         fragment_arms,
         fragment_groups,
-        "sid",
+        context::STATE_VAR,
         &sid_states,
     );
-    let init_condition = state_condition(&mut structure, "sid", semantic_init);
+    let init_condition = state_condition(&mut structure, context::STATE_VAR, semantic_init);
+    // K22: the loop-back is tested in wire space. The arms write the successor
+    // wire instead of the state, so the state is still the *previous* block's
+    // when this line runs -- testing it would either re-fetch right after the
+    // recipe entry or re-enter the recipe after its tail.
+    let recipe_end = context.recipe_end_condition(semantic_init);
     write!(
         s,
-        "if {init_condition} then {recipe_chain}else {fragment_chain}end;if {init_condition} then w={v_fetch};end;"
+        "{ctx_decode}{ctx_roll}if {init_condition} then {recipe_chain}else {fragment_chain}end;if {recipe_end} then w={v_fetch};end;"
     )
     .unwrap();
     if dispatch_first {

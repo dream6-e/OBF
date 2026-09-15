@@ -31,9 +31,13 @@ use crate::ir::{Capture, Constant};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const WIRE_INSTRUCTION_ENCODING: u8 = 1;
-/// K13c step 2: the constant pool payload is keyed, so the semantic image is
-/// not byte-compatible with ISA16 -- bump the private wire version.
-pub(crate) const WIRE_ISA_VERSION: u32 = 18;
+/// Goal 5 (2026-09-15): the private image no longer carries a constant-pool
+/// section -- each prototype's code region now ends with `[constants block]
+/// [u32 block_len]` (and the header's `code_len` covers both), so the image is
+/// not byte-compatible with ISA18 -- bump the private wire version.
+/// History: K13c step 2 keyed the pool payload (ISA17), K3-FULL moved the
+/// operand form into the recipe dictionary (ISA18).
+pub(crate) const WIRE_ISA_VERSION: u32 = 19;
 pub(crate) const RECIPE_TOKEN_STAGES: usize = 5;
 pub(crate) const EDGE_TOKEN_STAGES: usize = 3;
 const MAX_MULTI_RECIPES: usize = 96;
@@ -111,8 +115,10 @@ pub(crate) struct SemanticImage {
     pub segments_interleaved: bool,
     pub capture_pool_owners: Vec<usize>,
     pub capture_pool_slots: Vec<usize>,
-    pub constant_pool_owners: Vec<usize>,
-    pub constant_pool_indices: Vec<usize>,
+    /// Goal 5: there is no constant pool any more. Each prototype's constants
+    /// ride inside its own code region (see [`write_constant_block`]) and the
+    /// runtime synthesizes them per use, so there is deliberately no
+    /// `(owner, index) -> value` coordinate list to publish or extract.
     pub pools_interleaved: bool,
     pub referenced_recipe_ids: BTreeSet<u16>,
     /// K3-FULL: the opcode renumbering, encoder-side only and never serialized.
@@ -160,20 +166,11 @@ struct PooledCapture {
 
 /// One constant record in the global constant pool: the owning
 /// prototype, the constant index within that owner, and the value.
-#[derive(Clone, Debug)]
-struct PooledConstant {
-    owner: u16,
-    index: u16,
-    constant: Constant,
-}
-
 /// Physical pool layout published for the verification harness.
 #[derive(Clone, Debug)]
 struct PoolPhysicalLayout {
     capture_owners: Vec<usize>,
     capture_slots: Vec<usize>,
-    constant_owners: Vec<usize>,
-    constant_indices: Vec<usize>,
     interleaved: bool,
 }
 
@@ -1553,39 +1550,84 @@ fn build_capture_pool(
     Err(error("failed to interleave global capture pool"))
 }
 
-/// Build one globally shuffled constant pool. Every prototype constants
-/// become anonymous (owner, index, value) records; physical order is
-/// independent of owner and index order. Interleaving follows the same
-/// rule as the capture pool.
-fn build_constant_pool(
-    plans: &[PrototypePlan],
-    _image: &SemanticImage,
-    random: &mut crate::random::Prng,
-) -> Result<Vec<PooledConstant>, Diagnostic> {
-    if plans.len() > usize::from(u16::MAX) {
-        return Err(error("too many prototypes for the constant pool"));
-    }
-    let mut pool = Vec::new();
-    for (owner, plan) in plans.iter().enumerate() {
-        let owner = u16::try_from(owner)
-            .map_err(|_| error("prototype id exceeds constant pool owner range"))?;
-        for (index, constant) in plan.prototype.constants.iter().enumerate() {
-            let index = u16::try_from(index).map_err(|_| error("constant index overflow"))?;
-            pool.push(PooledConstant {
-                owner,
-                index,
-                constant: constant.clone(),
-            });
+/// Goal 5: append prototype `plan`'s constants to the end of its own code
+/// region, in constant-index order, as `[tag][payload]` entries followed by a
+/// clear u32 block length.
+///
+/// There is no pool and no record of coordinates: the bytes sit inside the
+/// region the segment graph already covers and the image cipher already keys,
+/// and the only way to a value is the per-use synthesis walk the interpreter
+/// runs (`KGC`), which recomputes the key stream from the entry lengths it
+/// passes over. The global pool this replaces published every constant as an
+/// `(owner, index, tag, extent, key)` token triple plus a keyed payload -- a
+/// ready-made constant table -- and that shape is what goal 5 abolishes.
+///
+/// The cipher is the capture pool's, unchanged so both sides keep one
+/// implementation: `pool_key_fold` chains the key over *every earlier entry*
+/// (so a reader that skips entries cannot align the stream) and
+/// `pool_key_byte` shifts each payload byte. The tag byte and a string's
+/// length prefix stay in the clear for the same reason they did in the pool:
+/// the walk needs extents before it has a key.
+fn write_constant_block(
+    code: &mut Vec<u8>,
+    plan: &PrototypePlan,
+    image: &SemanticImage,
+) -> Result<(), Diagnostic> {
+    let (mask, modulus) = pool_key_pair(image);
+    let mut acc = 0u64;
+    let mut block: Vec<u8> = Vec::new();
+    for constant in &plan.prototype.constants {
+        let tag = match constant {
+            Constant::Nil => 0u8,
+            Constant::Boolean(_) => 1,
+            Constant::Number(_) => 2,
+            Constant::String(_) => 3,
+            Constant::Integer(_) => 4,
+            Constant::Method(_) => 5,
+        };
+        block.push(tag);
+        // `key_from` is the first keyed byte; `keyed_len` is the byte count the
+        // key chain folds in. Both mirror `write_constant_pool`'s per-tag arms
+        // exactly, including the clear 4-byte string/method length prefix.
+        let at = block.len();
+        let (key_from, keyed_len): (usize, u64) = match constant {
+            Constant::Nil => (at, 0),
+            Constant::Boolean(value) => {
+                block.push(u8::from(*value));
+                (at, 1)
+            }
+            Constant::Number(bits) => {
+                block.extend_from_slice(&bits.to_le_bytes());
+                (at, 8)
+            }
+            Constant::Integer(value) => {
+                block.extend_from_slice(&value.to_le_bytes());
+                (at, 8)
+            }
+            Constant::String(value) => {
+                write_bytes(&mut block, value)?;
+                (at + 4, value.len() as u64)
+            }
+            Constant::Method(value) => {
+                write_bytes(&mut block, value.as_bytes())?;
+                (at + 4, value.len() as u64)
+            }
+        };
+        if keyed_len > 0 {
+            pool_key_apply(&mut block, key_from, acc);
+        }
+        acc = pool_key_fold(acc, keyed_len, mask, modulus);
+        if block.len() > custom::MAX_BYTES {
+            return Err(error("constant block exceeds size limit"));
         }
     }
-    for _ in 0..64 {
-        random.shuffle(&mut pool);
-        let owners: Vec<u16> = pool.iter().map(|record| record.owner).collect();
-        if pool_owners_are_interleaved(&owners) {
-            return Ok(pool);
-        }
+    let block_len = u32::try_from(block.len()).map_err(|_| error("constant block overflow"))?;
+    code.extend_from_slice(&block);
+    code.extend_from_slice(&block_len.to_le_bytes());
+    if code.len() > custom::MAX_BYTES {
+        return Err(error("image exceeds size limit"));
     }
-    Err(error("failed to interleave global constant pool"))
+    Ok(())
 }
 
 /// Serialize one global capture pool: fixed 6-byte records of three
@@ -1667,76 +1709,6 @@ fn pool_key_apply(out: &mut [u8], from: usize, acc: u64) {
     }
 }
 
-fn write_constant_pool(
-    out: &mut Vec<u8>,
-    pool: &[PooledConstant],
-    image: &SemanticImage,
-) -> Result<(), Diagnostic> {
-    let (mask, modulus) = pool_key_pair(image);
-    let mut acc = 0u64;
-    for (slot, record) in pool.iter().enumerate() {
-        let physical_slot =
-            u16::try_from(slot + 1).map_err(|_| error("constant pool slot exceeds u16 range"))?;
-        let tag = match &record.constant {
-            Constant::Nil => 0,
-            Constant::Boolean(_) => 1,
-            Constant::Number(_) => 2,
-            Constant::String(_) => 3,
-            Constant::Integer(_) => 4,
-            Constant::Method(_) => 5,
-        };
-        let tokens = [
-            encode_pool_owner(record.owner, physical_slot, image),
-            encode_pool_slot(record.index, record.owner, physical_slot, image),
-            encode_pool_payload(tag, record.index, record.owner, image),
-        ];
-        for token_slot in image.field_layout.pool_slot_fields(slot + 1) {
-            write_u16(out, tokens[token_slot]);
-        }
-        // Only the payload bytes are keyed: the three token slots above each
-        // record and the string/method length prefix stay in the clear, so the
-        // layer state machines and `take` can still find record extents without
-        // the key. The keyed length is what both sides fold into `acc`, and each
-        // side can compute it from the record alone.
-        let (key_at, keyed_len): (usize, u64) = match &record.constant {
-            Constant::Nil => (0, 0),
-            Constant::Boolean(value) => {
-                let at = out.len();
-                out.push(u8::from(*value));
-                (at, 1)
-            }
-            Constant::Number(bits) => {
-                let at = out.len();
-                out.extend_from_slice(&bits.to_le_bytes());
-                (at, 8)
-            }
-            Constant::String(value) => {
-                let at = out.len();
-                write_bytes(out, value)?;
-                (at + 4, value.len() as u64)
-            }
-            Constant::Integer(value) => {
-                let at = out.len();
-                out.extend_from_slice(&value.to_le_bytes());
-                (at, 8)
-            }
-            Constant::Method(value) => {
-                let at = out.len();
-                write_bytes(out, value.as_bytes())?;
-                (at + 4, value.len() as u64)
-            }
-        };
-        if keyed_len > 0 {
-            pool_key_apply(out, key_at, acc);
-        }
-        acc = pool_key_fold(acc, keyed_len, mask, modulus);
-        if out.len() > custom::MAX_BYTES {
-            return Err(error("image exceeds size limit"));
-        }
-    }
-    Ok(())
-}
-
 fn serialize(
     plans: &[PrototypePlan],
     image: &SemanticImage,
@@ -1760,14 +1732,13 @@ fn serialize(
     for (prototype_id, plan) in plans.iter().enumerate() {
         let prototype_id = u16::try_from(prototype_id)
             .map_err(|_| error("prototype id exceeds recipe-token range"))?;
-        codes.push(encode_code(
-            prototype_id,
-            plan,
-            &image.recipes,
-            decoys,
-            image,
-            random,
-        )?);
+        let mut code = encode_code(prototype_id, plan, &image.recipes, decoys, image, random)?;
+        // Goal 5: the constants are *in* the code region, so the header length
+        // (and therefore the segment graph's coverage and split arithmetic)
+        // describes code + block + the 4-byte block length. `DC` recovers the
+        // code-only extent from the block length at the tail.
+        write_constant_block(&mut code, plan, image)?;
+        codes.push(code);
     }
     let code_lengths: Vec<usize> = codes.iter().map(Vec::len).collect();
     let (segments, segment_counts, segments_interleaved) =
@@ -1785,7 +1756,6 @@ fn serialize(
         .map(|segment| usize::from(segment.next))
         .collect::<Vec<_>>();
     let capture_pool = build_capture_pool(plans, image, random)?;
-    let constant_pool = build_constant_pool(plans, image, random)?;
     let pool_layout = PoolPhysicalLayout {
         capture_owners: capture_pool
             .iter()
@@ -1794,14 +1764,6 @@ fn serialize(
         capture_slots: capture_pool
             .iter()
             .map(|record| usize::from(record.slot))
-            .collect(),
-        constant_owners: constant_pool
-            .iter()
-            .map(|record| usize::from(record.owner))
-            .collect(),
-        constant_indices: constant_pool
-            .iter()
-            .map(|record| usize::from(record.index))
             .collect(),
         interleaved: true,
     };
@@ -1862,17 +1824,11 @@ fn serialize(
             return Err(error("image exceeds size limit"));
         }
     }
-    // ISA14 global pools: captures and constants live only here, each
-    // record carrying masked owner/index tokens under a per-record
-    // factorial profile. Pool order follows the per-image flip bit the
-    // generated parser mirrors.
-    if image.field_layout.pools_flipped {
-        write_constant_pool(&mut out, &constant_pool, image)?;
-        write_capture_pool(&mut out, &capture_pool, image)?;
-    } else {
-        write_capture_pool(&mut out, &capture_pool, image)?;
-        write_constant_pool(&mut out, &constant_pool, image)?;
-    }
+    // ISA14 capture pool (goal 5: the constant pool is gone; each prototype's
+    // constants now ride in its own code region, so the wire carries exactly one
+    // pool). Records carry masked owner/slot/payload tokens under a per-record
+    // factorial profile.
+    write_capture_pool(&mut out, &capture_pool, image)?;
     for (slot, segment) in segments.iter().enumerate() {
         let physical_slot = u16::try_from(slot + 1)
             .map_err(|_| error("segment physical slot exceeds u16 range"))?;
@@ -2060,8 +2016,6 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
         segments_interleaved: false,
         capture_pool_owners: Vec::new(),
         capture_pool_slots: Vec::new(),
-        constant_pool_owners: Vec::new(),
-        constant_pool_indices: Vec::new(),
         pools_interleaved: false,
         referenced_recipe_ids,
     };
@@ -2085,8 +2039,6 @@ pub(crate) fn encode(program: &Program, seed: u64) -> Result<SemanticImage, Diag
     image.segments_interleaved = segments_interleaved;
     image.capture_pool_owners = pool_layout.capture_owners;
     image.capture_pool_slots = pool_layout.capture_slots;
-    image.constant_pool_owners = pool_layout.constant_owners;
-    image.constant_pool_indices = pool_layout.constant_indices;
     image.pools_interleaved = pool_layout.interleaved;
     Ok(image)
 }

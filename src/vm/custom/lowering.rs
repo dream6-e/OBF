@@ -249,7 +249,6 @@ pub(crate) struct FieldLayout {
     pub(crate) dict_flipped: bool,
     pub(crate) pool_mul: u8,
     pub(crate) pool_add: u8,
-    pub(crate) pools_flipped: bool,
     /// u32 metadata field at each wire slot: 0=parent, 1=nk, 2=nc, 3=codelen.
     pub(crate) meta_u32: [u8; 4],
     /// u16 metadata field at each wire slot: 0=registers, 1=nu, 2=root.
@@ -302,7 +301,6 @@ pub(crate) fn field_layout(seed: u64) -> FieldLayout {
         // pre-existing layout value) is unchanged.
         pool_mul: [1u8, 5][(random.index(2)) as usize],
         pool_add: (random.index(FIELD_POOL_ORDERS)) as u8,
-        pools_flipped: random.index(2) == 1,
         meta_u32,
         meta_u16,
         meta_u8,

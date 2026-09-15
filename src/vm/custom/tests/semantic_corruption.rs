@@ -126,7 +126,14 @@ fn target_decoder_rejects_corrupt_semantic_graph_before_user_code_runs() {
                 record_cursor += 1;
             }
         }
-        assert_eq!(record_cursor, code_len);
+        // Goal 5: the logical code region is `[records][constants block]
+        // [u32 block_len]`, so the record stream must cover the region up to
+        // the block -- the trailing block itself is validated by `DC` (its
+        // own corruption gates live in `tests/runtime.rs`).
+        let block_len =
+            u32::from_le_bytes(code_bytes[code_len - 4..code_len].try_into().unwrap()) as usize;
+        assert!(block_len > 0 && block_len + 4 <= code_len);
+        assert_eq!(record_cursor, code_len - 4 - block_len);
 
         let len_offset = if flipped { 0 } else { 2 };
         let rid_offset = if flipped { 1 } else { 0 };
@@ -229,7 +236,7 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
         .iter()
         .position(|old| *old == old_child)
         .expect("real child missing after semantic reorder");
-    let (layouts, pool_captures, _constants, segments) = semantic_pool_layouts(&image);
+    let (layouts, pool_captures, segments) = semantic_pool_layouts(&image);
     let meta = image.field_layout.metadata_positions();
     let child = layouts[child_id].header;
     assert!(child + 26 <= image.bytes.len());
@@ -372,7 +379,7 @@ fn target_decoder_rejects_every_global_segment_graph_corruption_on_both_targets(
         let data = compile("print('MUST_NOT_RUN')", target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 917).unwrap();
-        let (layouts, _captures, _constants, segments) = semantic_pool_layouts(&image);
+        let (layouts, _captures, segments) = semantic_pool_layouts(&image);
         assert!(layouts.len() >= 2 && segments.len() >= 4);
         let root = segments
             .iter()

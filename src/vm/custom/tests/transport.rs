@@ -1009,35 +1009,41 @@ fn stages_are_flattened_into_seeded_state_machines() {
         for seed in 0..=11u64 {
             let raw = generate(&data, &program, seed).unwrap();
             assert_eq!(generate(&data, &program, seed).unwrap(), raw);
-            // Nine `while true do` machines: entry graph, three segments,
-            // parse core, interpreter fetch/dispatch, and shared recipe/edge
-            // token machines. The seed-ISA handler-shape loop uses a bounded
-            // `for` loop instead, so it is not counted here.
-            assert_eq!(raw.matches("while true do").count(), 9);
+            // Ten `while true do` machines: entry graph, three segments,
+            // parse core, interpreter fetch/dispatch, shared recipe/edge token
+            // machines, and (goal 5) the per-use constant walker, whose walk is
+            // dispatched through seeded state ids instead of a linear reader.
+            // The seed-ISA handler-shape loop uses a bounded `for` loop
+            // instead, so it is not counted here.
+            assert_eq!(raw.matches("while true do").count(), 10);
             // K3-FULL: the exported first statement is now the folded key term; the
             // claim (no `local` binding across stage exports) is the same as before.
             assert!(!raw.contains("local pv=VMS["));
-            assert!(!raw.contains("local P,np,entry,KImg=VMS["));
+            assert!(!raw.contains("local P,np,entry=VMS["));
             assert_eq!(raw.matches("pv=VMS[").count(), 1);
-            assert_eq!(raw.matches("P,np,entry,KImg=VMS[").count(), 1);
+            assert_eq!(raw.matches("P,np,entry=VMS[").count(), 1);
             assert_eq!(raw.matches("local RD=function(v,l,n,s,f)").count(), 1);
             assert_eq!(raw.matches("local ED=function(v,l,f,ek)").count(), 1);
             assert!(
                 raw.matches("repeat v=").count() >= 34,
                 "token machines must carry dense nested dead paths"
             );
-            // Split functions: frame setup, prototype header, upvalue
-            // wiring, constant pool.
+            // Split functions: frame setup, prototype header, upvalue wiring.
+            // Goal 5 removed the fourth split stage (the constant pool writer,
+            // `PK`): there is no pool to write, and the constants ride inside
+            // the prototype's own code region instead.
             assert!(raw.contains("local SETUP=function(fid,args)"));
             assert!(raw.contains("local PH=function()"));
             assert!(raw.contains("local PU=function()"));
-            assert!(raw.contains("local PK=function()"));
+            assert!(!raw.contains("local PK=function()"));
+            assert!(!raw.contains("KBase=pos();gk=0;"));
             assert!(raw.contains("local F,R,va,RX,RF,K;"));
             assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);"));
-            // K13c step 2: the constants are rebuilt by `DC`, so the frame may
-            // only bind `K` after it -- binding before reads a table the load
-            // pass has already released.
-            assert!(raw.contains("code=DC(fid) end;K=F.__obf_proto_k;"));
+            // Goal 5: the constants live in the code region, so the frame may
+            // only bind `K` after `DC` has materialized the code; the synthesizer
+            // reads that region per use and no value table exists.
+            assert!(raw.contains("code=DC(fid) end;K=code[-1];"));
+            assert!(raw.contains("KGC=function(Q,n,m,KS,KT)"));
             // Graph fetch dynamically derives successors and the recipe id,
             // then routes that id into the random semantic fragment pool.
             // Tuple slots follow the per-image field order.
@@ -1050,7 +1056,13 @@ fn stages_are_flattened_into_seeded_state_machines() {
             assert_eq!(raw.matches(&fetch).count(), 1);
             let fetch_at = raw.find(&fetch).unwrap();
             assert!(raw[fetch_at..].starts_with(&fetch));
-            assert!(raw[fetch_at..raw.len().min(fetch_at + 500)].contains(";pc=next1;w="));
+            // K22: the fetch tail advances `pc`, re-seeds the rolling context key and
+            // publishes the entry wire token before flipping the dispatch flag, so
+            // the window is a little wider and the pin checks the two anchors
+            // separately instead of one contiguous spelling.
+            let tail = &raw[fetch_at..raw.len().min(fetch_at + 900)];
+            assert!(tail.contains(";pc=next1;"), "fetch tail missing pc advance");
+            assert!(tail.contains("w="), "fetch tail missing dispatch flag");
             // Collect this seed's three-digit state numbers.
             let mut found = std::collections::BTreeSet::new();
             for token in crate::lexer::lex(&raw, target).unwrap() {
@@ -1126,7 +1138,7 @@ fn decoder_splits_into_seeded_random_sections() {
             // Wiring order must be block/outer inverse -> LZW helper(s) ->
             // compression frame -> semantic reader(s) -> semantic core.
             let wiring_at = raw.find("local C=VMS[").expect("transport wiring");
-            let wiring_end = wiring_at + raw[wiring_at..].find("P,np,entry,KImg=VMS[").unwrap();
+            let wiring_end = wiring_at + raw[wiring_at..].find("P,np,entry=VMS[").unwrap();
             let wiring = &raw[wiring_at..wiring_end];
             let lzw_at = wiring.find("local LD=VMS[").expect("LZW wiring");
             let body_at = wiring.find("local B=VMS[").expect("frame wiring");

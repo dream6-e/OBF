@@ -75,8 +75,16 @@ fn k7_wire_image_bytes_are_pinned() {
         // and 1126 -> 1260 (luau, +134 B = 67 slots). The fingerprints change once, for
         // that single encoding decision; the public `.obf` bytes are untouched (this
         // probe's canonical image is unchanged), and no semantic field count moved.
-        (Target::Lua51, 7001u64, 1264usize, 0x0d7a445afbd605f7u64),
-        (Target::Luau, 7351u64, 1260usize, 0x17c8f04d5b648210u64),
+        // Goal 5 (2026-09-15, ISA19) -- the image *layout* changed by design: the
+        // constant-pool section is gone and every prototype's code region now ends
+        // with `[constants block][u32 block_len]` (whose bytes are keyed), so the
+        // lengths move 1264 -> 1263 (lua51) and 1260 -> 1259 (luau) and both
+        // fingerprints are re-recorded. The public `.obf` stays byte-identical
+        // (this probe's canonical image is unchanged); the ISA byte inside the
+        // image is covered by the fingerprint, which is why the version is part
+        // of this re-record.
+        (Target::Lua51, 7001u64, 1263usize, 0x0925476ae455c574u64),
+        (Target::Luau, 7351u64, 1259usize, 0x338ee8349017d5fau64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();

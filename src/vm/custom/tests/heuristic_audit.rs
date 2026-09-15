@@ -239,29 +239,89 @@ type AuditPins = (
 //     expansion only. M3b, the KAT words, M4's census, M4b, M5 (4,1812) and M6 all
 //     stayed byte-for-byte: a per-segment permutation cannot add a value class, a
 //     pretty constant or a repeated word.
+// K22 (2026-09-14, rolling context chain: keyed wire tokens + operand digest) --
+// measured Lua51 diff: the *only* moved cells are inside the M4a literal census.
+// `0` 436 -> 440 and `70` 53 -> 54, with the previous 12th entry `73`/50 falling
+// below the cut and `6`/50 entering: the batch adds one 0 (the conditional-add
+// spelling's `or 0`), and its 5-digit wire literals plus the digest weights make the
+// small-value classes marginally more common. M1 (96, per-segment tables), M2's
+// decoded stream (1523 B), M3b/KAT words, M4's big-value census, M4b (0 skipped),
+// M5 (4, 1812), M6 (0 pairs) and M7 ([568, 560, 550, 134, 17] gap 416) are
+// byte-for-byte unchanged -> no new API word, no new pretty constant, no repeated
+// ciphertext word: the chain buys its static surface with literals already in class.
+// P7 (2026-09-14, goal-3 micro-op MBA layer) -- measured Lua51 diff: the moved
+// cells are exactly the large-literal census and the counts of the small values it
+// shares terms with. M3b count 234 -> 390 and its sum grows by ~1.2e11: every drawn
+// coefficient pair and modulus spelling (`1000003..301000002`, `100003..999982`) is
+// a new literal >= 1e6, which is the point of the layer -- an analyst reading the
+// template no longer sees `sl+vo`, `ip+1`, `#q~=3` or `vo~=0`, and the price is
+// algebra that carries its own coefficients. M4a counts rise correspondingly (`1`
+// 502 -> 545, `0` 440 -> 478, `2` 231 -> 248), and the 12th entry is unchanged
+// (`6`/50, so no value class enters or leaves the top 12). M1 = 96, M2's decoded
+// stream (1523 B), the KAT words (only the audited getfenv capture), M4b (0
+// skipped), M5 (4, 1812), M6 (0 pairs) and M7 ([568, 560, 550, 134, 17], gap 416)
+// are byte-for-byte unchanged -> no new API word, no new pretty constant, no
+// repeated ciphertext word, no new string class.
+// P7 final draw shape (same batch, 2026-09-14) -- the layer's two literal draws were
+// re-specified after the anchor census and the measured diff is M3b/M4a only:
+//   M3b (390, 9007611512925197, 2^52) -> (378, 9007550309607896, 2^52). Coefficients
+//     are now drawn from 1e6..1.2e6 instead of 1e6..3.01e8 (`mba::coefficient_pair`),
+//     because the packed-reference field sites fold operands that reach ~9e6 and
+//     `9e6 * 1.2e6 < 2^53` keeps every product exact; 12 spellings fall below the 1e6
+//     gate and the sum follows (the payload's 2^52 max is untouched).
+//   M4a `2` 248 -> 330, `15` 73 -> 88, `8` 56 -> 68, `16`/73 enters the top-12 and
+//     `6`/50 leaves; `1` 545 -> 531. Two spelling sources move the small-value census:
+//     the poly form now carries 7-digit coefficients, and the modulus/half sum forms
+//     delegate to the shared `transport::opaque_split` (its parts are drawn under
+//     `is_nice_part` rejection, which is the same predicate the anchor floor uses, so
+//     the two layers can no longer disagree about what an anchor is) -- those parts are
+//     often small. `0` (478), `3`, `4`, `5`, `28`, `7`, `70` are unchanged, so no new
+//     value class, no new API word: M1 = 96, M2's decoded stream, the KAT words, M4b,
+//     M5, M6 and M7 are byte-for-byte identical.
+// Goal 5 (2026-09-15, ISA19) -- the constant-pool section became each
+// prototype's keyed code-region tail, so every length-sensitive measure moves
+// while the *shape* measures do not:
+//   M1 96 (unchanged)            the symbol census is the three transport
+//                                alphabets' union; the payload reshuffle cannot
+//                                change which bytes appear.
+//   M2 (1523,2,3,3) -> (1503,0,3,3)  the stream is 20 B shorter and its length
+//                                now lands on a different residue pair -- a pure
+//                                length artifact (M6/M3a stay put, so nothing
+//                                structural moved).
+//   M3b (378, ...) -> (377, ...)  one fewer big literal: the pool's per-record
+//                                coordinates held a `>= 1e6` mask constant that
+//                                the block length + key fold replaced.
+//   M4 top-12 census              the small-literal order reshuffles with the
+//                                payload (31 -> 15, 70 -> 75, one value
+//                                exchanged at the tail); the K9b floor for `256`
+//                                (4 sites) is unchanged.
+//   M5 (4,1812) -> (4,1779)       four long blobs still, 33 B less text.
+//   M7 gap 416 -> 408             the top string lengths moved by a few bytes.
+//   M3a / M4b / M6 (all zeros)    untouched: no KAT word, no skipped number,
+//                                no repeated u32 in the outer ciphertext.
 const PINS_LUA51_7001: AuditPins = (
     96,
-    (1523, 2, 3, 3),
+    (1503, 0, 3, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (234, 9007493881568240, 4503599627370496),
+    (377, 9007550309001824, 4503599627370496),
     [
-        (1, 502),
-        (0, 433),
-        (2, 231),
-        (3, 147),
+        (1, 522),
+        (0, 491),
+        (2, 331),
+        (3, 152),
         (4, 127),
-        (5, 93),
-        (15, 73),
-        (28, 71),
-        (7, 63),
-        (8, 56),
-        (70, 53),
-        (73, 50),
+        (15, 117),
+        (5, 95),
+        (75, 70),
+        (16, 68),
+        (28, 68),
+        (8, 65),
+        (7, 64),
     ],
     0,
-    (4, 1812),
+    (4, 1779),
     (0, 0),
-    ([568, 560, 550, 134, 17], 416),
+    ([560, 543, 542, 134, 17], 408),
 );
 
 // K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
@@ -389,29 +449,55 @@ const PINS_LUA51_7001: AuditPins = (
 // part 0's body, whose table this batch deliberately left alone. M2's decoded stream
 // (1550 B), M3b, the KAT words, M4's whole census, M4b (38) and M6 are byte-for-byte
 // unchanged -> no new literal class, no new pretty constant, no repeated word.
+// K22 (2026-09-14, rolling context chain) -- measured Luau diff, same attribution as
+// Lua51: M4a `0` 407 -> 410 only (the 12th entry `6`/50 is byte-identical on both
+// targets, so the two goldens moved for the same reason), M1/M2/M3b/M4b/M5/M6/M7
+// unchanged. M7's top-5 already sat at gap 404 after K3s2 and does not move here.
+// P7 (2026-09-14, goal-3 micro-op MBA layer) -- measured Luau diff, same
+// attribution as Lua51: M3b count 226 -> 330 with the drawn coefficient literals,
+// M4a `1` 520 -> 558, `0` 410 -> 448, `2` 241 -> 254, `3` 168 -> 174, `4` 162 -> 163,
+// `5` 80 -> 82, `8` 67 -> 68 (the bit-family spellings share the same coefficient
+// pool, so the class mix is the Lua51 one), 12th entry `6`/50 byte-identical. M1/M2
+// (1550 B)/KAT words/M4b (38)/M5 (4, 1781)/M6/M7 ([567, 542, 538, 134, 15], gap 404)
+// unchanged.
+// P7 final draw shape (same batch, 2026-09-14) -- Luau moves for exactly the Lua51
+// reasons (narrower coefficient draws, `opaque_split`-drawn modulus sums) and on the
+// same two cells: M3b (330, 9007583562583119, 2^52) -> (318, 9007524907854693, 2^52),
+// and M4a `2` 254 -> 322, `8` 68 -> 78, `16`/60 enters the top-12 while `6`/50 leaves,
+// `1` 558 -> 550. The bit-family spellings share the same coefficient pool on this
+// target, so the class mix tracks Lua51's (there `2`/330 and `16`/73). `0` (448), `3`,
+// `4`, `5`, `42`, `89`, `18`, `22` and M1/M2 (1550 B)/KAT words/M4b (38)/M5
+// (4, 1781)/M6/M7 ([567, 542, 538, 134, 15], gap 404) are byte-for-byte unchanged.
+// Goal 5 (2026-09-15, ISA19) -- same re-record as the lua51 config above, with
+// the Luau-side numbers: M2 total 1550 -> 1493 (57 B shorter, residues follow),
+// M4b skipped numbers 38 -> 37 and the whole M4 order reshuffles -- both are
+// small-literal census artifacts of the new payload (the block's tag bytes and
+// the block lengths are the new literals' neighbours). M1 (96), M3a (KAT rows),
+// M3b count/sum/max (318, ...) and M6 (0, 0) are untouched, and the new M4 top-12
+// still carries exactly four `256` sites, the K9b floor.
 const PINS_LUAU_7351: AuditPins = (
     96,
-    (1550, 2, 2, 0),
+    (1493, 2, 1, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (226, 9007479735086075, 4503599627370496),
+    (318, 9007524907854693, 4503599627370496),
     [
-        (1, 520),
-        (0, 405),
-        (2, 241),
-        (3, 168),
-        (4, 162),
-        (5, 80),
-        (42, 77),
-        (89, 71),
-        (8, 67),
-        (18, 59),
-        (22, 52),
-        (6, 50),
+        (1, 544),
+        (0, 464),
+        (2, 311),
+        (3, 172),
+        (4, 154),
+        (8, 89),
+        (5, 82),
+        (6, 67),
+        (19, 63),
+        (18, 60),
+        (16, 57),
+        (9, 50),
     ],
-    38,
-    (4, 1781),
+    37,
+    (4, 1730),
     (0, 0),
-    ([567, 542, 538, 134, 15], 404),
+    ([542, 529, 525, 134, 15], 391),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

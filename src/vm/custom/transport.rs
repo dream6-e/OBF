@@ -441,6 +441,21 @@ pub(crate) fn embedded_outer_ciphertext(
     seed: u64,
 ) -> Result<Vec<u8>, Diagnostic> {
     let segments = segment_literals(source, target, seed)?;
+    accept_segment_streams(&segments, target, seed)
+}
+
+/// The acceptance half of [`embedded_outer_ciphertext`], split out so gates can
+/// hand it *mutated* segment text: try all six orders, base86-decode, apply the
+/// outer ChaCha8 domain, authenticate frame v2, apply the inner domain and
+/// accept only the unique strict LZW/semantic image. This is the whole
+/// definition of "accepted stream" -- a chain candidate that survives
+/// `chained_segment_orders` has not been accepted yet (K19's edit gate states
+/// its claim over this path, not over the chain-order search alone).
+pub(crate) fn accept_segment_streams(
+    segments: &[Vec<u8>],
+    target: Target,
+    seed: u64,
+) -> Result<Vec<u8>, Diagnostic> {
     let alphabets = base86_segment_alphabets(seed);
     let params = cipher_params(seed);
     let chacha = chacha_params(seed);
@@ -449,7 +464,7 @@ pub(crate) fn embedded_outer_ciphertext(
     let permutation_term = perm_term(seed);
     let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
     let mut winners = Vec::new();
-    for (_order, parts) in chained_segment_orders(&segments, &alphabets) {
+    for (_order, parts) in chained_segment_orders(segments, &alphabets) {
         let stream: Vec<u8> = parts.iter().flatten().copied().collect();
         // The decoded stream must open with the fixed transport watermark;
         // everything after it is the outer ciphertext body. The watermark

@@ -166,6 +166,13 @@ struct AuditPins {
 //              stream, because the private image re-layouted (see the
 //              k7 image-length pin: 1,141 -> 1,118 on this config). Length, not
 //              structure: check2 still reads (86 distinct, span 99).
+// 2026-09-14 目标 3（P7 微操作 MBA 层）实测 Lua51 diff，只动一项：
+//   check8 相邻字面量对数 52 -> 62，gcd 仍为 1。P7 为每个被改写的微操作站点抽
+//     系数对 `(p, p+1)`（poly 家族 `x*(p+1)-x*p`），于是代码区多了若干多位数相邻
+//     对；gcd 保持 1 说明没有引入周期性结构。check1/2/3/4/5/6/7/9 一字未动：层里
+//     的字面量按「非漂亮值」抽取（`transport::is_nice_part` 拒绝采样），模数只写成
+//     `2^32`/`(2^16*2^16)` 这类无十进制数字串的形式或 nice-free 的两项和，所以漂亮
+//     值计数与锚点门（`anchor_floor`）都保持在各自的地板上。
 fn pins_lua51() -> AuditPins {
     AuditPins {
         // K19（分段密钥回灌）实测：`86` 由 4 降到 3 —— 旋转后的数字表用 `%r`，
@@ -273,27 +280,45 @@ fn pins_lua51() -> AuditPins {
         //     pre-existing 0xffffff mask constant, the density fail flag stays false,
         //     and check1/2/3/5/6/7/8/9 are byte-for-byte unchanged -- no new constant
         //     class reached the shell, and the threshold census got *more* varied.
-        check4_thresholds: (9, 16777215, false),
+        // 目标 5（2026-09-15，ISA19）-- measured Lua51 diff against the goal-3 pin:
+        //   check4 (9, 16777215, false) -> (11, 16777215, false). The constant walker
+        //     adds two distinct range bounds of its own (the two grouped search trees
+        //     over tag and code); max and the density flag are unchanged, and no new
+        //     nice constant class appeared (check1 still carries exactly four `256`
+        //     sites -- the K9b floor -- plus the same 2147483647/4294967296 rows).
+        //   check5 first class `X=X+N` 28 -> 30 (the walker's state machine and the two
+        //     per-tree accumulators are three more `X=X+N` assignments) and the 8th
+        //     entry slides: `X=(X+X+(N*X.X+N))%X.X` (8) leaves the top-8, the three
+        //     count-9 classes (`X=N`, `X[N]=N+N`, the long pack string) now fill it.
+        //     Class count stays 13.
+        //   check6 1 -> 0 and check9 (19765, 0, false) -> (19007, 2, false): the
+        //     alias-prologue census loses the one prologue the goal-3 golden had, and
+        //     the inner decoded stream is 758 B shorter with remainder 2 instead of 0.
+        //     The `fail` flag stays false -- no repeated word, no common divisor -- so
+        //     the constants block (which rides inside the image, i.e. into the LZW
+        //     input) introduced no periodic structure. check7 stays EMPTY and check8
+        //     (1, 62) is unchanged.
+        check4_thresholds: (11, 16777215, false),
         check5_templates: (
             13,
             vec![
-                ("X=X+N".to_string(), 28),
+                ("X=X+N".to_string(), 30),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
                 ("X[N]=N".to_string(), 16),
+                ("X=N".to_string(), 9),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
-        check6_alias_prologues: 1,
+        check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 52),
-        check9_stream: (19765, 0, false),
+        check8_literal_gcd: (1, 62),
+        check9_stream: (19007, 2, false),
     }
 }
 
@@ -385,7 +410,10 @@ fn pins_luau() -> AuditPins {
         // slots with a zero initialiser -- measured `X[N]=N` 17 -> 19 and check6 0 -> 1;
         // both moved back when those locals stopped being slots, and the surviving `86`
         // count is recorded as a cap in `anchor_floor`'s Luau table.
-        check1_nice_fails: vec![(86, 3), (256, 4), (16777216, 4), (2147483647, 27)],
+        // 目标 5（2026-09-15，ISA19）：check1 由四类降到三类 —— 裸 `86` 出现数 3 -> 2
+        // 掉出锚点表（新走查的基数拼写走既有的 `c1+c2` 和式，不再多一处字面量），
+        // `256` 仍是 4（K9b floor）、`16777216` 4、`2147483647` 27，三类全部未动。
+        check1_nice_fails: vec![(256, 4), (16777216, 4), (2147483647, 27)],
         // K3-FULL 第二步 (2026-09-13, per-segment digit tables) -- luau moves two cells.
         //   check2 (86, 99, false) -> (96, 99, true): the stream's symbol set is the
         //     union of the three per-segment tables (96 of 99 printable pool bytes), and
@@ -412,27 +440,42 @@ fn pins_luau() -> AuditPins {
         //     falls. Same seed-accident direction K14 recorded in mirror image (Lua
         //     5.1 fell 1 -> 0 there); the prologue already had five slots, so no new
         //     construct appears. check1/2/3/5/7/8/9 are byte-for-byte unchanged.
-        check4_thresholds: (8, 65535, false),
+        // 目标 5（2026-09-15，ISA19）-- measured Luau diff against the goal-3 pin,
+        // same causes as the Lua51 config above, with three target-specific slides:
+        //   check4 (8, 65535, false) -> (11, 65535, false): the walker's two grouped
+        //     search trees add three distinct bounds; the max stays the pre-existing
+        //     65535 spelling (the Lua51 side picked up the `0xffffff` mask instead) and
+        //     the density flag is still false.
+        //   check5 class count stays 12 (Lua51 goes to 13), first class `X=X+N` 27 -> 31
+        //     and the 8th entry slides from the fold template (8) to the long pack
+        //     string (9); `X=N` reaches 10 here -- below the cut it clears on Lua51.
+        //   check8 (1, 64) unchanged: the 6+ digit pair census and its gcd are untouched.
+        //   check9 (24603, 3, false) -> (24194, 4, false): the inner decoded stream is
+        //     409 B shorter and its remainder below 5 moves 3 -> 4; the `fail` flag is
+        //     still false (no repeat, no common divisor -- the constants block rode into
+        //     the LZW input, not into the emitted text). check6 stays 0, check7 EMPTY,
+        //     check2/check3 unchanged.
+        check4_thresholds: (11, 65535, false),
         check5_templates: (
             12,
             vec![
-                ("X=X+N".to_string(), 27),
+                ("X=X+N".to_string(), 31),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
                 ("X[N]=N".to_string(), 16),
+                ("X=N".to_string(), 10),
                 ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
-                ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 60),
-        check9_stream: (24603, 3, false),
+        check8_literal_gcd: (1, 64),
+        check9_stream: (24194, 4, false),
     }
 }
 

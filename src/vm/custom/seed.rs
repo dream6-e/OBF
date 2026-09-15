@@ -519,7 +519,9 @@ pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize, site_w: us
 
 /// The seed-loop template. `{FDIV}` is the only per-target line (`MF(x/y)` on
 /// Lua 5.1, `x//y` on Luau). The loop uses only module-scope helpers
-/// (`E`, `TY`, `MF`, `PC`, `U`, `Z`) so no plaintext global survives.
+/// (`E`, `TY`, `MF`, `PC`, `U`, `Z`) so no plaintext global survives; goal 5
+/// adds `KGC` (the per-use constant synthesizer) and the interpreter's `K`
+/// binding (the prototype's code region), both of which arrive as H-locals.
 const SEED_LOOP: &str = r#"local SEED=function(prog,site,expect)
 local TNUM,TFUN,TTAB,SN,HN,tmp=TY(0),TY(E),TY(STAB),#STAB,#SEEDH,{};
 local seedfail=function(m)E("seedfail:"..m)end;
@@ -532,7 +534,7 @@ local rv=function(re)
 local kind,vi,vo=refd(re);
 if kind==0 then if vi>15 or vo~=0 then seedfail(9)end;return tmp[vi];
 elseif kind==1 then if vi>2 or vo>255 or vo%1~=0 then seedfail(10)end;local sl=site[vi+1];if TY(sl)~=TNUM then seedfail(11)end;return R[RX(sl+vo)];
-elseif kind==2 then if vi~=3 or vo>255 or vo%1~=0 then seedfail(12)end;local sl=site[4];if TY(sl)~=TNUM then seedfail(13)end;return K[sl+vo];
+elseif kind==2 then if vi~=3 or vo>255 or vo%1~=0 then seedfail(12)end;local sl=site[4];if TY(sl)~=TNUM then seedfail(13)end;return KGC(K,F.__obf_proto_nk,sl+vo);
 elseif kind==3 then if vi>999999 or vo~=0 then seedfail(14)end;return vi;
 elseif kind==4 then if vi==0 or vi==1 then seedfail(15)end;if vi>9 or vo~=0 then seedfail(16)end;return site[vi];
 elseif kind==5 then if vi>=SN or vo~=0 then seedfail(17)end;return STAB[vi+1];
@@ -629,9 +631,17 @@ end seedfail(35);end;"#;
 /// `local SEED=function(prog,site,expect)...end;` (spliced inside H,
 /// R/RX/K arrive as H-locals so arms carry only the site block).
 pub(crate) fn seed_loop_lua(target: Target, seed: u64) -> String {
+    seed_loop_lua_upto(target, seed, true)
+}
+
+/// The fragment *before* the P7 micro-op MBA layer. Only the layer locks in
+/// `tests/seed_v1.rs` use it (P7 re-spells the P4/P5 sites those locks pin);
+/// it is never spliced into an artifact. The shell contract below still
+/// applies.
+pub(crate) fn seed_loop_lua_upto(target: Target, seed: u64, micro_op_mba: bool) -> String {
     let fdiv = if target.is_luau() { "x//y" } else { "MF(x/y)" };
     let body = SEED_LOOP.replace("{FDIV}", fdiv);
-    let deformed = super::seed_deform::p1_deform_template(&body, seed);
+    let deformed = super::seed_deform::p1_deform_template_upto(&body, target, seed, micro_op_mba);
     // P4 dead temps add lines (exact count asserted inside the deformer);
     // only the bound is checked here.
     assert!(
@@ -641,6 +651,23 @@ pub(crate) fn seed_loop_lua(target: Target, seed: u64) -> String {
     assert!(deformed.contains("100000"), "P1: fuel budget lost");
     assert!(!deformed.contains("{FDIV}"), "P1: FDIV placeholder leaked");
     deformed
+}
+
+/// The fragment's shell contract: helpers `seed_loop_lua` arms may call, as
+/// bound by the emitted shell (`emit.rs` splices the fragment inside the
+/// interpreter body, whose locals are these names).
+///
+/// `E`/`MF`/`TY`/`PC`/`U`/`Z` are covered by every differential fixture; the
+/// K7 bit captures `BX`/`BA`/`BO`/`BN` are what the goal-3 micro-op layer
+/// draws on Luau (`bit32.bxor/.band/.bor/.bnot`), so a Luau fixture that
+/// splices the fragment in must bind them too. Lua 5.1 has no bit library and
+/// its fragment uses pure arithmetic only, so the captures stay unbound there.
+pub(crate) fn seed_shell_prefix(target: Target) -> &'static str {
+    if target.is_luau() {
+        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;local BX,BA,BO,BN=bit32.bxor,bit32.band,bit32.bor,bit32.bnot;\nlocal KGC=function(Q,n,m)if TY(n)~=TY(0) or n%1~=0 or TY(m)~=TY(0) or m%1~=0 or m<0 or m>=n then E(\"seedfail:13\")end return Q[m] end;\n"
+    } else {
+        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;\nlocal KGC=function(Q,n,m)if TY(n)~=TY(0) or n%1~=0 or TY(m)~=TY(0) or m%1~=0 or m<0 or m>=n then E(\"seedfail:13\")end return Q[m] end;\n"
+    }
 }
 
 /// Bit for an op in the routine-table usage mask.
@@ -1039,6 +1066,27 @@ mod tests {
         assert!(lua51.contains("MF("), "lua51 template lacks floor");
         assert!(luau.contains("//"), "luau template lacks //");
         assert!(!luau.contains("MF("), "luau template uses MF");
+        // Goal-3 micro-op layer: the bit family is Luau-only and must go
+        // through the K7 capture names (a foreign identifier would be a free
+        // global in the emitted shell); Lua 5.1 must not draw it at all.
+        for name in ["BX(", "BA(", "BO(", "BN("] {
+            assert!(
+                !lua51.contains(name),
+                "lua51 template draws the bit family: {name}"
+            );
+        }
+        if ["BX(", "BA(", "BO(", "BN("]
+            .iter()
+            .any(|name| luau.contains(name))
+        {
+            let shell = seed_shell_prefix(Target::Luau);
+            for name in ["BX", "BA", "BO", "BN"] {
+                assert!(
+                    shell.contains(&format!("{name},")) || shell.contains(&format!("{name}=bit32")),
+                    "luau shell contract does not bind {name}"
+                );
+            }
+        }
         // Both must carry the fail-closed budget and validator.
         for (name, body) in [("lua51", lua51.as_str()), ("luau", luau.as_str())] {
             assert!(body.contains("seedfail"), "{name} lacks seedfail");
