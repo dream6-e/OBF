@@ -519,7 +519,9 @@ pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize, site_w: us
 
 /// The seed-loop template. `{FDIV}` is the only per-target line (`MF(x/y)` on
 /// Lua 5.1, `x//y` on Luau). The loop uses only module-scope helpers
-/// (`E`, `TY`, `MF`, `PC`, `U`, `Z`) so no plaintext global survives.
+/// (`E`, `TY`, `MF`, `PC`, `U`, `Z`) so no plaintext global survives; goal 5
+/// adds `KGC` (the per-use constant synthesizer) and the interpreter's `K`
+/// binding (the prototype's code region), both of which arrive as H-locals.
 const SEED_LOOP: &str = r#"local SEED=function(prog,site,expect)
 local TNUM,TFUN,TTAB,SN,HN,tmp=TY(0),TY(E),TY(STAB),#STAB,#SEEDH,{};
 local seedfail=function(m)E("seedfail:"..m)end;
@@ -532,7 +534,7 @@ local rv=function(re)
 local kind,vi,vo=refd(re);
 if kind==0 then if vi>15 or vo~=0 then seedfail(9)end;return tmp[vi];
 elseif kind==1 then if vi>2 or vo>255 or vo%1~=0 then seedfail(10)end;local sl=site[vi+1];if TY(sl)~=TNUM then seedfail(11)end;return R[RX(sl+vo)];
-elseif kind==2 then if vi~=3 or vo>255 or vo%1~=0 then seedfail(12)end;local sl=site[4];if TY(sl)~=TNUM then seedfail(13)end;return K[sl+vo];
+elseif kind==2 then if vi~=3 or vo>255 or vo%1~=0 then seedfail(12)end;local sl=site[4];if TY(sl)~=TNUM then seedfail(13)end;return KGC(K,F.__obf_proto_nk,sl+vo);
 elseif kind==3 then if vi>999999 or vo~=0 then seedfail(14)end;return vi;
 elseif kind==4 then if vi==0 or vi==1 then seedfail(15)end;if vi>9 or vo~=0 then seedfail(16)end;return site[vi];
 elseif kind==5 then if vi>=SN or vo~=0 then seedfail(17)end;return STAB[vi+1];
@@ -662,9 +664,9 @@ pub(crate) fn seed_loop_lua_upto(target: Target, seed: u64, micro_op_mba: bool) 
 /// its fragment uses pure arithmetic only, so the captures stay unbound there.
 pub(crate) fn seed_shell_prefix(target: Target) -> &'static str {
     if target.is_luau() {
-        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;local BX,BA,BO,BN=bit32.bxor,bit32.band,bit32.bor,bit32.bnot;\n"
+        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;local BX,BA,BO,BN=bit32.bxor,bit32.band,bit32.bor,bit32.bnot;\nlocal KGC=function(Q,n,m)if TY(n)~=TY(0) or n%1~=0 or TY(m)~=TY(0) or m%1~=0 or m<0 or m>=n then E(\"seedfail:13\")end return Q[m] end;\n"
     } else {
-        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;\n"
+        "local E=function(m)error(m,0)end;local MF=math.floor;local TY=type;local PC=pcall;local U=unpack or table.unpack;local Z=function(...)return {n=select('#',...),...}end;\nlocal KGC=function(Q,n,m)if TY(n)~=TY(0) or n%1~=0 or TY(m)~=TY(0) or m%1~=0 or m<0 or m>=n then E(\"seedfail:13\")end return Q[m] end;\n"
     }
 }
 

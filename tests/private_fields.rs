@@ -23,11 +23,13 @@ fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
     assert_eq!(image[6], 1, "generated scripts require private encoding 1");
     assert_eq!(
         u32::from_le_bytes(image[24..28].try_into().unwrap()),
-        18,
-        "generated scripts require private ISA18 images: keyed constant-pool payloads \
-         (K13c) plus the K3-FULL recipe dictionary, whose slots carry the renumbered \
-         opcode and the operand form as a byte pair, so the runtime rebuilds no form or \
-         permutation table"
+        19,
+        "generated scripts require private ISA19 images: the constant pool is gone -- \
+         each prototype's code region ends with `[constants block][u32 block_len]`, so \
+         the runtime validates the block once (seed-mode walk, count == nk) and keeps \
+         only the tag vector, synthesizing every value per use. The ISA18 recipe \
+         dictionary (renumbered opcode + operand form as a byte pair, no form or \
+         permutation table rebuilt) and the K13c keyed payloads still hold underneath"
     );
 }
 

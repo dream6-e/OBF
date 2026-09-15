@@ -48,9 +48,18 @@ fn inner_ciphertext_words_have_no_periodic_repeats() {
     // zero: still no repeated 4-byte word and no common divisor among repeat
     // distances -- the added byte is a 3-bit value per slot, which is exactly the kind
     // of structure a repeat census would catch, and it does not produce one.
+    // Re-recorded 2026-09-15 for goal 5 (ISA19): the constants moved out of the
+    // pool section into each prototype's code-region tail and are keyed with the
+    // same `pool_key_fold` chain, so the inner plaintext stream changes length
+    // again (lua51 1093 -> 1072, luau 1094 -> 1076 -- the block is shorter than
+    // the per-record pool encoding it replaced, by a different amount per
+    // target). Both zero halves stay zero: still no repeated 4-byte word and no
+    // common divisor among repeat distances -- the newly added keyed bytes and
+    // the u32 block lengths are exactly what this census would catch as
+    // structure, and they do not produce one.
     for (target, seed, expected) in [
-        (Target::Lua51, 7001u64, (1093usize, 0usize, 0u32)),
-        (Target::Luau, 7351u64, (1094usize, 0usize, 0u32)),
+        (Target::Lua51, 7001u64, (1072usize, 0usize, 0u32)),
+        (Target::Luau, 7351u64, (1076usize, 0usize, 0u32)),
     ] {
         let data = compile(AUDIT_PROBE, target).unwrap();
         let output = emit(&data, target, seed).unwrap();

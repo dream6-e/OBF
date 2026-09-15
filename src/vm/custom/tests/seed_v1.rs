@@ -64,7 +64,7 @@ local SEEDH={function(a,b)return a+b end,function()return "h1" end,function(p)re
 local RX=function(i)return i+10 end
 local K={[5]="k5",[6]="k6",[7]=false}
 local R={};R[12]="r12";R[13]=false;R[14]=0;R[15]={7,8};R[16]={}
-local F={__obf_proto_k=K}
+local F={__obf_proto_nk=8}
 "#;
 const SEED_V1_DATA: &str = r#"
 local UPS={};UPS[3]="u3";UPS[9]="u9"

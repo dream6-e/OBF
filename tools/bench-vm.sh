@@ -66,12 +66,12 @@ LUA51_VM="$ROOT/vm_lua51.out.lua"
 # byte budget lives. Caps are per target (the Luau shell carries a longer
 # runtime preamble) and are re-measured, not re-pinned, by K4 -- both numbers
 # are the ones the shell batch recorded.
-# 2026-09-14（目标 3/5 批次）：按用户指示把交付体积门统一改为 **81,000 B/目标**
-# （「体积门改为81kb(最终压缩后的)」），取代 K22 的 69,300 / 77,600 B（当时依据是 5 种子
-# 实测最坏 68,808 / 77,023 B + 余量）。归因与规则写在 semantic.rs 同一段；这一档不是
-# 「实测最坏 + 余量」，而是用户给定的交付上限，后续批次必须重新实测并向它对账。
-SHELL_CAP_LUA51=81000
-SHELL_CAP_LUAU=81000
+# 2026-09-15（目标 5 批次）：按用户指示把交付体积门从 81,000 B/目标改为 **90,000 B/目标**
+# （「体积门从81kb改成90kb」），取代目标 3 批次的 81,000 B 与 K22 的 69,300 / 77,600 B。
+# 归因与规则写在 semantic.rs 同一段；这一档不是「实测最坏 + 余量」，而是用户给定的交付
+# 上限，后续批次必须重新实测并向它对账。
+SHELL_CAP_LUA51=90000
+SHELL_CAP_LUAU=90000
 LUAU_VM="$ROOT/vm_luau.out.lua"
 LUA51_SRC="$ROOT/tests/fixtures/vm_lua51.lua"
 LUAU_SRC="$ROOT/tests/fixtures/vm_luau.lua"

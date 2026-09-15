@@ -369,7 +369,7 @@ fn global_function_segment_pool_is_decoder_coupled_interleaved_and_exact() {
             assert_eq!(image.segment_next_ids.len(), image.code_segments);
             physical_orders.insert(image.segment_physical_ids.clone());
 
-            let (layouts, _captures, _constants, segments) = semantic_pool_layouts(&image);
+            let (layouts, _captures, segments) = semantic_pool_layouts(&image);
             assert_eq!(segments.len(), image.code_segments);
             assert_eq!(layouts.len(), image.prototype_order.len());
             assert_eq!(image.segment_root_ids.len(), layouts.len());
@@ -603,10 +603,10 @@ fn per_prototype_register_abi_lowers_every_primitive_access() {
             assert_eq!(raw.matches("local RX,RF=RK(fid,R)").count(), 1);
             assert!(raw.contains("local F,R,va,RX,RF,K;"));
             assert!(raw.contains("F,R,va,RX,RF=SETUP(fid,args);"));
-            // K13c step 2: constants are rebuilt by `DC`, so the frame must
-            // read them only once the code (and with it the pool) is
-            // materialized -- reading before `DC` would index a released table.
-            assert!(raw.contains("code=DC(fid) end;K=F.__obf_proto_k;"));
+            // Goal 5: the constants live in the code region, so the frame binds
+            // `K` to it only after `DC` has materialized the code -- and there
+            // is no resident value table to read at all.
+            assert!(raw.contains("code=DC(fid) end;K=code[-1];"));
             // P0: register-file indexing now happens only in the three seed
             // loop sites (REG read, STORE, LOAD); classic bodies are gone.
             // P5: STORE ships two spellings (inline `R[RX(stix(si))]` or
@@ -856,6 +856,13 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
     // became the gate that matters, and the compensation gates are tests/shell.rs's
     // ratio pin, the pinned image/`.obf` bytes, and the real-machine differential gate
     // in tests/layout.rs.
+    // 2026-09-15 (goal 5: constant-pool removal / code-resident per-use synthesis) -- by
+    // user instruction the delivered-artifact budget moves again, 81,000 -> **90,000 B** per
+    // target (「体积门从81kb改成90kb」), superseding the goal-3 batch raise to 81,000 B. Same
+    // rule as every earlier step: the number is the user's shipped-size target, not a measured
+    // worst plus margin, so each batch re-measures against it and this note owns the
+    // attribution (no silent widening). The uncompressed 160,000 B static ceiling and the
+    // tests/shell.rs ratio pin are unchanged.
     // 2026-09-14 (goals 3+5: MBA micro-op layer + ephemeral string/constant synthesis) -- by
     // user instruction the delivered-artifact budget moves to 81,000 B per target
     // (「体积门改为81kb(最终压缩后的)」), superseding the K22 raise to 69,300/77,600 B. The
@@ -879,13 +886,13 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
             Target::Lua51,
             include_str!("../../../../tests/fixtures/vm_lua51.lua"),
             160_000usize,
-            81_000usize,
+            90_000usize,
         ),
         (
             Target::Luau,
             include_str!("../../../../tests/fixtures/vm_luau.lua"),
             160_000usize,
-            81_000usize,
+            90_000usize,
         ),
     ] {
         let data = compile(fixture, target).unwrap();
@@ -1463,15 +1470,13 @@ fn pool_token_helpers_mirror_segment_masking() {
 fn pool_field_profiles_cover_all_six_orders() {
     let mut combos = BTreeSet::new();
     let mut saw_plain = false;
-    let mut saw_flipped = false;
+    // Goal 5 removed the second (constant) pool and with it the flip bit: the
+    // one remaining pool has no sibling to swap with, so the field layout no
+    // longer draws one at all.
     for seed in 0..64u64 {
         let field = field_layout(seed);
         combos.insert((field.pool_mul, field.pool_add));
-        if field.pools_flipped {
-            saw_flipped = true;
-        } else {
-            saw_plain = true;
-        }
+        saw_plain = true;
         // The pool multiplier is coprime to 6, so one period covers every
         // quotient and every anonymous-slot permutation exactly once.
         let mut slots = BTreeSet::new();
@@ -1481,24 +1486,13 @@ fn pool_field_profiles_cover_all_six_orders() {
         }
     }
     assert!(combos.len() >= 6, "pool key variety: {combos:?}");
-    assert!(saw_plain && saw_flipped, "pool order never flips");
+    assert!(saw_plain, "pool key draw disappeared");
 }
 
 #[test]
-fn generated_parser_reads_global_capture_constant_pools() {
-    let mut plain = None;
-    let mut flipped = None;
-    for seed in 0..64u64 {
-        if field_layout(seed).pools_flipped {
-            flipped.get_or_insert(seed);
-        } else {
-            plain.get_or_insert(seed);
-        }
-    }
-    let (plain, flipped) = (plain.unwrap(), flipped.unwrap());
-    assert_ne!(plain, flipped);
+fn generated_parser_reads_the_capture_pool_and_publishes_no_constant_table() {
     for target in [Target::Lua51, Target::Luau] {
-        for seed in [plain, flipped] {
+        for seed in [0u64, 917] {
             let data = compile(
                 "local x=1;local function f()return x end print(f())",
                 target,
@@ -1506,39 +1500,52 @@ fn generated_parser_reads_global_capture_constant_pools() {
             .unwrap();
             let program = custom::decode(&data, target).unwrap();
             let raw = generate(&data, &program, seed).unwrap();
-            for marker in [
-                "local TU,TK=0,0;",
-                "for slot=1,TU do",
-                "for slot=1,TK do",
-                "local rec=UT[j]",
-                "local rec=KT[j]",
-            ] {
+            // The one pool that is left: capture tokens plus the per-prototype
+            // upvalue wiring that consumes them.
+            for marker in ["local TU=0;", "for slot=1,TU do", "local rec=UT[j]"] {
                 assert!(
                     raw.contains(marker),
-                    "{target} seed {seed}: missing pool marker {marker}"
+                    "{target} seed {seed}: missing capture-pool marker {marker}"
                 );
             }
+            // Goal 5: nothing in the emitted script may publish, cache or
+            // decode a constant *table* any more -- no pool walk, no region
+            // mirror and no `__obf_proto_k` value map. The only access path is
+            // the per-use synthesizer.
+            for stale in [
+                "for slot=1,TK do",
+                "local rec=KT[j]",
+                "KBase=pos();gk=0;",
+                "KLen=pos()-KBase;",
+                "T[ix]={tg,ko,kl,ka}",
+                "__obf_proto_rec=TT",
+                "KImg=SS(B,KBase,KBase+KLen-1)",
+                "__obf_proto_k=",
+                "__obf_proto_k[",
+                "K[sl+vo]",
+            ] {
+                assert!(
+                    !raw.contains(stale),
+                    "{target} seed {seed}: constant-pool plumbing survived: {stale}"
+                );
+            }
+            assert_eq!(
+                raw.matches("KGC=function(Q,n,m,KS,KT)").count(),
+                1,
+                "{target} seed {seed}: the per-use synthesizer must be defined once"
+            );
+            // Behaviorally: the synthesized constants reproduce the program.
+            let output = finalize(&raw, target, seed).unwrap();
+            let work = native::Workspace::new();
+            let path = work.0.join(if target.is_luau() {
+                "ephemeral_constants.luau"
+            } else {
+                "ephemeral_constants.lua"
+            });
+            fs::write(&path, output).unwrap();
+            let stdout = native::compile_and_run(target, &path);
+            assert_eq!(stdout, b"1\n", "{target} seed {seed}: synthesized constants");
         }
-        // Textual branch order is seed-shuffled, so flipped-order agreement
-        // between encoder and parser is proven behaviorally: the flipped
-        // seed must execute exactly like the native script on both targets.
-        let data = compile(
-            "local x=1;local function f()return x end print(f())",
-            target,
-        )
-        .unwrap();
-        let program = custom::decode(&data, target).unwrap();
-        let raw = generate(&data, &program, flipped).unwrap();
-        let output = finalize(&raw, target, flipped).unwrap();
-        let work = native::Workspace::new();
-        let path = work.0.join(if target.is_luau() {
-            "flipped_pools.luau"
-        } else {
-            "flipped_pools.lua"
-        });
-        fs::write(&path, output).unwrap();
-        let stdout = native::compile_and_run(target, &path);
-        assert_eq!(stdout, b"1\n", "{target}: flipped pools misbehave");
     }
 }
 

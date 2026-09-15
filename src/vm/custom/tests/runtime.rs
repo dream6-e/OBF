@@ -388,7 +388,7 @@ fn target_decoder_rejects_field_order_confusion_on_both_targets() {
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 735).unwrap();
         let field = image.field_layout;
-        let (layouts, _captures, _constants, segments) = semantic_pool_layouts(&image);
+        let (layouts, _captures, segments) = semantic_pool_layouts(&image);
         let code_bytes = semantic_code(&image, 0);
         let recipes = u16::from_le_bytes(code_bytes[..2].try_into().unwrap()) as usize;
         let len_offset = if field.dict_flipped { 0 } else { 2 };
@@ -506,16 +506,6 @@ struct PooledCaptureLayout {
     index: u8,
 }
 
-#[derive(Clone, Debug)]
-struct PooledConstantLayout {
-    physical_slot: usize,
-    token_positions: [usize; 3],
-    owner: usize,
-    index: usize,
-    tag: u16,
-    payload: std::ops::Range<usize>,
-}
-
 /// Parse one global capture pool at `position`: `total` records of three
 /// anonymous u16 slots ([owner, slot, payload]) under the per-record pool
 /// factorial profile. Returns the records and the first unconsumed offset.
@@ -594,98 +584,112 @@ fn parse_capture_pool(
 }
 
 /// Parse one global constant pool at `position`: `total` records of a
-/// three-slot u16 token header ([owner, index, tag]) plus the tag-dependent
-/// value payload. Returns the records and the first unconsumed offset.
-fn parse_constant_pool(
-    image: &super::semantic::SemanticImage,
-    layouts: &[SemanticPrototypeLayout],
-    constant_total: usize,
-    position: usize,
-) -> (Vec<PooledConstantLayout>, usize) {
-    let bytes = &image.bytes;
-    let field = image.field_layout;
-    let meta = field.metadata_positions();
-    let u16_at = |offset: usize| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
-    let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-    let mut position = position;
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::with_capacity(constant_total.min(bytes.len())); // cap: counts are untrusted until the wire lands;
-    for physical_slot in 1..=constant_total {
-        let slots = field.pool_field_slots(physical_slot);
-        let base = position;
-        let owner_position = base + slots[0] * 2;
-        let index_position = base + slots[1] * 2;
-        let tag_position = base + slots[2] * 2;
-        position = base + 6;
-        let wire_slot = physical_slot as u16;
-        let owner = usize::from(super::semantic::decode_pool_owner(
-            u16_at(owner_position),
-            wire_slot,
-            image,
-        ));
-        assert!(
-            owner < layouts.len(),
-            "constant pool record {physical_slot}: owner {owner} out of range"
-        );
-        let index = usize::from(super::semantic::decode_pool_slot(
-            u16_at(index_position),
-            owner as u16,
-            wire_slot,
-            image,
-        ));
-        let owner_constants =
-            u32_at(layouts[owner].header + meta.constants) as usize;
-        assert!(
-            index < owner_constants,
-            "constant pool record {physical_slot}: index {index} outside owner {owner} nk={owner_constants}"
-        );
-        let tag = super::semantic::decode_pool_payload(
-            u16_at(tag_position),
-            index as u16,
-            owner as u16,
-            image,
-        );
-        assert!(
-            tag <= 5,
-            "constant pool record {physical_slot}: bad tag {tag}"
-        );
-        let payload_start = position;
-        position += match tag {
-            0 => 0,
-            1 => 1,
-            2 | 4 => 8,
-            3 | 5 => {
-                let len = u32_at(position) as usize;
-                4 + len
-            }
-            _ => unreachable!("tag range was checked above"),
-        };
-        assert!(
-            seen.insert((owner, index)),
-            "duplicate constant pool record ({owner},{index})"
-        );
-        out.push(PooledConstantLayout {
-            physical_slot,
-            token_positions: [owner_position, index_position, tag_position],
-            owner,
-            index,
-            tag,
-            payload: payload_start..position,
-        });
-    }
-    (out, position)
+
+/// Goal 5: one code-resident constant as the independent wire reader sees it.
+#[derive(Clone, Debug, PartialEq)]
+struct CodeResidentConstant {
+    tag: u8,
+    /// Absolute file offset of the entry's tag byte.
+    tag_position: usize,
+    /// Absolute file offsets of the *keyed* payload bytes, in order.
+    payload: Vec<usize>,
+    /// Absolute file offset of a string/method entry's clear u32 length prefix.
+    length_position: Option<usize>,
+    value: ir::Constant,
 }
 
-/// ISA14 wire walker: contiguous 24-byte headers (captures/constants live
-/// only in the global pools now), then the capture and constant pools in
-/// `pools_flipped` order, then the segment graph. Exact consumption of every
-/// byte is asserted, exactly like the segment walker it extends.
+/// Recover a prototype's constants from the tail of its own code region,
+/// without the emitted walker.
+///
+/// Everything here is expressed in *region indices* -- the 0-based positions
+/// the emitted walker carries as `at`/`p`/`off`/`z` -- and mapped to file
+/// offsets through `layout.code_positions`. That mapping matters: a region is
+/// split across segments whose payloads are interleaved with other prototypes'
+/// in the file, so a multi-byte field can straddle two segments and must never
+/// be read as four consecutive file bytes. The mirror reads the clear u32 block
+/// length, walks `[tag][payload]` entries applying the documented key chain
+/// (`pool_key_fold` over every earlier entry's keyed length, `pool_key_byte` per
+/// payload byte), and returns the values. It is the same walk `KGC` performs, so
+/// agreement between the two proves the encoder's block layout, the runtime's
+/// per-use synthesis and this independent reader all describe one format.
+fn parse_code_constants(
+    image: &super::semantic::SemanticImage,
+    layout: &SemanticPrototypeLayout,
+) -> Vec<CodeResidentConstant> {
+    let bytes = &image.bytes;
+    let region = &layout.code_positions;
+    assert!(region.len() >= 4, "code region too short for a constant block");
+    // Region index -> file offset for the four bytes of a little-endian u32.
+    let u32_at = |from: usize| -> u32 {
+        let mut value = 0u32;
+        for (shift, offset) in region[from..from + 4].iter().enumerate() {
+            value |= u32::from(bytes[*offset]) << (8 * shift);
+        }
+        value
+    };
+    let tail = region.len() - 4;
+    let block_len = u32_at(tail) as usize;
+    assert!(
+        block_len + 4 <= region.len(),
+        "constant block {block_len} B overflows a {} B code region",
+        region.len()
+    );
+    let (mask, modulus) = super::semantic::pool_key_pair(image);
+    let mut acc = 0u64;
+    let mut at = tail - block_len;
+    let mut out = Vec::new();
+    while at < tail {
+        let tag = bytes[region[at]];
+        let (keyed_from, keyed_len, length_position) = match tag {
+            0 => (at + 1, 0usize, None),
+            1 => (at + 1, 1, None),
+            2 | 4 => (at + 1, 8, None),
+            3 | 5 => (at + 5, u32_at(at + 1) as usize, Some(region[at + 1])),
+            other => panic!("bad constant tag {other} in the code region"),
+        };
+        assert!(
+            keyed_from + keyed_len <= tail,
+            "constant entry runs past its block"
+        );
+        let mut plain = Vec::with_capacity(keyed_len);
+        for index in 0..keyed_len {
+            let key = super::semantic::pool_key_byte(acc, index as u64 + 1);
+            let byte = bytes[region[keyed_from + index]];
+            plain.push(((byte as u64 + 256 - key) % 256) as u8);
+        }
+        let value = match tag {
+            0 => ir::Constant::Nil,
+            1 => ir::Constant::Boolean(plain[0] == 1),
+            2 => ir::Constant::Number(u64::from_le_bytes(plain[..8].try_into().unwrap())),
+            3 => ir::Constant::String(plain),
+            4 => ir::Constant::Integer(i64::from_le_bytes(plain[..8].try_into().unwrap())),
+            _ => ir::Constant::Method(String::from_utf8(plain).unwrap()),
+        };
+        out.push(CodeResidentConstant {
+            tag,
+            tag_position: region[at],
+            payload: region[keyed_from..keyed_from + keyed_len].to_vec(),
+            length_position,
+            value,
+        });
+        at = keyed_from + keyed_len;
+        acc = super::semantic::pool_key_fold(acc, keyed_len as u64, mask, modulus);
+    }
+    assert_eq!(at, tail, "constant block does not end where its length says");
+    out
+}
+
+/// Wire walker: contiguous 24-byte headers (captures live only in the global
+/// capture pool; goal 5 moved the constants into the code regions), then the
+/// capture pool, then the segment graph. Exact consumption of every byte is
+/// asserted, exactly like the segment walker it extends -- which is also the
+/// proof that no constant pool exists any more: a third pool would leave bytes
+/// unconsumed.
 fn semantic_pool_layouts(
     image: &super::semantic::SemanticImage,
 ) -> (
     Vec<SemanticPrototypeLayout>,
     Vec<PooledCaptureLayout>,
-    Vec<PooledConstantLayout>,
     Vec<SemanticSegmentLayout>,
 ) {
     let bytes = &image.bytes;
@@ -697,18 +701,18 @@ fn semantic_pool_layouts(
     let mut position = 32usize;
     let mut layouts = Vec::with_capacity(prototypes);
     let mut capture_total = 0usize;
-    let mut constant_total = 0usize;
     for _ in 0..prototypes {
         let header = position;
         let captures = usize::from(u16_at(header + meta.captures));
         let segment_count = 2;
         let root_token_position = header + meta.root;
         let root_token = u16_at(root_token_position);
-        let constants = u32_at(header + meta.constants) as usize;
+        // Goal 5: the constant count is no longer parsed into a layout total --
+        // the block itself is walked (and its entry count checked against this
+        // same header field) by `parse_code_constants`.
         let records = u32_at(header + meta.records) as usize;
         let code_len = u32_at(header + meta.code_len) as usize;
         capture_total += captures;
-        constant_total += constants;
         position = header + 24;
         layouts.push(SemanticPrototypeLayout {
             header,
@@ -720,19 +724,7 @@ fn semantic_pool_layouts(
             root_token_position,
         });
     }
-    let (captures, constants, mut position) = if field.pools_flipped {
-        let (constants, position) =
-            parse_constant_pool(image, &layouts, constant_total, position);
-        let (captures, position) =
-            parse_capture_pool(image, &layouts, capture_total, position);
-        (captures, constants, position)
-    } else {
-        let (captures, position) =
-            parse_capture_pool(image, &layouts, capture_total, position);
-        let (constants, position) =
-            parse_constant_pool(image, &layouts, constant_total, position);
-        (captures, constants, position)
-    };
+    let (captures, mut position) = parse_capture_pool(image, &layouts, capture_total, position);
     let mut segments = Vec::with_capacity(prototypes * 2);
     for physical_slot in 1..=prototypes * 2 {
         // Segment tokens are anonymous same-width slots; the per-segment
@@ -810,11 +802,19 @@ fn semantic_pool_layouts(
         assert_eq!(id, 0);
         assert_eq!(layout.code_positions.len(), layout.code_len);
     }
-    (layouts, captures, constants, segments)
+    (layouts, captures, segments)
 }
 
+/// Goal 5 gate: the wire carries exactly one pool (captures) and nothing that
+/// reads back as a constant table, while every prototype's constants are
+/// *provably* still there -- inside its own code region, recoverable entry by
+/// entry through the documented key chain, in constant-index order, and equal to
+/// what the decoded program holds. The mirror is the same walk the emitted
+/// `KGC` performs, written independently in Rust, so a drift between the
+/// encoder's block layout and the runtime's per-use synthesis shows up here
+/// instead of at run time.
 #[test]
-fn capture_constant_pools_exist_in_wire_image() {
+fn capture_pool_mirror_and_code_resident_constants_hold_on_both_targets() {
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(
             "local function f(n)if n>0 then return f(n-1)end return n end print(f(2))",
@@ -824,7 +824,7 @@ fn capture_constant_pools_exist_in_wire_image() {
         let program = custom::decode(&data, target).unwrap();
         for seed in [0u64, 735] {
             let image = super::semantic::encode(&program, seed).unwrap();
-            let (layouts, captures, constants, segments) = semantic_pool_layouts(&image);
+            let (layouts, captures, segments) = semantic_pool_layouts(&image);
             let meta = image.field_layout.metadata_positions();
             let bytes = &image.bytes;
             let u16_at =
@@ -835,24 +835,39 @@ fn capture_constant_pools_exist_in_wire_image() {
                 .iter()
                 .map(|layout| usize::from(u16_at(layout.header + meta.captures)))
                 .sum();
-            let expected_constants: usize = layouts
-                .iter()
-                .map(|layout| u32_at(layout.header + meta.constants) as usize)
-                .sum();
-            assert_eq!(
-                captures.len(),
-                expected_captures,
-                "{target} seed {seed}: capture pool total"
-            );
-            assert!(
-                expected_captures > 0,
-                "fixture must exercise the capture pool"
-            );
-            assert_eq!(
-                constants.len(),
-                expected_constants,
-                "{target} seed {seed}: constant pool total"
-            );
+            // No constant pool: the captured total is the only pool total the
+            // wire can even express, and `semantic_pool_layouts` already proved
+            // exact byte consumption past it.
+            for (owner, layout) in layouts.iter().enumerate() {
+                let nk = u32_at(layout.header + meta.constants) as usize;
+                let mirrored = parse_code_constants(&image, layout);
+                assert_eq!(
+                    mirrored.len(),
+                    nk,
+                    "{target} seed {seed}: owner {owner} code-resident constant count"
+                );
+                for (index, constant) in mirrored.iter().enumerate() {
+                    assert!(
+                        layout.code_positions.contains(&constant.tag_position),
+                        "{target} seed {seed}: owner {owner} entry {index} outside its region"
+                    );
+                }
+                // Decoy prototypes carry synthetic constants (a real prototype
+                // order position does not exist for them), so only their block
+                // shape is pinned; the canonical prototypes must mirror their
+                // decoded constants value for value and in index order.
+                let old = image.prototype_order[owner];
+                if old >= program.prototypes.len() {
+                    continue;
+                }
+                let expected: Vec<ir::Constant> = program.prototypes[old].constants.clone();
+                assert_eq!(
+                    mirrored.iter().map(|c| c.value.clone()).collect::<Vec<_>>(),
+                    expected,
+                    "{target} seed {seed}: owner {owner} constants in the code region"
+                );
+            }
+            let _ = expected_captures;
             for (owner, layout) in layouts.iter().enumerate() {
                 let nu = usize::from(u16_at(layout.header + meta.captures));
                 let owned: BTreeSet<usize> = captures
@@ -865,18 +880,7 @@ fn capture_constant_pools_exist_in_wire_image() {
                     (0..nu).collect::<BTreeSet<_>>(),
                     "{target} seed {seed}: owner {owner} capture coverage"
                 );
-                let nk = u32_at(layout.header + meta.constants) as usize;
-                let kowned: BTreeSet<usize> = constants
-                    .iter()
-                    .filter(|record| record.owner == owner)
-                    .map(|record| record.index)
-                    .collect();
-                assert_eq!(
-                    kowned,
-                    (0..nk).collect::<BTreeSet<_>>(),
-                    "{target} seed {seed}: owner {owner} constant coverage"
-                );
-                // Pooled values match canonical ground truth. Decoy owners
+                // Decoy owners
                 // (past the canonical prototype count) carry no captures and
                 // only synthetic constants, so they are skipped here.
                 let old = image.prototype_order[owner];
@@ -896,17 +900,6 @@ fn capture_constant_pools_exist_in_wire_image() {
                         usize::from(index),
                         "{target} seed {seed}: capture index"
                     );
-                }
-                for record in constants.iter().filter(|record| record.owner == owner) {
-                    let expected = match program.prototypes[old].constants[record.index] {
-                        ir::Constant::Nil => 0,
-                        ir::Constant::Boolean(_) => 1,
-                        ir::Constant::Number(_) => 2,
-                        ir::Constant::String(_) => 3,
-                        ir::Constant::Integer(_) => 4,
-                        ir::Constant::Method(_) => 5,
-                    };
-                    assert_eq!(record.tag, expected, "{target} seed {seed}: constant tag");
                 }
             }
             assert_eq!(segments.len(), layouts.len() * 2);
@@ -928,27 +921,25 @@ fn pools_shuffle_across_seeds_and_interleave() {
             .iter()
             .map(|prototype| prototype.captures.len())
             .sum();
-        let canonical_constants: usize = program
+        let code_constants: usize = program
             .prototypes
             .iter()
             .map(|prototype| prototype.constants.len())
             .sum();
         assert!(canonical_captures >= 3, "fixture needs a shufflable pool");
+        assert!(
+            code_constants >= 3,
+            "fixture needs constants in the code regions"
+        );
         let mut capture_orders = BTreeSet::new();
-        let mut constant_orders = BTreeSet::new();
         for seed in [0u64, 1, 2, 3, 735, u64::MAX] {
             let image = super::semantic::encode(&program, seed).unwrap();
-            // Decoys never capture; at most the trailing decoy adds one
-            // synthetic numeric constant.
+            // Decoys never capture, so the pool total is exactly the canonical
+            // one; their synthetic constants live in their own code regions.
             assert_eq!(
                 image.capture_pool_owners.len(),
                 canonical_captures,
                 "{target} seed {seed}: capture pool total"
-            );
-            assert!(
-                (canonical_constants..=canonical_constants + 1)
-                    .contains(&image.constant_pool_owners.len()),
-                "{target} seed {seed}: constant pool total"
             );
             assert!(image.pools_interleaved, "{target} seed {seed}: interleave flag");
             capture_orders.insert(
@@ -959,22 +950,10 @@ fn pools_shuffle_across_seeds_and_interleave() {
                     .map(|(&owner, &slot)| (owner, slot))
                     .collect::<Vec<_>>(),
             );
-            constant_orders.insert(
-                image
-                    .constant_pool_owners
-                    .iter()
-                    .zip(&image.constant_pool_indices)
-                    .map(|(&owner, &index)| (owner, index))
-                    .collect::<Vec<_>>(),
-            );
         }
         assert!(
             capture_orders.len() >= 2,
             "{target}: capture pool order pinned across seeds"
-        );
-        assert!(
-            constant_orders.len() >= 2,
-            "{target}: constant pool order pinned across seeds"
         );
     }
 }
@@ -989,8 +968,8 @@ fn target_decoder_rejects_every_pool_corruption_on_both_targets() {
         .unwrap();
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 917).unwrap();
-        let (layouts, captures, constants, _) = semantic_pool_layouts(&image);
-        assert!(captures.len() >= 2 && constants.len() >= 4);
+        let (layouts, captures, _) = semantic_pool_layouts(&image);
+        assert!(captures.len() >= 2);
         let meta = image.field_layout.metadata_positions();
         let u16_at = |offset: usize| {
             u16::from_le_bytes(image.bytes[offset..offset + 2].try_into().unwrap())
@@ -1000,9 +979,18 @@ fn target_decoder_rejects_every_pool_corruption_on_both_targets() {
         };
         let owner_nu =
             |owner: usize| usize::from(u16_at(layouts[owner].header + meta.captures));
-        let owner_nk =
-            |owner: usize| u32_at(layouts[owner].header + meta.constants) as usize;
         let mut corruptions = Vec::new();
+        // Goal 5: the constant table is gone -- the corruptions below attack the
+        // code-resident blocks instead, and every one of them has to fail closed
+        // during `DC` (which walks every prototype's block before user code runs).
+        let mut blocks: Vec<(usize, Vec<CodeResidentConstant>)> = (0..layouts.len())
+            .map(|owner| (owner, parse_code_constants(&image, &layouts[owner])))
+            .filter(|(_, constants)| !constants.is_empty())
+            .collect();
+        assert!(
+            blocks.len() >= 2 && blocks.iter().map(|(_, c)| c.len()).sum::<usize>() >= 4,
+            "fixture must carry constants in at least two code regions"
+        );
 
         // Duplicate capture slot (also leaves the overwritten slot missing).
         let (first, second) = (&captures[0], &captures[1]);
@@ -1080,77 +1068,54 @@ fn target_decoder_rejects_every_pool_corruption_on_both_targets() {
             .copy_from_slice(&parent_violation.to_le_bytes());
         corruptions.push(("capture-parent-violation", bad));
 
-        // Duplicate constant index (also leaves the overwritten index missing).
-        let (first, second) = (&constants[0], &constants[1]);
+        let (owner, constants) = blocks.remove(0);
+        let region_span = &layouts[owner].code_positions;
+
+        // Tag byte outside 0..=5: the walk's tag dispatch has no arm for it.
         let mut bad = image.clone();
-        let slot = second.physical_slot as u16;
-        let owner_token =
-            super::semantic::encode_pool_owner(first.owner as u16, slot, &image);
-        bad.bytes[second.token_positions[0]..second.token_positions[0] + 2]
-            .copy_from_slice(&owner_token.to_le_bytes());
-        let index_token = super::semantic::encode_pool_slot(
-            first.index as u16,
-            first.owner as u16,
-            slot,
-            &image,
-        );
-        bad.bytes[second.token_positions[1]..second.token_positions[1] + 2]
-            .copy_from_slice(&index_token.to_le_bytes());
-        corruptions.push(("duplicate-constant-index", bad));
+        bad.bytes[constants[0].tag_position] = 6;
+        corruptions.push(("code-constant-bad-tag", bad));
 
-        let record = &constants[0];
-        let wire_slot = record.physical_slot as u16;
-        let owner = record.owner as u16;
-
+        // A string entry whose clear length prefix claims more than the block.
+        let string = constants
+            .iter()
+            .find(|constant| constant.tag == 3 || constant.tag == 5)
+            .expect("fixture must contain a string constant");
         let mut bad = image.clone();
-        let out_of_range_owner = super::semantic::encode_pool_owner(
-            layouts.len() as u16,
-            wire_slot,
-            &image,
-        );
-        bad.bytes[record.token_positions[0]..record.token_positions[0] + 2]
-            .copy_from_slice(&out_of_range_owner.to_le_bytes());
-        corruptions.push(("constant-owner-out-of-range", bad));
+        let length_at = string
+            .length_position
+            .expect("string entry carries a clear length prefix");
+        for (shift, offset) in [0usize, 1, 2, 3].iter().enumerate() {
+            bad.bytes[length_at + offset] = (0xffffu32 >> (8 * shift)) as u8;
+        }
+        corruptions.push(("code-constant-length-overflow", bad));
 
-        let mut bad = image.clone();
-        let out_of_range_index = super::semantic::encode_pool_slot(
-            owner_nk(record.owner) as u16,
-            owner,
-            wire_slot,
-            &image,
-        );
-        bad.bytes[record.token_positions[1]..record.token_positions[1] + 2]
-            .copy_from_slice(&out_of_range_index.to_le_bytes());
-        corruptions.push(("constant-index-out-of-range", bad));
-
-        let mut bad = image.clone();
-        let bad_tag =
-            super::semantic::encode_pool_payload(6, record.index as u16, owner, &image);
-        bad.bytes[record.token_positions[2]..record.token_positions[2] + 2]
-            .copy_from_slice(&bad_tag.to_le_bytes());
-        corruptions.push(("constant-bad-tag", bad));
-
+        // A boolean payload outside 0..=1: the value form is validated on the
+        // load walk, so this must die before any user code runs.
         let boolean = constants
             .iter()
-            .find(|record| record.tag == 1)
+            .find(|constant| constant.tag == 1)
             .expect("fixture must contain a boolean constant");
-        assert_eq!(boolean.payload.len(), 1);
         let mut bad = image.clone();
-        bad.bytes[boolean.payload.start] = 2; // boolean value outside 0..=1
-        corruptions.push(("constant-bool-overflow", bad));
+        bad.bytes[boolean.payload[0]] = 2;
+        corruptions.push(("code-constant-bool-overflow", bad));
+
+        // The clear block length is one byte short: the walk's extent no longer
+        // covers the block, and the code/block split moves with it.
+        let mut bad = image.clone();
+        let tail = region_span.len() - 4;
+        let block_len = u32_at(region_span[tail]);
+        let shrunk = (block_len - 1).to_le_bytes();
+        for (index, offset) in region_span[tail..tail + 4].iter().enumerate() {
+            bad.bytes[*offset] = shrunk[index];
+        }
+        corruptions.push(("code-constant-block-shrunk", bad));
 
         if !target.is_luau() {
-            // Tag 4 (64-bit integer) has no reader on Lua 5.1.
+            // Tag 4 (64-bit integer) has no value form on Lua 5.1.
             let mut bad = image.clone();
-            let tag4 = super::semantic::encode_pool_payload(
-                4,
-                record.index as u16,
-                owner,
-                &image,
-            );
-            bad.bytes[record.token_positions[2]..record.token_positions[2] + 2]
-                .copy_from_slice(&tag4.to_le_bytes());
-            corruptions.push(("constant-tag4-on-lua51", bad));
+            bad.bytes[constants[0].tag_position] = 4;
+            corruptions.push(("code-constant-tag4-on-lua51", bad));
         }
 
         // A removed pool record shifts every later byte; the fixed pool
@@ -1201,9 +1166,14 @@ fn empty_capture_pool_roundtrips_on_both_targets() {
         let data = compile(source, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
         let image = super::semantic::encode(&program, 917).unwrap();
-        let (_, captures, constants, _) = semantic_pool_layouts(&image);
+        let (layouts, captures, _) = semantic_pool_layouts(&image);
         assert!(captures.is_empty(), "{target}: expected an empty capture pool");
-        assert!(!constants.is_empty(), "{target}: fixture must pool constants");
+        assert!(
+            layouts
+                .iter()
+                .any(|layout| !parse_code_constants(&image, layout).is_empty()),
+            "{target}: fixture must carry constants in a code region"
+        );
         let raw = generate(&data, &program, 917).unwrap();
         let output = finalize(&raw, target, 917).unwrap();
         let work = native::Workspace::new();
@@ -1229,7 +1199,7 @@ local SEEDH={function(a,b)return a+b end,function()return "h1" end,function(p)re
 local RX=function(i)return i+10 end
 local K={[5]="k5",[6]="k6",[7]=false}
 local R={};R[12]="r12";R[13]=false;R[14]=0;R[15]={7,8};R[16]={}
-local F={__obf_proto_k=K}
+local F={__obf_proto_nk=8}
 "#;
 const SEED_DIRECT_DATA: &str = r#"
 local SITE={2,3,4,5,6,7,100}

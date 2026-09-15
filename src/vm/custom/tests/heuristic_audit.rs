@@ -278,29 +278,50 @@ type AuditPins = (
 //     often small. `0` (478), `3`, `4`, `5`, `28`, `7`, `70` are unchanged, so no new
 //     value class, no new API word: M1 = 96, M2's decoded stream, the KAT words, M4b,
 //     M5, M6 and M7 are byte-for-byte identical.
+// Goal 5 (2026-09-15, ISA19) -- the constant-pool section became each
+// prototype's keyed code-region tail, so every length-sensitive measure moves
+// while the *shape* measures do not:
+//   M1 96 (unchanged)            the symbol census is the three transport
+//                                alphabets' union; the payload reshuffle cannot
+//                                change which bytes appear.
+//   M2 (1523,2,3,3) -> (1503,0,3,3)  the stream is 20 B shorter and its length
+//                                now lands on a different residue pair -- a pure
+//                                length artifact (M6/M3a stay put, so nothing
+//                                structural moved).
+//   M3b (378, ...) -> (377, ...)  one fewer big literal: the pool's per-record
+//                                coordinates held a `>= 1e6` mask constant that
+//                                the block length + key fold replaced.
+//   M4 top-12 census              the small-literal order reshuffles with the
+//                                payload (31 -> 15, 70 -> 75, one value
+//                                exchanged at the tail); the K9b floor for `256`
+//                                (4 sites) is unchanged.
+//   M5 (4,1812) -> (4,1779)       four long blobs still, 33 B less text.
+//   M7 gap 416 -> 408             the top string lengths moved by a few bytes.
+//   M3a / M4b / M6 (all zeros)    untouched: no KAT word, no skipped number,
+//                                no repeated u32 in the outer ciphertext.
 const PINS_LUA51_7001: AuditPins = (
     96,
-    (1523, 2, 3, 3),
+    (1503, 0, 3, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (378, 9007550309607896, 4503599627370496),
+    (377, 9007550309001824, 4503599627370496),
     [
-        (1, 531),
-        (0, 478),
-        (2, 330),
-        (3, 151),
-        (4, 129),
+        (1, 522),
+        (0, 491),
+        (2, 331),
+        (3, 152),
+        (4, 127),
+        (15, 117),
         (5, 95),
-        (15, 88),
-        (16, 73),
-        (28, 71),
-        (8, 68),
-        (7, 63),
-        (70, 54),
+        (75, 70),
+        (16, 68),
+        (28, 68),
+        (8, 65),
+        (7, 64),
     ],
     0,
-    (4, 1812),
+    (4, 1779),
     (0, 0),
-    ([568, 560, 550, 134, 17], 416),
+    ([560, 543, 542, 134, 17], 408),
 );
 
 // K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
@@ -447,29 +468,36 @@ const PINS_LUA51_7001: AuditPins = (
 // target, so the class mix tracks Lua51's (there `2`/330 and `16`/73). `0` (448), `3`,
 // `4`, `5`, `42`, `89`, `18`, `22` and M1/M2 (1550 B)/KAT words/M4b (38)/M5
 // (4, 1781)/M6/M7 ([567, 542, 538, 134, 15], gap 404) are byte-for-byte unchanged.
+// Goal 5 (2026-09-15, ISA19) -- same re-record as the lua51 config above, with
+// the Luau-side numbers: M2 total 1550 -> 1493 (57 B shorter, residues follow),
+// M4b skipped numbers 38 -> 37 and the whole M4 order reshuffles -- both are
+// small-literal census artifacts of the new payload (the block's tag bytes and
+// the block lengths are the new literals' neighbours). M1 (96), M3a (KAT rows),
+// M3b count/sum/max (318, ...) and M6 (0, 0) are untouched, and the new M4 top-12
+// still carries exactly four `256` sites, the K9b floor.
 const PINS_LUAU_7351: AuditPins = (
     96,
-    (1550, 2, 2, 0),
+    (1493, 2, 1, 3),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (318, 9007524907854693, 4503599627370496),
     [
-        (1, 550),
-        (0, 448),
-        (2, 322),
-        (3, 174),
-        (4, 163),
+        (1, 544),
+        (0, 464),
+        (2, 311),
+        (3, 172),
+        (4, 154),
+        (8, 89),
         (5, 82),
-        (8, 78),
-        (42, 77),
-        (89, 71),
-        (16, 60),
-        (18, 59),
-        (22, 52),
+        (6, 67),
+        (19, 63),
+        (18, 60),
+        (16, 57),
+        (9, 50),
     ],
-    38,
-    (4, 1781),
+    37,
+    (4, 1730),
     (0, 0),
-    ([567, 542, 538, 134, 15], 404),
+    ([542, 529, 525, 134, 15], 391),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

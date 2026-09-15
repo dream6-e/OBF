@@ -31,15 +31,19 @@ fn k9_affine_lanes_round_trip_for_all_forms_and_contexts() {
 }
 
 #[test]
-fn wire_isa_version_is_18() {
+fn wire_isa_version_is_19() {
     assert_eq!(
         super::semantic::WIRE_ISA_VERSION,
-        18,
-        "K3-FULL requires ISA18: the recipe dictionary now carries the renumbered \
-         opcode plus the operand form as a byte pair, so the reader contract changed \
-         (the generated parser rebuilds neither a form table nor a permutation table). \
-         K13c step 2's ISA17 requirement -- keyed constant payloads, no plaintext \
-         constants in the image -- still holds underneath it"
+        19,
+        "Goal 5 requires ISA19: the private image carries no constant-pool section; \
+         each prototype's code region ends with `[constants block][u32 block_len]` \
+         and the header's code_len covers both, so the wire layout is not ISA18- \
+         compatible. K3-FULL's ISA18 requirement -- the recipe dictionary carries \
+         the renumbered opcode plus the operand form as a byte pair, so the reader \
+         rebuilds neither a form table nor a permutation table -- still holds \
+         underneath it, as does K13c step 2's ISA17 requirement (keyed constant \
+         payloads, no plaintext constant in the image; the block is now keyed with \
+         the same pool_key_fold chain and validated per prototype)"
     );
 }
 
@@ -53,7 +57,7 @@ fn wire_isa_version_is_18() {
 fn operand_lane_chain_is_order_dependent_and_double_exact() {
     use super::semantic::{
         k9_chain_init, k9_chain_next, K9_CHAIN_MOD, K9_CHAIN_MUL, K9_CHAIN_STEP_MUL,
-        K9_CHAIN_TOKEN_MUL, K9_INIT_PROTO_MUL, K9_INIT_ROUTE_MUL, K9_INIT_START_MUL,
+        K9_CHAIN_TOKEN_MUL,
     };
     // Same tokens, different order => different tail states (non-commutative).
     let run = |salt: u16, tokens: &[u16]| -> Vec<u32> {
@@ -225,10 +229,11 @@ fn prototype_words_relock_when_a_prototype_goes_idle() {
             );
             assert!(
                 raw.contains(
-                    // K13c step 2: the frame's decoded constants are released
-                    // with its code, so a re-lock rebuilds them from the keyed
-                    // region instead of reading a resident table.
-                    "if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_k=nil;G.__obf_proto_tags=nil end"
+                    // Goal 5: the frame holds no constant table any more, so the
+                    // release only has to restore the raw region and drop the
+                    // per-prototype routes/tags; a re-lock re-parses the region
+                    // and the constants are synthesized per use from it.
+                    "if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_tags=nil end"
                 ),
                 "{target} seed {seed}: release must restore the raw bytes and drop the routes"
             );
@@ -241,10 +246,13 @@ fn prototype_words_relock_when_a_prototype_goes_idle() {
                 1,
                 "{target} seed {seed}: re-lock handle must be minted once per decode"
             );
+            // Goal 5 adds the fourth `[-1]`: `H` binds the interpreter's one
+            // constant-region reader (`K=code[-1]`) at frame setup, because the
+            // value synthesizer walks that region instead of a value table.
             assert_eq!(
                 raw.matches("[-1]").count(),
-                3,
-                "{target} seed {seed}: re-lock handle needs exactly one mint and two uses"
+                4,
+                "{target} seed {seed}: re-lock handle needs exactly one mint, one reader and two uses"
             );
             assert_eq!(
                 raw.matches("LVC[fid]=(LVC[fid] or 0)+1;").count(),
@@ -293,14 +301,15 @@ fn prototype_words_relock_when_a_prototype_goes_idle() {
 // `LVE`, so a constant is never resident outside a materialized frame. Pinned
 // on the pre-finalizer text, where the pool locals are slot-rewritten but the
 // arithmetic is literal.
-//
-// The last assertion is not cosmetics: `PK` is compiled as a local function in
-// the stage-definition block, so the region bookkeeping must be declared
-// *before* those definitions. Declaring it next to the state variable instead
-// leaves `KLen` resolving to a global nil inside `PK`, which aborts the script
-// with "attempt to compare nil with number" at the first record.
+// Goal 5 replaced that whole design: there is no pool record, no coordinate
+// mirror and no value table left to pin. What is left to pin is the *absence* --
+// the wire-side proof lives in `tests/runtime.rs` (exact byte consumption plus
+// an independent block mirror), so this gate pins the emitted text: one
+// per-use synthesizer, no `__obf_proto_k` value map on the frame, no region
+// bookkeeping, and a walk that is a flattened state machine with two
+// value-keyed search trees rather than a linear tag chain.
 #[test]
-fn constant_pool_mirror_holds_coordinates_not_values() {
+fn constants_are_synthesized_per_use_with_no_value_table_in_the_text() {
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(
             "local x=1;local y='s';local q=0.5;local function f()return x end print(f(),y,q)",
@@ -310,51 +319,65 @@ fn constant_pool_mirror_holds_coordinates_not_values() {
         let program = custom::decode(&data, target).unwrap();
         for seed in [0u64, 7001, 7351, u64::MAX] {
             let raw = generate(&data, &program, seed).unwrap();
-            for marker in [
-                "KBase=pos();gk=0;",
-                "KLen=pos()-KBase;",
-                "T[ix]={tg,ko,kl,ka}",
-                "__obf_proto_rec=TT",
-                "KImg=SS(B,KBase,KBase+KLen-1)",
-                "if tg>5 or rec[2]+rec[3]>KLen or rec[4]==nil then E()end",
-                "local off,ln,ak=rec[2],rec[3],rec[4]",
-                "val=NU(UK(Q,off+1,8,ak),1)",
-                "local k=(acc+119)%256;",
-                "local KBase,gk,KLen,KImg=1,0,0,nil;",
-            ] {
-                assert_eq!(
-                    raw.matches(marker).count(),
-                    1,
-                    "{target} seed {seed}: pool plumbing marker {marker:?} appears {} times",
-                    raw.matches(marker).count()
-                );
-            }
-            // No decoded value survives in the mirror itself.
+            // The synthesizer exists exactly once, takes the region bounds and
+            // the seed-mode tables, and is the only reader of the block.
+            assert_eq!(
+                raw.matches("KGC=function(Q,n,m,KS,KT)").count(),
+                1,
+                "{target} seed {seed}: per-use synthesizer"
+            );
+            assert_eq!(
+                raw.matches("local kend=#Q-4;").count(),
+                1,
+                "{target} seed {seed}: block-length tail read"
+            );
+            // The walk keeps its state in one dispatch variable and reaches the
+            // value form through a second, value-keyed decision; both are seeded
+            // state ids/shuffled trees, so no canonical order survives.
+            let walker = raw.split("KGC=function(Q,n,m,KS,KT)").nth(1).unwrap();
+            // The walker is a state machine plus two value-keyed search trees,
+            // so its text is long; a fixed window keeps the shape pins honest
+            // without depending on where the last `end;` lands.
+            let walker = &walker[..walker.len().min(2400)];
+            assert!(
+                walker.contains("while true do") && walker.contains("local w="),
+                "{target} seed {seed}: the walk is not a flattened state machine"
+            );
+            assert!(
+                walker.matches("elseif ").count() >= 6,
+                "{target} seed {seed}: the walk lost its branch structure"
+            );
+            assert!(
+                walker.matches(">=").count() >= 2 || walker.matches("<=").count() >= 2,
+                "{target} seed {seed}: the walk lost its search-tree comparisons"
+            );
+            // Nothing that could hold a constant table survived.
             for stale in [
-                "T[ix]={tg,val}",
-                "T[ix]={tg,ko,pos()-KBase-ko}",
-                "OW.__obf_proto_k[ix]=val",
-                "OW.__obf_proto_tags[ix]=tg",
-                "local val=rec[2]",
-                "F.__obf_proto_k[j]=val",
-                // The pool walk must not decode: `str`/`num` belong to the
-                // record readers elsewhere, never to the constant loop.
-                "elseif tg==2 then val=num()",
-                "tg==3 or tg==5 then val=str()",
+                "__obf_proto_k",
+                "__obf_proto_kimg",
+                "__obf_proto_rec",
+                "KBase",
+                "KLen",
+                "KImg",
+                "K[sl+vo]",
+                "T[ix]={tg,ko,kl,ka}",
             ] {
                 assert_eq!(
                     raw.matches(stale).count(),
                     0,
-                    "{target} seed {seed}: constant mirror still holds values ({stale:?})"
+                    "{target} seed {seed}: constant-table plumbing survived ({stale:?})"
                 );
             }
-            let declared = raw
-                .find("local KBase,gk,KLen,KImg=1,0,0,nil;")
-                .unwrap();
-            let closed_over = raw.find("local PK=function").unwrap();
+            // The capture pool is the only pool left, and the interpreter still
+            // binds the region for the synthesizer.
+            assert_eq!(
+                raw.matches("for slot=1,TU do").count(),
+                1,
+                "{target} seed {seed}: capture pool walk"
+            );
             assert!(
-                declared < closed_over,
-                "{target} seed {seed}: region bookkeeping declared after the stage that closes over it"
+                raw.contains("K=code[-1];"),
+                "{target} seed {seed}: the interpreter must bind the code region"
             );
         }
     }

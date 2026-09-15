@@ -32,13 +32,17 @@ fn seed_v1_arms_emit_for_all_supported_ops_on_both_targets() {
                     < raw.find("local SEED=function").unwrap(),
                 "{target} seed {seed}: loop must sit inside H for H-local scope"
             );
+            // Goal 5: `K` is the prototype's code region -- the constants are
+            // synthesized out of it per use, so there is no value table to read
+            // and no `F.__obf_proto_k` to hoist. It rides in the hoisted frame
+            // locals because the seed loop closes over it.
             assert!(
                 raw.contains("local F,R,va,RX,RF,K;"),
                 "{target} seed {seed}: H must hoist frame locals for SEED"
             );
             assert!(
-                raw.contains("K=F.__obf_proto_k;"),
-                "{target} seed {seed}: H must derive K per activation"
+                raw.contains("K=code[-1];"),
+                "{target} seed {seed}: H must bind the code region per activation"
             );
             assert!(
                 raw.contains("local SEEDT={"),
