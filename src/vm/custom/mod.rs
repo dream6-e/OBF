@@ -121,6 +121,17 @@ fn finalize(source: &str, target: Target, seed: u64) -> Result<String, Diagnosti
     // 它只改写文本，语义镜像与容器一字不动，所以 `obf compile` 的 `.obf` 与 image
     // pin 必须逐字节不变；行为等价性由 `tests/layout.rs` 的真机差分把门。
     let source = layout::restructure(source, target, seed)?;
+    // Goal 6 (part 3): the two enumerable little state chains of the seed-mode
+    // validator -- the 12-arm seed-ISA opcode dispatch and the reference-kind
+    // arms -- are re-spelled with opaque literals here, i.e. after every pass
+    // that anchors on their canonical decimal spelling and before the constant
+    // lift / rename / minify stages. Production only, so the gates that read
+    // `finalize_unlaid` still see the canonical text.
+    let (source, arms) = seed_deform::opaque_state_arms(&source, target, seed);
+    debug_assert!(
+        arms == 0 || arms >= 12,
+        "opaque_state_arms: chain vanished ({arms} arms)"
+    );
     finalize_unlaid(&source, target, seed)
 }
 

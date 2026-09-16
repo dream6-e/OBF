@@ -79,6 +79,11 @@ fn layout_actually_rewrites_the_generated_script() {
         .unwrap();
         let mut totals = [0usize; 3];
         let mut growth = (0i64, 0i64);
+        // 重排是三条 pass 里最受依赖关系约束的一条：Goal 6 (part 3) 的不透明字面量
+        // 让每个站点多读一枚运行期局部量，可重排的相邻声明随之变少。这里改成按六个
+        // 种子求和，测到 lua51 6 次 / luau 4 次，下限 3 仍能把「pass 完全不动」
+        // 变成红（旧口径是单种子最大值 ≥ 2，luau 现在单种子最多只到 1）。
+        let mut reordered_total = 0usize;
         for seed in [7001u64, 7002, 7351, 7352, 42424, 90210] {
             let bytecode = compile(&source, target).unwrap();
             let program = custom::decode(&bytecode, target).unwrap();
@@ -96,6 +101,7 @@ fn layout_actually_rewrites_the_generated_script() {
             for (slot, value) in totals.iter_mut().zip(&counts) {
                 *slot = (*slot).max(*value);
             }
+            reordered_total += counts[2];
             growth = (
                 growth.0.min(after as i64 - before as i64),
                 growth.1.max(after as i64 - before as i64),
@@ -120,8 +126,8 @@ fn layout_actually_rewrites_the_generated_script() {
             "{target}: outline pass never hoisted anything"
         );
         assert!(
-            totals[2] >= 2,
-            "{target}: reorder pass never moved a statement"
+            reordered_total >= 3,
+            "{target}: reorder pass only moved {reordered_total} statements over six seeds"
         );
     }
 }

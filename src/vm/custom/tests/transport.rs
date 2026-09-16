@@ -966,14 +966,21 @@ fn core_logic_flows_through_scratch_table_slots() {
             // remain by design).
             assert!(!raw.contains("local P={};local work=0;"));
             assert!(!raw.contains("local S=\""));
+            // Slot keys, not every small numeral: part 3's opaque operands
+            // spray incidental numbers through the text, so the census reads
+            // the keys the slotted stages are actually addressed by (`g[K]`).
             let mut keys = std::collections::BTreeSet::new();
-            for token in crate::lexer::lex(&raw, target).unwrap() {
-                if token.kind == crate::lexer::TokenKind::Number {
-                    let text = token.text(&raw);
-                    if (1..=99).contains(&text.parse::<u64>().unwrap_or(0)) {
-                        keys.insert(text.to_owned());
-                    }
+            let mut cursor = 0usize;
+            while let Some(found) = raw[cursor..].find("g[") {
+                let value_at = cursor + found + 2;
+                let digits = raw[value_at..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .count();
+                if digits > 0 && raw[value_at + digits..].starts_with(']') {
+                    keys.insert(raw[value_at..value_at + digits].to_owned());
                 }
+                cursor = value_at;
             }
             assert!(keys.len() >= 8, "{target} seed {seed}: thin key set");
             key_sets.insert(keys);
@@ -1189,33 +1196,28 @@ fn dispatch_chains_split_into_seeded_subchains() {
                 .expect("bounds closure");
             let vld_end = vld_at + raw[vld_at..].find("E()end;return true").unwrap();
             let bounds = &raw[vld_at..vld_end];
+            // The `%` right-hand side has to be a *comparison* against a
+            // constant: Goal 6's guards spell `(o%2==o%2)`, which is not a
+            // selector, so the census is token-aware (`residue_selector_moduli`).
+            let moduli = residue_selector_moduli(bounds, target, "o");
             let mut modulus = None;
-            let mut selectors = 0usize;
-            let mut cursor = 0usize;
-            while let Some(found) = bounds[cursor..].find("o%") {
-                let value_at = cursor + found + 2;
-                let digits = bounds[value_at..]
-                    .chars()
-                    .take_while(char::is_ascii_digit)
-                    .count();
-                let value: u8 = bounds[value_at..value_at + digits].parse().unwrap();
-                assert!((2..=4).contains(&value), "selector modulus {value}");
+            for value in &moduli {
+                assert!((2..=4).contains(value), "selector modulus {value}");
                 match modulus {
-                    Some(seen) => assert_eq!(seen, value, "mixed sub-chain moduli"),
-                    None => modulus = Some(value),
+                    Some(seen) => assert_eq!(seen, *value, "mixed sub-chain moduli"),
+                    None => modulus = Some(*value),
                 }
-                selectors += 1;
-                cursor = value_at;
             }
             let groups = modulus.expect("no sub-chain selector");
-            assert_eq!(selectors, groups as usize, "one selector per group");
+            assert_eq!(moduli.len(), groups as usize, "one selector per group");
             // Interpreter chain: the residue selectors are gone, the interval
             // partition takes their place. Counted on the whole raw text because
             // `rid`/`sid` appear nowhere else.
             let mut nodes = [0usize; 2];
             for (index, var) in ["rid", "sid"].iter().enumerate() {
-                assert!(
-                    !raw.contains(&format!("{var}%")),
+                assert_eq!(
+                    residue_selectors(&raw, target, var),
+                    0,
                     "{target} seed {seed}: {var} still carries a residue selector"
                 );
                 let (equality, _, order) = scan_dispatch_chain(&raw, target, var);

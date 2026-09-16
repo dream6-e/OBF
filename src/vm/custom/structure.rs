@@ -73,7 +73,7 @@ pub(crate) fn decoy_arms(
             }
         };
         let body = bodies[(structure.index(bodies.len())) as usize];
-        let condition = structure.dispatch_condition(u16::from(opcode), luau);
+        let condition = structure.dispatch_condition_opaque("o", u16::from(opcode), luau, "o");
         out.push((opcode, format!("{condition} then {body}")));
     }
     out
@@ -166,7 +166,8 @@ fn search_tree(
     // The comparator and the branch order both vary per seed; the two forms
     // are exact complements, so the partition is the same tree either way.
     let below = structure.index(2) == 0;
-    let condition = structure.boundary_condition(value_var, u16::from(bound), below, luau);
+    let condition =
+        structure.boundary_condition_opaque(value_var, u16::from(bound), below, luau, value_var);
     // Exactly one side runs: `below` asks `<` and keeps the low half in the
     // then-branch, otherwise the same partition rides as `>=` with the halves
     // swapped. Both spellings are complements, so no value can reach both.
@@ -183,7 +184,7 @@ fn search_tree(
 /// interval builder below draws its bounds and its tautology fallbacks through
 /// this filter, so the nice-constant census cannot move by luck of where a
 /// split happened to fall, and a bound never reads as a radix hint.
-const NICE_LABELS: [u16; 4] = [86, 256, 7225, 7396];
+const NICE_LABELS: [u16; 4] = crate::random::Prng::NICE_LITERALS;
 
 /// K22: the same filter, exposed to the context-key planner so the dispatch
 /// weights can never be an audit-nice label either. Kept as one function over
@@ -317,6 +318,7 @@ fn interval_tree(
     out: &mut String,
     open: bool,
     avoid: &[u16],
+    luau: bool,
 ) {
     let mut open = open;
     loop {
@@ -335,7 +337,8 @@ fn interval_tree(
         // gets is a per-seed choice, and the two halves swap with it so no
         // value can reach both sides.
         let below = structure.index(2) == 0;
-        let condition = structure.interval_condition(value_var, bound, noise, below);
+        let condition =
+            structure.interval_condition_opaque(value_var, bound, noise, below, luau, value_var);
         let (first, second) = if below { (left, right) } else { (right, left) };
         write!(
             out,
@@ -343,7 +346,9 @@ fn interval_tree(
             if open { "if" } else { "elseif" }
         )
         .unwrap();
-        interval_tree(structure, first, value_var, leaf_max, out, true, avoid);
+        interval_tree(
+            structure, first, value_var, leaf_max, out, true, avoid, luau,
+        );
         open = false;
         members = second;
     }
@@ -370,6 +375,7 @@ pub(crate) fn grouped_interval_chain(
     groups: u8,
     value_var: &str,
     avoid: &[u16],
+    luau: bool,
 ) -> String {
     // Numeric order is what makes an interval test meaningful; the seeded
     // randomness rides in the split choices, the bounds, the comparison spelling
@@ -408,7 +414,8 @@ pub(crate) fn grouped_interval_chain(
         // The cascade is monotone: `v <= B1` then `v <= B2` with growing bounds,
         // so the `elseif` run is an exact interval partition even when the
         // individual test is spelled as a difference or a negation.
-        let condition = structure.interval_condition(value_var, *bound, noise, true);
+        let condition =
+            structure.interval_condition_opaque(value_var, *bound, noise, true, luau, value_var);
         write!(
             text,
             "{} {condition} then ",
@@ -423,6 +430,7 @@ pub(crate) fn grouped_interval_chain(
             &mut text,
             true,
             avoid,
+            luau,
         );
         start = *at;
     }
@@ -435,6 +443,7 @@ pub(crate) fn grouped_interval_chain(
         &mut text,
         true,
         avoid,
+        luau,
     );
     text.push_str(" end;");
     text
@@ -558,7 +567,9 @@ pub(crate) fn state_condition(
     structure: &mut crate::random::Prng,
     var: &str,
     value: u16,
+    luau: bool,
 ) -> String {
+    let value = structure.opaque_literal(u64::from(value), luau, var);
     match structure.index(4) {
         0 => format!("{var}=={value}"),
         1 => format!("{value}=={var}"),
@@ -567,11 +578,36 @@ pub(crate) fn state_condition(
     }
 }
 
+/// `var=<opaque state>;` -- one CFF transition whose target number is rebuilt at
+/// run time instead of being spelled (goal 6 part 3). The guard of the
+/// reconstruction reads `var` itself, which is an integer at every transition
+/// site, and both arms are the same value, so the transition is exact whatever
+/// the guard returns. Transitions stay the machine's only control-flow step: no
+/// new chain, no new local, just a number that can no longer be read off.
+pub(crate) fn state_assign(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    value: u16,
+    luau: bool,
+) -> String {
+    let value = structure.opaque_literal(u64::from(value), luau, var);
+    format!("{var}={value};")
+}
+
 /// Runtime-masked state representation used where a static state number must
 /// not be enough to resolve a control-flow edge. Both assignment and every
 /// comparison retain the mask expression; there is no removable one-time
 /// guard in front of an otherwise ordinary state machine.
-pub(crate) fn masked_state_value(value: u16, mask: &str) -> String {
+pub(crate) fn masked_state_value(
+    structure: &mut crate::random::Prng,
+    value: u16,
+    mask: &str,
+    luau: bool,
+) -> String {
+    // The mask already makes the *live* number runtime-only; the reconstruction
+    // additionally removes the literal, so neither the state number nor the
+    // masked representation can be read off the text (goal 6 part 3).
+    let value = structure.opaque_literal(u64::from(value), luau, mask);
     format!("({value}+{mask})%65521")
 }
 
@@ -580,8 +616,9 @@ pub(crate) fn masked_state_condition(
     var: &str,
     mask: &str,
     value: u16,
+    luau: bool,
 ) -> String {
-    let represented = masked_state_value(value, mask);
+    let represented = masked_state_value(structure, value, mask, luau);
     match structure.index(4) {
         0 => format!("{var}=={represented}"),
         1 => format!("{represented}=={var}"),
@@ -593,11 +630,17 @@ pub(crate) fn masked_state_condition(
 /// Select one of two disjoint physical state pairs from a runtime mask bit.
 /// This makes the concrete transition -- not merely a common translation of
 /// an otherwise static state -- depend on the reconstructed probe shares.
-pub(crate) fn selected_masked_state_value(first: u16, second: u16, mask: &str) -> String {
+pub(crate) fn selected_masked_state_value(
+    structure: &mut crate::random::Prng,
+    first: u16,
+    second: u16,
+    mask: &str,
+    luau: bool,
+) -> String {
     format!(
         "({mask}%2==0 and {} or {})",
-        masked_state_value(first, mask),
-        masked_state_value(second, mask)
+        masked_state_value(structure, first, mask, luau),
+        masked_state_value(structure, second, mask, luau)
     )
 }
 
@@ -607,9 +650,10 @@ pub(crate) fn selected_masked_state_condition(
     mask: &str,
     first: u16,
     second: u16,
+    luau: bool,
 ) -> String {
-    let first = masked_state_condition(structure, var, mask, first);
-    let second = masked_state_condition(structure, var, mask, second);
+    let first = masked_state_condition(structure, var, mask, first, luau);
+    let second = masked_state_condition(structure, var, mask, second, luau);
     format!("(({mask}%2==0 and {first})or({mask}%2~=0 and {second}))")
 }
 
@@ -622,11 +666,12 @@ pub(crate) fn state_machine(
     structure: &mut crate::random::Prng,
     var: &str,
     mut branches: Vec<(u16, String)>,
+    luau: bool,
 ) -> String {
     structure.shuffle(&mut branches);
     let mut text = String::from("while true do ");
     for (index, (value, body)) in branches.iter().enumerate() {
-        let condition = state_condition(structure, var, *value);
+        let condition = state_condition(structure, var, *value, luau);
         write!(
             text,
             "{} {condition} then {body}",
@@ -639,7 +684,15 @@ pub(crate) fn state_machine(
 }
 
 fn u16_expression(value: u16) -> String {
-    format!("({}*256+{})", value / 256, value % 256)
+    // Goal 6 (part 3): the two bytes are spelled like every other byte of the
+    // layer -- a byte that happens to be an audit anchor (`85`, `86`) comes out
+    // as its neighbour form, so a drawn salt never hands the anchor census a
+    // decimal token. The value is unchanged; only the spelling moves.
+    format!(
+        "({}*256+{})",
+        crate::random::Prng::byte_token((value / 256) as u8),
+        crate::random::Prng::byte_token((value % 256) as u8)
+    )
 }
 
 fn token_opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
@@ -690,6 +743,7 @@ fn nested_token_guard(
 pub(crate) fn layered_recipe_decoder(
     structure: &mut crate::random::Prng,
     layers: &[semantic::RecipeTokenLayer; semantic::RECIPE_TOKEN_STAGES],
+    luau: bool,
 ) -> String {
     const DECOY_STATES: usize = 5;
     let mut states = state_values(structure, semantic::RECIPE_TOKEN_STAGES + 1 + DECOY_STATES);
@@ -731,14 +785,19 @@ pub(crate) fn layered_recipe_decoder(
         branches.push((
             state,
             format!(
-                "repeat v=(v*{odd}+l*n+s*f+{salt})%65536;n=(n+v+{salt})%65536;q={next};break until false;"
+                "repeat v=(v*{odd}+l*n+s*f+{salt})%65536;n=(n+v+{salt})%65536;{go_next}break until false;",
+                go_next = state_assign(structure, "q", next, luau)
             ),
         ));
     }
+    // `v` is the decoder's own operand: it is the value every branch already
+    // does arithmetic on, so naming it as the guard source adds no assumption
+    // that the surrounding decoder did not already make. (`q` itself is not in
+    // scope inside its own initializer, which is why the init names `v`.)
+    let q_start = structure.opaque_literal(u64::from(live_states[0]), luau, "v");
     format!(
-        "local RD=function(v,l,n,s,f)local q={};{}end;",
-        live_states[0],
-        state_machine(structure, "q", branches)
+        "local RD=function(v,l,n,s,f)local q={q_start};{}end;",
+        state_machine(structure, "q", branches, luau)
     )
 }
 
@@ -784,6 +843,7 @@ fn nested_edge_guard(
 pub(crate) fn layered_edge_decoder(
     structure: &mut crate::random::Prng,
     layers: &[semantic::EdgeTokenLayer; semantic::EDGE_TOKEN_STAGES],
+    luau: bool,
 ) -> String {
     const DECOY_STATES: usize = 3;
     let mut states = state_values(structure, semantic::EDGE_TOKEN_STAGES + 1 + DECOY_STATES);
@@ -824,14 +884,15 @@ pub(crate) fn layered_edge_decoder(
         branches.push((
             state,
             format!(
-                "repeat v=(v*{odd}+l*(f+1)+ek+{salt})%65536;f=(f+v+{salt})%65536;q={next};break until false;"
+                "repeat v=(v*{odd}+l*(f+1)+ek+{salt})%65536;f=(f+v+{salt})%65536;{go_next}break until false;",
+                go_next = state_assign(structure, "q", next, luau)
             ),
         ));
     }
+    let q_start = structure.opaque_literal(u64::from(live_states[0]), luau, "v");
     format!(
-        "local ED=function(v,l,f,ek)local q={};{}end;",
-        live_states[0],
-        state_machine(structure, "q", branches)
+        "local ED=function(v,l,f,ek)local q={q_start};{}end;",
+        state_machine(structure, "q", branches, luau)
     )
 }
 

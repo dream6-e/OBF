@@ -307,11 +307,20 @@ fn pins_lua51() -> AuditPins {
         //     重新加密后 LZW 输入不同，长度 +38、余数 2 -> 0，`fail` 仍为
         //     false（无重复字、无可公约距离，见 `stream_audit` 的同一行）。
         // check1/2/3/6/7/8 一字未动（`256` 仍是 4、gcd 仍是 1）。
-        check4_thresholds: (16, 16777215, false),
+        // Goal 6（2026-09-16，part 3 不透明常量）实测 Lua51 diff，只动三项，全部
+        // 是「字面量不再直接参与比较/拼写」的直接后果：
+        //   check4 阈值字面量类数 16 -> 3：分派链、区间树、形状臂与状态数字的
+        //     比较右端（左端）不再是一个十进制阈值，而是不透明字面量，能直接读出
+        //     「阈值」的位置因此变少；max 仍是 0xffffff 掩码，密度标志仍 false。
+        //   check5 模板 `X=X+N` 31 -> 30：同上，一枚赋值被不透明重建吸收。
+        //   check8 字面量间距 (1, 62) -> (1, 65)：不透明臂自身带的算术常量进入
+        //     普查，gcd 仍为 1（没有周期性结构）。
+        // check1/2/3/6/7/9 一字未动；check1 的 `256` 仍是 4、`2147483647` 仍是 24。
+        check4_thresholds: (3, 16777215, false),
         check5_templates: (
             13,
             vec![
-                ("X=X+N".to_string(), 31),
+                ("X=X+N".to_string(), 30),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -326,7 +335,7 @@ fn pins_lua51() -> AuditPins {
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 62),
+        check8_literal_gcd: (1, 65),
         check9_stream: (19045, 0, false),
     }
 }
@@ -471,11 +480,20 @@ fn pins_luau() -> AuditPins {
         //   check9 (24194, 4, false) -> (24195, 0, false)：重新加密后的 LZW
         //     输入长度 +1、余数 4 -> 0，`fail` 仍为 false。
         // check1/2/3/6/7/8 一字未动。
-        check4_thresholds: (10, 65535, false),
+        // Goal 6（2026-09-16，part 3 不透明常量）实测 Luau diff，四项：
+        //   check4 阈值字面量类数 10 -> 3（同 Lua51 的原因：比较的操作数改成不透明
+        //     字面量，能直接读出的阈值位置变少）；max 仍是 65535，密度标志仍 false。
+        //   check5 fail 计数 12 -> 13、首类 `X=X+N` 30 -> 29：一枚赋值被不透明重建
+        //     吸收，同时有一族模板越过计数线。
+        //   check6 0 -> 1：与 K21 同源的种子漂移（head 语句的多余数字索引槽），
+        //     Luau 上翻到 1，不是新构造。
+        //   check8 字面量间距 (1, 64) -> (1, 69)，gcd 仍为 1。
+        // check1/2/3/7/9 一字未动。
+        check4_thresholds: (3, 65535, false),
         check5_templates: (
-            12,
+            13,
             vec![
-                ("X=X+N".to_string(), 30),
+                ("X=X+N".to_string(), 29),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -488,9 +506,9 @@ fn pins_luau() -> AuditPins {
                 ),
             ],
         ),
-        check6_alias_prologues: 0,
+        check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 64),
+        check8_literal_gcd: (1, 69),
         check9_stream: (24195, 0, false),
     }
 }

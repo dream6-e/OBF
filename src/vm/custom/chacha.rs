@@ -328,30 +328,45 @@ pub(crate) fn chacha_decoder_sections(
     let add = |draw: &mut crate::random::Prng, terms: &[&str]| render_modsum(draw, terms);
     // Term shapes mirror the canonical quarter round exactly; only the
     // closure pair draws, term orders and modulus spellings vary.
+    // The four quarter-round rotation amounts are the other ChaCha fingerprint
+    // (16/12/8/7 in that order names the round even without the sigma words).
+    // Each is rebuilt opaquely; `d` is the round's own index argument, an
+    // integer in scope at every site.
+    let luau = target.is_luau();
+    let (rot16, rot12, rot8, rot7) = (
+        bitops.opaque_literal(16, luau, "d"),
+        bitops.opaque_literal(12, luau, "d"),
+        bitops.opaque_literal(8, luau, "d"),
+        bitops.opaque_literal(7, luau, "d"),
+    );
     let quarter_body = [
         format!("s[a]={}", add(bitops, &["s[a]", "s[b]"])),
         format!(
-            "s[d]={}({}(s[d],s[a]),16)",
+            "s[d]={}({}(s[d],s[a]),{})",
             rot_pick(bitops),
-            xor_pick(bitops)
+            xor_pick(bitops),
+            rot16
         ),
         format!("s[c]={}", add(bitops, &["s[c]", "s[d]"])),
         format!(
-            "s[b]={}({}(s[b],s[c]),12)",
+            "s[b]={}({}(s[b],s[c]),{})",
             rot_pick(bitops),
-            xor_pick(bitops)
+            xor_pick(bitops),
+            rot12
         ),
         format!("s[a]={}", add(bitops, &["s[a]", "s[b]"])),
         format!(
-            "s[d]={}({}(s[d],s[a]),8)",
+            "s[d]={}({}(s[d],s[a]),{})",
             rot_pick(bitops),
-            xor_pick(bitops)
+            xor_pick(bitops),
+            rot8
         ),
         format!("s[c]={}", add(bitops, &["s[c]", "s[d]"])),
         format!(
-            "s[b]={}({}(s[b],s[c]),7)",
+            "s[b]={}({}(s[b],s[c]),{})",
             rot_pick(bitops),
-            xor_pick(bitops)
+            xor_pick(bitops),
+            rot7
         ),
     ];
     let quarter = format!(
@@ -360,9 +375,22 @@ pub(crate) fn chacha_decoder_sections(
         quarter_body.join(";"),
     );
     let block_add = add(bitops, &["x[i]", "s[i]"]);
+    // Goal 6 (part 3): the four ChaCha8 sigma words were the single most
+    // recognizable line in the whole script -- a reader who saw
+    // `1634760805,857760878,2036477234,1797285236` had named the cipher. They
+    // are now opaque reconstructions whose guard reads the block's own counter
+    // argument, so the constants are rebuilt at run time and the text carries no
+    // spelling of them. The state layout, the round structure and every value
+    // stay exactly as before (the anti-hook self-test below re-derives three
+    // published words of the zero-key block, so a misreconstruction cannot ship).
+    let sigma: Vec<String> = CHACHA_CONSTANTS
+        .iter()
+        .map(|word| bitops.opaque_literal(u64::from(*word), target.is_luau(), "C"))
+        .collect();
     let block = format!(
-        "[{}]=function(Q)return function(K,C,N)local s={{1634760805,857760878,2036477234,1797285236,K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],C,N[1],N[2],N[3]}};local x={{}};for i=1,16 do x[i]=s[i]end;for i=1,4 do Q(x,1,5,9,13);Q(x,2,6,10,14);Q(x,3,7,11,15);Q(x,4,8,12,16);Q(x,1,6,11,16);Q(x,2,7,12,13);Q(x,3,8,9,14);Q(x,4,5,10,15)end;for i=1,16 do x[i]={block_add} end;return x end end,",
-        keys[CHACHA_BLOCK_FIELD]
+        "[{}]=function(Q)return function(K,C,N)local s={{{},{},{},{},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],C,N[1],N[2],N[3]}};local x={{}};for i=1,16 do x[i]=s[i]end;for i=1,4 do Q(x,1,5,9,13);Q(x,2,6,10,14);Q(x,3,7,11,15);Q(x,4,8,12,16);Q(x,1,6,11,16);Q(x,2,7,12,13);Q(x,3,8,9,14);Q(x,4,5,10,15)end;for i=1,16 do x[i]={block_add} end;return x end end,",
+        keys[CHACHA_BLOCK_FIELD],
+        sigma[0], sigma[1], sigma[2], sigma[3]
     );
     let salts = params
         .key_salts
@@ -434,17 +462,18 @@ pub(crate) fn chacha_decoder_sections(
     };
     let fold_a = add(bitops, &["w*257", "SB(A,i)"]);
     let fold_b = add(bitops, &["w*257", "SB(B,i)"]);
-    let kat_expr = |value: u32| {
-        let bytes = value.to_be_bytes();
-        format!(
-            "(({}*256+{})*256+{})*256+{}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        )
-    };
-    let kat1 = kat_expr(804192318);
-    let kat8 = kat_expr(505049583);
-    let kat16 = kat_expr(1123945486);
+    // Goal 6 (part 3): the published-answer words are rebuilt opaquely as well.
+    // They were already byte-folded, so their decimal spelling never appeared --
+    // this puts them through the same two-arm toolbox, with the guard reading
+    // the freshly computed zero-key block word. The anti-hook self-test compares
+    // `Z[1]`, `Z[8]` and `Z[16]` against these reconstructions and the script
+    // aborts on any mismatch, so the substitution is checked by the delivered
+    // code itself on every run.
+    let kat1 = bitops.opaque_literal(804192318, target.is_luau(), "Z[1]");
+    let kat8 = bitops.opaque_literal(505049583, target.is_luau(), "Z[8]");
+    let kat16 = bitops.opaque_literal(1123945486, target.is_luau(), "Z[16]");
     let att_terms = ["w", kat1.as_str(), kat8.as_str(), kat16.as_str(), "255"];
+    // (`kat1`/`kat8`/`kat16` are `String`s now, so the borrow below is explicit.)
     let att = add(bitops, &att_terms);
     let anti = format!(
         "[{}]=function(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DB,GI,LS){metadata}if SB(\"AZ\",1)~=65 or SB(\"AZ\",2)~=90 or NCH(65)~=\"A\" or TC({{\"A\",\"B\"}})~=\"AB\" or MF(15/4)~=3 or X8C(90,165)~=255 then E()end;local Z=CB({{0,0,0,0,0,0,0,0}},0,{{0,0,0}});if Z[1]~={kat1} or Z[8]~={kat8} or Z[16]~={kat16} then E()end;local w=0;for i=1,#A do w={fold_a} end;for i=1,#B do w={fold_b} end;return {att} end,",

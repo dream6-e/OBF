@@ -72,6 +72,11 @@ fn generate_semantic(
     // per-segment profile recomputed from the physical slot. Dictionary,
     // metadata and tuple orders are per-image permutations baked into the
     // generated parser text below.
+    // Goal 6 (part 3): one target bit for the opaque-constant toolbox. The
+    // Luau-only bit forms (xor/or reconstructions and the `&0`/`|0` guards) are
+    // exact only where the operand is an integer, so they are offered only when
+    // the emitted text targets Luau.
+    let luau = program.target.is_luau();
     let field_order = field_layout(seed);
     let primitive_ops: std::collections::BTreeSet<Opcode> = semantic_image
         .recipes
@@ -308,6 +313,13 @@ if d7+d8*65521~={fake_adler} then E()end;"
         // scratch table g[...] and is cleared before returning.
         let sv = state_values(&mut structure, 4);
         let (k_prefix, k_main, k_tail, k_done) = (sv[0], sv[1], sv[2], sv[3]);
+        // Goal 6 (part 3): every transition target and the initial state are
+        // opaque reconstructions (see `structure::state_assign`), so no handler
+        // state number can be read off the text. The `ww`/`kk` group widths in
+        // the bodies are *data* (decoded widths), not state labels, and stay.
+        let go_main = state_assign(&mut structure, "st", k_main, luau);
+        let go_tail = state_assign(&mut structure, "st", k_tail, luau);
+        let go_done = state_assign(&mut structure, "st", k_done, luau);
         let machine = state_machine(
             &mut structure,
             "st",
@@ -315,9 +327,9 @@ if d7+d8*65521~={fake_adler} then E()end;"
                 (
                     k_prefix,
                     format!(
-                        "{take}B=vv%M24;R=B;pv=vv;i=5;st={k_main};",
+                        "{take}B=vv%M24;R=B;pv=vv;i=5;{go_main}",
                         take = k9a_take("4", "1"),
-                        k_main = k_main,
+                        go_main = go_main,
                     ),
                 ),
                 (
@@ -325,10 +337,10 @@ if d7+d8*65521~={fake_adler} then E()end;"
                     format!(
                         "if R>4 then local w=pv%3;local ww=4;local kk=3;\
 if w==1 then ww=5;kk=4 elseif w==2 then ww=6;kk=4 end;\
-{take}pv=vv;i=i+ww;{emit}R=R-kk;else st={k_tail} end;",
+{take}pv=vv;i=i+ww;{emit}R=R-kk;else {go_tail} end;",
                         take = k9a_take("ww", "i"),
                         emit = k9a_emit("kk"),
-                        k_tail = k_tail,
+                        go_tail = go_tail,
                     ),
                 ),
                 (
@@ -339,7 +351,7 @@ if r1==4 then local w=pv%3;local ww=5;if w%2==1 then ww=6 end;{take_w}pv=vv;i=i+
 elseif r1==3 then {take4}pv=vv;i=i+4;{emit3}\
 elseif r1==2 then {take3}pv=vv;i=i+3;{emit2}\
 elseif r1==1 then {take2}pv=vv;i=i+2;{emit1}\
-end;if i~=#S+1 then E()end;st={k_done};",
+end;if i~=#S+1 then E()end;{go_done}",
                         take_w = k9a_take("ww", "i"),
                         emit4 = k9a_emit("4"),
                         take4 = k9a_take("4", "i"),
@@ -348,11 +360,12 @@ end;if i~=#S+1 then E()end;st={k_done};",
                         emit2 = k9a_emit("2"),
                         take2 = k9a_take("2", "i"),
                         emit1 = k9a_emit("1"),
-                        k_done = k_done,
+                        go_done = go_done,
                     ),
                 ),
                 (k_done, "local rr=TC(o);g=nil;return rr;".to_owned()),
             ],
+            luau,
         );
         // The head segment is the chain root and keeps the plain table build;
         // later segments fold the previous part into `B` -- a slot this function
@@ -371,10 +384,15 @@ end;if i~=#S+1 then E()end;st={k_done};",
                 "local VAL={};for j=1,#ALPHA do VAL[SB(ALPHA,j)]=(j-1+B)%r end;".to_owned(),
             )
         };
+        // `i` is `1` here and is an integer local, so it can carry the guard of
+        // the initial-state reconstruction (the state variable itself is not in
+        // scope inside its own initializer, which is why this site names a
+        // different source than the transitions do).
+        let st_prefix = structure.opaque_literal(u64::from(k_prefix), luau, "i");
         let mut body = format!(
             "local ALPHA={alpha};local S=\"{literal}\";local r={c1}+{c2};local MM={m1}+{m2};\
 local M24={a24}+{b24};local o={{}};local B=0;local R=0;local pv=0;local i=1;\
-{fold_into_b}{val_build}local st={k_prefix};{machine}",
+{fold_into_b}{val_build}local st={st_prefix};{machine}",
             alpha = alpha_literal,
             literal = literal,
             c1 = c1,
@@ -383,7 +401,7 @@ local M24={a24}+{b24};local o={{}};local B=0;local R=0;local pv=0;local i=1;\
             m2 = m2,
             a24 = a24,
             b24 = b24,
-            k_prefix = k_prefix,
+            st_prefix = st_prefix,
             machine = machine,
             fold_into_b = fold_into_b,
             val_build = val_build,
@@ -413,6 +431,7 @@ local g={{}};{body}end,",
     // The split watermark check: W1 is a plain 4-byte packer, W2 compares
     // against the opaque expected value. Hidden in plain sight among the
     // other numeric-keyed payload functions.
+    let watermark_compare = structure.opaque_literal(u64::from(expected_watermark), luau, "v");
     let watermark_fields = vec![
         format!(
             "[{}]=function(S,E,SB)local a,b,c,d=SB(S,1),SB(S,2),SB(S,3),SB(S,4);\
@@ -420,8 +439,9 @@ if not d then E()end;return((a*256+b)*256+c)*256+d;end,",
             keys[11]
         ),
         format!(
-            "[{}]=function(v,E)if v~={expected_watermark} then E()end;end,",
-            keys[12]
+            "[{}]=function(v,E)if v~={watermark_compare} then E()end;end,",
+            keys[12],
+            watermark_compare = watermark_compare
         ),
     ];
     // Random decoder sections: the anti-hook gate, 32-bit word operations,
@@ -604,8 +624,12 @@ local check=b32();if {ad_guard} then E()end;
     for definition in &defs {
         core_text.push_str(definition);
     }
+    let w_next = structure.opaque_literal(u64::from(c_next), luau, "id");
+    let go_pool_a = state_assign(&mut structure, "w", c_pool_a, luau);
+    let go_slice = state_assign(&mut structure, "w", c_slice, luau);
+    let go_fin = state_assign(&mut structure, "w", c_fin, luau);
     core_text.push_str(&format!(
-        "local P={{}};local work=0;local id=0;local TU=0;local w={c_next};\n"
+        "local P={{}};local work=0;local id=0;local TU=0;local w={w_next};\n"
     ));
     let segment_add = semantic_image.token_layers[0].add;
     let segment_multiplier = semantic_image.token_layers[0].multiplier;
@@ -623,16 +647,16 @@ local check=b32();if {ad_guard} then E()end;
             (
                 c_next,
                 format!(
-                    "if id>=np then w={c_pool_a} else F,VMCS,RT=PH();TU=TU+F.__obf_proto_nu;work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;F.__obf_proto_code={{VMCS,RT}};P[id]=F;id=id+1;w={c_next}; end;"
+                    "if id>=np then {go_pool_a} else F,VMCS,RT=PH();TU=TU+F.__obf_proto_nu;work=work+F.__obf_proto_nu+F.__obf_proto_nk+F.__obf_proto_nc;if work>1000000 then E()end;F.__obf_proto_code={{VMCS,RT}};P[id]=F;id=id+1;w={c_next}; end;"
                 ),
             ),
             (
                 c_pool_a,
-                format!("{capture_pool}w={c_slice};"),
+                format!("{capture_pool}{go_slice}"),
             ),
             (
                 c_slice,
-                format!("for fid=0,np-1 do id=fid;F=P[id];PU() end;w={c_fin};"),
+                format!("for fid=0,np-1 do id=fid;F=P[id];PU() end;{go_fin}"),
             ),
             (
                 c_fin,
@@ -642,6 +666,7 @@ local check=b32();if {ad_guard} then E()end;
                 ),
             ),
         ],
+        luau,
     ));
     core_text.push_str("\nlocal rP,rnp,ren=P,np,entry;g=nil;return rP,rnp,ren\n");
     core_text = slot_rewrite(
@@ -720,17 +745,24 @@ local r=1+((d[1]+d[2]*87)*31+(d[3]+d[4]*87)*7+(d[5]+d[6]*87))%2147483646;g=nil;r
     // The fifth shape is spelled like the other four (and an unlisted value reaches
     // `E()`), so the reader is self-contained: it never treats "anything else" as shape
     // five, which is what lets the parser-side form check stay a cheap range test.
+    // Goal 6 (part 3): the five operand-shape comparisons are spelled opaquely
+    // like every other dispatch arm, so the shape ids the reader branches on
+    // are not readable from the emitted text either. Drawn here, in order, so
+    // the per-seed stream stays a pure function of the seed.
+    let sf_forms: Vec<String> = (1..=5)
+        .map(|n| structure.dispatch_condition_opaque("sf", n as u16, luau, "sf"))
+        .collect();
     let mut decode_body = format!(
         "[{key}]=function(E,SB)local g={{}};\nlocal Dv=function(CD,p)local w=SB(CD,p);if w==nil then E()end;p=p+1;local v=w%128;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*128;if w<128 and v<128 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*16384;if w<128 and v<16384 then E()end;\
 if w>=128 then w=SB(CD,p);if w==nil then E()end;p=p+1;v=v+w%128*2097152;if v<2097152 then E()end;\
 if w>=128 then E()end;end;end;end;return v,p end;\n local AK=function(kv,kid,klane,kx,km,kcl)local kq=(kv*17+kid*31+klane*53+{k9_salt})%8+1;local kii;if km==65536 then kii=({{1,43691,52429,28087,36409,35747,20165,61167}})[kq]else kii=({{1,171,205,183,57,163,197,239}})[kq]end;local kaa=(kv*257+kid*911+klane*193+{k9_add}+kcl%km)%km;return (kx-kaa)*kii%km end;\nreturn function(CD,p,sf,token,id,cl)local a,b,c,j,k2,kk,p2;\
-if sf==1 then j,p2=Dv(CD,p);if {jx} then E()end;a=j%256;k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);c=AK(token,id,2,c,256,cl);\
-elseif sf==2 then a,p2=Dv(CD,p);if {ax} then E()end;b=0;c=0;a=AK(token,id,0,a,256,cl);\
-elseif sf==3 then a,p2=Dv(CD,p);b,p2=Dv(CD,p2);if {ax} or {bx} then E()end;c=0;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);\
-elseif sf==4 then a,p2=Dv(CD,p);k2,p2=Dv(CD,p2);if {ax} or {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;kk=AK(token,id,1,b+c*256,65536,cl);a=AK(token,id,0,a,256,cl);b=kk%256;c=(kk-b)/256;\
-elseif sf==5 then a,p2=Dv(CD,p);b,p2=Dv(CD,p2);c,p2=Dv(CD,p2);if {ax} or {bx} or {cx} then E()end;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);c=AK(token,id,2,c,256,cl);\
+if {sf1} then j,p2=Dv(CD,p);if {jx} then E()end;a=j%256;k2=(j-j%256)/256;b=k2%256;c=(k2-k2%256)/256;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);c=AK(token,id,2,c,256,cl);\
+elseif {sf2} then a,p2=Dv(CD,p);if {ax} then E()end;b=0;c=0;a=AK(token,id,0,a,256,cl);\
+elseif {sf3} then a,p2=Dv(CD,p);b,p2=Dv(CD,p2);if {ax} or {bx} then E()end;c=0;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);\
+elseif {sf4} then a,p2=Dv(CD,p);k2,p2=Dv(CD,p2);if {ax} or {kx} then E()end;b=k2%256;c=(k2-k2%256)/256;kk=AK(token,id,1,b+c*256,65536,cl);a=AK(token,id,0,a,256,cl);b=kk%256;c=(kk-b)/256;\
+elseif {sf5} then a,p2=Dv(CD,p);b,p2=Dv(CD,p2);c,p2=Dv(CD,p2);if {ax} or {bx} or {cx} then E()end;a=AK(token,id,0,a,256,cl);b=AK(token,id,1,b,256,cl);c=AK(token,id,2,c,256,cl);\
 else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
         key = keys[14],
         jx = jx,
@@ -740,6 +772,11 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
         cx = cx,
         k9_salt = semantic_image.mask_salt,
         k9_add = semantic_image.mask_add,
+        sf1 = &sf_forms[0],
+        sf2 = &sf_forms[1],
+        sf3 = &sf_forms[2],
+        sf4 = &sf_forms[3],
+        sf5 = &sf_forms[4],
     );
     // Only the varint reader's scratch keeps the slot treatment (as before this batch).
     // The shape branch works in plain locals instead: `slot_rewrite` turns `local x`
@@ -757,9 +794,11 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
                 perm[(*op as u8) as usize],
                 format!(
                     "{} then ok={};",
-                    structure.dispatch_condition(
-                        u64::from(perm[(*op as u8) as usize]) as u16,
-                        program.target.is_luau()
+                    structure.dispatch_condition_opaque(
+                        "o",
+                        u16::from(perm[(*op as u8) as usize]),
+                        luau,
+                        "o"
                     ),
                     validation(*op)
                 ),
@@ -810,8 +849,8 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
     // are synthesized per use by `KGC` inside the interpreter, so nothing in the
     // parse path ever holds one.
     let kimg_pass = "local kend=#CD-4;if kend<0 then E()end;local ke=kend-U32(CD,kend+1);if ke<0 then E()end;if F.__obf_proto_nk>0 then local KS,KT={{}},{{}};local eo,ei=KGC(CD,F.__obf_proto_nk,nil,KS,KT,nil);if eo~=kend-ke or ei~=F.__obf_proto_nk then E()end;F.__obf_proto_tags=KT else F.__obf_proto_tags={{}} end;";
-    let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
-    let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
+    let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers, luau);
+    let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers, luau);
     let tuple_slots = field_order.tuple_slots();
     // K8: route each decoded record through a per-prototype, payload-derived
     // indirect target table before the normal rid dispatch. The constants are
@@ -874,14 +913,14 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         tuple_next = tuple_slots[1],
         tuple_skip = tuple_slots[2],
         operand_store = OperandLayout::parser_store_lua(),
-        ctl44 = perm[44],
-        ctl45 = perm[45],
-        ctl46 = perm[46],
-        ctl47 = perm[47],
-        jump = perm[Opcode::Jump as usize],
-        test = perm[Opcode::Test as usize],
-        ret = perm[Opcode::Return as usize],
-        tail = perm[Opcode::TailCall as usize],
+        ctl44 = structure.opaque_literal(u64::from(perm[44]), luau, "op"),
+        ctl45 = structure.opaque_literal(u64::from(perm[45]), luau, "op"),
+        ctl46 = structure.opaque_literal(u64::from(perm[46]), luau, "op"),
+        ctl47 = structure.opaque_literal(u64::from(perm[47]), luau, "op"),
+        jump = structure.opaque_literal(u64::from(perm[Opcode::Jump as usize]), luau, "last"),
+        test = structure.opaque_literal(u64::from(perm[Opcode::Test as usize]), luau, "last"),
+        ret = structure.opaque_literal(u64::from(perm[Opcode::Return as usize]), luau, "last"),
+        tail = structure.opaque_literal(u64::from(perm[Opcode::TailCall as usize]), luau, "last"),
     );
     s.push_str(&semantic_validator);
     s.push_str("\nend,");
@@ -1015,13 +1054,20 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         entry_states[4],
         entry_states[5],
     );
+    // Goal 6 (part 3): the entry graph's stage labels are opaque, like every
+    // other CFF state number -- see `structure::state_assign`.
+    let go_probe = state_assign(&mut structure, "es", e_probe, luau);
+    let go_segments = state_assign(&mut structure, "es", e_segments, luau);
+    let go_decode = state_assign(&mut structure, "es", e_decode, luau);
+    let go_bind = state_assign(&mut structure, "es", e_bind, luau);
+    let go_run = state_assign(&mut structure, "es", e_run, luau);
     let prelude_stage = format!(
-        "{}{ret_names}=VMS[{}]();es={e_probe};",
+        "{}{ret_names}=VMS[{}]();{go_probe}",
         scatter.blob(0),
         keys[0]
     );
     let probe_stage = format!(
-        "{}c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});{}c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});{}c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});es={e_segments};",
+        "{}c{cn0}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});{}c{cn1}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});{}c{cn2}=VMS[{}](SB,{},{},DBG,GI,LS{probe_arg});{go_segments}",
         scatter.blob(1),
         keys[5 + probe_order[0]],
         probe_inputs[probe_order[0]].0,
@@ -1039,7 +1085,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         cn2 = probe_order[2] + 1,
     );
     let segment_stage = format!(
-        "{}Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);{}Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y1);{}Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y2);{}local mV=VMS[{}](Y1,E,SB);{}VMS[{}](mV,E);es={e_decode};",
+        "{}Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);{}Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y1);{}Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y2);{}local mV=VMS[{}](Y1,E,SB);{}VMS[{}](mV,E);{go_decode}",
         scatter.blob(4),
         keys[8 + hold[0]],
         scatter.blob(5),
@@ -1058,9 +1104,9 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     // scoped to the state machine's arm, so this must be an assignment.
     let walker = constant_walker_lua(&mut structure, program.target, pool_mask, pool_mod);
     let decoder_stage = format!("{walker}{decoder_stage}");
-    let decode_stage = format!("{}{decoder_stage}es={e_bind};", scatter.blob(9));
+    let decode_stage = format!("{}{decoder_stage}{go_bind}", scatter.blob(9));
     let bind_stage = format!(
-        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E);RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC);CV,SV,Lookup=VMS[{}](TY,E);es={e_run};",
+        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E);RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC);CV,SV,Lookup=VMS[{}](TY,E);{go_run}",
         scatter.blob(10),
         keys[14], keys[15], keys[2], keys[3],
     );
@@ -1086,6 +1132,11 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         "{scatter_check}local H=VMS[{}](SC,Z,U,G,E,PC,SB,SS,SF,MF,TN,TY,TS,NX,MT,SM,RG,RE,IF,Freeze,P,CV,SV,Lookup,RD,ED,OG,DC,KGC{mba_bits});local result=H(entry,Z(...),{{}});return U(result,1,result.n);",
         keys[4]
     );
+    // Goal 6 (part 3): the entry graph's six stage labels are opaque too, and
+    // the initial `local es=<state>` names `ck` (an integer already bound one
+    // statement earlier) because the state variable is not in scope inside its
+    // own initializer.
+    let es_prelude = structure.opaque_literal(u64::from(e_prelude), luau, "ck");
     let entry_machine = state_machine(
         &mut structure,
         "es",
@@ -1097,10 +1148,11 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
             (e_bind, bind_stage),
             (e_run, run_stage),
         ],
+        luau,
     );
     write!(
         s,
-        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names},KGC;local c1,c2,c3,Y1,Y2,Y3,pv,P,np,entry,RD,ED,OG,DC,CV,SV,Lookup;local ck=0;local es={e_prelude};{entry_machine}{entry_tail}\nend,\n"
+        "[\"{method}\"]=function(VMS,...){entry_head}\nlocal {ret_names},KGC;local c1,c2,c3,Y1,Y2,Y3,pv,P,np,entry,RD,ED,OG,DC,CV,SV,Lookup;local ck=0;local es={es_prelude};{entry_machine}{entry_tail}\nend,\n"
     )
     .unwrap();
     write!(
@@ -1219,12 +1271,26 @@ end;
     let fsv = state_values(&mut structure, 4);
     let (k_fetch, k_disp, k_fetch_alt, k_disp_alt) = (fsv[0], fsv[1], fsv[2], fsv[3]);
     let control_mask = "P.__obf_proto_control";
-    let c_fetch =
-        selected_masked_state_condition(&mut structure, "w", control_mask, k_fetch, k_fetch_alt);
-    let c_disp =
-        selected_masked_state_condition(&mut structure, "w", control_mask, k_disp, k_disp_alt);
-    let v_fetch = selected_masked_state_value(k_fetch, k_fetch_alt, control_mask);
-    let v_disp = selected_masked_state_value(k_disp, k_disp_alt, control_mask);
+    let c_fetch = selected_masked_state_condition(
+        &mut structure,
+        "w",
+        control_mask,
+        k_fetch,
+        k_fetch_alt,
+        luau,
+    );
+    let c_disp = selected_masked_state_condition(
+        &mut structure,
+        "w",
+        control_mask,
+        k_disp,
+        k_disp_alt,
+        luau,
+    );
+    let v_fetch =
+        selected_masked_state_value(&mut structure, k_fetch, k_fetch_alt, control_mask, luau);
+    let v_disp =
+        selected_masked_state_value(&mut structure, k_disp, k_disp_alt, control_mask, luau);
     let dispatch_first = !structure.coin();
     // Seed-ISA v1 prelude: after Make binds (so the helper pool captures
     // live values) and before H (so every arm reaches it lexically).
@@ -1276,8 +1342,7 @@ end;
         } else {
             debug_assert_ne!(recipe.descriptor_ops, recipe.execute_ops);
         }
-        let entry_condition =
-            structure.dispatch_condition_for("rid", recipe.id, program.target.is_luau());
+        let entry_condition = structure.dispatch_condition_opaque("rid", recipe.id, luau, "rid");
         recipe_entries.push((
             recipe.id,
             format!("{entry_condition} then {};", context.successor(chunks[0].2)),
@@ -1311,8 +1376,7 @@ end;
                     write!(body, "{};", context.successor(semantic_init)).unwrap();
                 }
             }
-            let condition =
-                structure.dispatch_condition_for("sid", stage, program.target.is_luau());
+            let condition = structure.dispatch_condition_opaque("sid", stage, luau, "sid");
             fragment_arms.push((stage, format!("{condition} then {body}")));
         }
     }
@@ -1333,16 +1397,23 @@ end;
         .copied()
         .chain(std::iter::once(semantic_init))
         .collect();
-    let recipe_chain =
-        grouped_interval_chain(&mut structure, recipe_entries, recipe_groups, "rid", &[]);
+    let recipe_chain = grouped_interval_chain(
+        &mut structure,
+        recipe_entries,
+        recipe_groups,
+        "rid",
+        &[],
+        luau,
+    );
     let fragment_chain = grouped_interval_chain(
         &mut structure,
         fragment_arms,
         fragment_groups,
         context::STATE_VAR,
         &sid_states,
+        luau,
     );
-    let init_condition = state_condition(&mut structure, context::STATE_VAR, semantic_init);
+    let init_condition = state_condition(&mut structure, context::STATE_VAR, semantic_init, luau);
     // K22: the loop-back is tested in wire space. The arms write the successor
     // wire instead of the state, so the state is still the *previous* block's
     // when this line runs -- testing it would either re-fetch right after the

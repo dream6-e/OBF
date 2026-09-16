@@ -120,10 +120,13 @@ fn the_reader_splits_the_pair_without_consulting_a_table() {
             );
         }
         // The five shapes are still all reachable, each with its own baked widths: the
-        // de-pooling must not have collapsed the shape chain into one branch.
-        for shape in 1..=5u8 {
+        // de-pooling must not have collapsed the shape chain into one branch. Goal 6
+        // (part 3) spells those operands as opaque literals, so the arms are read by
+        // value (`scan_dispatch_chain_spans`) rather than by decimal spelling.
+        let (arms, _, _, _) = scan_dispatch_chain_spans(&raw, target, "sf");
+        for shape in 1..=5u64 {
             assert!(
-                raw.contains(&format!("sf=={shape}")),
+                arms.contains(&shape),
                 "{target}: shape {shape} lost its specialised read"
             );
         }

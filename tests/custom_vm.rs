@@ -524,10 +524,13 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
                 format!("local f=assert(loadfile('{path}')) f()"),
             )
         };
-        // Change the generated ChaCha constant itself. The helper still has
-        // plausible source metadata, but the anti-hook known-answer test must
-        // reject it before either payload decrypt can expose bytes.
-        let helper_tamper = generated.replacen("1634760805", "1634760806", 1);
+        // Change the generated ChaCha helper itself. Goal 6 (part 3) spells the
+        // sigma words as opaque literals, so the tamper target is the quarter-round
+        // column list instead: the helper still has plausible source metadata, but
+        // the anti-hook known-answer test must reject it before either payload
+        // decrypt can expose bytes.
+        assert_eq!(generated.matches("1,5,9,13").count(), 1);
+        let helper_tamper = generated.replacen("1,5,9,13", "1,5,9,12", 1);
         assert_ne!(helper_tamper, generated);
         // K7 shuffles the attestation fold terms and respells its modulus. The
         // packed payload mutation remains a stable syntax-preserving tamper

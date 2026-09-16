@@ -773,51 +773,37 @@ fn opaque_true_false_branches_carry_real_but_unreachable_instructions() {
             // 拼写普查就会数不到。运行时行为由 execute_* 一组测试覆盖。
             let output = super::emit_unlifted(&data, target, seed).unwrap();
             assert_eq!(super::emit_unlifted(&data, target, seed).unwrap(), output);
-            // Dead dispatch arms: an identifier/number equality where
-            // the number sits in the impossible 200..=254 band.
+            // Dead dispatch arms: an identifier/number equality where the number
+            // sits in the impossible 200..=254 band. Goal 6 (part 3) writes those
+            // numbers as opaque literals, so the census folds the operand value
+            // (`chain_operand_value`) instead of reading a decimal spelling; the
+            // spellings themselves are gated by the opaque-literal tests.
             let tokens = crate::lexer::lex(&output, target).unwrap();
             let mut dead_arms = 0usize;
-            // Numeric literals appear in decimal, hex or digit-grouped
-            // binary spellings (integer_literal variants).
-            let numeric = |text: &str| -> Option<u32> {
-                let (radix, digits) = if let Some(rest) = text.strip_prefix("0x") {
-                    (16, rest)
-                } else if let Some(rest) = text.strip_prefix("0b") {
-                    (2, rest)
-                } else {
-                    (10, text)
-                };
-                u32::from_str_radix(&digits.replace('_', ""), radix).ok()
+            let identifier = |index: usize| {
+                tokens
+                    .get(index)
+                    .is_some_and(|token| token.kind == crate::lexer::TokenKind::Identifier)
             };
-            for index in 0..tokens.len().saturating_sub(5) {
-                let band = |token: usize| {
-                    tokens[token].kind == crate::lexer::TokenKind::Number
-                        && numeric(tokens[token].text(&output))
-                            .is_some_and(|value| (200..=254).contains(&value))
+            for index in 0..tokens.len().saturating_sub(2) {
+                if identifier(index) && matches!(tokens[index + 1].text(&output), "==" | "~=") {
+                    if let Some((value, _)) = chain_operand_value(&tokens, &output, index + 2) {
+                        if (200..=254).contains(&value) {
+                            dead_arms += 1;
+                        }
+                    }
+                }
+                let Some((value, used)) = chain_operand_value(&tokens, &output, index) else {
+                    continue;
                 };
-                if tokens[index + 1].text(&output) == "=="
-                    && ((tokens[index].kind == crate::lexer::TokenKind::Identifier
-                        && band(index + 2))
-                        || (band(index)
-                            && tokens[index + 2].kind == crate::lexer::TokenKind::Identifier))
-                {
-                    dead_arms += 1;
+                if !(200..=254).contains(&value) {
+                    continue;
                 }
-                // not(A~=K) spelling.
-                if tokens[index].text(&output) == "not"
-                    && tokens[index + 1].text(&output) == "("
-                    && tokens[index + 2].kind == crate::lexer::TokenKind::Identifier
-                    && tokens[index + 3].text(&output) == "~="
-                    && band(index + 4)
-                {
-                    dead_arms += 1;
-                }
-                // A-K==0 spelling.
-                if tokens[index].kind == crate::lexer::TokenKind::Identifier
-                    && tokens[index + 1].text(&output) == "-"
-                    && band(index + 2)
-                    && tokens[index + 3].text(&output) == "=="
-                    && tokens[index + 4].text(&output) == "0"
+                let after = index + used;
+                if matches!(
+                    tokens.get(after).map(|token| token.text(&output)),
+                    Some("==" | "~=")
+                ) && identifier(after + 1)
                 {
                     dead_arms += 1;
                 }
@@ -988,10 +974,17 @@ fn transport_watermark_is_present_checked_and_never_spelled_out() {
             })
             .count();
         assert_eq!(stamped, 1, "{target}");
-        // The split functions carry no watermark spelling: W1 is a
-        // byte packer, W2 holds only the packed u32 as a number.
+        // The split functions carry no watermark spelling: W1 is a byte packer,
+        // W2 holds only the packed u32 as a number. Goal 6 (part 3) turned that
+        // number into an opaque literal as well, so the census now asserts the
+        // *absence* of the decimal spelling -- the compare itself is still there
+        // (`transport_watermark_is_checked` runs it) and the runtime side is the
+        // mismatch gate in `custom_vm.rs`, which must abort before user code.
         let expected = u32::from_be_bytes(*b"XXS:").to_string();
-        assert!(output.contains(&expected));
+        assert!(
+            !output.contains(&expected),
+            "{target}: the transport watermark is spelled out again"
+        );
         // Extraction strips the watermark; full roundtrip still holds.
         assert_eq!(
             decrypt_embedded(&output, target, 735).unwrap(),
@@ -1121,7 +1114,7 @@ fn semantic_descriptors_and_fragments_poison_dictionary_only_translation() {
             // K21：fragment 池不再按余数切子链，改成数字区间（见
             // `dispatch_intervals.rs` 的 census 与真机门）。这里改钉「选择器确实没了」，
             // 区间节点数下限由 K21 那条门按双目标多种子把守。
-            assert_eq!(raw.matches("sid%").count(), 0);
+            assert_eq!(residue_selectors(&raw, target, "sid"), 0);
             let output = emit(&data, target, seed).unwrap();
             assert!(!output.contains("__obf_fl"));
             assert!(!output.contains("__obf_fv"));
@@ -1167,7 +1160,22 @@ fn split_chacha8_sections_and_cross_stage_terms_couple_the_pipeline() {
                 "[{}]=function(AH,CC,CB,X8C",
                 keys[ANTI_HOOK_FIELD]
             )));
-            assert!(raw.contains("1634760805,857760878,2036477234,1797285236"));
+            // Goal 6 (part 3): the sigma words are opaque reconstructions now, so
+            // the gate flips to the property the change was made for -- the four
+            // words are no longer readable in the text at all. The block layout,
+            // the round structure and the anti-hook known-answer self-test are the
+            // positive side and are pinned by the surrounding assertions.
+            for word in [
+                "1634760805",
+                "857760878",
+                "2036477234",
+                "1797285236",
+            ] {
+                assert!(
+                    !raw.contains(word),
+                    "{target}: the ChaCha sigma word {word} is spelled again"
+                );
+            }
             assert!(raw.contains("for i=1,4 do Q(x,1,5,9,13)"));
             assert!(raw.contains("Z[1]~=") && !raw.contains("Z[1]~=804192318"));
             assert_eq!(raw.matches("local aw=AH(AH,CC,CB,X8C").count(), 2);

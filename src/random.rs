@@ -234,10 +234,29 @@ impl Prng {
     /// Variable-parameterized form used by the semantic recipe dispatcher.
     /// The caller supplies an internal identifier, never user source.
     pub fn dispatch_condition_for(&mut self, variable: &str, opcode: u16, luau: bool) -> String {
+        let literal = self.integer_literal(u64::from(opcode), luau);
+        self.dispatch_shape(variable, &literal)
+    }
+
+    /// Goal 6 (part 3): the same four dispatcher shapes over an *opaque* spelling
+    /// of the opcode -- see [`Prng::opaque_literal`]. Every form is an exact
+    /// arithmetic/compare context, so the reconstruction can drop in unchanged,
+    /// and the four shapes are the same four the plain spelling uses.
+    pub fn dispatch_condition_opaque(
+        &mut self,
+        variable: &str,
+        opcode: u16,
+        luau: bool,
+        source: &str,
+    ) -> String {
+        let literal = self.opaque_literal(u64::from(opcode), luau, source);
+        self.dispatch_shape(variable, &literal)
+    }
+
+    fn dispatch_shape(&mut self, variable: &str, literal: &str) -> String {
         debug_assert!(variable
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
-        let literal = self.integer_literal(u64::from(opcode), luau);
         let mut result = String::new();
         match self.index(4) {
             0 => write!(result, "{variable}=={literal}").unwrap(),
@@ -296,10 +315,30 @@ impl Prng {
         below: bool,
         luau: bool,
     ) -> String {
+        let literal = self.integer_literal(u64::from(bound), luau);
+        self.boundary_shape(variable, &literal, below)
+    }
+
+    /// Goal 6 (part 3): a binary-search bound -- the number that says where a
+    /// partition cuts -- spelled as an opaque reconstruction instead of a
+    /// literal. Both polarities keep their exact-complement relationship: the
+    /// reconstruction is one fixed value, only its spelling varies.
+    pub fn boundary_condition_opaque(
+        &mut self,
+        variable: &str,
+        bound: u16,
+        below: bool,
+        luau: bool,
+        source: &str,
+    ) -> String {
+        let literal = self.opaque_literal(u64::from(bound), luau, source);
+        self.boundary_shape(variable, &literal, below)
+    }
+
+    fn boundary_shape(&mut self, variable: &str, literal: &str, below: bool) -> String {
         debug_assert!(variable
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
-        let literal = self.integer_literal(u64::from(bound), luau);
         let mut result = String::new();
         if below {
             match self.index(5) {
@@ -342,9 +381,6 @@ impl Prng {
         noise: u16,
         below: bool,
     ) -> String {
-        debug_assert!(variable
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
         // Both numbers are plain decimals by construction: a bound is not a
         // value the chain ever tests for equality, so its only job is to look
         // like every other three-to-five digit number in the shell, where hex
@@ -352,6 +388,31 @@ impl Prng {
         // anything (contrast `dispatch_condition`, whose literals *are* opcodes
         // and therefore gain from an unusual spelling).
         let literal = bound.to_string();
+        self.interval_shape(variable, &literal, noise, below)
+    }
+
+    /// Goal 6 (part 3): the interval bound -- the partition boundary of the
+    /// opcode dispatch chain -- as an opaque reconstruction. The tautology guard
+    /// forms keep hiding the *variable*; the bound stops being a readable number
+    /// in every form, so no `<= 1234` anchor survives and the partition cannot be
+    /// read off the text without folding arithmetic on the runtime partition.
+    pub fn interval_condition_opaque(
+        &mut self,
+        variable: &str,
+        bound: u16,
+        noise: u16,
+        below: bool,
+        luau: bool,
+        source: &str,
+    ) -> String {
+        let literal = self.opaque_literal(u64::from(bound), luau, source);
+        self.interval_shape(variable, &literal, noise, below)
+    }
+
+    fn interval_shape(&mut self, variable: &str, literal: &str, noise: u16, below: bool) -> String {
+        debug_assert!(variable
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
         let guard = format!("({variable}<={variable} and {variable} or {noise})");
         let mut result = String::new();
         if below {
@@ -379,6 +440,237 @@ impl Prng {
         }
         .unwrap();
         result
+    }
+
+    /// Goal 6 (part 3): the opaque-constant toolbox.
+    ///
+    /// A *meaningful* constant -- a CFF state number, a binary-search bound, a
+    /// ChaCha8 sigma word -- is the kind of number a reader greps for, because
+    /// recognising `0x61707865` or a stable `w==567` names the construction.
+    /// This spells such a value as **two algebraically exact reconstructions
+    /// selected by an always-true guard over a runtime local**:
+    ///
+    /// ```text
+    /// ((<source><=<source>)and(<a>+<b>)or(<value>+<k>-<k>))
+    /// ```
+    ///
+    /// Three properties matter, and each is gated by a unit test below:
+    ///
+    /// * **No spelling of the value.** Every arm is built from operands that are
+    ///   themselves different from `value`, so the number never appears as a
+    ///   decimal (or, after the P1 respeller, hex/scientific) token. A reader has
+    ///   to fold arithmetic to recover it.
+    /// * **Two arms, not one.** Both arms are exact and the guard only chooses a
+    ///   *spelling*; neither arm is a copy of the other. A reader cannot decide
+    ///   which reconstruction a site uses without evaluating the guard, and the
+    ///   guard reads a runtime value (a state variable, a ChaCha round argument)
+    ///   that has no static value in the delivered text.
+    /// * **Sound by construction.** Because both arms equal `value`, the guard
+    ///   cannot change behaviour even when it is false -- NaN, a wrapped value, a
+    ///   metatable, anything. There is no unreachable-arm assumption anywhere, so
+    ///   the substitution is exact for every input, not merely for the inputs the
+    ///   emitter expected.
+    ///
+    /// The operand pools skip the audit-nice literals ([`Prng::NICE_LITERALS`]),
+    /// so the nice-constant census cannot move by drawing an operand that is
+    /// itself an anchor. Small values are allowed but only the offset families
+    /// apply to them (a split of `2` into two smaller operands does not exist),
+    /// and every arm is dropped if its own text happens to spell the value --
+    /// which is what keeps `(1*2)` from standing in for `2`.
+    pub fn opaque_literal(&mut self, value: u64, luau: bool, source: &str) -> String {
+        assert!(value < (1 << 31), "opaque_literal: {value} exceeds 2^31");
+        assert!(
+            !source.is_empty()
+                && source
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"[]_.".contains(&byte)),
+            "opaque_literal: {source:?} is not a simple runtime reference"
+        );
+        let mut arms: Vec<String> = Vec::new();
+        // (a) additive split: two operands strictly below the value.
+        if value >= 4 {
+            let a = 1 + self.index((value - 1) as usize) as u64;
+            let b = value - a;
+            if !Self::audit_nice(a) && !Self::audit_nice(b) {
+                arms.push(format!("({a}+{b})"));
+            }
+        }
+        // (b) offset differences: the value plus a small offset, minus that
+        // offset. Neither operand can be the value, so this family works for
+        // every value including `0`; three independent draws guarantee two
+        // distinct arms even when every other family is inapplicable.
+        for _ in 0..3 {
+            let k = 1 + self.index(199) as u64;
+            if k != value && !Self::audit_nice(k) && !Self::audit_nice(value + k) {
+                let arm = format!("({}-{k})", value + k);
+                if !arms.contains(&arm) {
+                    arms.push(arm);
+                }
+            }
+        }
+        // (c) doubling: exact for both parities (`2a-1` for odd values).
+        {
+            let b = value % 2;
+            let a = (value + b) / 2;
+            if !Self::audit_nice(a) && a != value {
+                arms.push(if b == 0 {
+                    format!("({a}*2)")
+                } else {
+                    format!("({a}*2-1)")
+                });
+            }
+        }
+        // (d) byte fold: the value spelled as its own big-endian bytes, the form
+        // the anti-hook KAT words already used. Only for values that need a
+        // second byte, i.e. where the fold is not a single digit plus zero.
+        if value >= 256 {
+            let bytes = value.to_be_bytes();
+            let first = bytes
+                .iter()
+                .position(|&byte| byte != 0)
+                .expect("nonzero value has a first byte");
+            // Left-associative nesting, exactly like the emitted KAT spellings:
+            // `((b0*256+b1)*256+b2)` -- a flat run would re-associate and change
+            // the value under Lua's precedence rules.
+            let mut text = Self::byte_token(bytes[first]);
+            for &byte in &bytes[first + 1..] {
+                let byte = Self::byte_token(byte);
+                text = format!("({text}*256+{byte})");
+            }
+            arms.push(text);
+        }
+        // Every arm must also survive the *text* census, not just the operand
+        // rule: the byte fold carries a literal `256` of its own, and any arm
+        // that happens to spell the value while being built is dropped here
+        // rather than shipped (for `256` that is exactly the byte-fold form).
+        arms.retain(|arm| !Self::spells_value(value, arm));
+        // (e) Luau only: a shift-shaped split. Native bitwise operators are not
+        // in the language subset this tool parses (`src/parser.rs` has no `&`,
+        // `|`, `~`, `<<`, `>>` at all -- only `//`), and the emitted text is
+        // re-parsed by that same parser before it ships, so a "bit form" has to
+        // be written in the operators the subset does have: the radix-`2^shift`
+        // fold below is exactly the shift/mask arithmetic the emitted Luau bit
+        // helpers perform, spelled inline. Both operands stay below the value,
+        // so the digits of `value` never appear.
+        if luau {
+            let shift = 1 + self.index(7) as u32;
+            let radix = 1u64 << shift;
+            let high = value / radix;
+            let low = value % radix;
+            if high != 0
+                && low != 0
+                && high != value
+                && low != value
+                && !Self::audit_nice(high)
+                && !Self::audit_nice(low)
+            {
+                arms.push(format!("({high}*2^{shift}+{low})"));
+            }
+        }
+        arms.retain(|arm| !Self::spells_value(value, arm));
+        assert!(
+            arms.len() >= 2,
+            "opaque_literal: value {value} has {} usable decompositions",
+            arms.len()
+        );
+        let first = self.index(arms.len());
+        let second = {
+            let mut index = self.index(arms.len() - 1);
+            if index >= first {
+                index += 1;
+            }
+            index
+        };
+        let guard = self.opaque_guard(source, value, luau);
+        let text = format!("({guard}and{}or{})", arms[first], arms[second]);
+        debug_assert!(
+            !Self::spells_value(value, &text),
+            "opaque_literal: {text} still spells {value}"
+        );
+        text
+    }
+
+    /// Audit-nice literals (the structure layer's `nice_label` filter, kept as
+    /// data here because this module sits below it in the dependency order).
+    pub(crate) const NICE_LITERALS: [u16; 4] = [86, 256, 7225, 7396];
+
+    /// The *complete* audit set (`product_audit` check1 / `transport::NICE_FULL`):
+    /// every value the static audit counts as an anchor. The label filter above
+    /// is the subset that fits the label domains; an operand pool has to reject
+    /// all of them, because a spelled `85`, `86` or `65535` is exactly the grep
+    /// handle the layer exists to remove.
+    pub(crate) const AUDIT_NICE: [u64; 17] = [
+        85, 7225, 614125, 52200625, 86, 7396, 636056, 54700816, 256, 65535, 65536, 16777216,
+        2147483648, 2147483647, 4294967295, 4294967296, 4294967297,
+    ];
+
+    fn audit_nice(value: u64) -> bool {
+        Self::AUDIT_NICE.contains(&value)
+    }
+
+    /// One byte of the byte-fold family, spelled so that a byte which is itself
+    /// an audit anchor is never a token of its own: `85` becomes `(84+1)` and
+    /// `86` becomes `(87-1)`, both exact and both made of non-anchor operands.
+    /// Any other byte keeps its plain spelling.
+    pub(crate) fn byte_token(byte: u8) -> String {
+        let value = u64::from(byte);
+        if !Self::audit_nice(value) {
+            return value.to_string();
+        }
+        if !Self::audit_nice(value - 1) {
+            format!("({}+1)", value - 1)
+        } else {
+            format!("({}-1)", value + 1)
+        }
+    }
+
+    /// True when `text` contains `value` as a complete digit token -- the
+    /// census rule every audit in this repository uses, so "hidden" here means
+    /// hidden for the same reader.
+    pub(crate) fn spells_value(value: u64, text: &str) -> bool {
+        let needle = value.to_string();
+        let bytes = text.as_bytes();
+        text.match_indices(needle.as_str()).any(|(at, _)| {
+            let before = at == 0 || !bytes[at - 1].is_ascii_digit();
+            let end = at + needle.len();
+            let after = end >= bytes.len() || !bytes[end].is_ascii_digit();
+            before && after
+        })
+    }
+
+    /// An always-true guard over a runtime reference, in the same families the
+    /// structure layer already uses for its opaque pairs. Every form returns a
+    /// boolean (or, for the `*0` form, a comparison) and reads `source` only, so
+    /// inserting one cannot add an effect, a local or a read position. The Luau
+    /// bit forms are offered only where `source` is an integer by construction.
+    fn opaque_guard(&mut self, source: &str, value: u64, luau: bool) -> String {
+        // The first three spell no digit at all, which is what lets `0` and `1`
+        // be hidden too: every other form would put a `0`/`1` into the text.
+        // `(x<=x)` and the reflexive `==`/`*` forms are not identities for NaN
+        // or infinity, and they do not have to be: both arms of the surrounding
+        // selection are the same value, so the guard can only choose a spelling.
+        let mut forms = vec![
+            format!("({source}<={source})"),
+            format!("(not({source}<{source}))"),
+            format!("({source}-{source}=={source}-{source})"),
+            format!("({source}-{source}==0)"),
+            format!("({source}~={source}-1)"),
+            format!("({source}*0==0)"),
+        ];
+        if luau {
+            // `//` is the one Luau-only operator this tool's parser accepts, and
+            // it is an identity for integers, so it makes a Luau-shaped guard
+            // that still parses (and that Lua 5.1 would reject, which is why it
+            // is offered only for Luau).
+            forms.push(format!("(({source}//1)=={source})"));
+            forms.push(format!("({source}%2=={source}%2)"));
+        }
+        forms.retain(|form| !Self::spells_value(value, form));
+        assert!(
+            !forms.is_empty(),
+            "opaque_guard: no digit-free form left for {value}"
+        );
+        forms[self.index(forms.len())].clone()
     }
 }
 
@@ -912,5 +1204,323 @@ mod tests {
             "b" => right,
             other => panic!("unexpected side {other:?}"),
         }
+    }
+
+    // --- Goal 6 (part 3): the opaque-constant toolbox ---------------------
+
+    /// One value in the restricted grammar `opaque_literal` emits. Booleans and
+    /// numbers are kept apart because Lua's `and`/`or` *return their operands*,
+    /// which is exactly what makes `(guard and A or B)` an operator-free
+    /// selection when A and B are numbers.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum OvValue {
+        Num(i64),
+        Bool(bool),
+    }
+
+    impl OvValue {
+        fn truthy(self) -> bool {
+            match self {
+                OvValue::Bool(value) => value,
+                OvValue::Num(_) => true,
+            }
+        }
+
+        fn num(self) -> i64 {
+            match self {
+                OvValue::Num(value) => value,
+                OvValue::Bool(value) => panic!("expected a number, got boolean {value}"),
+            }
+        }
+    }
+
+    /// A hand-written evaluator for the grammar the toolbox may emit: decimal
+    /// integers, the one runtime reference `X`, `+ - *`, `< <= == ~=`, `and or
+    /// not`, the Luau bit operators `& | ~`, and parentheses. It implements Lua
+    /// precedence (`or` < `and` < comparison < additive < multiplicative <
+    /// unary) so a mis-parenthesized reconstruction cannot pass.
+    struct OvParser<'a> {
+        bytes: &'a [u8],
+        at: usize,
+        source_value: i64,
+    }
+
+    impl<'a> OvParser<'a> {
+        fn new(text: &'a str, source_value: i64) -> Self {
+            OvParser {
+                bytes: text.as_bytes(),
+                at: 0,
+                source_value,
+            }
+        }
+
+        fn parse(text: &str, source_value: i64) -> i64 {
+            OvParser::evaluate(text, source_value).num()
+        }
+
+        /// Same parse, keeping the value kind: the guards are booleans, and
+        /// Lua's truthiness (only `false` is falsy) is what the caller checks.
+        fn truthy(text: &str, source_value: i64) -> bool {
+            OvParser::evaluate(text, source_value).truthy()
+        }
+
+        fn evaluate(text: &str, source_value: i64) -> OvValue {
+            let mut parser = OvParser::new(text, source_value);
+            let value = parser.or_expr();
+            assert_eq!(parser.at, parser.bytes.len(), "trailing text in {text}");
+            value
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.bytes.get(self.at).copied()
+        }
+
+        fn eat(&mut self, text: &str) -> bool {
+            if self.bytes[self.at..].starts_with(text.as_bytes()) {
+                self.at += text.len();
+                true
+            } else {
+                false
+            }
+        }
+
+        fn or_expr(&mut self) -> OvValue {
+            let mut left = self.and_expr();
+            while self.eat("or") {
+                let right = self.and_expr();
+                left = if left.truthy() { left } else { right };
+            }
+            left
+        }
+
+        fn and_expr(&mut self) -> OvValue {
+            let mut left = self.compare_expr();
+            while self.eat("and") {
+                let right = self.compare_expr();
+                left = if left.truthy() { right } else { left };
+            }
+            left
+        }
+
+        fn compare_expr(&mut self) -> OvValue {
+            let left = self.sum_expr();
+            if self.eat("<=") {
+                return OvValue::Bool(left.num() <= self.sum_expr().num());
+            }
+            if self.eat("==") {
+                return OvValue::Bool(left.num() == self.sum_expr().num());
+            }
+            if self.eat("~=") {
+                return OvValue::Bool(left.num() != self.sum_expr().num());
+            }
+            if self.eat("<") {
+                return OvValue::Bool(left.num() < self.sum_expr().num());
+            }
+            left
+        }
+
+        /// A boolean operand is *not* an error at this level: Lua lets
+        /// `(a<b) and x or y` ride through the operator levels, and only an
+        /// arithmetic operator applied to a boolean would fail. The kind is
+        /// therefore kept until an operator actually demands a number.
+        fn sum_expr(&mut self) -> OvValue {
+            let mut value = self.product_expr();
+            loop {
+                if self.eat("+") {
+                    value = OvValue::Num(value.num() + self.product_expr().num());
+                } else if self.eat("-") {
+                    value = OvValue::Num(value.num() - self.product_expr().num());
+                } else {
+                    return value;
+                }
+            }
+        }
+
+        fn product_expr(&mut self) -> OvValue {
+            let mut value = self.power_expr();
+            loop {
+                if self.eat("*") {
+                    value = OvValue::Num(value.num() * self.power_expr().num());
+                } else if self.eat("//") {
+                    let divisor = self.power_expr().num();
+                    assert!(divisor != 0, "floor division by zero");
+                    value = OvValue::Num(value.num().div_euclid(divisor));
+                } else if self.eat("/") {
+                    value = OvValue::Num(value.num() / self.power_expr().num());
+                } else if self.eat("%") {
+                    let divisor = self.power_expr().num();
+                    assert!(divisor != 0, "modulo by zero");
+                    // Lua's `%` is the floored modulo, i.e. `rem_euclid` for a
+                    // positive divisor -- the form every guard here uses.
+                    value = OvValue::Num(value.num().rem_euclid(divisor));
+                } else if self.eat("&") {
+                    value = OvValue::Num(value.num() & self.power_expr().num());
+                } else if self.eat("|") {
+                    value = OvValue::Num(value.num() | self.power_expr().num());
+                } else if self.bytes[self.at..].starts_with(b"~")
+                    && !self.bytes[self.at..].starts_with(b"~=")
+                {
+                    self.at += 1;
+                    value = OvValue::Num(value.num() ^ self.power_expr().num());
+                } else {
+                    return value;
+                }
+            }
+        }
+
+        /// `^` binds tighter than `*` and is right-associative in Lua, so it
+        /// gets its own level (`2^3` in the Luau shift form must read as `8`,
+        /// not as `(x*2)^3`).
+        fn power_expr(&mut self) -> OvValue {
+            let base = self.atom();
+            if self.eat("^") {
+                let exponent = self.power_expr().num();
+                assert!(exponent >= 0, "negative exponent in a reconstruction");
+                return OvValue::Num(base.num().pow(exponent as u32));
+            }
+            base
+        }
+
+        fn atom(&mut self) -> OvValue {
+            if self.eat("(") {
+                let value = self.or_expr();
+                assert!(self.eat(")"), "unbalanced parentheses");
+                return value;
+            }
+            if self.eat("not") {
+                let value = self.atom();
+                return OvValue::Bool(!value.truthy());
+            }
+            if self.eat("-") {
+                return OvValue::Num(-self.atom().num());
+            }
+            if self.eat("X") {
+                return OvValue::Num(self.source_value);
+            }
+            let start = self.at;
+            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                self.at += 1;
+            }
+            assert!(self.at > start, "no atom at byte {start}");
+            OvValue::Num(
+                std::str::from_utf8(&self.bytes[start..self.at])
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            )
+        }
+    }
+
+    /// Split an emitted reconstruction into its (guard, arm, arm) parts. The
+    /// guard forms and both arms are pure arithmetic/compare text with no
+    /// `and`/`or` of their own, so the first two keywords are the separators and
+    /// the assertion below is what keeps that true.
+    fn opaque_parts<'a>(text: &'a str) -> (&'a str, &'a str, &'a str) {
+        let body = text
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("reconstruction is parenthesized");
+        let (guard, rest) = body.split_once("and").expect("guard separator");
+        let (first, second) = rest.split_once("or").expect("arm separator");
+        (guard, first, second)
+    }
+
+    #[test]
+    fn opaque_literals_hide_their_value_and_are_exact_under_both_arms() {
+        let mut random = Prng::sfc(0x6f70_6171_7565_3631);
+        let mut values: Vec<u64> = (100..1000).step_by(37).collect();
+        values.extend([
+            0, 1, 2, 3, 7, 8, 17, 86, 256, 512, 65_521, 65_535, 16_777_215,
+        ]);
+        values.extend([
+            1_634_760_805,
+            857_760_878,
+            2_036_477_234,
+            1_797_285_236,
+            804_192_318,
+            505_049_583,
+            1_123_945_486,
+        ]);
+        for luau in [false, true] {
+            for &value in &values {
+                for _ in 0..8 {
+                    let text = random.opaque_literal(value, luau, "X");
+                    assert!(
+                        !Prng::spells_value(value, &text),
+                        "{text} still spells {value}"
+                    );
+                    assert!(
+                        text.matches('(').count() == text.matches(')').count(),
+                        "{text} has unbalanced parentheses"
+                    );
+                    let (guard, first, second) = opaque_parts(&text);
+                    assert!(
+                        !guard.contains("and") && !guard.contains("or"),
+                        "guard {guard} is not atomic"
+                    );
+                    // Every guard outcome picks a spelling of the same value:
+                    // that is the soundness argument, and it is checked here
+                    // rather than argued.
+                    assert_eq!(OvParser::parse(first, 5), value as i64, "arm {first}");
+                    assert_eq!(OvParser::parse(second, 5), value as i64, "arm {second}");
+                    assert!(OvParser::truthy(guard, 5), "guard {guard} must be true");
+                    assert_eq!(OvParser::parse(&text, 5), value as i64, "whole {text}");
+                    assert_eq!(OvParser::parse(&text, 0), value as i64, "whole {text} at 0");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_conditions_never_spell_their_bound() {
+        let mut random = Prng::sfc(0x636f_6e64_6974_696f);
+        for luau in [false, true] {
+            for bound in [17u16, 86, 256, 512, 4096, 12_345, 65_535] {
+                for _ in 0..8 {
+                    let text = random.dispatch_condition_opaque("o", bound, luau, "o");
+                    assert!(!Prng::spells_value(u64::from(bound), &text), "{text}");
+                    let text = random.boundary_condition_opaque("o", bound, true, luau, "o");
+                    assert!(!Prng::spells_value(u64::from(bound), &text), "{text}");
+                    let text = random.boundary_condition_opaque("o", bound, false, luau, "o");
+                    assert!(!Prng::spells_value(u64::from(bound), &text), "{text}");
+                    let text = random.interval_condition_opaque("o", bound, 7, true, luau, "o");
+                    assert!(!Prng::spells_value(u64::from(bound), &text), "{text}");
+                    let text = random.interval_condition_opaque("o", bound, 7, false, luau, "o");
+                    assert!(!Prng::spells_value(u64::from(bound), &text), "{text}");
+                }
+            }
+        }
+    }
+
+    /// The strongest cheap check on the toolbox: every reconstruction is fed
+    /// back through **the project's own parser** for the target it was built
+    /// for. The emitted text is re-parsed before it ships (and again when it is
+    /// shelled), so a form the parser rejects would be a latent generation
+    /// failure no evaluation test could catch -- this is exactly how the native
+    /// `~`/`|` xor forms were caught before shipping.
+    #[test]
+    fn opaque_forms_are_inside_the_tools_language_subset() {
+        use crate::target::Target;
+        let mut random = Prng::sfc(0x7375_6273_6574_6c75);
+        for (target, luau) in [(Target::Lua51, false), (Target::Luau, true)] {
+            for value in [0u64, 1, 2, 7, 17, 86, 100, 567, 4096, 65_535, 1_634_760_805] {
+                for _ in 0..12 {
+                    let text = random.opaque_literal(value, luau, "X");
+                    let source = format!("local X=5\nlocal w={text}\nreturn w");
+                    crate::parser::parse_source(&source, target).unwrap_or_else(|error| {
+                        panic!("{target} parser rejected {text}: {error:?}")
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn value_census_is_token_exact() {
+        assert!(!Prng::spells_value(256, "2^8"));
+        assert!(Prng::spells_value(256, "x==256"));
+        assert!(!Prng::spells_value(256, "x==1256"));
+        assert!(!Prng::spells_value(256, "x==2560"));
+        assert!(!Prng::spells_value(86, "0x586"));
     }
 }

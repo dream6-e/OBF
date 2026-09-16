@@ -1712,19 +1712,36 @@ pub(crate) fn pool_key_pair(image: &SemanticImage) -> (u64, u64) {
 /// fields, so an independent decoder still reproduces it without the script.
 pub(crate) fn pool_roll_triple(image: &SemanticImage) -> (u64, u64, u64) {
     let layer = &image.token_layers[3];
-    let mixed = (u64::from(image.mask_salt) + 3).wrapping_mul(2654435761)
+    let mut mixed = (u64::from(image.mask_salt) + 3).wrapping_mul(2654435761)
         ^ (u64::from(image.mask_add).wrapping_add(1)).wrapping_mul(2246822519)
         ^ (u64::from(layer.multiplier).wrapping_add(1)).wrapping_mul(3266489917)
         ^ u64::from(layer.add).wrapping_mul(668265263);
-    (
-        // Odd multiplier: the map is a bijection on k for a fixed plaintext, so
-        // no two distinct running keys can converge on the same successor.
-        3 + 2 * ((mixed >> 5) % 127),
-        // Plaintext weight, drawn in 1..=251 so `k*mul + p*mix + add` stays far
-        // below 2^53 and every step is an exact integer.
-        1 + ((mixed >> 17) % 251),
-        (mixed >> 29) % 256,
-    )
+    loop {
+        let triple = (
+            // Odd multiplier: the map is a bijection on k for a fixed plaintext,
+            // so no two distinct running keys can converge on the same successor.
+            3 + 2 * ((mixed >> 5) % 127),
+            // Plaintext weight, drawn in 1..=251 so `k*mul + p*mix + add` stays
+            // far below 2^53 and every step is an exact integer.
+            1 + ((mixed >> 17) % 251),
+            (mixed >> 29) % 256,
+        );
+        // Goal 6 (part 3): the three coefficients are written into the script on
+        // both sides (the writer's `UK` and the walk), so a draw that lands on an
+        // audit anchor (`85`, `86`, the radix family, ...) would hand the
+        // anchor-floor gate a grep handle for the cipher. Re-hash instead of
+        // accepting it -- the parity/range properties above are untouched.
+        if [triple.0, triple.1, triple.2]
+            .iter()
+            .any(|value| crate::vm::custom::transport::is_nice_part(*value))
+        {
+            mixed = mixed
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(0xBF58_476D_1CE4_E5B9);
+            continue;
+        }
+        return triple;
+    }
 }
 
 /// Stream position after one record. Both the writer and the emitted

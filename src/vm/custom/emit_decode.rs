@@ -112,7 +112,15 @@ pub(crate) fn constant_walker_lua(
     // decrypted until a use asks for it, the walk resumes where the previous
     // use stopped, and the only thing that survives a call is the cursor
     // (offset, running key, entry index) -- never a value.
-    let commit_go = |body: String| format!("{body}w={s_commit};");
+    let go_commit = super::structure::state_assign(structure, "w", s_commit, luau);
+    let go_extent = super::structure::state_assign(structure, "w", s_extent, luau);
+    let go_advance = super::structure::state_assign(structure, "w", s_advance, luau);
+    let go_loop = super::structure::state_assign(structure, "w", s_loop, luau);
+    let go_convert = super::structure::state_assign(structure, "w", s_convert, luau);
+    // Goal 6 (part 3): the walker's own state labels are opaque too, so the
+    // laziness machinery cannot be read off as a state table. The commit is the
+    // transition every conversion arm shares.
+    let commit_go = |body: String| format!("{body}{go_commit}");
     let int_form = if luau {
         "local s4=UK(Q,p+1,8,bk);local iv=IF(SF('%08x%08x',U32(s4,5),U32(s4,1)),16);if iv==nil then E()end;v=iv;"
             .to_owned()
@@ -150,14 +158,14 @@ pub(crate) fn constant_walker_lua(
     let convert =
         super::structure::grouped_tree(structure, convert_arms, convert_groups, "code", luau);
     let loop_body = format!(
-        "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg=SB(Q,at+1);if tg==nil then E()end;w={s_extent};"
+        "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg=SB(Q,at+1);if tg==nil then E()end;{go_extent}"
     );
-    let extent_body = format!("{extent}w={s_advance};");
+    let extent_body = format!("{extent}{go_advance}");
     // One entry consumed: the entry-level chain folds its keyed length (what
     // the seed-mode walk and the encoder both advance) and the normal path
     // either keeps skipping towards the wanted index or converts it.
     let advance_body = format!(
-        "off=off+p-at+ln;local nb=(bk+ln*257+{mask})%{mod};if seed then KS[ix]=at;KT[ix]=tg;ix=ix+1;bk=nb;w={s_loop} elseif ix<m then ix=ix+1;bk=nb;w={s_loop} else w={s_convert} end;",
+        "off=off+p-at+ln;local nb=(bk+ln*257+{mask})%{mod};if seed then KS[ix]=at;KT[ix]=tg;ix=ix+1;bk=nb;{go_loop} elseif ix<m then ix=ix+1;bk=nb;{go_loop} else {go_convert} end;",
         mask = pool_mask,
         mod = pool_mod,
     );
@@ -180,9 +188,13 @@ pub(crate) fn constant_walker_lua(
             (s_convert, convert_body),
             (s_commit, commit_body),
         ],
+        luau,
     );
+    // `off` is already bound (to 0) in the walker's own head, so it can carry
+    // the guard of the initial-state reconstruction.
+    let w_start = structure.opaque_literal(u64::from(s_loop), luau, "off");
     format!(
-        "KGC=function(Q,n,m,KS,KT,ST)\nlocal kend=#Q-4;if kend<0 then E()end;local blen=U32(Q,kend+1);if blen<0 or blen>kend then E()end;\nlocal z,off,bk,at,tg,ln,p,code,ix,v=kend-blen,0,0,0,0,0,0,0,0,nil;local seed=KS~=nil;\nif seed then if n%1~=0 or n<0 or n>65536 then E()end else if m%1~=0 or m<0 or m>=n then E()end end;\nif not seed then if ST==nil then off,bk,ix=0,0,0 else off,bk,ix=ST[1],ST[2],ST[3];if ST[4]~=Q then off,bk,ix=0,0,0;ST[4]=Q end;if ix>m then off,bk,ix=0,0,0 end end end;\nlocal w={s_loop};{machine}end;\n"
+        "KGC=function(Q,n,m,KS,KT,ST)\nlocal kend=#Q-4;if kend<0 then E()end;local blen=U32(Q,kend+1);if blen<0 or blen>kend then E()end;\nlocal z,off,bk,at,tg,ln,p,code,ix,v=kend-blen,0,0,0,0,0,0,0,0,nil;local seed=KS~=nil;\nif seed then if n%1~=0 or n<0 or n>65536 then E()end else if m%1~=0 or m<0 or m>=n then E()end end;\nif not seed then if ST==nil then off,bk,ix=0,0,0 else off,bk,ix=ST[1],ST[2],ST[3];if ST[4]~=Q then off,bk,ix=0,0,0;ST[4]=Q end;if ix>m then off,bk,ix=0,0,0 end end end;\nlocal w={w_start};{machine}end;\n"
     )
 }
 
