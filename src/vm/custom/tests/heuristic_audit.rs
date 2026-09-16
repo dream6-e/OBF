@@ -299,29 +299,47 @@ type AuditPins = (
 //   M7 gap 416 -> 408             the top string lengths moved by a few bytes.
 //   M3a / M4b / M6 (all zeros)    untouched: no KAT word, no skipped number,
 //                                no repeated u32 in the outer ciphertext.
+// Goal 6 (2026-09-16) -- same re-record, one cause: `UK` gained the rolling step
+// (`local k=(acc+119)%256; ... k=(k*MUL+b*MIX+ADD)%256`) and the walker gained the
+// lazy cursor (`ST[1],ST[2],ST[3]` plus the commit state), so the emitted text is
+// different text with a different small-literal mix:
+//   M2 (1503, 0, 3, 3) -> (1501, 1, 1, 1)   two fewer integer tokens, one hex
+//       spelling, one scientific spelling, one "unparsed" token (all four counters
+//       move together because the respeller has to place the same literals in
+//       different forms); the total is 2 B smaller.
+//   M3b 377 -> 379, big-sum 9007550309001824 -> 9007554604575187: three more
+//       6+ digit literals appear (the rolling coefficients are three extra numeric
+//       tokens) and the sum follows them. max is the K9b 2^52 anchor, unchanged.
+//   M4 top-12 re-orders (1, 522) -> (1, 526), (0, 491) -> (0, 506), 15: 117 -> 100,
+//       5: 95 -> 82, 8: 65 -> 67: the `0`/`1` census is where the new `ST[1]`-style
+//       field reads and the `%256` in the rolling step land. The four-cell `256`
+//       floor is unchanged (K9b) and no new nice class appears.
+//   M5 (4, 1779) -> (4, 1787)      four long blobs, 8 B more text.
+//   M7 gap 408 -> 399              same strings, top-5 order re-measured.
+//   M1 (96), M3a, M6 (0, 0)        untouched.
 const PINS_LUA51_7001: AuditPins = (
     96,
-    (1503, 0, 3, 3),
+    (1501, 1, 1, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (377, 9007550309001824, 4503599627370496),
+    (379, 9007554604575187, 4503599627370496),
     [
-        (1, 522),
-        (0, 491),
-        (2, 331),
-        (3, 152),
-        (4, 127),
-        (15, 117),
-        (5, 95),
+        (1, 526),
+        (0, 506),
+        (2, 335),
+        (3, 164),
+        (4, 129),
+        (15, 100),
+        (5, 82),
         (75, 70),
         (16, 68),
         (28, 68),
-        (8, 65),
+        (8, 67),
         (7, 64),
     ],
     0,
-    (4, 1779),
+    (4, 1787),
     (0, 0),
-    ([560, 543, 542, 134, 17], 408),
+    ([560, 560, 533, 134, 17], 399),
 );
 
 // K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
@@ -468,36 +486,43 @@ const PINS_LUA51_7001: AuditPins = (
 // target, so the class mix tracks Lua51's (there `2`/330 and `16`/73). `0` (448), `3`,
 // `4`, `5`, `42`, `89`, `18`, `22` and M1/M2 (1550 B)/KAT words/M4b (38)/M5
 // (4, 1781)/M6/M7 ([567, 542, 538, 134, 15], gap 404) are byte-for-byte unchanged.
-// Goal 5 (2026-09-15, ISA19) -- same re-record as the lua51 config above, with
-// the Luau-side numbers: M2 total 1550 -> 1493 (57 B shorter, residues follow),
-// M4b skipped numbers 38 -> 37 and the whole M4 order reshuffles -- both are
-// small-literal census artifacts of the new payload (the block's tag bytes and
-// the block lengths are the new literals' neighbours). M1 (96), M3a (KAT rows),
-// M3b count/sum/max (318, ...) and M6 (0, 0) are untouched, and the new M4 top-12
-// still carries exactly four `256` sites, the K9b floor.
+// Goal 6 (2026-09-16) -- the Luau re-record, same cause as the lua51 block above
+// (rolling `UK` + the walker's lazy cursor/commit state). It moves more cells than
+// lua51 because the Luau text carries the extra bit-helpers and one more convert arm:
+//   M2 (1493, 2, 1, 3) -> (1501, 1, 1, 1): the counter total *rises* by 8 here (the
+//       cursor reads plus the rolling coefficients outweigh the removed positional
+//       step), while the spelling split collapses onto the same shape lua51 has.
+//   M3b (318, 9007524907854693) -> (319, 9007529202821988): one more 6+ digit
+//       literal; the sum follows it; max stays the 2^52 anchor.
+//   M4 order and counts re-measured (1: 547, 0: 472, 2: 313, 3: 171, 4: 155, 8: 89,
+//       5: 82, 18: 60, 16: 57, 36: 50, 42: 50, 6: 46) -- still exactly four `256`
+//       sites, the K9b floor, and no new nice class.
+//   M4b skipped 38, M5 (4, 1760), M7 ([550, 541, 535, 134, 15], 401), M3a/M6 zeros:
+//       re-measured with the same text.
+//   M1 (96) unchanged.
 const PINS_LUAU_7351: AuditPins = (
     96,
-    (1493, 2, 1, 3),
+    (1501, 1, 1, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (318, 9007524907854693, 4503599627370496),
+    (319, 9007529202821988, 4503599627370496),
     [
-        (1, 544),
-        (0, 464),
-        (2, 311),
-        (3, 172),
-        (4, 154),
+        (1, 547),
+        (0, 472),
+        (2, 313),
+        (3, 171),
+        (4, 155),
         (8, 89),
         (5, 82),
-        (6, 67),
-        (19, 63),
         (18, 60),
         (16, 57),
-        (9, 50),
+        (36, 50),
+        (42, 50),
+        (6, 46),
     ],
-    37,
-    (4, 1730),
+    38,
+    (4, 1760),
     (0, 0),
-    ([542, 529, 525, 134, 15], 391),
+    ([550, 541, 535, 134, 15], 401),
 );
 
 /// Value of an integer number token in any spelling the emitter produces

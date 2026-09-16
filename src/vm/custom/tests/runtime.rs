@@ -635,6 +635,7 @@ fn parse_code_constants(
         region.len()
     );
     let (mask, modulus) = super::semantic::pool_key_pair(image);
+    let (roll_mul, roll_mix, roll_add) = super::semantic::pool_roll_triple(image);
     let mut acc = 0u64;
     let mut at = tail - block_len;
     let mut out = Vec::new();
@@ -651,11 +652,16 @@ fn parse_code_constants(
             keyed_from + keyed_len <= tail,
             "constant entry runs past its block"
         );
+        // Goal 6 rolling inverse: the first byte's key is the entry seed, and
+        // every later key rolls over the plaintext byte just recovered -- the
+        // same recurrence `UK` runs, written here independently.
         let mut plain = Vec::with_capacity(keyed_len);
+        let mut key = super::semantic::pool_key_byte(acc, 1);
         for index in 0..keyed_len {
-            let key = super::semantic::pool_key_byte(acc, index as u64 + 1);
             let byte = bytes[region[keyed_from + index]];
-            plain.push(((byte as u64 + 256 - key) % 256) as u8);
+            let value = (u64::from(byte) + 256 - key) % 256;
+            plain.push(value as u8);
+            key = (key * roll_mul + value * roll_mix + roll_add) % 256;
         }
         let value = match tag {
             0 => ir::Constant::Nil,

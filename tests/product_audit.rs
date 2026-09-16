@@ -298,11 +298,20 @@ fn pins_lua51() -> AuditPins {
         //     the constants block (which rides inside the image, i.e. into the LZW
         //     input) introduced no periodic structure. check7 stays EMPTY and check8
         //     (1, 62) is unchanged.
-        check4_thresholds: (11, 16777215, false),
+        // Goal 6（2026-09-16，滚动惰性解密）实测 Lua51 diff，只动三项：
+        //   check4 阈值字面量类数 11 -> 16、check5 模板 `X=X+N` 30 -> 31：
+        //     `UK` 的滚动步骤（`k=(k*MUL+b*MIX+ADD)%256`）与游标的 commit
+        //     体（`ST[1],ST[2],ST[3]=off,bk,ix+1`）是本批次唯一新增的文本，
+        //     三个滚动系数、`%256` 与游标比较给阈值/赋值模板各添了一族；
+        //   check9 内层流 (19007, 2, false) -> (19045, 0, false)：负载字节被
+        //     重新加密后 LZW 输入不同，长度 +38、余数 2 -> 0，`fail` 仍为
+        //     false（无重复字、无可公约距离，见 `stream_audit` 的同一行）。
+        // check1/2/3/6/7/8 一字未动（`256` 仍是 4、gcd 仍是 1）。
+        check4_thresholds: (16, 16777215, false),
         check5_templates: (
             13,
             vec![
-                ("X=X+N".to_string(), 30),
+                ("X=X+N".to_string(), 31),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -318,7 +327,7 @@ fn pins_lua51() -> AuditPins {
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 62),
-        check9_stream: (19007, 2, false),
+        check9_stream: (19045, 0, false),
     }
 }
 
@@ -455,11 +464,18 @@ fn pins_luau() -> AuditPins {
         //     still false (no repeat, no common divisor -- the constants block rode into
         //     the LZW input, not into the emitted text). check6 stays 0, check7 EMPTY,
         //     check2/check3 unchanged.
-        check4_thresholds: (11, 65535, false),
+        // Goal 6（2026-09-16，同 lua51 的归因）Luau 侧只动两项：
+        //   check4 类数 11 -> 10、check5 `X=X+N` 31 -> 30：同一支滚动步与
+        //     游标 commit 体在 Luau 的 respeller 下落到不同模板族，两项互为
+        //     迁移（阈值类数少一、赋值模板多一），模板类数 12 不变；
+        //   check9 (24194, 4, false) -> (24195, 0, false)：重新加密后的 LZW
+        //     输入长度 +1、余数 4 -> 0，`fail` 仍为 false。
+        // check1/2/3/6/7/8 一字未动。
+        check4_thresholds: (10, 65535, false),
         check5_templates: (
             12,
             vec![
-                ("X=X+N".to_string(), 31),
+                ("X=X+N".to_string(), 30),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
@@ -475,7 +491,7 @@ fn pins_luau() -> AuditPins {
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 64),
-        check9_stream: (24194, 4, false),
+        check9_stream: (24195, 0, false),
     }
 }
 

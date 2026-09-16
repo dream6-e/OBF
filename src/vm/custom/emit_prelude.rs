@@ -30,6 +30,7 @@ pub(crate) fn emit_prelude(
     keys: &[u64],
     structure: &mut crate::random::Prng,
     bitops_rng: &mut crate::random::Prng,
+    roll: (u64, u64, u64),
 ) -> PreludeStage {
     let mut s = String::from("local x={};return setmetatable({");
     let header_end = s.len();
@@ -275,7 +276,20 @@ pub(crate) fn emit_prelude(
     s.push_str(
         "local U32=function(S,i)local a,b,c,d=SB(S,i),SB(S,i+1),SB(S,i+2),SB(S,i+3);if not d then E()end;return((d*256+c)*256+b)*256+a end;",
     );
-    s.push_str("local UK=function(S,p,n,acc)local o={};local k=(acc+119)%256;for j=1,n do o[j]=NCH((SB(S,p+j-1)+256-k)%256);k=(k+119)%256 end;return TC(o)end;");
+    // Goal 6: `UK` is now the *rolling* inverse. The per-byte key no longer
+    // walks the position (`acc + j*119`, derivable from the clear entry
+    // lengths) -- it rolls over the plaintext byte it has just recovered, so
+    // the keystream can only be produced by decrypting the run in order and a
+    // flipped byte poisons every later byte of the run. The same three
+    // coefficients are baked into `write_constant_block` on the encoder side,
+    // and `pool_roll_triple` derives them from the image fields so an
+    // independent decoder does not need this text.
+    s.push_str(&format!(
+        "local UK=function(S,p,n,acc)local o={{}};local k=(acc+119)%256;\nfor j=1,n do local b=(SB(S,p+j-1)+256-k)%256;o[j]=NCH(b);k=(k*{mul}+b*{mix}+{add})%256 end;\nreturn TC(o)end;",
+        mul = roll.0,
+        mix = roll.1,
+        add = roll.2,
+    ));
     s.push_str("local NU=function(S,i)local lo,hi=U32(S,i),U32(S,i+4);local sg=hi>=2147483648 and -1 or 1;local ex=MF(hi/1048576)%2048;local fr=(hi%1048576)*4294967296+lo;if ex==2047 then if fr==0 then return sg/0 else return 0/0 end elseif ex==0 then return sg*(fr*2^-1074) else return sg*((1+fr/4503599627370496)*2^(ex-1023))end end;");
     let mut ret_order: Vec<&str> = vec![
         "SC", "Z", "U", "G", "E", "PC", "SB", "SS", "SF", "NCH", "TC", "MF", "TN", "TY", "TS",

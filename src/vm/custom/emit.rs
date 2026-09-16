@@ -184,7 +184,13 @@ if d7+d8*65521~={fake_adler} then E()end;"
         header_end,
         ret_names,
         probe_transcript,
-    } = emit_prelude(program, &keys, &mut structure, &mut bitops_rng);
+    } = emit_prelude(
+        program,
+        &keys,
+        &mut structure,
+        &mut bitops_rng,
+        semantic::pool_roll_triple(&semantic_image),
+    );
     // Entry reconstructs three source-witness shares in shuffled call order.
     // Both ChaCha8 domains then derive final key/nonce/counter words only at
     // runtime after anti-hook attestation. Exact-integer work stays below
@@ -803,7 +809,7 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
     // ReadGlobal/WriteGlobal arms need to know which slots are strings. Values
     // are synthesized per use by `KGC` inside the interpreter, so nothing in the
     // parse path ever holds one.
-    let kimg_pass = "local kend=#CD-4;if kend<0 then E()end;local ke=kend-U32(CD,kend+1);if ke<0 then E()end;if F.__obf_proto_nk>0 then local KS,KT={{}},{{}};local eo,ei=KGC(CD,F.__obf_proto_nk,nil,KS,KT);if eo~=kend-ke or ei~=F.__obf_proto_nk then E()end;F.__obf_proto_tags=KT else F.__obf_proto_tags={{}} end;";
+    let kimg_pass = "local kend=#CD-4;if kend<0 then E()end;local ke=kend-U32(CD,kend+1);if ke<0 then E()end;if F.__obf_proto_nk>0 then local KS,KT={{}},{{}};local eo,ei=KGC(CD,F.__obf_proto_nk,nil,KS,KT,nil);if eo~=kend-ke or ei~=F.__obf_proto_nk then E()end;F.__obf_proto_tags=KT else F.__obf_proto_tags={{}} end;";
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers);
     let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers);
     let tuple_slots = field_order.tuple_slots();

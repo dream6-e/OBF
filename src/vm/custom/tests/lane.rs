@@ -322,7 +322,7 @@ fn constants_are_synthesized_per_use_with_no_value_table_in_the_text() {
             // The synthesizer exists exactly once, takes the region bounds and
             // the seed-mode tables, and is the only reader of the block.
             assert_eq!(
-                raw.matches("KGC=function(Q,n,m,KS,KT)").count(),
+                raw.matches("KGC=function(Q,n,m,KS,KT,ST)").count(),
                 1,
                 "{target} seed {seed}: per-use synthesizer"
             );
@@ -334,7 +334,7 @@ fn constants_are_synthesized_per_use_with_no_value_table_in_the_text() {
             // The walk keeps its state in one dispatch variable and reaches the
             // value form through a second, value-keyed decision; both are seeded
             // state ids/shuffled trees, so no canonical order survives.
-            let walker = raw.split("KGC=function(Q,n,m,KS,KT)").nth(1).unwrap();
+            let walker = raw.split("KGC=function(Q,n,m,KS,KT,ST)").nth(1).unwrap();
             // The walker is a state machine plus two value-keyed search trees,
             // so its text is long; a fixed window keeps the shape pins honest
             // without depending on where the last `end;` lands.

@@ -1043,7 +1043,7 @@ fn stages_are_flattened_into_seeded_state_machines() {
             // only bind `K` after `DC` has materialized the code; the synthesizer
             // reads that region per use and no value table exists.
             assert!(raw.contains("code=DC(fid) end;K=code[-1];"));
-            assert!(raw.contains("KGC=function(Q,n,m,KS,KT)"));
+            assert!(raw.contains("KGC=function(Q,n,m,KS,KT,ST)"));
             // Graph fetch dynamically derives successors and the recipe id,
             // then routes that id into the random semantic fragment pool.
             // Tuple slots follow the per-image field order.

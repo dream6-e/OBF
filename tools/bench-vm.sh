@@ -72,6 +72,12 @@ LUA51_VM="$ROOT/vm_lua51.out.lua"
 # 上限，后续批次必须重新实测并向它对账。
 SHELL_CAP_LUA51=90000
 SHELL_CAP_LUAU=90000
+# 2026-09-16（目标 6 批次）：按用户指示「完成前关闭体积门」在构建窗口内暂停上面这枚
+# **交付体积门**，与 raw 侧的 OBF_BENCH_SCRIPT_CAP=off 同一形状：只报数、不判负，且
+# 每次暂停都打一行 WARN（不能悄悄过）。批次收尾时必须重新实测、重开（unset 即恢复），
+# 并把实测值向 90,000 B 对账。比率门（tests/shell.rs 的 0.655/0.679）**不在**这枚开关里，
+# 它不属于「体积门」而是压缩率不变量，批次内一样要过。
+SHELL_GATE=${OBF_SHELL_CAP:-on}
 LUAU_VM="$ROOT/vm_luau.out.lua"
 LUA51_SRC="$ROOT/tests/fixtures/vm_lua51.lua"
 LUAU_SRC="$ROOT/tests/fixtures/vm_luau.lua"
@@ -94,6 +100,14 @@ best_ms() { # <runner> <script>
 check_shell() { # <name> <shell-script> <cap>
     local size
     size=$(wc -c <"$2")
+    if [[ $SHELL_GATE == off ]]; then
+        # Construction window (user instruction 完成前关闭体积门): the recorded
+        # budget is reported, never enforced, and the suspension is announced.
+        echo "[bench] WARN $1 compressed-deliverable gate suspended (recorded budget ${3}B, measured ${size}B)"
+        printf '[bench] %s compressed-size=%s/%sB(gate off) (raw %sB)\n' \
+            "$1" "$size" "$3" "$(wc -c <"$ROOT/vm_${1}.out.lua")"
+        return
+    fi
     if [[ $size -gt $3 ]]; then
         echo "[bench] error: $1 compressed deliverable is ${size}B, over the ${3}B budget" >&2
         exit 1

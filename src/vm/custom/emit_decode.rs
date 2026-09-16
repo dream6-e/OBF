@@ -82,8 +82,9 @@ pub(crate) fn constant_walker_lua(
     pool_mod: u64,
 ) -> String {
     let luau = target.is_luau();
-    let states = super::structure::state_values(structure, 4);
-    let (s_loop, s_extent, s_advance, s_convert) = (states[0], states[1], states[2], states[3]);
+    let states = super::structure::state_values(structure, 5);
+    let (s_loop, s_extent, s_advance, s_convert, s_commit) =
+        (states[0], states[1], states[2], states[3], states[4]);
     // Entry extent by tag: `p` becomes the first keyed byte, `ln` the keyed
     // length and `code` the value form. Tag 4 (64-bit integer) exists only on
     // Luau; on Lua 5.1 the arm rejects it exactly like the old pool reader did.
@@ -104,37 +105,46 @@ pub(crate) fn constant_walker_lua(
     ];
     let extent_groups = (2 + structure.index(2)) as u8;
     let extent = super::structure::grouped_tree(structure, extent_arms, extent_groups, "tg", luau);
-    // Value form by conversion code.
+    // Value form by conversion code. Goal 6: a leaf no longer returns
+    // straight out -- it assigns the synthesized value to `v` and hands control
+    // to the commit state, which folds the entry into the *rolling cursor* and
+    // only then returns. That is what makes the decryption lazy: nothing is
+    // decrypted until a use asks for it, the walk resumes where the previous
+    // use stopped, and the only thing that survives a call is the cursor
+    // (offset, running key, entry index) -- never a value.
+    let commit_go = |body: String| format!("{body}w={s_commit};");
     let int_form = if luau {
-        "local s4=UK(Q,p+1,8,bk);local iv=IF(SF('%08x%08x',U32(s4,5),U32(s4,1)),16);if iv==nil then E()end;return iv;"
+        "local s4=UK(Q,p+1,8,bk);local iv=IF(SF('%08x%08x',U32(s4,5),U32(s4,1)),16);if iv==nil then E()end;v=iv;"
             .to_owned()
     } else {
         "E();".to_owned()
     };
     let convert_arms = vec![
-        decode_arm(structure, luau, "code", 0, "return nil;"),
+        decode_arm(structure, luau, "code", 0, &commit_go("v=nil;".to_owned())),
         decode_arm(
             structure,
             luau,
             "code",
             1,
-            "local b0=SB(UK(Q,p+1,1,bk),1);if b0~=0 and b0~=1 then E()end;return b0==1;",
+            &commit_go(
+                "local b0=SB(UK(Q,p+1,1,bk),1);if b0~=0 and b0~=1 then E()end;v=b0==1;".to_owned(),
+            ),
         ),
         decode_arm(
             structure,
             luau,
             "code",
             2,
-            "local nb=NU(UK(Q,p+1,8,bk),1);return nb;",
+            &commit_go("local nb=NU(UK(Q,p+1,8,bk),1);v=nb;".to_owned()),
         ),
         decode_arm(
             structure,
             luau,
             "code",
             3,
-            "local ns=UK(Q,p+1,ln,bk);return ns;",
+            &commit_go("local ns=UK(Q,p+1,ln,bk);v=ns;".to_owned()),
         ),
-        decode_arm(structure, luau, "code", 4, &int_form),
+        decode_arm(structure, luau, "code", 4, &commit_go(int_form)),
     ];
     let convert_groups = (2 + structure.index(2)) as u8;
     let convert =
@@ -143,8 +153,19 @@ pub(crate) fn constant_walker_lua(
         "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg=SB(Q,at+1);if tg==nil then E()end;w={s_extent};"
     );
     let extent_body = format!("{extent}w={s_advance};");
+    // One entry consumed: the entry-level chain folds its keyed length (what
+    // the seed-mode walk and the encoder both advance) and the normal path
+    // either keeps skipping towards the wanted index or converts it.
     let advance_body = format!(
         "off=off+p-at+ln;local nb=(bk+ln*257+{mask})%{mod};if seed then KS[ix]=at;KT[ix]=tg;ix=ix+1;bk=nb;w={s_loop} elseif ix<m then ix=ix+1;bk=nb;w={s_loop} else w={s_convert} end;",
+        mask = pool_mask,
+        mod = pool_mod,
+    );
+    // The commit: fold this entry into the cursor, publish it back to the
+    // caller's slot (nil for a stateless caller such as the seed harness or
+    // `DC`), and return the one value that was asked for. No table, no cache.
+    let commit_body = format!(
+        "off=off+p-at+ln;bk=(bk+ln*257+{mask})%{mod};if ST~=nil then ST[1],ST[2],ST[3]=off,bk,ix+1 end;return v;",
         mask = pool_mask,
         mod = pool_mod,
     );
@@ -157,10 +178,11 @@ pub(crate) fn constant_walker_lua(
             (s_extent, extent_body),
             (s_advance, advance_body),
             (s_convert, convert_body),
+            (s_commit, commit_body),
         ],
     );
     format!(
-        "KGC=function(Q,n,m,KS,KT)\nlocal kend=#Q-4;if kend<0 then E()end;local blen=U32(Q,kend+1);if blen<0 or blen>kend then E()end;\nlocal z,off,bk,at,tg,ln,p,code,ix=kend-blen,0,0,0,0,0,0,0,0;local seed=KS~=nil;\nif seed then if n%1~=0 or n<0 or n>65536 then E()end else if m%1~=0 or m<0 or m>=n then E()end end;\nlocal w={s_loop};{machine}end;\n"
+        "KGC=function(Q,n,m,KS,KT,ST)\nlocal kend=#Q-4;if kend<0 then E()end;local blen=U32(Q,kend+1);if blen<0 or blen>kend then E()end;\nlocal z,off,bk,at,tg,ln,p,code,ix,v=kend-blen,0,0,0,0,0,0,0,0,nil;local seed=KS~=nil;\nif seed then if n%1~=0 or n<0 or n>65536 then E()end else if m%1~=0 or m<0 or m>=n then E()end end;\nif not seed then if ST==nil then off,bk,ix=0,0,0 else off,bk,ix=ST[1],ST[2],ST[3];if ST[4]~=Q then off,bk,ix=0,0,0;ST[4]=Q end;if ix>m then off,bk,ix=0,0,0 end end end;\nlocal w={s_loop};{machine}end;\n"
     )
 }
 

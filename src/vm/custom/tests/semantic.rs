@@ -916,8 +916,22 @@ fn compression_reduces_bytecode_while_script_budget_is_independent() {
             // OBF_BENCH_SCRIPT_CAP=off suspends the raw ceiling below and nothing
             // else, same switch as bench-vm.sh.
             let shell = crate::shell::wrap(&output, target, seed).expect("shell wraps the script");
+            // 2026-09-16（目标 6 批次）：用户指示「完成前关闭体积门」⇒ 构建窗口内
+            // OBF_SHELL_CAP=off 只报数不判负（与 bench-vm.sh / test-matrix.sh 同一枚开关，
+            // 每次暂停都会打一行 WARN，收尾时必须重开并向 90,000 B 对账）。比率门
+            // （tests/shell.rs 的 0.655/0.679）不是「体积门」，不在这枚开关里。
+            let shell_gate = std::env::var("OBF_SHELL_CAP").is_ok_and(|v| v == "off");
+            if shell_gate && shell.script.len() > shell_budget {
+                eprintln!(
+                    "[goal6] WARN {target} seed {seed}: compressed deliverable {}B over the recorded {}B \
+                     budget -- gate suspended for this construction window (raw script {}B)",
+                    shell.script.len(),
+                    shell_budget,
+                    output.len()
+                );
+            }
             assert!(
-                shell.script.len() <= shell_budget,
+                shell_gate || shell.script.len() <= shell_budget,
                 "{target} seed {seed}: compressed deliverable {}B exceeds the {}B budget                  (uncompressed script {}B)",
                 shell.script.len(),
                 shell_budget,
@@ -1530,7 +1544,7 @@ fn generated_parser_reads_the_capture_pool_and_publishes_no_constant_table() {
                 );
             }
             assert_eq!(
-                raw.matches("KGC=function(Q,n,m,KS,KT)").count(),
+                raw.matches("KGC=function(Q,n,m,KS,KT,ST)").count(),
                 1,
                 "{target} seed {seed}: the per-use synthesizer must be defined once"
             );

@@ -31,3 +31,4 @@ include!("tests/segment_alphabets.rs");
 include!("tests/layout.rs");
 include!("tests/context_key.rs");
 include!("tests/mba.rs");
+include!("tests/rolling.rs");

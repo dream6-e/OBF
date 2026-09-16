@@ -83,8 +83,16 @@ fn k7_wire_image_bytes_are_pinned() {
         // (this probe's canonical image is unchanged); the ISA byte inside the
         // image is covered by the fingerprint, which is why the version is part
         // of this re-record.
-        (Target::Lua51, 7001u64, 1263usize, 0x0925476ae455c574u64),
-        (Target::Luau, 7351u64, 1259usize, 0x338ee8349017d5fau64),
+        // Goal 6 (2026-09-16, still ISA19): the per-byte key now *rolls over the
+        // plaintext* it recovers (`k=(k*mul+p*mix+add)%256`) instead of walking the
+        // position (`acc+j*119`, which was derivable from the clear lengths), so the
+        // keyed payload bytes all change while **both lengths stay exactly 1263 /
+        // 1259** -- the cipher is a re-key, not a re-layout, which is the property
+        // this row is here to prove. The ISA byte and every structural field are
+        // unchanged; only the two fingerprints are re-recorded. The public `.obf`
+        // is byte-identical (this probe's canonical image did not move).
+        (Target::Lua51, 7001u64, 1263usize, 0xee06effa224c7300u64),
+        (Target::Luau, 7351u64, 1259usize, 0x98d71d9b358e57aeu64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();

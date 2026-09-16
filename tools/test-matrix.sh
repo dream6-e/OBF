@@ -448,7 +448,13 @@ for shell_pair in "lua51 7001 vm:lua51:ok" "luau 7351 vm:luau:ok"; do
     # 归因见 src/vm/custom/tests/semantic.rs 里同一段记录。未压缩侧的 160,000 B 静态上限
     # 与 tests/shell.rs 的比率门不动。
     shell_limit=90000
-    if [[ $shell_bytes -gt $shell_limit ]]; then
+    # 2026-09-16（目标 6 批次）：用户指示「完成前关闭体积门」⇒ 构建窗口内
+    # `OBF_SHELL_CAP=off` 只报数不判负（每次暂停都打 WARN，收尾时必须重开并向记录值对账）。
+    # 未压缩侧的 160,000 B 静态上限与 tests/shell.rs 的比率门不在这一枚开关里。
+    if [[ ${OBF_SHELL_CAP:-on} == off ]]; then
+        printf '[matrix] WARN XXS shell %s gate suspended (recorded %sB, measured %sB)\n' \
+            "$shell_target" "$shell_limit" "$shell_bytes"
+    elif [[ $shell_bytes -gt $shell_limit ]]; then
         printf 'error: XXS shell for %s is %sB over the recorded %sB budget\n' \
             "$shell_target" "$shell_bytes" "$shell_limit" >&2
         exit 1

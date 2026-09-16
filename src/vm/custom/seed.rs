@@ -524,6 +524,7 @@ pub(crate) fn routine_lua(prog: &[SeedInstr], seed: u64, slot: usize, site_w: us
 /// binding (the prototype's code region), both of which arrive as H-locals.
 const SEED_LOOP: &str = r#"local SEED=function(prog,site,expect)
 local TNUM,TFUN,TTAB,SN,HN,tmp=TY(0),TY(E),TY(STAB),#STAB,#SEEDH,{};
+local KC={0,0,0};
 local seedfail=function(m)E("seedfail:"..m)end;
 local refd=function(re)
 if TY(re)~=TNUM or re<0 then seedfail(6)end;
@@ -534,7 +535,7 @@ local rv=function(re)
 local kind,vi,vo=refd(re);
 if kind==0 then if vi>15 or vo~=0 then seedfail(9)end;return tmp[vi];
 elseif kind==1 then if vi>2 or vo>255 or vo%1~=0 then seedfail(10)end;local sl=site[vi+1];if TY(sl)~=TNUM then seedfail(11)end;return R[RX(sl+vo)];
-elseif kind==2 then if vi~=3 or vo>255 or vo%1~=0 then seedfail(12)end;local sl=site[4];if TY(sl)~=TNUM then seedfail(13)end;return KGC(K,F.__obf_proto_nk,sl+vo);
+elseif kind==2 then if vi~=3 or vo>255 or vo%1~=0 then seedfail(12)end;local sl=site[4];if TY(sl)~=TNUM then seedfail(13)end;return KGC(K,F.__obf_proto_nk,sl+vo,nil,nil,KC);
 elseif kind==3 then if vi>999999 or vo~=0 then seedfail(14)end;return vi;
 elseif kind==4 then if vi==0 or vi==1 then seedfail(15)end;if vi>9 or vo~=0 then seedfail(16)end;return site[vi];
 elseif kind==5 then if vi>=SN or vo~=0 then seedfail(17)end;return STAB[vi+1];

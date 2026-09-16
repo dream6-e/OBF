@@ -1564,8 +1564,10 @@ fn build_capture_pool(
 ///
 /// The cipher is the capture pool's, unchanged so both sides keep one
 /// implementation: `pool_key_fold` chains the key over *every earlier entry*
-/// (so a reader that skips entries cannot align the stream) and
-/// `pool_key_byte` shifts each payload byte. The tag byte and a string's
+/// (so a reader that skips entries cannot align the stream) and, since goal 6,
+/// `pool_key_roll_apply` rolls each payload byte's key over the *plaintext*
+/// recovered so far (so the keystream is neither derivable from the clear
+/// lengths nor seekable). The tag byte and a string's
 /// length prefix stay in the clear for the same reason they did in the pool:
 /// the walk needs extents before it has a key.
 fn write_constant_block(
@@ -1574,6 +1576,7 @@ fn write_constant_block(
     image: &SemanticImage,
 ) -> Result<(), Diagnostic> {
     let (mask, modulus) = pool_key_pair(image);
+    let roll = pool_roll_triple(image);
     let mut acc = 0u64;
     let mut block: Vec<u8> = Vec::new();
     for constant in &plan.prototype.constants {
@@ -1614,7 +1617,7 @@ fn write_constant_block(
             }
         };
         if keyed_len > 0 {
-            pool_key_apply(&mut block, key_from, acc);
+            pool_key_roll_apply(&mut block, key_from, acc, roll);
         }
         acc = pool_key_fold(acc, keyed_len, mask, modulus);
         if block.len() > custom::MAX_BYTES {
@@ -1689,6 +1692,41 @@ pub(crate) fn pool_key_pair(image: &SemanticImage) -> (u64, u64) {
     )
 }
 
+/// Goal 6: the rolling byte step's coefficients. The per-byte key is no longer
+/// a function of the stream position alone -- `acc + j*119` is fully derivable
+/// from the *clear* entry lengths, so a static reader could precompute the whole
+/// keystream without ever touching a payload byte. The key now rolls over the
+/// plaintext it recovers:
+///
+/// ```text
+/// k0     = (acc + 119) % 256
+/// cj     = (pj + kj) % 256
+/// k(j+1) = (kj * mul + pj * mix + add) % 256
+/// ```
+///
+/// so the keystream depends on every payload byte before it, decryption is
+/// strictly sequential (no seeking, no alignment, no precomputed stream), and
+/// a flipped byte propagates into every later byte of the same run instead of
+/// staying local. Both sides run exactly this recurrence: the writer here and
+/// `UK` in the emitted script. The triple is derived from the image's own
+/// fields, so an independent decoder still reproduces it without the script.
+pub(crate) fn pool_roll_triple(image: &SemanticImage) -> (u64, u64, u64) {
+    let layer = &image.token_layers[3];
+    let mixed = (u64::from(image.mask_salt) + 3).wrapping_mul(2654435761)
+        ^ (u64::from(image.mask_add).wrapping_add(1)).wrapping_mul(2246822519)
+        ^ (u64::from(layer.multiplier).wrapping_add(1)).wrapping_mul(3266489917)
+        ^ u64::from(layer.add).wrapping_mul(668265263);
+    (
+        // Odd multiplier: the map is a bijection on k for a fixed plaintext, so
+        // no two distinct running keys can converge on the same successor.
+        3 + 2 * ((mixed >> 5) % 127),
+        // Plaintext weight, drawn in 1..=251 so `k*mul + p*mix + add` stays far
+        // below 2^53 and every step is an exact integer.
+        1 + ((mixed >> 17) % 251),
+        (mixed >> 29) % 256,
+    )
+}
+
 /// Stream position after one record. Both the writer and the emitted
 /// parser/`DC` apply exactly this recurrence, so a record's key depends on the
 /// payload size of *every earlier* record in physical pool order: the cipher is
@@ -1703,9 +1741,18 @@ pub(crate) fn pool_key_byte(acc: u64, index: u64) -> u64 {
     (acc + index * 119) % 256
 }
 
-fn pool_key_apply(out: &mut [u8], from: usize, acc: u64) {
-    for (index, byte) in out[from..].iter_mut().enumerate() {
-        *byte = ((*byte as u64 + pool_key_byte(acc, index as u64 + 1)) % 256) as u8;
+/// Goal 6: key one payload run in place with the rolling step above. The first
+/// byte's key is still `pool_key_byte(acc, 1)` (so the entry-level chain is the
+/// same one `DC`'s seed-mode walk advances), but every later byte's key depends
+/// on the plaintext recovered before it -- which is exactly what the emitted
+/// `UK` recomputes when it decrypts the run sequentially.
+fn pool_key_roll_apply(out: &mut [u8], from: usize, acc: u64, roll: (u64, u64, u64)) {
+    let (mul, mix, add) = roll;
+    let mut key = pool_key_byte(acc, 1);
+    for byte in out[from..].iter_mut() {
+        let plain = u64::from(*byte);
+        *byte = ((plain + key) % 256) as u8;
+        key = (key * mul + plain * mix + add) % 256;
     }
 }
 
