@@ -1,0 +1,940 @@
+use super::*;
+use std::fmt::Write as _;
+
+/// Random non-keyword single-letter name for the wrapper's entry method. No
+/// Lua 5.1 or Luau keyword is a single letter. Drawn from a dedicated seeded
+/// stream: the same seed reproduces the whole script while bytecode, final
+/// local names and private fields stay on their own existing streams.
+pub(crate) fn wrapper_method(target: Target, seed: u64) -> String {
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6d65_7468_6f64_3276);
+    let mut pool: Vec<char> = (b'a'..=b'z').map(char::from).collect();
+    random.shuffle(&mut pool);
+    let name = pool[0].to_string();
+    debug_assert!(!crate::lexer::is_keyword(&name, target));
+    name
+}
+
+/// Distinct random numeric keys for every payload-table section, including
+/// seed-variable LZW fields and five split ChaCha8/anti-hook fields. Separate
+/// seeded stream; same reproducibility guarantees as the method name.
+pub(crate) fn wrapper_keys(seed: u64) -> Vec<u64> {
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6b65_7973_3276_6d35);
+    let mut used = std::collections::BTreeSet::new();
+    let mut keys = Vec::new();
+    while keys.len() < 29 {
+        let key = 100 + random.index(9900) as u64;
+        // K9a label hygiene: arbitrary labels must never emit audit-nice
+        // values (a YARA rule for 86 must not hit a table key).
+        if key == 256 || key == 7225 || key == 7396 {
+            continue;
+        }
+        if used.insert(key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// M7 opaque branch predicates: constant integer tautologies and their
+/// matched contradictions. Same shape, flipped truth value; no NaN, no
+/// metamethods, no floats -- the truth value is fixed at generation time.
+pub(crate) fn opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
+    const TAUTOLOGIES: [(&str, &str); 4] = [
+        ("48271%2==1", "48271%2==0"),
+        ("2147483647>2147483646", "2147483647>2147483647"),
+        ("65536%256==0", "65536%256==1"),
+        ("16777216%2==0", "16777216%2==1"),
+    ];
+    let index = (structure.index(TAUTOLOGIES.len())) as usize;
+    let (truthy, falsy) = TAUTOLOGIES[index];
+    (truthy.to_owned(), falsy.to_owned())
+}
+
+/// M7 unreachable decoy arms for the F3/F5 dispatch chains: `elseif o==K`
+/// (in the chain's current comparison spelling) with byte values drawn
+/// from outside the per-seed opcode image. The expanded instruction
+/// stream only ever carries renumbered values of real opcodes, so these
+/// arms are dead by construction while carrying real, plausible
+/// instructions.
+pub(crate) fn decoy_arms(
+    structure: &mut crate::random::Prng,
+    count: usize,
+    luau: bool,
+    bodies: &[&str],
+    image: &std::collections::BTreeSet<u8>,
+) -> Vec<(u8, String)> {
+    let mut used = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    while used.len() < count {
+        let opcode = loop {
+            let value = (structure.index(256)) as u8;
+            if !image.contains(&value) && used.insert(value) {
+                break value;
+            }
+        };
+        let body = bodies[(structure.index(bodies.len())) as usize];
+        let condition = structure.dispatch_condition_opaque("o", u16::from(opcode), luau, "o");
+        out.push((opcode, format!("{condition} then {body}")));
+    }
+    out
+}
+
+/// Two-level dispatch split with a binary search tree inside each bucket: the
+/// arms of a dispatch chain are partitioned into a seeded number of sub-chains
+/// selected by `value_var % groups`, and each sub-chain's arms are then looked
+/// up through a seeded, possibly unbalanced **binary search tree** over the
+/// arm values instead of one flat `if/elseif` scan. Every arm still sits behind
+/// exactly its own equality test (`structure.dispatch_condition` spelling), so
+/// evaluating the tree means evaluating at most one arm body -- the same
+/// observable behaviour as the flat chain, with `log2` comparisons instead of a
+/// scan. Leaves keep a short linear run (seeded size) so the topology has both
+/// tree and chain shapes; every leaf and every empty residue class closes with
+/// its own fail-closed `else E()end;`, and a residue class no arm carries stays
+/// dead by construction (the selector can only be reached by validated
+/// renumbered opcodes) and simply aborts.
+pub(crate) fn grouped_tree(
+    structure: &mut crate::random::Prng,
+    mut arms: Vec<(u8, String)>,
+    groups: u8,
+    value_var: &str,
+    luau: bool,
+) -> String {
+    structure.shuffle(&mut arms);
+    // K18: a leaf may merge at most three arms. The previous 2..=4 draw let one
+    // pinned config come out a level shallower than the dispatch gate requires,
+    // so the depth floor was luck of the stream rather than a property of the
+    // construction; with three as the cap, `nodes >= 20` follows from covering
+    // 48/51 arms and stays true for every seed.
+    let leaf_max = 2 + (structure.index(2)) as usize;
+    let mut text = String::new();
+    for group in 0..groups {
+        let condition = selector_condition(structure, value_var, groups, group);
+        write!(
+            text,
+            "{} {condition} then ",
+            if group == 0 { "if" } else { "elseif" }
+        )
+        .unwrap();
+        let mut members: Vec<(u8, String)> = arms
+            .iter()
+            .filter(|(value, _)| value % groups == group)
+            .map(|(value, arm)| (*value, arm.clone()))
+            .collect();
+        if members.is_empty() {
+            text.push_str("E();");
+            continue;
+        }
+        // A value-partitioning tree needs distinct keys: equal values have to
+        // stay in one leaf so the first matching arm wins, exactly like the
+        // flat chain. The validator's callers guarantee this (renumbered
+        // opcodes are a permutation and decoy values are drawn outside the
+        // image), so a collision is a builder bug rather than a runtime case.
+        members.sort_by_key(|(value, _)| *value);
+        debug_assert!(members
+            .as_slice()
+            .windows(2)
+            .all(|pair| pair[0].0 != pair[1].0));
+        search_tree(structure, &members, value_var, luau, leaf_max, &mut text);
+    }
+    text.push_str(" else E()end;");
+    text
+}
+
+/// One bucket's search tree. `members` must be sorted by value and hold
+/// distinct values. Internal nodes only compare `value_var` against an existing
+/// arm value (`below` picks `<`/`>=`), so each recursive call gets exactly the
+/// arms on that side of the bound; small runs collapse into the original
+/// `if/elseif ... else E()end` chain.
+fn search_tree(
+    structure: &mut crate::random::Prng,
+    members: &[(u8, String)],
+    value_var: &str,
+    luau: bool,
+    leaf_max: usize,
+    out: &mut String,
+) {
+    if members.len() <= leaf_max {
+        for (index, (_, arm)) in members.iter().enumerate() {
+            write!(out, "{} {arm}", if index == 0 { "if" } else { "elseif" }).unwrap();
+        }
+        out.push_str(" else E()end;");
+        return;
+    }
+    let split = 1 + structure.index(members.len() - 1);
+    let (left, right) = members.split_at(split);
+    let bound = right[0].0;
+    // The comparator and the branch order both vary per seed; the two forms
+    // are exact complements, so the partition is the same tree either way.
+    let below = structure.index(2) == 0;
+    let condition =
+        structure.boundary_condition_opaque(value_var, u16::from(bound), below, luau, value_var);
+    // Exactly one side runs: `below` asks `<` and keeps the low half in the
+    // then-branch, otherwise the same partition rides as `>=` with the halves
+    // swapped. Both spellings are complements, so no value can reach both.
+    let (first, second) = if below { (left, right) } else { (right, left) };
+    write!(out, "if {condition} then ").unwrap();
+    search_tree(structure, first, value_var, luau, leaf_max, out);
+    out.push_str(" else ");
+    search_tree(structure, second, value_var, luau, leaf_max, out);
+    out.push_str(" end;");
+}
+
+/// Audit-nice values that an arbitrary label in the dispatch region must never
+/// spell (same K9a hygiene rule `wrapper_keys` and `state_values` follow). The
+/// interval builder below draws its bounds and its tautology fallbacks through
+/// this filter, so the nice-constant census cannot move by luck of where a
+/// split happened to fall, and a bound never reads as a radix hint.
+const NICE_LABELS: [u16; 4] = crate::random::Prng::NICE_LITERALS;
+
+/// K22: the same filter, exposed to the context-key planner so the dispatch
+/// weights can never be an audit-nice label either. Kept as one function over
+/// `u64` because the key ring is wider than the label space.
+pub(crate) fn nice_label(value: u64) -> bool {
+    value <= u64::from(u16::MAX) && NICE_LABELS.contains(&(value as u16))
+}
+
+/// A bound strictly between two neighbouring arm values: never an arm value
+/// itself, never an audit-nice label. `None` when the gap is too narrow, which
+/// is what keeps adjacent opcodes inside one leaf run instead of forcing a
+/// bound onto a number the chain already tests below it.
+fn interval_bound(
+    structure: &mut crate::random::Prng,
+    low: u16,
+    high: u16,
+    avoid: &[u16],
+) -> Option<u16> {
+    let gap = high.checked_sub(low)?;
+    if gap < 2 {
+        return None;
+    }
+    // A bound must not read as any value that the same variable is compared against
+    // elsewhere in the script: an interval boundary that collides with a state number
+    // (K3-FULL: the loop-back state of the very machine whose handlers are being
+    // partitioned) would make the boundary ambiguous even though the partition over
+    // the arm values themselves stays exact. `avoid` carries those extra values;
+    // `NICE_LABELS` keeps applying, since a nice bound is an anchor either way.
+    let taken = |value: u16| NICE_LABELS.contains(&value) || avoid.contains(&value);
+    let mut bound = low + 1 + structure.index((gap - 1) as usize) as u16;
+    if taken(bound) {
+        // Slide inside the same gap; the partition stays exact either way.
+        if bound + 1 < high && !taken(bound + 1) {
+            bound += 1;
+        } else if bound > low + 1 && !taken(bound - 1) {
+            bound -= 1;
+        } else {
+            return None;
+        }
+    }
+    Some(bound)
+}
+
+/// Split positions this arm list allows: indices whose left and right neighbours
+/// leave room for a bound. Recomputed per node, so a dense run (the fragment
+/// states live in a 900-wide window) naturally grows its leaves instead of
+/// emitting a bound that equals an arm value.
+fn gap_positions(members: &[(u16, String)]) -> Vec<usize> {
+    (1..members.len())
+        .filter(|&index| members[index].0.saturating_sub(members[index - 1].0) >= 2)
+        .collect()
+}
+
+/// Choose the node's split: closest to the middle (plus a small seeded jitter,
+/// so the depth is not exactly `log2` and the tree shape varies per seed), and
+/// the bound drawn inside that gap. Falls back to the other gap positions if the
+/// nearest one has no acceptable bound.
+fn interval_split(
+    structure: &mut crate::random::Prng,
+    members: &[(u16, String)],
+    positions: &[usize],
+    target: usize,
+    avoid: &[u16],
+) -> Option<(usize, u16)> {
+    let jitter = (structure.index(5) as usize).saturating_sub(2);
+    let center = target.wrapping_add(jitter).max(1).min(members.len() - 2);
+    let mut ordered: Vec<(usize, usize)> = positions
+        .iter()
+        .copied()
+        .map(|at| (at.abs_diff(center), at))
+        .collect();
+    ordered.sort();
+    for (_, at) in ordered {
+        if let Some(bound) = interval_bound(structure, members[at - 1].0, members[at].0, avoid) {
+            return Some((at, bound));
+        }
+    }
+    None
+}
+
+/// A plain integer for the `(v<=v and v or K)` guard's fallback branch. At most
+/// three digits keeps it in the same visual class as the state numbers, and
+/// filtered through `NICE_LABELS`, so the noise cannot move the nice-constant
+/// census; it never selects a handler because every leaf still tests the dispatch
+/// value itself.
+fn dispatch_noise(structure: &mut crate::random::Prng) -> u16 {
+    loop {
+        let value = 1 + structure.index(999) as u16;
+        if !NICE_LABELS.contains(&value) {
+            return value;
+        }
+    }
+}
+
+/// One leaf: the arm's own equality tests, in a seeded order, closed fail-closed.
+/// `open` says whether the run starts its own statement (`if ...`) or continues
+/// the interval chain it sits at the tail of (`elseif ...`) -- continuing it is
+/// what saves the ` end;` a nested `else` block would otherwise need.
+fn leaf_run(
+    structure: &mut crate::random::Prng,
+    members: &[(u16, String)],
+    out: &mut String,
+    open: bool,
+) {
+    let distinct = members.windows(2).all(|pair| pair[0].0 != pair[1].0);
+    let mut order: Vec<usize> = (0..members.len()).collect();
+    if distinct && members.len() > 1 {
+        structure.shuffle(&mut order);
+    }
+    for (step, which) in order.iter().enumerate() {
+        let keyword = match (step, open) {
+            (0, true) => "if",
+            _ => "elseif",
+        };
+        write!(out, "{keyword} {}", members[*which].1).unwrap();
+    }
+    out.push_str(" else E()end;");
+}
+
+/// One bucket's interval chain. Internal nodes decide with a numeric range test
+/// against a bound no arm carries, and a node's other half rides on as `elseif`
+/// instead of a nested `else if ... end;`: same partition, one ` end;` cheaper per
+/// node and one level shallower for the parser. Each recursive call receives
+/// exactly the arms whose value lies on that side of the bound, so the intervals
+/// refine down to a single opcode instead of scanning a chain of equality tests.
+fn interval_tree(
+    structure: &mut crate::random::Prng,
+    mut members: &[(u16, String)],
+    value_var: &str,
+    leaf_max: usize,
+    out: &mut String,
+    open: bool,
+    avoid: &[u16],
+    luau: bool,
+) {
+    let mut open = open;
+    loop {
+        let mut split = None;
+        if members.len() > leaf_max {
+            let positions = gap_positions(members);
+            split = interval_split(structure, members, &positions, members.len() / 2, avoid);
+        }
+        let Some((at, bound)) = split else {
+            leaf_run(structure, members, out, open);
+            return;
+        };
+        let (left, right) = members.split_at(at);
+        let noise = dispatch_noise(structure);
+        // Either polarity cuts the domain at the same place; which one a node
+        // gets is a per-seed choice, and the two halves swap with it so no
+        // value can reach both sides.
+        let below = structure.index(2) == 0;
+        let condition =
+            structure.interval_condition_opaque(value_var, bound, noise, below, luau, value_var);
+        let (first, second) = if below { (left, right) } else { (right, left) };
+        write!(
+            out,
+            "{} {condition} then ",
+            if open { "if" } else { "elseif" }
+        )
+        .unwrap();
+        interval_tree(
+            structure, first, value_var, leaf_max, out, true, avoid, luau,
+        );
+        open = false;
+        members = second;
+    }
+}
+
+/// The semantic interpreter's two lookup levels (recipe id, then fragment state)
+/// dispatched by **numeric interval**: the arms are sorted by value, split into a
+/// seeded number of contiguous buckets whose boundaries are themselves range
+/// tests, and each bucket is then searched with a seeded binary interval tree.
+///
+/// This replaces the old `value % groups == residue` selector plus one flat
+/// `if/elseif` equality scan per residue class. Two things change on purpose: the
+/// *boundaries between instructions* are now numbers the chain never tests for
+/// equality (so the opcode set cannot be read off as "the values appearing after
+/// `then`", it has to be recovered by solving the intervals), and an arm costs
+/// `log2` range tests instead of a scan of its bucket. Everything else is kept
+/// exactly: every arm still sits behind its own equality test, every leaf and
+/// every interval that carries no arm closes with `else E()end;`, so an unknown
+/// dispatch value still aborts rather than running a neighbour, and the emitted
+/// order inside a leaf stays seeded so the chain shape keeps varying per seed.
+pub(crate) fn grouped_interval_chain(
+    structure: &mut crate::random::Prng,
+    mut arms: Vec<(u16, String)>,
+    groups: u8,
+    value_var: &str,
+    avoid: &[u16],
+    luau: bool,
+) -> String {
+    // Numeric order is what makes an interval test meaningful; the seeded
+    // randomness rides in the split choices, the bounds, the comparison spelling
+    // and the order inside each leaf, not in the arm order.
+    arms.sort_by_key(|(value, _)| *value);
+    if arms.is_empty() {
+        return "E();".to_owned();
+    }
+    // Leaf size is the size/depth trade: a node costs one interval test, a leaf
+    // run costs none beyond the arms it already carried, so the chain grows by
+    // (roughly) one test per leaf rather than per arm. With 137 recipe arms and
+    // ~410 fragment arms per target, runs of 16..=28 keep the whole interval
+    // overlay near 1.5 KB while cutting a lookup to log2(leaves) + leaf scan --
+    // several times fewer tests than the flat scan it replaces. K18's argument
+    // still applies to the depth floor: with these arm counts even the smallest
+    // draw leaves `nodes >= 20` per chain as a property of the construction.
+    let leaf_max = 16 + structure.index(13) as usize;
+    let positions = gap_positions(&arms);
+    // Bucket boundaries: one range test per cut, so the cascade costs strictly
+    // fewer tests than the modulo selector it replaces (groups-1 against groups),
+    // while every bucket keeps its own fail-closed leaf tail below.
+    let mut cuts: Vec<(usize, u16)> = Vec::new();
+    for rank in 1..usize::from(groups) {
+        let target = arms.len() * rank / usize::from(groups);
+        if let Some((at, bound)) = interval_split(structure, &arms, &positions, target, avoid) {
+            if !cuts.iter().any(|(seen, _)| *seen == at) {
+                cuts.push((at, bound));
+            }
+        }
+    }
+    cuts.sort_by_key(|(at, _)| *at);
+    let mut text = String::new();
+    let mut start = 0usize;
+    for (index, (at, bound)) in cuts.iter().enumerate() {
+        let noise = dispatch_noise(structure);
+        // The cascade is monotone: `v <= B1` then `v <= B2` with growing bounds,
+        // so the `elseif` run is an exact interval partition even when the
+        // individual test is spelled as a difference or a negation.
+        let condition =
+            structure.interval_condition_opaque(value_var, *bound, noise, true, luau, value_var);
+        write!(
+            text,
+            "{} {condition} then ",
+            if index == 0 { "if" } else { "elseif" }
+        )
+        .unwrap();
+        interval_tree(
+            structure,
+            &arms[start..*at],
+            value_var,
+            leaf_max,
+            &mut text,
+            true,
+            avoid,
+            luau,
+        );
+        start = *at;
+    }
+    text.push_str(" else ");
+    interval_tree(
+        structure,
+        &arms[start..],
+        value_var,
+        leaf_max,
+        &mut text,
+        true,
+        avoid,
+        luau,
+    );
+    text.push_str(" end;");
+    text
+}
+
+/// Sub-chain selector condition, one of four exactly equivalent spellings
+/// of `value % modulus == group` (raw integer arithmetic, no metamethods).
+pub(crate) fn selector_condition(
+    structure: &mut crate::random::Prng,
+    value_var: &str,
+    modulus: u8,
+    group: u8,
+) -> String {
+    match structure.index(4) {
+        0 => format!("{value_var}%{modulus}=={group}"),
+        1 => format!("{group}=={value_var}%{modulus}"),
+        2 => format!("not({value_var}%{modulus}~={group})"),
+        _ => format!("{value_var}%{modulus}-{group}==0"),
+    }
+}
+
+/// Scratch-table slots: rewrite the given local variables of a field's
+/// body into reads/writes of `g[key]` -- one fixed random key per variable
+/// (drawn from the structure stream, so the mapping varies per seed), the
+/// value constantly changing, `local` declarations for slots stripped
+/// (assignments target the table). The caller prepends `local g={};` and,
+/// where the field's lifetime ends, clears the table (`g=nil`) before
+/// returning. Function names, parameters and for-loop controls must not be
+/// listed; the scanner matches whole words only, so field-access prefixes
+/// and string contents are never touched.
+fn flush_word(word: &mut String, out: &mut String, keys: &std::collections::BTreeMap<&str, u64>) {
+    if !word.is_empty() {
+        match keys.get(word.as_str()) {
+            Some(key) => write!(out, "g[{key}]").unwrap(),
+            None => out.push_str(word),
+        }
+        word.clear();
+    }
+}
+
+pub(crate) fn slot_rewrite(
+    structure: &mut crate::random::Prng,
+    text: &str,
+    vars: &[&str],
+) -> String {
+    let mut keys: std::collections::BTreeMap<&str, u64> = Default::default();
+    let mut used = std::collections::BTreeSet::new();
+    for name in vars {
+        loop {
+            let key = 1 + structure.index(99) as u64;
+            // K9a label hygiene: slot keys are arbitrary labels, so 85/86
+            // are rejected (they would read as radix constants).
+            if key == 85 || key == 86 {
+                continue;
+            }
+            if used.insert(key) {
+                keys.insert(name, key);
+                break;
+            }
+        }
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut word = String::new();
+    // String literals are copied verbatim: packed payloads and tags must
+    // never be mistaken for variable words. The scan is escape-aware: a
+    // backslash inside a literal protects the next character, so K9a
+    // `\"`/`\\`/`\ddd` escapes can never desynchronize the quote tracker
+    // (behavior-preserving on escape-free bodies, which cover all
+    // pre-K9a templates).
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in text.chars() {
+        if let Some(marker) = quote {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == marker {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            flush_word(&mut word, &mut out, &keys);
+            out.push(c);
+            quote = Some(c);
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush_word(&mut word, &mut out, &keys);
+            out.push(c);
+        }
+    }
+    flush_word(&mut word, &mut out, &keys);
+    // Slot declarations lose `local ` (they are table assignments now).
+    out.replace("local g[", "g[")
+}
+
+/// Control-flow flattening: distinct per-seed state numbers for one
+/// machine (three digits keeps them visually indistinct from operands).
+pub(crate) fn state_values(structure: &mut crate::random::Prng, count: usize) -> Vec<u16> {
+    let mut used = std::collections::BTreeSet::new();
+    while used.len() < count {
+        let value = (100 + structure.index(900)) as u16;
+        // K9a label hygiene: state numbers are arbitrary labels, so the
+        // byte width 256 is rejected.
+        if value == 256 {
+            continue;
+        }
+        used.insert(value);
+    }
+    used.into_iter().collect()
+}
+
+/// State-test condition, one of four exactly equivalent spellings of
+/// `var == value` (raw integer comparison, no metamethods).
+pub(crate) fn state_condition(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    value: u16,
+    luau: bool,
+) -> String {
+    let value = structure.opaque_literal(u64::from(value), luau, var);
+    match structure.index(4) {
+        0 => format!("{var}=={value}"),
+        1 => format!("{value}=={var}"),
+        2 => format!("not({var}~={value})"),
+        _ => format!("{var}-{value}==0"),
+    }
+}
+
+/// `var=<opaque state>;` -- one CFF transition whose target number is rebuilt at
+/// run time instead of being spelled (goal 6 part 3). The guard of the
+/// reconstruction reads `var` itself, which is an integer at every transition
+/// site, and both arms are the same value, so the transition is exact whatever
+/// the guard returns. Transitions stay the machine's only control-flow step: no
+/// new chain, no new local, just a number that can no longer be read off.
+pub(crate) fn state_assign(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    value: u16,
+    luau: bool,
+) -> String {
+    let value = structure.opaque_literal(u64::from(value), luau, var);
+    format!("{var}={value};")
+}
+
+/// Runtime-masked state representation used where a static state number must
+/// not be enough to resolve a control-flow edge. Both assignment and every
+/// comparison retain the mask expression; there is no removable one-time
+/// guard in front of an otherwise ordinary state machine.
+pub(crate) fn masked_state_value(
+    structure: &mut crate::random::Prng,
+    value: u16,
+    mask: &str,
+    luau: bool,
+) -> String {
+    // The mask already makes the *live* number runtime-only; the reconstruction
+    // additionally removes the literal, so neither the state number nor the
+    // masked representation can be read off the text (goal 6 part 3).
+    let value = structure.opaque_literal(u64::from(value), luau, mask);
+    format!("({value}+{mask})%65521")
+}
+
+pub(crate) fn masked_state_condition(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    mask: &str,
+    value: u16,
+    luau: bool,
+) -> String {
+    let represented = masked_state_value(structure, value, mask, luau);
+    match structure.index(4) {
+        0 => format!("{var}=={represented}"),
+        1 => format!("{represented}=={var}"),
+        2 => format!("not({var}~={represented})"),
+        _ => format!("{var}-{represented}==0"),
+    }
+}
+
+/// Select one of two disjoint physical state pairs from a runtime mask bit.
+/// This makes the concrete transition -- not merely a common translation of
+/// an otherwise static state -- depend on the reconstructed probe shares.
+pub(crate) fn selected_masked_state_value(
+    structure: &mut crate::random::Prng,
+    first: u16,
+    second: u16,
+    mask: &str,
+    luau: bool,
+) -> String {
+    format!(
+        "({mask}%2==0 and {} or {})",
+        masked_state_value(structure, first, mask, luau),
+        masked_state_value(structure, second, mask, luau)
+    )
+}
+
+pub(crate) fn selected_masked_state_condition(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    mask: &str,
+    first: u16,
+    second: u16,
+    luau: bool,
+) -> String {
+    let first = masked_state_condition(structure, var, mask, first, luau);
+    let second = masked_state_condition(structure, var, mask, second, luau);
+    format!("(({mask}%2==0 and {first})or({mask}%2~=0 and {second}))")
+}
+
+/// A flattened state machine: `while true do if <c1> then B1 elseif <c2>
+/// then B2 ... else E()end end;` with the branch bodies supplied by the
+/// caller and both the textual branch order and every condition spelling
+/// drawn from the structure stream. The caller declares and initializes
+/// the state variable before the machine.
+pub(crate) fn state_machine(
+    structure: &mut crate::random::Prng,
+    var: &str,
+    mut branches: Vec<(u16, String)>,
+    luau: bool,
+) -> String {
+    structure.shuffle(&mut branches);
+    let mut text = String::from("while true do ");
+    for (index, (value, body)) in branches.iter().enumerate() {
+        let condition = state_condition(structure, var, *value, luau);
+        write!(
+            text,
+            "{} {condition} then {body}",
+            if index == 0 { "if" } else { "elseif" }
+        )
+        .unwrap();
+    }
+    text.push_str(" else E()end;end;");
+    text
+}
+
+fn u16_expression(value: u16) -> String {
+    // Goal 6 (part 3): the two bytes are spelled like every other byte of the
+    // layer -- a byte that happens to be an audit anchor (`85`, `86`) comes out
+    // as its neighbour form, so a drawn salt never hands the anchor census a
+    // decimal token. The value is unchanged; only the spelling moves.
+    format!(
+        "({}*256+{})",
+        crate::random::Prng::byte_token((value / 256) as u8),
+        crate::random::Prng::byte_token((value % 256) as u8)
+    )
+}
+
+fn token_opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
+    let salt = u16_expression((17 + structure.index(4_079)) as u16);
+    match structure.index(5) {
+        0 => ("v<=v and l<=l".to_owned(), "v<v or l<l".to_owned()),
+        1 => (
+            format!("(n+{salt})-{salt}==n"),
+            format!("(n+{salt})-{salt}~=n"),
+        ),
+        2 => ("s%1==0 and f%1==0".to_owned(), "s%1==1 or f<0".to_owned()),
+        3 => ("(v-l)==(v-l)".to_owned(), "(v-l)~=(v-l)".to_owned()),
+        _ => (
+            "(v<=v and v or 0)==v".to_owned(),
+            "(v<=v and v or 0)~=v".to_owned(),
+        ),
+    }
+}
+
+fn nested_token_guard(
+    structure: &mut crate::random::Prng,
+    mut live: String,
+    depth: usize,
+    decoy_states: &[u16],
+) -> String {
+    for _ in 0..depth {
+        let (truthy, falsy) = token_opaque_pair(structure);
+        let odd = 3 + 2 * (structure.index(31));
+        let salt = u16_expression((101 + structure.index(65_000)) as u16);
+        let state = decoy_states[structure.next_u64() as usize % decoy_states.len()];
+        let dead = format!("repeat v=(v*{odd}+l+n+s+f+{salt})%65536;q={state};break until false;");
+        live = if structure.index(2) == 0 {
+            format!("if {truthy} then {live}else {dead}end;")
+        } else {
+            format!("if {falsy} then {dead}else {live}end;")
+        };
+    }
+    live
+}
+
+/// Five-stage context-dependent recipe-token decoder. The real inverse stages
+/// are routed through a shuffled state machine and each is buried under four
+/// or five nested dynamic tautologies. Five additional state arms contain
+/// plausible one-iteration arithmetic loops but have no incoming transition
+/// from the live chain. The same function is used while validating the wire
+/// and on every interpreter fetch, so a record never exposes a stable recipe
+/// id before these runtime stages have completed.
+pub(crate) fn layered_recipe_decoder(
+    structure: &mut crate::random::Prng,
+    layers: &[semantic::RecipeTokenLayer; semantic::RECIPE_TOKEN_STAGES],
+    luau: bool,
+) -> String {
+    const DECOY_STATES: usize = 5;
+    let mut states = state_values(structure, semantic::RECIPE_TOKEN_STAGES + 1 + DECOY_STATES);
+    structure.shuffle(&mut states);
+    let live_states = &states[..=semantic::RECIPE_TOKEN_STAGES];
+    let decoy_states = &states[semantic::RECIPE_TOKEN_STAGES + 1..];
+    let mut branches = Vec::new();
+    for (stage, layer) in layers.iter().rev().enumerate() {
+        let terms = [
+            u16_expression(layer.add),
+            format!("l*{}", u16_expression(layer.label)),
+            format!("n*{}", u16_expression(layer.next)),
+            format!("s*{}", u16_expression(layer.skip)),
+            format!("f*{}", u16_expression(layer.prototype)),
+            format!("((l*n+s*f)%65536)*{}", u16_expression(layer.cross)),
+        ];
+        let mut terms = terms.to_vec();
+        structure.shuffle(&mut terms);
+        let context = terms.join("+");
+        let body = format!(
+            "v=((v-({context})%65536)*{})%65536;q={};",
+            u16_expression(layer.inverse),
+            live_states[stage + 1]
+        );
+        let depth = 4 + (structure.index(2)) as usize;
+        branches.push((
+            live_states[stage],
+            nested_token_guard(structure, body, depth, decoy_states),
+        ));
+    }
+    branches.push((
+        live_states[semantic::RECIPE_TOKEN_STAGES],
+        "return v;".to_owned(),
+    ));
+    for (index, &state) in decoy_states.iter().enumerate() {
+        let next = decoy_states[(index + 1) % decoy_states.len()];
+        let odd = 3 + 2 * (structure.index(61));
+        let salt = u16_expression((1 + structure.index(65_535)) as u16);
+        branches.push((
+            state,
+            format!(
+                "repeat v=(v*{odd}+l*n+s*f+{salt})%65536;n=(n+v+{salt})%65536;{go_next}break until false;",
+                go_next = state_assign(structure, "q", next, luau)
+            ),
+        ));
+    }
+    // `v` is the decoder's own operand: it is the value every branch already
+    // does arithmetic on, so naming it as the guard source adds no assumption
+    // that the surrounding decoder did not already make. (`q` itself is not in
+    // scope inside its own initializer, which is why the init names `v`.)
+    let q_start = structure.opaque_literal(u64::from(live_states[0]), luau, "v");
+    format!(
+        "local RD=function(v,l,n,s,f)local q={q_start};{}end;",
+        state_machine(structure, "q", branches, luau)
+    )
+}
+
+fn edge_opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
+    let salt = u16_expression((23 + structure.index(4_057)) as u16);
+    match structure.index(4) {
+        0 => ("v<=v and l<=l".to_owned(), "v<v or l<l".to_owned()),
+        1 => (
+            format!("(f+{salt})-{salt}==f"),
+            format!("(f+{salt})-{salt}~=f"),
+        ),
+        2 => ("ek%1==0 and f>=0".to_owned(), "ek%1==1 or f<0".to_owned()),
+        _ => ("(v-l)==(v-l)".to_owned(), "(v-l)~=(v-l)".to_owned()),
+    }
+}
+
+fn nested_edge_guard(
+    structure: &mut crate::random::Prng,
+    mut live: String,
+    depth: usize,
+    decoy_states: &[u16],
+) -> String {
+    for _ in 0..depth {
+        let (truthy, falsy) = edge_opaque_pair(structure);
+        let odd = 3 + 2 * (structure.index(29));
+        let salt = u16_expression((1 + structure.index(65_535)) as u16);
+        let state = decoy_states[structure.next_u64() as usize % decoy_states.len()];
+        let dead = format!("repeat v=(v*{odd}+l+f+ek+{salt})%65536;q={state};break until false;");
+        live = if structure.index(2) == 0 {
+            format!("if {truthy} then {live}else {dead}end;")
+        } else {
+            format!("if {falsy} then {dead}else {live}end;")
+        };
+    }
+    live
+}
+
+/// Three-stage decoder for encoded CFG successors. Raw `next`/`skip` labels
+/// exist only as short-lived locals during validation/fetch; the persistent
+/// code table retains edge tokens. A second shuffled state machine and its
+/// dead arithmetic states prevent the recipe decoder from being the sole
+/// control-flow gate.
+pub(crate) fn layered_edge_decoder(
+    structure: &mut crate::random::Prng,
+    layers: &[semantic::EdgeTokenLayer; semantic::EDGE_TOKEN_STAGES],
+    luau: bool,
+) -> String {
+    const DECOY_STATES: usize = 3;
+    let mut states = state_values(structure, semantic::EDGE_TOKEN_STAGES + 1 + DECOY_STATES);
+    structure.shuffle(&mut states);
+    let live_states = &states[..=semantic::EDGE_TOKEN_STAGES];
+    let decoy_states = &states[semantic::EDGE_TOKEN_STAGES + 1..];
+    let mut branches = Vec::new();
+    for (stage, layer) in layers.iter().rev().enumerate() {
+        let terms = [
+            u16_expression(layer.add),
+            format!("l*{}", u16_expression(layer.source)),
+            format!("f*{}", u16_expression(layer.prototype)),
+            format!("ek*{}", u16_expression(layer.kind)),
+            format!("(((l+ek)*(f+1))%65536)*{}", u16_expression(layer.cross)),
+        ];
+        let mut terms = terms.to_vec();
+        structure.shuffle(&mut terms);
+        let context = terms.join("+");
+        let body = format!(
+            "v=((v-({context})%65536)*{})%65536;q={};",
+            u16_expression(layer.inverse),
+            live_states[stage + 1]
+        );
+        let depth = 2 + (structure.index(2)) as usize;
+        branches.push((
+            live_states[stage],
+            nested_edge_guard(structure, body, depth, decoy_states),
+        ));
+    }
+    branches.push((
+        live_states[semantic::EDGE_TOKEN_STAGES],
+        "return v;".to_owned(),
+    ));
+    for (index, &state) in decoy_states.iter().enumerate() {
+        let next = decoy_states[(index + 1) % decoy_states.len()];
+        let odd = 3 + 2 * (structure.index(47));
+        let salt = u16_expression((1 + structure.index(65_535)) as u16);
+        branches.push((
+            state,
+            format!(
+                "repeat v=(v*{odd}+l*(f+1)+ek+{salt})%65536;f=(f+v+{salt})%65536;{go_next}break until false;",
+                go_next = state_assign(structure, "q", next, luau)
+            ),
+        ));
+    }
+    let q_start = structure.opaque_literal(u64::from(live_states[0]), luau, "v");
+    format!(
+        "local ED=function(v,l,f,ek)local q={q_start};{}end;",
+        state_machine(structure, "q", branches, luau)
+    )
+}
+
+/// Per-seed opcode renumbering: an injective map from the 64 canonical ISA
+/// slots to byte values 0..=255, drawn by rejection sampling from a
+/// seed-salted stream. Both sides derive it identically: the generator
+/// renumbers every dispatch/bounds arm and the termination check, the
+/// target rebuilds the table from the packed base86 string (two chars per
+/// slot, see the forms field) and rewrites each opcode byte while
+/// expanding the validated varint stream.
+pub(crate) fn opcode_permutation(seed: u64, slots: u8) -> Vec<u8> {
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6f70_636f_6465_7333);
+    let mut taken = std::collections::BTreeSet::new();
+    (0..slots)
+        .map(|_| loop {
+            let value = (random.index(256)) as u8;
+            if taken.insert(value) {
+                return value;
+            }
+        })
+        .collect()
+}
+
+/// One base86 digit (0..=85) as the backslash-free printable char shared
+/// by the packed strings of the forms field.
+pub(crate) fn pack86(digit: u8) -> char {
+    let mut byte = 35 + digit;
+    if byte >= 92 {
+        byte += 1;
+    }
+    byte as char
+}
+
+/// M7 structural variant: one of three exactly equivalent integer bound
+/// checks. The operands are always integers decoded from 7-bit varints, so
+/// `x>K`, `K<x` and `not(x<=K)` are interchangeable -- NaN cannot occur and
+/// raw numeric comparison has no metamethod dispatch. Only the spelling of
+/// the emitted check changes; behavior and rejection behavior are identical.
+pub(crate) fn gt(structure: &mut crate::random::Prng, value: &str, bound: &str) -> String {
+    match structure.index(3) {
+        0 => format!("{value}>{bound}"),
+        1 => format!("{bound}<{value}"),
+        _ => format!("not({value}<={bound})"),
+    }
+}
