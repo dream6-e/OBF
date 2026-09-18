@@ -1,0 +1,76 @@
+--- proto 0: 56 constants ---
+  [0] number: 5.0
+  [1] string: 'assert'
+  [2] number: 3.0
+  [3] number: 8.0
+  [4] number: 2.0
+  [5] number: 6.0
+  [6] number: 9.0
+  [7] number: 4.0
+  [8] number: 13.0
+  [9] number: 1.0
+  [10] string: 'left'
+  [11] string: 'yes'
+  [12] string: 'right'
+  [13] string: 'no'
+  [14] bool: True
+  [15] number: 192.0
+  [16] number: 64.0
+  [17] number: 32.0
+  [18] string: '__idiv'
+  [19] string: 'setmetatable'
+  [20] string: 'value'
+  [21] number: 17.0
+  [22] number: 11.0
+  [23] number: 24.0
+  [24] number: 512.0
+  [25] bool: False
+  [26] string: '83'
+  [27] number: 10.0
+  [28] string: 'add'
+  [29] string: 'add'
+  [30] number: 15.0
+  [31] string: 'table'
+  [32] string: 'create'
+  [33] string: 'insert'
+  [34] number: 0.0
+  [35] string: 'ipairs'
+  [36] string: 'alpha'
+  [37] string: 'beta'
+  [38] number: 7.0
+  [39] string: 'pairs'
+  [40] string: 'kind'
+  [41] string: 'template'
+  [42] string: 'count'
+  [43] string: 'pcall'
+  [44] string: 'value:64'
+  [45] string: 'type'
+  [46] string: 'string'
+  [47] string: 'vm:luau:'
+  [48] string: ''
+  [49] string: 'vm:luau:64'
+  [50] string: '__obf_luau_import_probe'
+  [51] string: 'format'
+  [52] string: 'ignored'
+  [53] string: 'changed'
+  [54] string: 'print'
+  [55] string: 'vm:luau:ok'
+--- proto 1: 2 constants ---
+  [0] number: 1.0
+  [1] string: 'tostring'
+--- proto 2: 2 constants ---
+  [0] string: 'left'
+  [1] string: 'right'
+--- proto 3: 1 constants ---
+  [0] string: 'changed'
+--- proto 7: 1 constants ---
+  [0] number: 539.0
+--- proto 14: 1 constants ---
+  [0] string: 'value'
+--- proto 15: 1 constants ---
+  [0] string: 'value'
+--- proto 16: 4 constants ---
+  [0] string: 'string'
+  [1] string: 'format'
+  [2] string: '%s:%d'
+  [3] string: 'value'

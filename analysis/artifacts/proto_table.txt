@@ -1,0 +1,21 @@
+len=18038 nproto=18 z=0 c19=19 adler=0xb8944c4f pos=32
+after proto headers pos= 464
+total upvals 4
+  0 parent= MAIN maxstack=  57 params= 0 flags= 1(vararg=False) nup= 0 ninstr=   674 nconst=   56 size= 12145 chain=34511
+  1 parent=    0 maxstack=  13 params= 2 flags= 8(vararg=True) nup= 0 ninstr=    98 nconst=    2 size=  1551 chain=21988
+  2 parent=    0 maxstack=   8 params= 2 flags= 8(vararg=True) nup= 0 ninstr=    25 nconst=    2 size=   403 chain=9465
+  3 parent=    0 maxstack=   3 params= 0 flags= 8(vararg=True) nup= 0 ninstr=     9 nconst=    1 size=   176 chain=62478
+  4 parent=    0 maxstack=   2 params= 0 flags= 0(vararg=False) nup= 0 ninstr=     4 nconst=    0 size=   103 chain=49955
+  5 parent=    4 maxstack=   2 params= 0 flags= 0(vararg=False) nup= 0 ninstr=     4 nconst=    0 size=   102 chain=37432
+  6 parent=    5 maxstack=   2 params= 0 flags= 0(vararg=False) nup= 0 ninstr=     4 nconst=    0 size=   103 chain=24909
+  7 parent=    6 maxstack=   2 params= 0 flags= 0(vararg=False) nup= 0 ninstr=     4 nconst=    1 size=   110 chain=12386
+  8 parent=    0 maxstack=   4 params= 1 flags= 8(vararg=True) nup= 0 ninstr=     8 nconst=    0 size=   155 chain=65399
+  9 parent=    8 maxstack=   3 params= 0 flags= 0(vararg=False) nup= 1 ninstr=     9 nconst=    0 size=   165 chain=52876
+ 10 parent=    9 maxstack=   6 params= 1 flags= 0(vararg=False) nup= 1 ninstr=    12 nconst=    0 size=   212 chain=40353
+ 11 parent=    0 maxstack=   5 params= 1 flags= 8(vararg=True) nup= 0 ninstr=    14 nconst=    0 size=   233 chain=27830
+ 12 parent=   11 maxstack=   4 params= 1 flags= 0(vararg=False) nup= 1 ninstr=    15 nconst=    0 size=   251 chain=15307
+ 13 parent=    0 maxstack=   3 params= 0 flags= 9(vararg=True) nup= 0 ninstr=     8 nconst=    0 size=   152 chain=2784
+ 14 parent=    0 maxstack=   9 params= 2 flags= 8(vararg=True) nup= 0 ninstr=    19 nconst=    1 size=   308 chain=55797
+ 15 parent=    0 maxstack=   8 params= 2 flags= 8(vararg=True) nup= 0 ninstr=    21 nconst=    1 size=   340 chain=43274
+ 16 parent=    0 maxstack=   5 params= 0 flags= 0(vararg=False) nup= 1 ninstr=    15 nconst=    4 size=   330 chain=30751
+ 17 parent=    0 maxstack=   7 params= 2 flags= 8(vararg=True) nup= 0 ninstr=    30 nconst=    0 size=   495 chain=18228
