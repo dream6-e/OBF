@@ -1430,7 +1430,7 @@ fn build_code_segment_pool(
     codes: Vec<Vec<u8>>,
     image: &SemanticImage,
     random: &mut crate::random::Prng,
-) -> Result<(Vec<CodeSegment>, Vec<usize>, bool), Diagnostic> {
+) -> Result<(Vec<CodeSegment>, Vec<usize>, Vec<usize>, bool), Diagnostic> {
     if codes.is_empty() {
         return Err(error("global code segment pool is empty"));
     }
@@ -1438,20 +1438,26 @@ fn build_code_segment_pool(
         return Err(error("too many prototypes for the segment id graph"));
     }
     let owner_count = codes.len();
+    let mut ids: Vec<u16> = (1..=owner_count * 2)
+        .map(|id| u16::try_from(id).unwrap())
+        .collect();
+    random.shuffle(&mut ids);
+    if owner_count > 1 && (0..owner_count).all(|owner| ids[owner * 2] == (owner * 2 + 1) as u16) {
+        ids.rotate_left(1);
+    }
+    let roots: Vec<usize> = (0..owner_count)
+        .map(|owner| usize::from(ids[owner * 2]))
+        .collect();
     let mut pool = Vec::with_capacity(owner_count * 2);
-    for (owner, code) in codes.into_iter().enumerate() {
+    for (owner_index, code) in codes.into_iter().enumerate() {
+        let root = ids[owner_index * 2];
+        let terminal = ids[owner_index * 2 + 1];
+        let owner = owner_index;
         if code.len() < 2 {
             return Err(error("prototype code is too short to segment"));
         }
         let owner =
             u16::try_from(owner).map_err(|_| error("prototype id exceeds segment owner range"))?;
-        let root = owner
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| error("segment id overflow"))?;
-        let terminal = root
-            .checked_add(1)
-            .ok_or_else(|| error("segment id overflow"))?;
         let split = code_segment_split(code.len(), owner, image);
         pool.push(CodeSegment {
             id: root,
@@ -1472,7 +1478,7 @@ fn build_code_segment_pool(
     for _ in 0..64 {
         random.shuffle(&mut pool);
         if pool.len() <= 2 || owners_are_interleaved(&pool) {
-            return Ok((pool, vec![2; owner_count], true));
+            return Ok((pool, vec![2; owner_count], roots, true));
         }
     }
     Err(error("failed to interleave global code segment pool"))
@@ -1562,14 +1568,10 @@ fn build_capture_pool(
 /// `(owner, index, tag, extent, key)` token triple plus a keyed payload -- a
 /// ready-made constant table -- and that shape is what goal 5 abolishes.
 ///
-/// The cipher is the capture pool's, unchanged so both sides keep one
-/// implementation: `pool_key_fold` chains the key over *every earlier entry*
-/// (so a reader that skips entries cannot align the stream) and, since goal 6,
-/// `pool_key_roll_apply` rolls each payload byte's key over the *plaintext*
-/// recovered so far (so the keystream is neither derivable from the clear
-/// lengths nor seekable). The tag byte and a string's
-/// length prefix stay in the clear for the same reason they did in the pool:
-/// the walk needs extents before it has a key.
+/// Each entry receives an independent quadratic ordinal-derived subkey, then
+/// `pool_key_roll_apply` rolls that payload's key over the plaintext recovered
+/// so far. The tag is masked by the same subkey; only string lengths remain in
+/// the clear so the lazy walk can advance without materializing values.
 fn write_constant_block(
     code: &mut Vec<u8>,
     plan: &PrototypePlan,
@@ -1577,9 +1579,9 @@ fn write_constant_block(
 ) -> Result<(), Diagnostic> {
     let (mask, modulus) = pool_key_pair(image);
     let roll = pool_roll_triple(image);
-    let mut acc = 0u64;
     let mut block: Vec<u8> = Vec::new();
-    for constant in &plan.prototype.constants {
+    for (index, constant) in plan.prototype.constants.iter().enumerate() {
+        let entry_start = block.len();
         let tag = match constant {
             Constant::Nil => 0u8,
             Constant::Boolean(_) => 1,
@@ -1616,10 +1618,11 @@ fn write_constant_block(
                 (at + 4, value.len() as u64)
             }
         };
+        let subkey = pool_entry_key(index, mask, modulus);
+        block[entry_start] = block[entry_start].wrapping_add(pool_key_byte(subkey, 0) as u8);
         if keyed_len > 0 {
-            pool_key_roll_apply(&mut block, key_from, acc, roll);
+            pool_key_roll_apply(&mut block, key_from, subkey, roll);
         }
-        acc = pool_key_fold(acc, keyed_len, mask, modulus);
         if block.len() > custom::MAX_BYTES {
             return Err(error("constant block exceeds size limit"));
         }
@@ -1687,7 +1690,7 @@ pub(crate) fn pool_key_pair(image: &SemanticImage) -> (u64, u64) {
         ^ u64::from(layer.multiplier).wrapping_mul(3266489917)
         ^ u64::from(image.mask_add).wrapping_mul(668265263);
     (
-        1 + (mixed >> 16) % 65_521,
+        1 + (mixed >> 16) % 65_479,
         4_294_967_291 + (mixed >> 40) % 6,
     )
 }
@@ -1744,13 +1747,12 @@ pub(crate) fn pool_roll_triple(image: &SemanticImage) -> (u64, u64, u64) {
     }
 }
 
-/// Stream position after one record. Both the writer and the emitted
-/// parser/`DC` apply exactly this recurrence, so a record's key depends on the
-/// payload size of *every earlier* record in physical pool order: the cipher is
-/// order-dependent, not a position-indexed table, and a reader that skips
-/// records cannot even align the key stream.
-pub(crate) fn pool_key_fold(acc: u64, keyed_len: u64, mask: u64, modulus: u64) -> u64 {
-    (acc + keyed_len * 257 + mask) % modulus
+/// Derive one constant's independent subkey from its ordinal and the
+/// image-specific key pair. The quadratic term keeps adjacent entries from
+/// sharing a linear rolling state or inheriting corruption from one another.
+pub(crate) fn pool_entry_key(index: usize, mask: u64, modulus: u64) -> u64 {
+    let ordinal = index as u64 + 1;
+    (mask + ordinal * 257 + ordinal * ordinal * 17) % modulus
 }
 
 /// Per-byte shift inside one record's payload.
@@ -1805,7 +1807,7 @@ fn serialize(
         codes.push(code);
     }
     let code_lengths: Vec<usize> = codes.iter().map(Vec::len).collect();
-    let (segments, segment_counts, segments_interleaved) =
+    let (segments, segment_counts, root_ids, segments_interleaved) =
         build_code_segment_pool(codes, image, random)?;
     let physical_ids = segments
         .iter()
@@ -1831,7 +1833,6 @@ fn serialize(
             .collect(),
         interleaved: true,
     };
-    let root_ids = (0..plans.len()).map(|owner| owner * 2 + 1).collect();
     let mut out = Vec::from(*b"OBF\x02");
     out.extend_from_slice(&[
         if target.is_luau() { 0x75 } else { 0x51 },
@@ -1853,10 +1854,8 @@ fn serialize(
         let code_len = code_lengths[prototype_id];
         let owner = u16::try_from(prototype_id)
             .map_err(|_| error("prototype id exceeds segment owner range"))?;
-        let root = owner
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| error("segment root id overflow"))?;
+        let root =
+            u16::try_from(root_ids[prototype_id]).map_err(|_| error("segment root id overflow"))?;
         // ISA13 keeps the 24-byte shape and the wire read sequence, but the
         // field assigned to each same-width slot follows the per-image
         // metadata permutation. The generated PH mirrors this assignment.

@@ -186,7 +186,7 @@ fn emit_private_decoder(
          local bs=function()local n=b32();if bp+n-1>#B then E()end;local v=string.sub(B,bp,bp+n-1);bp=bp+n;return v end;\
          local bn=function()local t=b8();if t==0 then local v=tonumber(bs());if not v then E()end;return v elseif t==1 then return 0/0 elseif t==2 then return 1/0 elseif t==3 then return -1/0 else E()end end;\
          if b8()~=79 or b8()~=66 or b8()~=70 or b8()~=1 or b8()~=81 then E()end;\
-         local bl=b32();local ck=b32();local ps=bp;if #B-ps+1~=bl then E()end;local s1,s2=1,0;for j=ps,#B do s1=(s1+string.byte(B,j))%65521;s2=(s2+s1)%65521 end;if s1+s2*65536~=ck then E()end;\
+         local bl=b32();local ck=b32();local ps=bp;if #B-ps+1~=bl then E()end;local s1,s2=1,0;for j=ps,#B do s1=(s1+string.byte(B,j))%65437;s2=(s2+s1)%65437 end;if s1+s2*65536~=ck then E()end;\
          local M=b32();local np=bc();local P={};for id=0,np-1 do local F={k={},q={},c={}};F.u=b8();F.p=b8();F.v=b8();F.m=b8();\
          local nk=bc();for j=0,nk-1 do local t=b8();if t==0 then F.k[j]=nil elseif t==1 then F.k[j]=b8()~=0 elseif t==2 then F.k[j]=bn() elseif t==3 then F.k[j]=bs() else E()end end;\
          local nq=bc();for j=0,nq-1 do F.q[j]=b32()end;local nc=bc();for j=1,nc do local o=b16();local w=b32();local x=math.floor(w/16384)%262144;F.c[j]={o,math.floor(w/64)%256,math.floor(w/8388608)%512,math.floor(w/16384)%512,x,x-131071,w}end;P[id]=F end;\

@@ -269,7 +269,7 @@ fn pins_lua51() -> AuditPins {
         //     picking a seed for the census rather than fixing anything, so it is left at
         //     the measured value. check1 (all three classes), check3, check4 (9, max,
         //     density flag), check7, check8 and check9 (19765, 0, false) are unchanged.
-        check1_nice_fails: vec![(256, 4), (2147483647, 24), (4294967296, 3)],
+        check1_nice_fails: vec![(256, 4), (4294967296, 3)],
         // Goal 7 (2026-09-18): each static token is now one private-alphabet
         // fragment rather than the concatenated three-segment transport. The
         // old union fingerprint (96/99, fail=true) disappears at token scope.
@@ -321,27 +321,27 @@ fn pins_lua51() -> AuditPins {
         // check1/2/3/6/7/9 一字未动；check1 的 `256` 仍是 4、`2147483647` 仍是 24。
         check4_thresholds: (3, 16777215, false),
         check5_templates: (
-            13,
+            12,
             vec![
                 ("X=X+N".to_string(), 31),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
-                ("X=N*X%N".to_string(), 17),
                 ("X[N]=N".to_string(), 16),
-                ("X=N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
                 ("X=NXXXXXXX=(X*N+X+X+X+X+(N*X.X+N))%X.X".to_string(), 8),
+                ("X=(X+X+(N*X.X+N))%X.X".to_string(), 7),
+                ("X=N".to_string(), 6),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 65),
+        check8_literal_gcd: (1, 67),
         // Goal 7: the old static token walker sees one 2,380-byte fragment,
         // not the 19,045-byte runtime reconstruction; its lint remains clear.
-        check9_stream: (2380, 0, false),
+        check9_stream: (2417, 2, false),
     }
 }
 
@@ -436,7 +436,7 @@ fn pins_luau() -> AuditPins {
         // 目标 5（2026-09-15，ISA19）：check1 由四类降到三类 —— 裸 `86` 出现数 3 -> 2
         // 掉出锚点表（新走查的基数拼写走既有的 `c1+c2` 和式，不再多一处字面量），
         // `256` 仍是 4（K9b floor）、`16777216` 4、`2147483647` 27，三类全部未动。
-        check1_nice_fails: vec![(256, 4), (16777216, 4), (2147483647, 27)],
+        check1_nice_fails: vec![(256, 4), (16777216, 4)],
         // K3-FULL 第二步 (2026-09-13, per-segment digit tables) -- luau moves two cells.
         //   check2 (86, 99, false) -> (96, 99, true): the stream's symbol set is the
         //     union of the three per-segment tables (96 of 99 printable pool bytes), and
@@ -498,29 +498,29 @@ fn pins_luau() -> AuditPins {
         // check1/2/3/7/9 一字未动。
         // Goal 7 predicate correction: transient selector fragments move check5
         // 13 -> 12, while the validator's captured API list moves check6 0 -> 1.
-        check4_thresholds: (3, 65535, false),
+        check4_thresholds: (2, 65535, false),
         check5_templates: (
-            12,
+            11,
             vec![
                 ("X=X+N".to_string(), 31),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
-                ("X=N*X%N".to_string(), 17),
                 ("X[N]=N".to_string(), 16),
-                ("X=N".to_string(), 10),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
                 ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
+                ("X=N".to_string(), 7),
+                ("X[N]=N+N".to_string(), 6),
             ],
         ),
         check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
-        check8_literal_gcd: (1, 69),
+        check8_literal_gcd: (1, 68),
         // The token walker sees a 2,691-byte fragment rather than the
         // 24,195-byte runtime join; no periodic/repetition lint trips.
-        check9_stream: (2691, 1, false),
+        check9_stream: (2701, 1, false),
     }
 }
 

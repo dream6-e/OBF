@@ -328,7 +328,7 @@ impl Compressor {
 
 /// 外壳头部：5 字节解压长度 + 2×2 字节折叠初值 + 2×2 字节期望值。
 const HEADER_LEN: usize = 13;
-const ADLER_MOD: u64 = 65_521;
+const ADLER_MOD: u64 = 65_447;
 
 /// z85 的 85 枚可打印符号（RFC1924 base85 的同族变体）：不含 `"` `'` `\` `[` `]` ⇒ 长括号字面量里零转义，
 /// 也永远不会出现 `]]`。这里再按种子做一次置换，使通用 base85 解码器读不出来。
@@ -413,7 +413,7 @@ pub fn wrap(source: &str, target: Target, seed: u64) -> Result<Shell, Diagnostic
 
     // 头：长度（5B）+ 折叠初值（2B + 2B）+ 期望值（2B + 2B）。初值取自种子，
     // 于是把别的种子的负载插进这份外壳会在 loadstring 之前死掉。
-    // 两枚初值都落在 1..=65,520 ⇒ 与 Lua 侧每步 `% 65521` 的取值域一致。
+    // 两枚初值都落在 1..=65,446 ⇒ 与 Lua 侧每步 `% 65447` 的取值域一致。
     let a_init = 1 + seed % (ADLER_MOD - 1);
     let c_init = 1 + (seed >> 32) % (ADLER_MOD - 1);
     let (a_end, c_end) = fold_lanes(data, a_init, c_init);
@@ -613,8 +613,8 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(4, "o = o + 1;", &mut out);
     line(4, "local v = P();", &mut out);
     line(4, "d[o] = v;", &mut out);
-    line(4, "a = (a + v) % 65521;", &mut out);
-    line(4, "c = (c + a) % 65521;", &mut out);
+    line(4, "a = (a + v) % 65447;", &mut out);
+    line(4, "c = (c + a) % 65447;", &mut out);
     line(3, "else", &mut out);
     line(4, "local s = P() * 256 + P();", &mut out);
     // e6：distance 越界（<=0 或超过已产出长度）。
@@ -636,8 +636,8 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     // e8：链接指向还没产出的位置。
     line(5, "if not v then G.error(\"XXS e8\", 0) end;", &mut out);
     line(5, "d[o] = v;", &mut out);
-    line(5, "a = (a + v) % 65521;", &mut out);
-    line(5, "c = (c + a) % 65521;", &mut out);
+    line(5, "a = (a + v) % 65447;", &mut out);
+    line(5, "c = (c + a) % 65447;", &mut out);
     line(4, "end;", &mut out);
     line(3, "end;", &mut out);
     line(3, "h = h - h % 2;", &mut out);

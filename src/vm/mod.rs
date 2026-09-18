@@ -139,8 +139,8 @@ mod tests {
         );
         let (mut first, mut second) = (1u32, 0u32);
         for byte in &blob[13..] {
-            first = (first + u32::from(*byte)) % 65_521;
-            second = (second + first) % 65_521;
+            first = (first + u32::from(*byte)) % 65_437;
+            second = (second + first) % 65_437;
         }
         assert_eq!(
             u32::from_le_bytes(blob[9..13].try_into().unwrap()),

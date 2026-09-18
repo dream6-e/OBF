@@ -91,8 +91,8 @@ fn k7_wire_image_bytes_are_pinned() {
         // this row is here to prove. The ISA byte and every structural field are
         // unchanged; only the two fingerprints are re-recorded. The public `.obf`
         // is byte-identical (this probe's canonical image did not move).
-        (Target::Lua51, 7001u64, 1263usize, 0xee06effa224c7300u64),
-        (Target::Luau, 7351u64, 1259usize, 0x98d71d9b358e57aeu64),
+        (Target::Lua51, 7001u64, 1263usize, 0x3b1b8d42680fe5bdu64),
+        (Target::Luau, 7351u64, 1259usize, 0xce3767dc0f7d2e7cu64),
     ] {
         let data = compile(K7_PROBE, target).unwrap();
         let program = custom::decode(&data, target).unwrap();

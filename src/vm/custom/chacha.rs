@@ -123,9 +123,10 @@ fn sum32(values: &[u64]) -> u32 {
 }
 
 /// Runtime-only ChaCha material. The delivered script contains salts and the
-/// derivation, but not these final key/nonce/counter words. The anti-hook
-/// attestation and three source-witness-bound shares are mandatory inputs;
-/// outer and inner streams use disjoint domains and contexts.
+/// derivation, but not these final key/nonce/counter words. The three
+/// source-witness-bound shares are mandatory inputs; anti-hook attestation is
+/// checked separately and cannot perturb decryption material. Outer and inner
+/// streams use disjoint domains and contexts.
 pub(crate) fn chacha_material(
     shares: &[u64; 3],
     permutation: u64,
@@ -142,23 +143,23 @@ pub(crate) fn chacha_material(
     let [s1, s2, s3] = *shares;
     let pv = permutation;
     let ctx = u64::from(context);
-    let guard = u64::from(attestation);
+    let _guard = attestation;
     let d = u64::from(domain);
     let salt = params.key_salts.map(u64::from);
     let base_key = [
-        sum32(&[s1, salt[0], guard]),
+        sum32(&[s1, salt[0], pv]),
         sum32(&[s2, salt[1], ctx]),
-        sum32(&[s3, salt[2], guard]),
+        sum32(&[s3, salt[2], d]),
         sum32(&[pv, salt[3], ctx]),
         sum32(&[s1, s2, salt[4], d]),
         sum32(&[s2, s3, salt[5], ctx * d]),
-        sum32(&[s3, s1, salt[6], guard, ctx]),
-        sum32(&[s1, s2, s3, pv, salt[7], guard, d]),
+        sum32(&[s3, s1, salt[6], pv, ctx]),
+        sum32(&[s1, s2, s3, pv, salt[7], ctx, d]),
     ];
     let nonce_salt = params.nonce_salts[domain_index].map(u64::from);
     let base_nonce = [
         sum32(&[ctx, nonce_salt[0]]),
-        sum32(&[guard, nonce_salt[1]]),
+        sum32(&[pv, nonce_salt[1]]),
         sum32(&[s1, s3, pv, nonce_salt[2]]),
     ];
     let base_counter = params.counters[domain_index];
@@ -403,14 +404,14 @@ pub(crate) fn chacha_decoder_sections(
     // KDF term sets, byte-identical to the pre-K7 schedule; only the order
     // and modulus spelling draw per site.
     let salt_terms: [&[&str]; 8] = [
-        &["s1", "S[1]", "aw"],
+        &["s1", "S[1]", "pv"],
         &["s2", "S[2]", "ctx"],
-        &["s3", "S[3]", "aw"],
+        &["s3", "S[3]", "d"],
         &["pv", "S[4]", "ctx"],
         &["s1", "s2", "S[5]", "d"],
         &["s2", "s3", "S[6]", "ctx*d"],
-        &["s3", "s1", "S[7]", "aw", "ctx"],
-        &["s1", "s2", "s3", "pv", "S[8]", "aw", "d"],
+        &["s3", "s1", "S[7]", "pv", "ctx"],
+        &["s1", "s2", "s3", "pv", "S[8]", "ctx", "d"],
     ];
     let key_sums: Vec<String> = salt_terms.iter().map(|terms| add(bitops, terms)).collect();
     let bound = render_u32_atom(bitops);
@@ -419,7 +420,7 @@ pub(crate) fn chacha_decoder_sections(
     // Nonce term sets per domain (salts owned so the shuffle sees &str).
     let nonce_sets: [Vec<String>; 6] = [
         vec!["ctx".to_owned(), n0[0].to_string()],
-        vec!["aw".to_owned(), n0[1].to_string()],
+        vec!["pv".to_owned(), n0[1].to_string()],
         vec![
             "s1".to_owned(),
             "s3".to_owned(),
@@ -427,7 +428,7 @@ pub(crate) fn chacha_decoder_sections(
             n0[2].to_string(),
         ],
         vec!["ctx".to_owned(), n1[0].to_string()],
-        vec!["aw".to_owned(), n1[1].to_string()],
+        vec!["pv".to_owned(), n1[1].to_string()],
         vec![
             "s1".to_owned(),
             "s3".to_owned(),

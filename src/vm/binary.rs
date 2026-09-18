@@ -1,7 +1,7 @@
 use crate::Diagnostic;
 
 const HEADER_SIZE: usize = 13;
-const ADLER_MODULUS: u32 = 65_521;
+const ADLER_MODULUS: u32 = 65_437;
 
 /// Writer for the executable private bytecode container embedded in VM output.
 ///
@@ -93,9 +93,33 @@ mod tests {
         let result = writer.finish().unwrap();
         assert_eq!(&result[..5], b"OBF\x01\x51");
         assert_eq!(u32::from_le_bytes(result[5..9].try_into().unwrap()), 10);
-        assert_eq!(
-            u32::from_le_bytes(result[9..13].try_into().unwrap()),
-            adler32(&result[13..])
-        );
+        let recorded = u32::from_le_bytes(result[9..13].try_into().unwrap());
+        assert_eq!(recorded, adler32(&result[13..]));
+        let independent = |modulus: u32| {
+            let (mut first, mut second) = (1u32, 0u32);
+            for byte in &result[13..] {
+                first = (first + u32::from(*byte)) % modulus;
+                second = (second + first) % modulus;
+            }
+            first | (second << 16)
+        };
+        assert_eq!(recorded, independent(65_437));
+
+        // The tiny header fixture does not cross either modulus. A larger
+        // payload independently distinguishes the legacy writer contract.
+        let mut large = Writer::new(0x51, 3, 7);
+        large.bytes(&vec![255; 1_000]).unwrap();
+        let large = large.finish().unwrap();
+        let large_recorded = u32::from_le_bytes(large[9..13].try_into().unwrap());
+        let independent_large = |modulus: u32| {
+            let (mut first, mut second) = (1u32, 0u32);
+            for byte in &large[13..] {
+                first = (first + u32::from(*byte)) % modulus;
+                second = (second + first) % modulus;
+            }
+            first | (second << 16)
+        };
+        assert_eq!(large_recorded, independent_large(65_437));
+        assert_ne!(large_recorded, independent_large(65_521));
     }
 }

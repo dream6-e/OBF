@@ -26,7 +26,24 @@ pub(crate) const BASE86_DROPS: usize = 10;
 /// batch the segments differed only through the K19 key fold (`seg_ro` is a
 /// rotation of the *same* set); the set itself was shared.
 ///
-/// `part` is the **logical** segment index (0 = the `XXS:` watermark head), not
+/// Per-build four-byte chain witness. It is deliberately non-textual and changes
+/// with both seed and target; its only role is to select the unique segment order.
+pub fn transport_witness(seed: u64, target: Target) -> [u8; 4] {
+    let salt = if target.is_luau() {
+        0x6c75_6175_5f77_6974
+    } else {
+        0x6c35_315f_7769_746e
+    };
+    let mut rng = crate::random::Prng::sfc(seed ^ salt);
+    let mut out = [0u8; 4];
+    out[0] = (1 + rng.index(127)) as u8;
+    for byte in &mut out[1..] {
+        *byte = (128 + rng.index(128)) as u8;
+    }
+    out
+}
+
+/// `part` is the **logical** segment index (0 = the chain-witness head), not
 /// the script field position: which field carries which part is itself shuffled
 /// by `emit.rs`'s `hold`, so the table has to follow the stream part for the
 /// audit's chain walk to find it.
@@ -354,6 +371,8 @@ pub(crate) fn opaque_split(rng: &mut crate::random::Prng, value: u64) -> (u64, u
 pub(crate) fn chained_segment_orders(
     segments: &[Vec<u8>],
     alphabets: &[[u8; 86]; 3],
+    seed: u64,
+    target: Target,
 ) -> Vec<([usize; 3], Vec<Vec<u8>>)> {
     let permutations = [
         [0usize, 1, 2],
@@ -376,7 +395,7 @@ pub(crate) fn chained_segment_orders(
             parts.push(bytes);
         }
         let chained: Vec<u8> = parts.iter().flatten().copied().collect();
-        if chained.starts_with(b"XXS:") {
+        if chained.starts_with(&transport_witness(seed, target)) {
             streams.push((permutation, parts));
         }
     }
@@ -416,7 +435,7 @@ pub(crate) fn accept_segment_streams(
     let permutation_term = perm_term(seed);
     let expected = if target.is_luau() { 0x75u8 } else { 0x51 };
     let mut winners = Vec::new();
-    for (_order, parts) in chained_segment_orders(segments, &alphabets) {
+    for (_order, parts) in chained_segment_orders(segments, &alphabets, seed, target) {
         let stream: Vec<u8> = parts.iter().flatten().copied().collect();
         // The decoded stream must open with the fixed transport watermark;
         // everything after it is the outer ciphertext body. The watermark

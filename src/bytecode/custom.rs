@@ -453,8 +453,8 @@ fn select(instruction: &I) -> Result<Word, Diagnostic> {
 pub fn checksum(bytes: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32);
     for &v in bytes {
-        a = (a + u32::from(v)) % 65_521;
-        b = (b + a) % 65_521;
+        a = (a + u32::from(v)) % 65_519;
+        b = (b + a) % 65_519;
     }
     a | b << 16
 }

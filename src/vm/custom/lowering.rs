@@ -451,8 +451,22 @@ impl FieldLayout {
     /// record loop; `id` is the parser loop variable. Uses only exact integer
     /// arithmetic and small tables, so Lua 5.1 and Luau agree bit for bit.
     pub(crate) fn record_profile_lua(self) -> String {
+        let record_mul = usize::from(self.record_mul);
+        let record_add = usize::from(self.record_add);
+        let key = 1 + (record_mul * 7 + record_add * 11) % 251;
+        let salt = (record_mul * 13 + record_add * 17) % 257;
+        let entries = (0..24)
+            .map(|q| {
+                let order = factorial_field_at_slot(q, 4);
+                let inverse = invert_order(&order);
+                let packed = inverse[0] + inverse[1] * 4 + inverse[2] * 16 + inverse[3] * 64;
+                (packed + ((q + 1) * key + salt) % 257) % 257
+            })
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "local fq=(id*{mul}+{add})%24;local fd1=(fq-fq%6)/6;fq=fq%6;local fd2=(fq-fq%2)/2;local fd3=fq%2;local frem={{0,1,2,3}};local fix={{fd1,fd2,fd3,0}};local fky={{0,0,0,0}};for fk=1,4 do local fw=fix[fk];local fn2=0;for fj=1,4 do if frem[fj]>=0 then if fn2==fw then fky[fk]=frem[fj];frem[fj]=-1;break end;fn2=fn2+1 end end end;local ford={{0,0,0,0}};for fk=1,4 do ford[fky[fk]+1]=fk end;",
+            "local fq=(id*{mul}+{add})%24;local fp={{{entries}}};local fv=(fp[fq+1]-((fq+1)*{key}+{salt})%257)%257;local fa=fv%4;fv=(fv-fa)/4;local fb=fv%4;fv=(fv-fb)/4;local fc=fv%4;local ford={{fa+1,fb+1,fc+1,(fv-fc)/4+1}};",
             mul = self.record_mul,
             add = self.record_add,
         )
@@ -514,14 +528,31 @@ impl FieldLayout {
         reads
     }
 
+    fn keyed_perm3_lua(mul: usize, add: usize, domain: usize) -> String {
+        let key = 1 + (mul * 7 + add * 11 + domain) % 29;
+        let salt = (mul * 13 + add * 17 + domain * 19) % 31;
+        let mut entries = Vec::with_capacity(6);
+        for q in 0..6 {
+            let order = factorial_field_at_slot(q, 3);
+            let inverse = invert_order(&order);
+            let packed = inverse[0] + inverse[1] * 3 + inverse[2] * 9;
+            let mask = ((q + 1) * key + salt) % 31;
+            entries.push((packed + mask) % 31);
+        }
+        format!(
+            "local tk1,tk2,tk3=b16(),b16(),b16();local sq=(slot*{mul}+{add})%6;local sp={{{}}};local sv=(sp[sq+1]-((sq+1)*{key}+{salt})%31)%31;local sa=sv%3;sv=(sv-sa)/3;local sb=sv%3;local sont={{sa+1,sb+1,(sv-sb)/3+1}};local st={{tk1,tk2,tk3}};",
+            entries.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+        )
+    }
+
     /// Per-segment token-order decode for the global pool reader. `slot` is
     /// the 1-based physical position. Emits `sont[1..3]`, the 1-based wire
     /// slot of [id, owner, next], plus the three raw token reads in `st`.
     pub(crate) fn segment_decode_lua(self) -> String {
-        format!(
-            "local tk1,tk2,tk3=b16(),b16(),b16();local sq=(slot*{mul}+{add})%6;local sd1=(sq-sq%2)/2;local sd2=sq%2;local srem={{0,1,2}};local six={{sd1,sd2,0}};local skey={{0,0,0}};for sk=1,3 do local sw=six[sk];local scn=0;for sj=1,3 do if srem[sj]>=0 then if scn==sw then skey[sk]=srem[sj];srem[sj]=-1;break end;scn=scn+1 end end end;local st={{tk1,tk2,tk3}};local sont={{0,0,0}};for sk=1,3 do sont[skey[sk]+1]=sk end;",
-            mul = self.segment_mul,
-            add = self.segment_add,
+        Self::keyed_perm3_lua(
+            usize::from(self.segment_mul),
+            usize::from(self.segment_add),
+            7,
         )
     }
 
@@ -531,10 +562,6 @@ impl FieldLayout {
     /// so both pools and the segment graph share one textual shape with
     /// pool-specific baked keys.
     pub(crate) fn pool_decode_lua(self) -> String {
-        format!(
-            "local tk1,tk2,tk3=b16(),b16(),b16();local sq=(slot*{mul}+{add})%6;local sd1=(sq-sq%2)/2;local sd2=sq%2;local srem={{0,1,2}};local six={{sd1,sd2,0}};local skey={{0,0,0}};for sk=1,3 do local sw=six[sk];local scn=0;for sj=1,3 do if srem[sj]>=0 then if scn==sw then skey[sk]=srem[sj];srem[sj]=-1;break end;scn=scn+1 end end end;local st={{tk1,tk2,tk3}};local sont={{0,0,0}};for sk=1,3 do sont[skey[sk]+1]=sk end;",
-            mul = self.pool_mul,
-            add = self.pool_add,
-        )
+        Self::keyed_perm3_lua(usize::from(self.pool_mul), usize::from(self.pool_add), 23)
     }
 }

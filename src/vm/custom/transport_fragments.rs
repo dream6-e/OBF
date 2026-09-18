@@ -15,15 +15,32 @@ pub(crate) fn fragment_segment_literal(
         text.len() >= count * 12,
         "transport segment is too short to fragment"
     );
-    let mut fragments = Vec::with_capacity(count);
-    for ordinal in 1..=count {
-        let start = text.len() * (ordinal - 1) / count;
-        let end = text.len() * ordinal / count;
-        let mut bytes = Vec::with_capacity(end - start + 1);
-        bytes.push(alphabet[ordinal]);
-        bytes.extend_from_slice(&text.as_bytes()[start..end]);
-        fragments.push(lua_escape_string(&bytes));
+    let mut lengths: Vec<usize> = (1..=count)
+        .map(|ordinal| text.len() * ordinal / count - text.len() * (ordinal - 1) / count)
+        .collect();
+    for index in 0..count - 1 {
+        if lengths[index] % 5 == 4 {
+            lengths[index] -= 1;
+            lengths[index + 1] += 1;
+        }
     }
+    if lengths[count - 1] % 5 == 4 {
+        let delta = if lengths[count - 2] % 5 == 3 { 2 } else { 1 };
+        lengths[count - 2] += delta;
+        lengths[count - 1] -= delta;
+    }
+    let mut fragments = Vec::with_capacity(count);
+    let mut start = 0usize;
+    for (index, length) in lengths.into_iter().enumerate() {
+        let end = start + length;
+        let mut bytes = Vec::with_capacity(length + 1);
+        bytes.push(alphabet[index + 1]);
+        bytes.extend_from_slice(&text.as_bytes()[start..end]);
+        debug_assert_ne!(bytes.len() % 5, 0);
+        fragments.push(lua_escape_string(&bytes));
+        start = end;
+    }
+    debug_assert_eq!(start, text.len());
     rng.shuffle(&mut fragments);
     let mut literal = String::from("{");
     for (index, fragment) in fragments.iter().enumerate() {

@@ -208,7 +208,7 @@ fn k20_probe_fold_and_guard_respellings_are_equivalent() {
         for seed in [0u64, 1, 735, 7001] {
             let raw = generate(&data, &program, seed).unwrap();
             respelled += raw
-                .matches("a=(a+a*256+SB(A,b))%2147483647;")
+                .matches("a=(a+a*256+SB(A,b))%(2147483600+47);")
                 .count();
         }
         assert!(

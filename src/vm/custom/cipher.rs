@@ -116,13 +116,13 @@ fn frame_tag(
     keys: [u64; 2],
     params: &FrameParams,
 ) -> u64 {
-    let mut left = (keys[0] + params.tag_salt) % 65_521;
-    let mut right = (keys[1] + params.cookie_salt) % 65_521;
+    let mut left = (keys[0] + params.tag_salt) % 65_497;
+    let mut right = (keys[1] + params.cookie_salt) % 65_497;
     for &byte in payload {
-        left = (left * 257 + u64::from(byte)) % 65_521;
-        right = (right * 263 + u64::from(byte) + left) % 65_521;
+        left = (left * 257 + u64::from(byte)) % 65_497;
+        right = (right * 263 + u64::from(byte) + left) % 65_497;
     }
-    (left + right * 65_521 + cookie * 17 + descriptor * 31) % 4_294_967_296
+    (left + right * 65_497 + cookie * 17 + descriptor * 31) % 4_294_967_296
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u64) {

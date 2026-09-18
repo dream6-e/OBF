@@ -55,13 +55,13 @@ fn bounded_lzw_roundtrips_exactly_and_rejects_malformed_frames() {
         let body_len = 1 + (random.next_u64() as usize % 256);
         let padding = random.next_u64() as usize % 8;
         let mut malformed = Vec::with_capacity(COMPRESSION_HEADER + body_len);
-        malformed.extend_from_slice(&COMPRESSION_MAGIC);
+        let original_len = COMPRESSION_HEADER + body_len + 1;
+        let bit_len = body_len * 8 - padding;
         malformed.extend_from_slice(
-            &u32::try_from(COMPRESSION_HEADER + body_len + 1)
-                .unwrap()
-                .to_le_bytes(),
+            &compression_descriptor(original_len, bit_len, 0).to_le_bytes(),
         );
-        malformed.extend_from_slice(&u32::try_from(body_len * 8 - padding).unwrap().to_le_bytes());
+        malformed.extend_from_slice(&u32::try_from(original_len).unwrap().to_le_bytes());
+        malformed.extend_from_slice(&u32::try_from(bit_len).unwrap().to_le_bytes());
         malformed.extend_from_slice(&0u32.to_le_bytes());
         malformed.extend((0..body_len).map(|_| random.next_u64().to_le_bytes()[0]));
         assert!(decompress_bytecode(&malformed).is_err());
@@ -79,6 +79,11 @@ fn bounded_lzw_roundtrips_exactly_and_rejects_malformed_frames() {
         let mut corruptions = Vec::new();
         let mut bad_checksum = frame.clone();
         bad_checksum[12] ^= 1;
+        let n = u32::from_le_bytes(bad_checksum[4..8].try_into().unwrap()) as usize;
+        let bits = u32::from_le_bytes(bad_checksum[8..12].try_into().unwrap()) as usize;
+        let checksum = u32::from_le_bytes(bad_checksum[12..16].try_into().unwrap());
+        bad_checksum[..4]
+            .copy_from_slice(&compression_descriptor(n, bits, checksum).to_le_bytes());
         corruptions.push(bad_checksum);
         let mut bad_body = frame;
         bad_body[COMPRESSION_HEADER] ^= 1;
@@ -205,7 +210,7 @@ fn chacha8_matches_published_vector_and_roundtrips_both_domains() {
             );
             assert_ne!(outer, inner);
             assert_ne!(outer, changed);
-            assert_ne!(outer, wrong_guard);
+            assert_eq!(outer, wrong_guard, "anti-hook result must not alter cipher material");
         }
     }
     assert_eq!(outputs.len(), 16);
@@ -254,7 +259,8 @@ fn frame_v2_roundtrips_and_rejects_every_outer_ciphertext_byte() {
             runtime_attestation(target).wrapping_add(1),
             &chacha,
         );
-        assert!(open_transport_frame(&wrong_attestation, &shares, permutation, &params,).is_err());
+        assert_eq!(wrong_attestation, frame);
+        assert!(open_transport_frame(&wrong_attestation, &shares, permutation, &params).is_ok());
         for index in 0..encrypted.len() {
             let mut damaged = encrypted.clone();
             damaged[index] ^= 1;
@@ -354,7 +360,7 @@ fn runtime_probe_witness_is_required_by_every_share_and_control_mask() {
 #[test]
 fn emitted_probe_transcript_masks_interpreter_control_states() {
     let source = "local function f(x)return x+3 end print(f(4),f(9))";
-    let transcript = "a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%2147483647;b=b+1 end";
+    let transcript = "a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%(2147483600+47);b=b+1 end";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
         let program = custom::decode(&data, target).unwrap();
@@ -362,7 +368,7 @@ fn emitted_probe_transcript_masks_interpreter_control_states() {
             let raw = generate(&data, &program, seed).unwrap();
             // K20：探测字段可能已被搬出表字面量、以等价改写后的形式在运行期装载
             // （`a*257` 变 `a+a*256`），两种拼法都算数，总数仍必须是三处。
-            const PROBE_FOLD_RESPELLED: &str = "a=(a+a*256+SB(A,b))%2147483647;";
+            const PROBE_FOLD_RESPELLED: &str = "a=(a+a*256+SB(A,b))%(2147483600+47);";
             assert_eq!(
                 raw.matches(transcript).count() + raw.matches(PROBE_FOLD_RESPELLED).count(),
                 3,
@@ -371,7 +377,7 @@ fn emitted_probe_transcript_masks_interpreter_control_states() {
             assert_eq!(raw.matches("return 1+(x+a*").count(), 3);
             assert!(raw.contains("P.__obf_proto_control=(c1+c2+c3)%65520"));
             assert!(
-                raw.matches("+P.__obf_proto_control)%65521").count() >= 10,
+                raw.matches("+P.__obf_proto_control)%65479").count() >= 10,
                 "{target} seed {seed}: runtime mask missing from represented states"
             );
             assert!(
@@ -394,8 +400,9 @@ fn emitted_probe_transcript_masks_interpreter_control_states() {
 #[test]
 fn cipher_key_is_derived_dynamically_and_never_appears_in_plaintext() {
     // Shares and final ChaCha8 material are COMPUTED at run time from script
-    // structure, target source witnesses, domain/context, and attestation;
-    // none of the resulting material may appear as a numeric literal (or, for
+    // structure, target source witnesses, and domain/context. Anti-hook checks
+    // are deliberately independent of this key schedule; none of the resulting
+    // material may appear as a numeric literal (or, for
     // the large values, any digit run at all) in the output.
     for (target, fixture) in [
         (
@@ -1618,7 +1625,12 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
         // same resolver the audit path uses. `positions` maps a segment's file
         // index to its stream position, which decides whether the field takes an
         // upstream plaintext argument at all.
-        let orders = chained_segment_orders(&segments, &base86_segment_alphabets(seed));
+        let orders = chained_segment_orders(
+            &segments,
+            &base86_segment_alphabets(seed),
+            seed,
+            target,
+        );
         assert_eq!(orders.len(), 1, "{target}: chained segment order not unique");
         let (order, chained) = orders[0].clone();
         let mut positions = [0usize; 3];

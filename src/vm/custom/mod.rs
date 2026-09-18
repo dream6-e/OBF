@@ -77,7 +77,7 @@ pub(crate) use structure::*;
 pub(crate) use transport::*;
 pub use transport::{
     base86_decode_mixed, base86_image_alphabet, base86_segment_alphabet, decrypt_embedded,
-    extract_embedded,
+    extract_embedded, transport_witness,
 };
 pub(crate) use transport_fragments::*;
 

@@ -304,17 +304,27 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
     bad.bytes[segments[0].id_token_position..segments[0].id_token_position + 2]
         .copy_from_slice(&out_of_range.to_le_bytes());
     corruptions.push(bad);
+    let root_id = super::semantic::decode_segment_root(layouts[0].root_token, 0, &image);
     let root_segment = segments
         .iter()
-        .find(|segment| segment.id == 1)
+        .find(|segment| segment.id == usize::from(root_id))
         .expect("root segment missing");
     let next_position = root_segment.next_token_position;
     let mut bad = image.clone();
-    let cycle = super::semantic::encode_segment_next(1, 1, 0, &image);
+    let cycle = super::semantic::encode_segment_next(root_id, root_id, 0, &image);
     bad.bytes[next_position..next_position + 2].copy_from_slice(&cycle.to_le_bytes());
     corruptions.push(bad);
+    let foreign = segments
+        .iter()
+        .find(|segment| segment.owner != root_segment.owner)
+        .expect("foreign-owner segment missing");
     let mut bad = image.clone();
-    let wrong_owner = super::semantic::encode_segment_next(3, 1, 0, &image);
+    let wrong_owner = super::semantic::encode_segment_next(
+        foreign.id as u16,
+        root_id,
+        root_segment.owner as u16,
+        &image,
+    );
     bad.bytes[next_position..next_position + 2].copy_from_slice(&wrong_owner.to_le_bytes());
     corruptions.push(bad);
     let mut bad = image.clone();
@@ -331,10 +341,6 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
     bad.bytes[12..16].copy_from_slice(&bad_len.to_le_bytes());
     corruptions.push(bad);
 
-    // Index of the trailing-slack class in `corruptions` (the push after the
-    // truncated-payload one), named so the tripwire below cannot drift onto
-    // another class if the list is reordered.
-    const UNPINNED_TAIL_SLACK: usize = 11;
     for (kind, mut bad) in corruptions.into_iter().enumerate() {
         repair_semantic_checksum(&mut bad.bytes);
         let raw = super::emit::generate_from_semantic_image(&program, 735, bad).unwrap();
@@ -347,24 +353,6 @@ fn target_decoder_rejects_corrupt_semantic_prototype_metadata() {
             .arg(path)
             .output()
             .unwrap();
-        if kind == UNPINNED_TAIL_SLACK {
-            // Tripwire for a *measured* detection gap, not a waiver: appending a
-            // byte past the last section and re-signing the length/checksum fields
-            // the repair helper owns leaves nothing for the runtime to notice -
-            // section extents are derived from the read cursor, so `pos()` and the
-            // declared length move together. K18 tried to close it with a pool-tail
-            // census (max consumed extent vs the cursor); it does not fire, because
-            // the slack sits outside the pool region. Closing the gap needs a
-            // *declared* per-section length compared against the measured one, i.e.
-            // an image-format change, which is scheduled with the next private ISA
-            // bump. The moment detection lands this assert fails, and the class has
-            // to move back into the rejecting set below.
-            assert!(
-                result.status.success(),
-                "prototype corruption {kind} is now detected: move it back into the rejecting set"
-            );
-            continue;
-        }
         assert!(!result.status.success(), "prototype corruption {kind} ran");
         assert!(
             result.stdout.is_empty(),

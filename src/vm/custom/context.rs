@@ -89,7 +89,7 @@ pub(crate) const STATE_VAR: &str = "sid";
 
 /// Same prime the K8 route table and the frame tag already use, so the batch
 /// introduces no new pretty constant.
-pub(crate) const MODULUS: u64 = 65521;
+pub(crate) const MODULUS: u64 = 65479;
 
 /// Every stage number the emitter can hand out comes from `state_values`
 /// (`100..=999`). The mask hygiene below leans on that ceiling, so it is named

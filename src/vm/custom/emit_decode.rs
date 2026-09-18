@@ -41,9 +41,9 @@ pub(crate) fn capture_pool_lua(
 /// walker is the only code that can turn those bytes into a value, and it keeps
 /// none: it steps entry by entry (in seed mode it walks all of them and fills
 /// the offset/tag tables `DC` validates against), and it decrypts exactly the
-/// entry the caller asked for using the key chain (`pool_key_fold` /
-/// `pool_key_byte`) recomputed from the entry lengths it passed over. So a
-/// constant can be re-derived per use and never has to exist as a table.
+/// entry the caller asked for using an independent ordinal-derived subkey and
+/// the entry-local `pool_key_byte` recurrence. So a constant can be re-derived
+/// per use and never has to exist as a value table.
 ///
 /// Shape, per the batch's structural rule: the walk is one flattened state
 /// machine (seeded opaque state ids, shuffled branch order) and the two
@@ -126,9 +126,9 @@ pub(crate) fn constant_walker_lua(
     // laziness machinery cannot be read off as a state table. The commit is the
     // transition every conversion arm shares.
     let commit_go = |body: String| format!("{body}{go_commit}");
+    let entry_key = format!("({pool_mask}+(ix+1)*257+(ix+1)*(ix+1)*17)%{pool_mod}");
     let int_form = if luau {
-        "local s4=UK(Q,p+1,8,bk);local iv=IF(SF('%08x%08x',U32(s4,5),U32(s4,1)),16);if iv==nil then E()end;v=iv;"
-            .to_owned()
+        format!("local s4=UK(Q,p+1,8,{entry_key});local iv=IF(SF('%08x%08x',U32(s4,5),U32(s4,1)),16);if iv==nil then E()end;v=iv;")
     } else {
         "E();".to_owned()
     };
@@ -139,23 +139,23 @@ pub(crate) fn constant_walker_lua(
             luau,
             "code",
             1,
-            &commit_go(
-                "local b0=SB(UK(Q,p+1,1,bk),1);if b0~=0 and b0~=1 then E()end;v=b0==1;".to_owned(),
-            ),
+            &commit_go(format!(
+                "local b0=SB(UK(Q,p+1,1,{entry_key}),1);if b0~=0 and b0~=1 then E()end;v=b0==1;"
+            )),
         ),
         decode_arm(
             structure,
             luau,
             "code",
             2,
-            &commit_go("local nb=NU(UK(Q,p+1,8,bk),1);v=nb;".to_owned()),
+            &commit_go(format!("local nb=NU(UK(Q,p+1,8,{entry_key}),1);v=nb;")),
         ),
         decode_arm(
             structure,
             luau,
             "code",
             3,
-            &commit_go("local ns=UK(Q,p+1,ln,bk);v=ns;".to_owned()),
+            &commit_go(format!("local ns=UK(Q,p+1,ln,{entry_key});v=ns;")),
         ),
         decode_arm(structure, luau, "code", 4, &commit_go(int_form)),
     ];
@@ -170,7 +170,7 @@ pub(crate) fn constant_walker_lua(
     );
     let qbyte = if luau { "BR8(Q,at)" } else { "SB(Q,at+1)" };
     let loop_body = format!(
-        "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg={qbyte};if tg==nil then E()end;{go_extent}"
+        "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg={qbyte};if tg==nil then E()end;tg=(tg-({entry_key})%256)%256;{go_extent}"
     );
     let extent_body = format!("{extent}{go_advance}");
     // One entry consumed: the entry-level chain folds its keyed length (what
@@ -267,7 +267,7 @@ pub(crate) fn compression_decoder_sections(
         format!("local LD=VMS[{}](E,SB,NCH,TC,MF);", keys[22])
     };
     let ctx_sum = render_modsum(bitops, &["n*31", "bits*17", "cs*7", "cc*13", "bl"]);
-    let core = format!("if #C<17 or L32(C,1)~=22501964 then E()end;local n=L32(C,5);local bits=L32(C,9);local cs=L32(C,13);local bl=MF((bits+7)/8);local cc=MF((n+8191)/8192);if n<1 or n>16777216 or bits<1 or bl~=#C-16 or #C>=n then E()end;local ctx={ctx_sum};local aw=AH(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DBG,GI,LS);local D=CC(SS(C,17),s1,s2,s3,pv,ctx,2,aw,CB,E,SB,NCH,TC,MF,X8);local pad=#D*8-bits;if pad>7 or pad>0 and MF(SB(D,#D)/2^(8-pad))~=0 then E()end;local B=LD(D,bits,n);if AD(B,1,#B)~=cs then E()end;return B");
+    let core = format!("if #C<17 then E()end;local fd=L32(C,1);local n=L32(C,5);local bits=L32(C,9);local cs=L32(C,13);local fw=(n*bits+cs*(n%251+257)+(bits%241)*(n%239))%4294967296;if fd~=fw then E()end;local bl=MF((bits+7)/8);local cc=MF((n+8191)/8192);if n<1 or n>16777216 or bits<1 or bl~=#C-16 or #C>=n then E()end;local ctx={ctx_sum};local aw=AH(AH,CC,CB,X8C,E,SB,NCH,TC,MF,DBG,GI,LS);local D=CC(SS(C,17),s1,s2,s3,pv,ctx,2,aw,CB,E,SB,NCH,TC,MF,X8);local pad=#D*8-bits;if pad>7 or pad>0 and MF(SB(D,#D)/2^(8-pad))~=0 then E()end;local B=LD(D,bits,n);if AD(B,1,#B)~=cs then E()end;return B");
     fields.push(format!(
         "[{}]=function(C,s1,s2,s3,pv,CC,AH,CB,LD,E,SB,SS,NCH,TC,MF,X8,X8C,AD,L32,DBG,GI,LS){core} end,",
         keys[23]
@@ -294,9 +294,9 @@ pub(crate) fn transport_frame_decoder(
         bitops,
         &["n", "d*257", "(fk0%65536)*65536", "(fk1%65536)*17", &cookie],
     );
-    let ex1 = render_modsum(bitops, &["left", "right*65521", "c*17", "d*31"]);
+    let ex1 = render_modsum(bitops, &["left", "right*65497", "c*17", "d*31"]);
     format!(
-        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;local fk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;local fk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;local fd={version}+{header}*256+(fk0+fk1+{descriptor})%65536*65536;local d=L32(B,1);local n=L32(B,5);local c=L32(B,9);local t=L32(B,13);local pad=(4-(16+n)%4)%4;if n>16777216 or #B~=16+n+pad or d~=fd then E()end;local ex={ex0};if c~=ex then E()end;local left=(fk0+{tag})%65521;local right=(fk1+{cookie})%65521;for i=17,16+n do local byte=SB(B,i);left=(left*257+byte)%65521;right=(right*263+byte+left)%65521 end;local ex={ex1};if t~=ex then E()end;for i=1,pad do if SB(B,16+n+i)~=(fk0+fk1*i+{padding})%256 then E()end end;B=SS(B,17,16+n);",
+        "if #B<{header} or #B%4~=0 or #B>16777232 then E()end;local fk0=1+(s1*{c00}+s2*{c01}+s3*{c02}+pv*{c03}+#B*{c04}+{s0})%2147483646;local fk1=1+(s1*{c10}+s2*{c11}+s3*{c12}+pv*{c13}+#B*{c14}+{s1})%2147483646;local fd={version}+{header}*256+(fk0+fk1+{descriptor})%65536*65536;local d=L32(B,1);local n=L32(B,5);local c=L32(B,9);local t=L32(B,13);local pad=(4-(16+n)%4)%4;if n>16777216 or #B~=16+n+pad or d~=fd then E()end;local ex={ex0};if c~=ex then E()end;local left=(fk0+{tag})%65497;local right=(fk1+{cookie})%65497;for i=17,16+n do local byte=SB(B,i);left=(left*257+byte)%65497;right=(right*263+byte+left)%65497 end;local ex={ex1};if t~=ex then E()end;for i=1,pad do if SB(B,16+n+i)~=(fk0+fk1*i+{padding})%256 then E()end end;B=SS(B,17,16+n);",
         header = TRANSPORT_FRAME_HEADER,
         version = TRANSPORT_FRAME_VERSION,
         c00 = c0[0],

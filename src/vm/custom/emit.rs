@@ -152,14 +152,14 @@ d4[(dq-2)/2]=dx-35+(dy-35)*86 end;",
     );
     if !structure.coin() {
         entry_decoy.push_str(&format!(
-            "local d5=({fake_a}*31+{fake_b})%2147483647;d5=48271*d5%2147483647;\
-d5=65539*d5%2147483647;local d6=1+(d5+31*#d3)%2147483646;"
+            "local d5=({fake_a}*31+{fake_b})%(2147483600+47);d5=48271*d5%(2147483600+47);\
+d5=65539*d5%(2147483600+47);local d6=1+(d5+31*#d3)%2147483646;"
         ));
     }
     if !structure.coin() {
         entry_decoy.push_str(&format!(
-            "local d7,d8=1,0;for dq=1,#d3 do d7=(d7+SB(d3,dq))%65521;d8=(d8+d7)%65521 end;\
-if d7+d8*65521~={fake_adler} then E()end;"
+            "local d7,d8=1,0;for dq=1,#d3 do d7=(d7+SB(d3,dq))%65449;d8=(d8+d7)%65449 end;\
+if d7+d8*65449~={fake_adler} then E()end;"
         ));
     }
     let f3_decoys = decoy_arms(
@@ -232,10 +232,11 @@ if d7+d8*65521~={fake_adler} then E()end;"
     // Three independently keyed mixed-base86 parts wrap the double-ChaCha8
     // frame. Each runs its own native probe and four-state decoder. Goal 7
     // fragments and source-shuffles every encoded part before runtime joining.
-    // The split opaque watermark check still fails closed before decryption.
-    let expected_watermark = u32::from_be_bytes(*b"XXS:");
+    // A per-build non-textual witness selects the segment chain before decryption.
+    let witness = transport::transport_witness(seed, program.target);
+    let expected_watermark = u32::from_be_bytes(witness);
     let mut marked = Vec::with_capacity(encrypted.len() + 4);
-    marked.extend_from_slice(b"XXS:");
+    marked.extend_from_slice(&witness);
     marked.extend_from_slice(&encrypted);
     // K3-FULL 第二步: one digit table per logical segment, shared with the audit
     // through `base86_segment_alphabets` (single source of truth).
@@ -661,7 +662,7 @@ local check=b32();if {ad_guard} then E()end;
             (
                 c_fin,
                 format!(
-                    "local Q={{}};local SN=np*2;for slot=1,SN do {segment_decode}local sid=(st[sont[1]]-slot*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or Q[sid]then E()end;local owner=MF((sid-1)/2);local claimed=(st[sont[2]]-sid*{segment_multiplier}-slot-{segment_add})%65536;if claimed~=owner then E()end;local part=(sid-1)%2;local SP=P[owner].__obf_proto_code;local nxt=(st[sont[3]]-sid*{segment_multiplier}-owner-{segment_add})%65536;local split=1+MF((SP[1]-1)*(({segment_add}+owner*{segment_multiplier})%65536)/65536);local n=part==0 and split or SP[1]-split;Q[sid]={{owner,nxt,take(n)}}end;if pos()~=#B+1 then E()end;local used={{}};local roots={{}};for owner=0,np-1 do local SP=P[owner].__obf_proto_code;local sid=(SP[2]-owner*{segment_multiplier}-{segment_add})%65536;if sid~=owner*2+1 or roots[sid]then E()end;roots[sid]=1;local code='';for count=1,2 do local S=Q[sid];if not S or S[1]~=owner or used[sid]then E()end;used[sid]=1;code=code..S[3];sid=S[2]end;if sid~=0 or #code~=SP[1]then E()end;{carrier_store} end;for sid=1,SN do if not used[sid]then E()end end;B=nil;break;",
+                    "local Q={{}};local SN=np*2;for slot=1,SN do {segment_decode}local sid=(st[sont[1]]-slot*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or Q[sid]then E()end;local owner=(st[sont[2]]-sid*{segment_multiplier}-slot-{segment_add})%65536;if owner>=np then E()end;local SP=P[owner].__obf_proto_code;local nxt=(st[sont[3]]-sid*{segment_multiplier}-owner-{segment_add})%65536;local split=1+MF((SP[1]-1)*(({segment_add}+owner*{segment_multiplier})%65536)/65536);local n=nxt~=0 and split or SP[1]-split;Q[sid]={{owner,nxt,take(n)}}end;if pos()~=#B+1 then E()end;local used={{}};local roots={{}};for owner=0,np-1 do local SP=P[owner].__obf_proto_code;local sid=(SP[2]-owner*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or roots[sid]then E()end;roots[sid]=1;local code='';for count=1,2 do local S=Q[sid];if not S or S[1]~=owner or used[sid]then E()end;used[sid]=1;code=code..S[3];sid=S[2]end;if sid~=0 or #code~=SP[1]then E()end;{carrier_store} end;for sid=1,SN do if not used[sid]then E()end end;B=nil;break;",
                     segment_decode = field_order.segment_decode_lua(),
                 ),
             ),
@@ -859,8 +860,8 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
     // semantic image at runtime; duplicate routes fail closed during parsing.
     let mut route_random = crate::random::Prng::lcg(seed ^ 0x4b38_7661_6c74_726f);
     let route_mul = 3 + (route_random.index(251)) * 2;
-    let route_add = 1 + route_random.index(65520);
-    let route_salt = 1 + route_random.index(65520);
+    let route_add = 1 + route_random.index(65478);
+    let route_salt = 1 + route_random.index(65478);
     let decoded_guard = if luau { "TY(CD)==TY(P)" } else { "CD[0]~=nil" };
     let semantic_validator = format!(
         r#"{edge_decoder}{recipe_decoder}{operand_getter}
@@ -877,7 +878,7 @@ local DC=function(id)
  end;
  local start=D16();local code={{}};local stL=(id*{k9_init_proto}+nr*{k9_init_routes}+start*{k9_init_start}+{k9_salt})%{k9_mod};
  for at=0,F.__obf_proto_nc-1 do {record_head}local next1=ED(nextToken,label,id,0);local skip=ED(skipToken,label,id,1);local rid=RD(token,label,next1,skip,id);stL=(stL*{k9_chain_mul}+token*{k9_chain_token}+at*{k9_chain_step}+{k9_salt})%{k9_mod};local recipe=RM[rid];
-  if label==0 or code[label]~=nil or recipe==nil then E()end;local route=(label*{route_mul}+token*{route_add}+id*{route_salt})%65521;local bucket=VR[route];if bucket==nil then bucket={{}};VR[route]=bucket end;if bucket[label]~=nil then E()end;bucket[label]={{rid,#recipe}};{tuple_construct}
+  if label==0 or code[label]~=nil or recipe==nil then E()end;local route=(label*{route_mul}+token*{route_add}+id*{route_salt})%65479;local bucket=VR[route];if bucket==nil then bucket={{}};VR[route]=bucket end;if bucket[label]~=nil then E()end;bucket[label]={{rid,#recipe}};{tuple_construct}
   for qi=1,#recipe do local r=recipe[qi];local op=r%256;local a,b,c,j,k,p2=dec(CD,p,(r-op)/256+1,token,id,stL);p=p2;
    if not vld(op,a,b,c,j,k,at,F,P,id)then E()end;{operand_store}
   end;code[label]=I;
@@ -986,7 +987,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or {proto_len}~=SP
     for (index, _) in shares.iter().enumerate() {
         let mut steps = String::new();
         for _ in 0..params.probe_rounds[index] {
-            steps.push_str(&format!("x={}*x%2147483647;", params.outer));
+            steps.push_str(&format!("x={}*x%(2147483600+47);", params.outer));
         }
         let mut field = format!(
             "[{}]=function(SB,a,b,DB,GI,LS{probe_arg})local A={probe_body}",
@@ -994,7 +995,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or {proto_len}~=SP
         );
         let _ = write!(
             field,
-            "local x=(a*{}+b)%2147483647;{steps}a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%2147483647;b=b+1 end;return 1+(x+a*{})%2147483646;end,",
+            "local x=(a*{}+b)%(2147483600+47);{steps}a=0;b=1;while b<=#A do a=(a*257+SB(A,b))%(2147483600+47);b=b+1 end;return 1+(x+a*{})%2147483646;end,",
             params.mix,
             params.mix,
         );
@@ -1335,7 +1336,7 @@ end;
     }
     s.push_str(&seed_prelude_lua_v1(program.target, seed, seed_used));
     let fetch_branch = format!(
-        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);route=(pc*{route_mul}+I[{tuple_token}]*{route_add}+fid*{route_salt})%65521;route_info=F.__obf_proto_routes[route];if route_info==nil then E()end;route_info=route_info[pc];if not route_info or route_info[1]~=rid or route_info[2]<1 or route_info[2]>4 then E()end;rid=route_info[1];pc=next1;{ctx_reset}w={v_disp};",
+        "{c_fetch} then\n   I=code[pc];if I==nil then E()end;next1=ED(I[{tuple_next}],pc,fid,0);skip1=ED(I[{tuple_skip}],pc,fid,1);rid=RD(I[{tuple_token}],pc,next1,skip1,fid);route=(pc*{route_mul}+I[{tuple_token}]*{route_add}+fid*{route_salt})%65479;route_info=F.__obf_proto_routes[route];if route_info==nil then E()end;route_info=route_info[pc];if not route_info or route_info[1]~=rid or route_info[2]<1 or route_info[2]>4 then E()end;rid=route_info[1];pc=next1;{ctx_reset}w={v_disp};",
         tuple_next = tuple_slots[1],
         tuple_skip = tuple_slots[2],
         tuple_token = tuple_slots[0],

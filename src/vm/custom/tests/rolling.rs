@@ -1,6 +1,7 @@
 
-/// Goal 6 gate: the constant block's payload key **rolls over the plaintext**,
-/// and the runtime walk is **lazy** (a resumable cursor, never a table).
+/// Goal 6 gate: every constant has an independent index-derived subkey, each
+/// payload key **rolls over only that entry's plaintext**, and the runtime walk
+/// is **lazy** (a resumable cursor, never a value table).
 ///
 /// Three properties are asserted here, each against the real encoder output:
 ///
@@ -21,7 +22,7 @@
 ///    three-slot cursor.
 #[test]
 fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
-    use super::semantic::{pool_key_byte, pool_key_fold, pool_key_pair, pool_roll_triple};
+    use super::semantic::{pool_entry_key, pool_key_byte, pool_key_pair, pool_roll_triple};
 
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(
@@ -39,7 +40,7 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
             // The walker runs from its signature to the next section marker; a
             // fixed generous window keeps the assertions on *this* function
             // (every needle below is unique to it anyway).
-            let walker = &raw[at..(at + 2600).min(raw.len())];
+            let walker = &raw[at..(at + 4000).min(raw.len())];
             assert!(
                 walker.contains("return v;"),
                 "{target} seed {seed}: walker window missed its tail"
@@ -90,9 +91,11 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
                 let tail = region.len() - 4;
                 let block_len = u32_region(region, tail) as usize;
                 let mut at = tail - block_len;
-                let mut acc = 0u64;
+                let mut entry_index = 0usize;
                 while at < tail {
-                    let tag = bytes[region[at]];
+                    let tag = bytes[region[at]].wrapping_sub(
+                        pool_key_byte(pool_entry_key(entry_index, mask, modulus), 0) as u8,
+                    );
                     let (keyed_from, keyed_len) = match tag {
                         0 => (at + 1, 0usize),
                         1 => (at + 1, 1),
@@ -103,11 +106,14 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
                     let cipher: Vec<u8> = (0..keyed_len)
                         .map(|index| bytes[region[keyed_from + index]])
                         .collect();
+                    let subkey = pool_entry_key(entry_index, mask, modulus);
                     let positional_byte = |index: usize, byte: u8| -> u8 {
-                        ((u64::from(byte) + 256 - pool_key_byte(acc, index as u64 + 1)) % 256) as u8
+                        ((u64::from(byte) + 256
+                            - pool_key_byte(subkey, index as u64 + 1))
+                            % 256) as u8
                     };
                     // The rolling decode (what the emitted `UK` runs).
-                    let mut key = pool_key_byte(acc, 1);
+                    let mut key = pool_key_byte(subkey, 1);
                     let mut rolling = Vec::with_capacity(keyed_len);
                     for &byte in &cipher {
                         let plain = (u64::from(byte) + 256 - key) % 256;
@@ -130,9 +136,9 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
                             rolled_long += 1;
                         }
                     }
-                    // Every multi-byte run of this block agrees with the value
-                    // the decoded program holds, through the rolling stream.
-                    acc = pool_key_fold(acc, keyed_len as u64, mask, modulus);
+                    // Every entry has an independently derived subkey; rolling
+                    // remains local to that entry's recovered plaintext.
+                    entry_index += 1;
                     at = keyed_from + keyed_len;
                 }
             }
@@ -156,10 +162,12 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
             let tail = region.len() - 4;
             let block_len = u32_region(region, tail) as usize;
             let mut at = tail - block_len;
-            let mut acc = 0u64;
+            let mut entry_index = 0usize;
             let mut flipped_ok = false;
             while at < tail {
-                let tag = bytes[region[at]];
+                let tag = bytes[region[at]].wrapping_sub(
+                    pool_key_byte(pool_entry_key(entry_index, mask, modulus), 0) as u8,
+                );
                 let (keyed_from, keyed_len) = match tag {
                     0 => (at + 1, 0usize),
                     1 => (at + 1, 1),
@@ -168,12 +176,15 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
                     other => panic!("bad constant tag {other}"),
                 };
                 if keyed_len >= 3 {
+                    let subkey = pool_entry_key(entry_index, mask, modulus);
                     let positional_byte = |index: usize, byte: u8| -> u8 {
-                        ((u64::from(byte) + 256 - pool_key_byte(acc, index as u64 + 1)) % 256) as u8
+                        ((u64::from(byte) + 256
+                            - pool_key_byte(subkey, index as u64 + 1))
+                            % 256) as u8
                     };
                     let mid = keyed_len / 2;
                     let decode = |flip: Option<usize>| -> Vec<u8> {
-                        let mut key = pool_key_byte(acc, 1);
+                        let mut key = pool_key_byte(subkey, 1);
                         let mut plain = Vec::with_capacity(keyed_len);
                         for index in 0..keyed_len {
                             let mut byte = bytes[region[keyed_from + index]];
@@ -226,7 +237,7 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
                     flipped_ok = true;
                     break;
                 }
-                acc = pool_key_fold(acc, keyed_len as u64, mask, modulus);
+                entry_index += 1;
                 at = keyed_from + keyed_len;
             }
             assert!(
@@ -235,4 +246,43 @@ fn rolling_keystream_is_plaintext_chained_and_the_walk_is_lazy() {
             );
         }
     }
+}
+
+#[test]
+fn one_constant_corruption_never_changes_the_next_entry_key_or_plaintext() {
+    use super::semantic::{pool_entry_key, pool_key_byte};
+
+    let modulus = 65_519u64;
+    let mask = 41_337u64;
+    let mul = 173u64;
+    let mix = 91u64;
+    let add = 47u64;
+    let decode = |entry: usize, cipher: &[u8]| {
+        let subkey = pool_entry_key(entry, mask, modulus);
+        let mut key = pool_key_byte(subkey, 1);
+        cipher
+            .iter()
+            .map(|byte| {
+                let plain = (u64::from(*byte) + 256 - key) % 256;
+                key = (key * mul + plain * mix + add) % 256;
+                plain as u8
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first = [19, 91, 7, 203, 44, 18];
+    let second = [87, 11, 222, 4, 156, 61];
+    let clean_second = decode(1, &second);
+    let mut corrupt_first = first;
+    corrupt_first[2] ^= 0x40;
+    assert_ne!(decode(0, &first), decode(0, &corrupt_first));
+    assert_eq!(
+        clean_second,
+        decode(1, &second),
+        "entry 1 must derive from its own ordinal subkey, never entry 0 plaintext"
+    );
+    assert_ne!(
+        pool_entry_key(0, mask, modulus),
+        pool_entry_key(1, mask, modulus)
+    );
 }

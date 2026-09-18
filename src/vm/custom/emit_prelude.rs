@@ -267,7 +267,7 @@ pub(crate) fn emit_prelude(
     s.push_str(&pre_cold);
     s.push_str(&decl_hot);
     s.push_str(&decl_cold);
-    s.push_str("local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65521;y=(y+x)%65521 end;return x+y*65536 end;");
+    s.push_str("local AD=function(S,a,b)local x,y=1,0;for i=a,b do x=(x+SB(S,i))%65519;y=(y+x)%65519 end;return x+y*65536 end;");
     s.push_str(&l32_decl);
     // K13c step 2: the constant region primitives. `UK` shifts a byte run back
     // into plaintext from a running stream position, `U32` reads a little-endian

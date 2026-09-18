@@ -607,9 +607,8 @@ struct CodeResidentConstant {
 /// split across segments whose payloads are interleaved with other prototypes'
 /// in the file, so a multi-byte field can straddle two segments and must never
 /// be read as four consecutive file bytes. The mirror reads the clear u32 block
-/// length, walks `[tag][payload]` entries applying the documented key chain
-/// (`pool_key_fold` over every earlier entry's keyed length, `pool_key_byte` per
-/// payload byte), and returns the values. It is the same walk `KGC` performs, so
+/// length, unmasks each tag and payload with its independent ordinal-derived
+/// subkey, and returns the values. It is the same lazy walk `KGC` performs, so
 /// agreement between the two proves the encoder's block layout, the runtime's
 /// per-use synthesis and this independent reader all describe one format.
 fn parse_code_constants(
@@ -636,11 +635,15 @@ fn parse_code_constants(
     );
     let (mask, modulus) = super::semantic::pool_key_pair(image);
     let (roll_mul, roll_mix, roll_add) = super::semantic::pool_roll_triple(image);
-    let mut acc = 0u64;
     let mut at = tail - block_len;
     let mut out = Vec::new();
     while at < tail {
-        let tag = bytes[region[at]];
+        let tag = bytes[region[at]].wrapping_sub(
+            super::semantic::pool_key_byte(
+                super::semantic::pool_entry_key(out.len(), mask, modulus),
+                0,
+            ) as u8,
+        );
         let (keyed_from, keyed_len, length_position) = match tag {
             0 => (at + 1, 0usize, None),
             1 => (at + 1, 1, None),
@@ -656,7 +659,8 @@ fn parse_code_constants(
         // every later key rolls over the plaintext byte just recovered -- the
         // same recurrence `UK` runs, written here independently.
         let mut plain = Vec::with_capacity(keyed_len);
-        let mut key = super::semantic::pool_key_byte(acc, 1);
+        let subkey = super::semantic::pool_entry_key(out.len(), mask, modulus);
+        let mut key = super::semantic::pool_key_byte(subkey, 1);
         for index in 0..keyed_len {
             let byte = bytes[region[keyed_from + index]];
             let value = (u64::from(byte) + 256 - key) % 256;
@@ -679,7 +683,6 @@ fn parse_code_constants(
             value,
         });
         at = keyed_from + keyed_len;
-        acc = super::semantic::pool_key_fold(acc, keyed_len as u64, mask, modulus);
     }
     assert_eq!(at, tail, "constant block does not end where its length says");
     out
@@ -748,17 +751,14 @@ fn semantic_pool_layouts(
             image,
         ));
         assert!((1..=prototypes * 2).contains(&id));
-        let owner = (id - 1) / 2;
         let owner_token = u16_at(owner_token_position);
-        assert_eq!(
-            usize::from(super::semantic::decode_segment_owner(
-                owner_token,
-                id as u16,
-                physical_slot as u16,
-                image,
-            )),
-            owner
-        );
+        let owner = usize::from(super::semantic::decode_segment_owner(
+            owner_token,
+            id as u16,
+            physical_slot as u16,
+            image,
+        ));
+        assert!(owner < prototypes);
         let next_token = u16_at(next_token_position);
         let next = usize::from(super::semantic::decode_segment_next(
             next_token,
@@ -766,10 +766,9 @@ fn semantic_pool_layouts(
             owner as u16,
             image,
         ));
-        let part = (id - 1) % 2;
         let split =
             super::semantic::code_segment_split(layouts[owner].code_len, owner as u16, image);
-        let length = if part == 0 {
+        let length = if next != 0 {
             split
         } else {
             layouts[owner].code_len - split

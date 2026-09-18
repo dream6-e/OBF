@@ -5,7 +5,6 @@ use std::collections::HashMap;
 /// domains, so ciphertext never enters the LZW dictionary. The inner domain
 /// protects only the bitstream; frame-v2-authenticated header fields remain
 /// available for bounded context derivation and allocation.
-pub(crate) const COMPRESSION_MAGIC: [u8; 4] = *b"LZW\x01";
 pub(crate) const COMPRESSION_HEADER: usize = 16;
 pub(crate) const COMPRESSION_CHUNK: usize = 8_192;
 pub(crate) const COMPRESSION_LIMIT: usize = 16_777_216;
@@ -33,15 +32,28 @@ fn u32_at(bytes: &[u8], offset: usize) -> usize {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
 }
 
+/// Payload-derived header witness: unlike the old `LZW\1` word it has no fixed
+/// value or textual identity. All intermediates fit exactly below 2^53 in Lua.
+pub(crate) fn compression_descriptor(original_len: usize, bit_len: usize, checksum: u32) -> u32 {
+    let value = original_len as u64 * bit_len as u64
+        + u64::from(checksum) * (original_len as u64 % 251 + 257)
+        + (bit_len as u64 % 241) * (original_len as u64 % 239);
+    value.rem_euclid(4_294_967_296) as u32
+}
+
 /// Validate the clear, frame-v2-covered compression header without touching
 /// the inner-ChaCha8-encrypted bitstream. This is safe for context derivation.
 pub(crate) fn compression_header(bytes: &[u8]) -> Result<CompressionHeader, Diagnostic> {
-    if bytes.len() < COMPRESSION_HEADER || bytes[..4] != COMPRESSION_MAGIC {
-        return Err(bad("bad magic or truncated header"));
+    if bytes.len() < COMPRESSION_HEADER {
+        return Err(bad("truncated header"));
     }
+    let descriptor = u32::from_le_bytes(bytes[..4].try_into().unwrap());
     let original_len = u32_at(bytes, 4);
     let bit_len = u32_at(bytes, 8);
     let checksum = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+    if descriptor != compression_descriptor(original_len, bit_len, checksum) {
+        return Err(bad("header witness mismatch"));
+    }
     if original_len == 0 || original_len > COMPRESSION_LIMIT {
         return Err(bad("original length out of range"));
     }
@@ -186,10 +198,13 @@ pub(crate) fn compress_bytecode(input: &[u8]) -> Result<Vec<u8>, Diagnostic> {
         pack_codes(&mut writer, &lzw_codes(chunk));
     }
     let mut out = Vec::with_capacity(COMPRESSION_HEADER + writer.bytes.len());
-    out.extend_from_slice(&COMPRESSION_MAGIC);
+    let checksum = custom::checksum(input);
+    out.extend_from_slice(
+        &compression_descriptor(input.len(), writer.bits, checksum).to_le_bytes(),
+    );
     push_u32(&mut out, input.len())?;
     push_u32(&mut out, writer.bits)?;
-    out.extend_from_slice(&custom::checksum(input).to_le_bytes());
+    out.extend_from_slice(&checksum.to_le_bytes());
     out.extend_from_slice(&writer.bytes);
     compression_header(&out)?;
     Ok(out)

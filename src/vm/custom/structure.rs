@@ -35,15 +35,15 @@ pub(crate) fn wrapper_keys(seed: u64) -> Vec<u64> {
     keys
 }
 
-/// M7 opaque branch predicates: constant integer tautologies and their
-/// matched contradictions. Same shape, flipped truth value; no NaN, no
-/// metamethods, no floats -- the truth value is fixed at generation time.
+/// M7 entry predicates depend on the live wrapper receiver or its runtime
+/// vararg count rather than a foldable pair of integer literals. Each pair is
+/// still free of metamethod and floating-point behavior.
 pub(crate) fn opaque_pair(structure: &mut crate::random::Prng) -> (String, String) {
     const TAUTOLOGIES: [(&str, &str); 4] = [
-        ("48271%2==1", "48271%2==0"),
-        ("2147483647>2147483646", "2147483647>2147483647"),
-        ("65536%256==0", "65536%256==1"),
-        ("16777216%2==0", "16777216%2==1"),
+        ("VMS==VMS", "VMS~=VMS"),
+        ("#{...}>=0", "#{...}<0"),
+        ("(VMS and VMS or false)==VMS", "(VMS and VMS or false)~=VMS"),
+        ("not not VMS", "not VMS"),
     ];
     let index = (structure.index(TAUTOLOGIES.len())) as usize;
     let (truthy, falsy) = TAUTOLOGIES[index];
@@ -642,7 +642,7 @@ pub(crate) fn masked_state_value(
     // additionally removes the literal, so neither the state number nor the
     // masked representation can be read off the text (goal 6 part 3).
     let value = structure.opaque_literal(u64::from(value), luau, mask);
-    format!("({value}+{mask})%65521")
+    format!("({value}+{mask})%65479")
 }
 
 pub(crate) fn masked_state_condition(

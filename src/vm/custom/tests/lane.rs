@@ -42,8 +42,8 @@ fn wire_isa_version_is_19() {
          the renumbered opcode plus the operand form as a byte pair, so the reader \
          rebuilds neither a form table nor a permutation table -- still holds \
          underneath it, as does K13c step 2's ISA17 requirement (keyed constant \
-         payloads, no plaintext constant in the image; the block is now keyed with \
-         the same pool_key_fold chain and validated per prototype)"
+         payloads, no plaintext constant in the image; the block now uses independent \
+         per-entry subkeys and is validated per prototype)"
     );
 }
 

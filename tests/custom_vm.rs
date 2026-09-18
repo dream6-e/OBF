@@ -721,6 +721,7 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
         )
         .unwrap();
         let generated = vm::custom::emit(&bytes, target, 735).unwrap();
+        let witness = vm::custom::transport_witness(735, target);
         assert!(!generated.contains("XXS:"));
         // Flip the first digit of the stream-first segment's first body
         // group (decoded char 4, right after the length prefix), keeping
@@ -774,7 +775,7 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
             else {
                 continue;
             };
-            if decoded.starts_with(b"XXS:") {
+            if decoded.starts_with(&witness) {
                 candidates.push((fragments, text, decoded));
             }
         }
@@ -805,7 +806,7 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
             else {
                 continue;
             };
-            if probe_decoded.starts_with(b"XXS:") || probe_decoded[4..] != decoded[4..] {
+            if probe_decoded.starts_with(&witness) || probe_decoded[4..] != decoded[4..] {
                 continue;
             }
             tampered.replace_range(raw_at..raw_at + raw_len, &(candidate as char).to_string());
