@@ -270,7 +270,10 @@ fn pins_lua51() -> AuditPins {
         //     the measured value. check1 (all three classes), check3, check4 (9, max,
         //     density flag), check7, check8 and check9 (19765, 0, false) are unchanged.
         check1_nice_fails: vec![(256, 4), (2147483647, 24), (4294967296, 3)],
-        check2_alphabet: (96, 99, true),
+        // Goal 7 (2026-09-18): each static token is now one private-alphabet
+        // fragment rather than the concatenated three-segment transport. The
+        // old union fingerprint (96/99, fail=true) disappears at token scope.
+        check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         // K21 (interval opcode dispatch) -- measured Lua51 diff, the only move:
         //   check4 (2, 16777215, false) -> (12, 16777215, false). The dispatch chains
@@ -320,23 +323,25 @@ fn pins_lua51() -> AuditPins {
         check5_templates: (
             13,
             vec![
-                ("X=X+N".to_string(), 30),
+                ("X=X+N".to_string(), 31),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
                 ("X[N]=N".to_string(), 16),
                 ("X=N".to_string(), 9),
-                ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
+                ("X=NXXXXXXX=(X*N+X+X+X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
         check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 65),
-        check9_stream: (19045, 0, false),
+        // Goal 7: the old static token walker sees one 2,380-byte fragment,
+        // not the 19,045-byte runtime reconstruction; its lint remains clear.
+        check9_stream: (2380, 0, false),
     }
 }
 
@@ -444,7 +449,9 @@ fn pins_luau() -> AuditPins {
         //     (8, 65535, false), check6 (stays 0 on this target), check7, check8 (1, 60)
         //     and check9 (24603, 3, false -- the *decoded* stream length is untouched, so
         //     the golden's 269 B drop is source-level escape and statement churn only).
-        check2_alphabet: (96, 99, true),
+        // Goal 7: token-scope analysis now sees one private-alphabet fragment,
+        // so the old three-table union fingerprint is absent.
+        check2_alphabet: (86, 99, false),
         check3_noise_pairs: 0,
         // K21 (interval opcode dispatch) -- measured Luau diff, two moves, and no
         // `fail` flag is affected:
@@ -493,23 +500,25 @@ fn pins_luau() -> AuditPins {
         check5_templates: (
             13,
             vec![
-                ("X=X+N".to_string(), 29),
+                ("X=X+N".to_string(), 31),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
                 ("X[N]=X[N][X[N]]XX[N]==XXX()X".to_string(), 18),
                 ("X=N*X%N".to_string(), 17),
                 ("X[N]=N".to_string(), 16),
                 ("X=N".to_string(), 10),
-                ("X[N]=N+N".to_string(), 9),
                 (
                     "X[N]=NXX=N,NXX[N]=X(X[N],X[N]+X-N)XX[N]==XXX()X".to_string(),
                     9,
                 ),
+                ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
-        check6_alias_prologues: 1,
+        check6_alias_prologues: 0,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 69),
-        check9_stream: (24195, 0, false),
+        // The token walker sees a 2,691-byte fragment rather than the
+        // 24,195-byte runtime join; no periodic/repetition lint trips.
+        check9_stream: (2691, 1, false),
     }
 }
 

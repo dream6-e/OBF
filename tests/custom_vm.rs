@@ -590,11 +590,9 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
     }
 }
 
-// K9a segment locators shared by the watermark and encrypted-frame
-// corruption tests. Spans come from the lexer's own string tokens and are
-// filtered on DECODED bytes (segments carry `\"`/`\\`/`\ddd` escapes);
-// callers either identify the watermark carrier by decoding or keep the
-// three longest spans, which are the payload segments.
+// Goal-7 transport-fragment locators shared by the watermark and encrypted-
+// frame corruption tests. Every span is one source-shuffled fragment: decoded
+// byte zero is its private-alphabet ordinal and the remaining bytes are base86.
 fn segment_spans(source: &str, target: Target, seed: u64) -> Vec<(usize, usize)> {
     // K3-FULL 第二步: each payload segment is baked in its own digit table, so
     // this mirror of `transport::segment_literals` admits the **union** of the
@@ -627,6 +625,51 @@ fn segment_spans(source: &str, target: Target, seed: u64) -> Vec<(usize, usize)>
 }
 
 /// Decoded bytes of a raw inner span (re-adds the quotes for the parser).
+fn segment_fragment_groups(source: &str, target: Target, seed: u64) -> Vec<Vec<(usize, usize)>> {
+    let tokens = obf::lexer::lex(source, target).unwrap();
+    let mut stack: Vec<(&str, usize)> = Vec::new();
+    let mut functions = Vec::new();
+    for token in tokens
+        .iter()
+        .filter(|token| token.kind == obf::lexer::TokenKind::Keyword)
+    {
+        match token.text(source) {
+            "do" => {
+                if !matches!(
+                    stack.last().map(|(word, _)| *word),
+                    Some("for") | Some("while")
+                ) {
+                    stack.push(("do", token.span.start));
+                }
+            }
+            "function" | "for" | "if" | "while" | "repeat" => {
+                stack.push((token.text(source), token.span.start));
+            }
+            "end" | "until" => {
+                let (opener, start) = stack.pop().unwrap();
+                if opener == "function" {
+                    functions.push((start, token.span.end));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut groups = std::collections::BTreeMap::new();
+    for span in segment_spans(source, target, seed) {
+        if let Some(owner) = functions
+            .iter()
+            .filter(|(start, end)| *start < span.0 && span.1 < *end)
+            .max_by_key(|(start, _)| *start)
+        {
+            groups.entry(*owner).or_insert_with(Vec::new).push(span);
+        }
+    }
+    groups
+        .into_values()
+        .filter(|group| group.len() >= 2)
+        .collect()
+}
+
 fn span_bytes(source: &str, target: Target, span: (usize, usize)) -> Vec<u8> {
     obf::minify::literal_bytes(&source[span.0 - 1..span.1 + 1], target).unwrap()
 }
@@ -691,45 +734,85 @@ fn watermark_mismatch_aborts_silently_before_any_execution() {
             .copied()
             .filter(|&byte| byte != 34 && byte != 92 && byte >= 32)
             .collect();
-        let mut tampered = generated.clone();
-        let mut flipped = false;
-        for (start, end) in segment_spans(&generated, target, 735) {
-            let text = String::from_utf8(span_bytes(&generated, target, (start, end))).unwrap();
-            let Ok(decoded) = vm::custom::base86_decode_mixed(&text, &alphabet) else {
+        let mut candidates = Vec::new();
+        for group in segment_fragment_groups(&generated, target, 735) {
+            if !(8..=16).contains(&group.len()) {
+                continue;
+            }
+            let mut ordered = vec![None; group.len()];
+            let mut valid = true;
+            for span in group {
+                let bytes = span_bytes(&generated, target, span);
+                if !bytes.iter().all(|byte| alphabet.contains(byte)) {
+                    valid = false;
+                    break;
+                }
+                let ordinal = alphabet.iter().position(|byte| *byte == bytes[0]).unwrap();
+                if ordinal == 0 || ordinal > ordered.len() || ordered[ordinal - 1].is_some() {
+                    valid = false;
+                    break;
+                }
+                ordered[ordinal - 1] = Some((span, bytes));
+            }
+            if !valid || ordered.iter().any(Option::is_none) {
+                continue;
+            }
+            let fragments: Vec<_> = ordered
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let (span, bytes) = item.unwrap();
+                    (index + 1, span, bytes)
+                })
+                .collect();
+            let text: Vec<u8> = fragments
+                .iter()
+                .flat_map(|(_, _, bytes)| bytes[1..].iter().copied())
+                .collect();
+            let Ok(decoded) =
+                vm::custom::base86_decode_mixed(std::str::from_utf8(&text).unwrap(), &alphabet)
+            else {
                 continue;
             };
-            if !decoded.starts_with(b"XXS:") {
+            if decoded.starts_with(b"XXS:") {
+                candidates.push((fragments, text, decoded));
+            }
+        }
+        assert_eq!(
+            candidates.len(),
+            1,
+            "{target}: head fragment chain is not unique"
+        );
+        let (fragments, text, decoded) = candidates.pop().unwrap();
+        // Encoded char four is the first body group after the length prefix.
+        // It is in ordinal-one fragment at decoded offset five (one marker +
+        // four prefix chars). Keep the rest of the decoded stream identical.
+        let (_, (start, end), first) = &fragments[0];
+        let mut tampered = generated.clone();
+        let map = raw_char_map(&generated[*start..*end]);
+        let raw_at = *start + map[5];
+        let raw_len = map[6] - map[5];
+        let original = first[5];
+        let mut flipped = false;
+        for &candidate in &plain {
+            if candidate == original {
                 continue;
             }
-            let map = raw_char_map(&generated[start..end]);
-            let raw_at = start + map[4];
-            let raw_len = map[5] - map[4];
-            let original = text.as_bytes()[4];
-            for &candidate in &plain {
-                if candidate == original {
-                    continue;
-                }
-                let mut probe = text.clone().into_bytes();
-                probe[4] = candidate;
-                let probe_text = String::from_utf8(probe).unwrap();
-                let Ok(probe_decoded) = vm::custom::base86_decode_mixed(&probe_text, &alphabet)
-                else {
-                    continue;
-                };
-                if probe_decoded.starts_with(b"XXS:") || probe_decoded[4..] != decoded[4..] {
-                    continue;
-                }
-                tampered.replace_range(raw_at..raw_at + raw_len, &(candidate as char).to_string());
-                flipped = true;
-                break;
+            let mut probe = text.clone();
+            probe[4] = candidate;
+            let Ok(probe_decoded) =
+                vm::custom::base86_decode_mixed(std::str::from_utf8(&probe).unwrap(), &alphabet)
+            else {
+                continue;
+            };
+            if probe_decoded.starts_with(b"XXS:") || probe_decoded[4..] != decoded[4..] {
+                continue;
             }
-            assert!(flipped, "{target}: no watermark flip preserved the chain");
+            tampered.replace_range(raw_at..raw_at + raw_len, &(candidate as char).to_string());
+            flipped = true;
             break;
         }
-        assert!(
-            flipped,
-            "{target}: stream-first watermark segment not found"
-        );
+        assert!(flipped, "{target}: no watermark flip preserved the chain");
         let workspace = Workspace::new();
         let runner = support::root()
             .join("toolchains/bin")
@@ -762,47 +845,22 @@ fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
         )
         .unwrap();
         let generated = vm::custom::emit(&bytes, target, 735).unwrap();
-        let alphabet = vm::custom::base86_image_alphabet(735);
-        let mut spans = segment_spans(&generated, target, 735);
-        spans.sort_by_key(|&(start, end)| std::cmp::Reverse(end - start));
-        spans.truncate(3);
-        assert_eq!(spans.len(), 3, "{target}: payload segment count");
-
-        let stream_first = spans
-            .iter()
-            .position(|&span| {
-                let text = String::from_utf8(span_bytes(&generated, target, span)).unwrap();
-                vm::custom::base86_decode_mixed(&text, &alphabet)
-                    .is_ok_and(|bytes| bytes.starts_with(b"XXS:"))
-            })
-            .unwrap_or_else(|| panic!("{target}: stream-first segment missing"));
-        let mut mutation_offsets = BTreeSet::new();
-        for (index, &(start, end)) in spans.iter().enumerate() {
-            // K3-FULL 第二步: a mutant has to be swapped for a symbol from the
-            // table that actually *owns* this segment (each payload segment is
-            // baked in its own digit table now). `segment_spans` admits the union
-            // of the three, so this lookup is exact rather than heuristic -- and
-            // its exactness is the depooling claim, asserted here as well.
+        let spans = segment_spans(&generated, target, 735);
+        assert!(spans.len() >= 24, "{target}: transport fragments missing");
+        let mut by_owner: [Vec<usize>; 3] = std::array::from_fn(|_| Vec::new());
+        for (start, end) in spans {
+            let bytes = span_bytes(&generated, target, (start, end));
             let owner = (0..3)
                 .find(|part| {
                     let table = vm::custom::base86_segment_alphabet(735, *part);
-                    span_bytes(&generated, target, (start, end))
-                        .iter()
-                        .all(|&byte| table.contains(&byte))
+                    bytes.iter().all(|byte| table.contains(byte))
                 })
-                .expect("a segment is not readable in exactly one table");
-            // Spread raw offsets across the literal, snapped to plain
-            // (non-escape) chars so every mutant stays valid Lua. Any flip
-            // desyncs the chained widths or corrupts ciphertext, and some
-            // gate (transport, watermark, frame, LZW, Adler) fires. The
-            // watermark carrier (decoded chars 0..10: 4-char prefix plus a
-            // first body group of at most 6) is skipped with margin on the
-            // stream-first segment so these mutants exercise the layers
-            // past the watermark.
+                .expect("a fragment has no owning alphabet");
+            let table = vm::custom::base86_segment_alphabet(735, owner);
+            let ordinal = table.iter().position(|byte| *byte == bytes[0]).unwrap();
             let inner = &generated[start..end];
             let map = raw_char_map(inner);
-            let skip = if index == stream_first { 12 } else { 0 };
-            let mut usable = Vec::new();
+            let skip = if owner == 0 && ordinal == 1 { 13 } else { 1 };
             for decoded_at in skip..map.len() {
                 let raw_end = if decoded_at + 1 < map.len() {
                     map[decoded_at + 1]
@@ -812,16 +870,22 @@ fn chacha8_transport_ciphertext_corruption_fails_closed_on_both_targets() {
                 if raw_end - map[decoded_at] == 1 {
                     let byte = inner.as_bytes()[map[decoded_at]];
                     if byte != 34 && byte != 92 && byte >= 32 {
-                        usable.push(start + map[decoded_at]);
+                        by_owner[owner].push(start + map[decoded_at]);
                     }
                 }
             }
-            assert!(!usable.is_empty(), "{target}: no plain mutant offsets");
+        }
+        let mut mutation_offsets = BTreeSet::new();
+        for (owner, usable) in by_owner.iter_mut().enumerate() {
+            usable.sort_unstable();
+            assert!(
+                !usable.is_empty(),
+                "{target}: owner {owner} has no mutant offsets"
+            );
             mutation_offsets.insert((usable[0], owner));
             mutation_offsets.insert((usable[usable.len() / 2], owner));
             mutation_offsets.insert((usable[usable.len() - 1], owner));
         }
-
         let workspace = Workspace::new();
         let runner = support::root()
             .join("toolchains/bin")

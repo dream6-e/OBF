@@ -317,20 +317,20 @@ type AuditPins = (
 //   M5 (4, 1779) -> (4, 1787)      four long blobs, 8 B more text.
 //   M7 gap 408 -> 399              same strings, top-5 order re-measured.
 //   M1 (96), M3a, M6 (0, 0)        untouched.
-// Goal 6 part 3 (2026-09-18) -- opaque spellings for status values, dispatch
-// boundaries, ChaCha constants, record kinds and wrapper operands move only
-// the numeric-token census. M1/M2/KAT/M4b/M5/M6/M7 remain byte-for-byte fixed;
-// the larger M3b/M4 counts are the deliberately expanded equivalent arithmetic,
-// not new payload or API surface.
+// Goal 7 transport fragmentation (2026-09-18): the three complete payload
+// literals are replaced by 8..16 source-shuffled pieces each. M5/M7 lose the
+// 500-byte-class blobs; their new 64..79-byte entries are payload fragments,
+// not new monoliths. A dedicated fragment RNG leaves M1/M2/KAT/M3b/M4b/M6 and
+// downstream draws fixed; only the joiner's 0/1/2 token counts enter M4.
 const PINS_LUA51_7001: AuditPins = (
     96,
     (1501, 1, 1, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (385, 9007538239491966, 4503599627370496),
     [
-        (0, 682),
-        (1, 619),
-        (2, 470),
+        (0, 685),
+        (1, 628),
+        (2, 473),
         (3, 181),
         (4, 151),
         (5, 80),
@@ -342,9 +342,9 @@ const PINS_LUA51_7001: AuditPins = (
         (23, 54),
     ],
     0,
-    (4, 1787),
+    (9, 716),
     (0, 0),
-    ([560, 560, 533, 134, 17], 399),
+    ([134, 79, 77, 76, 75], 1),
 );
 
 // K17 (2026-09-11, decimal-escape minimality + quote-hostile alphabet bytes) --
@@ -505,33 +505,33 @@ const PINS_LUA51_7001: AuditPins = (
 //   M4b skipped 38, M5 (4, 1760), M7 ([550, 541, 535, 134, 15], 401), M3a/M6 zeros:
 //       re-measured with the same text.
 //   M1 (96) unchanged.
-// Goal 6 part 3 (2026-09-18) -- the Luau side of the opaque-literal batch.
-// M1/M2/KAT/M5/M6/M7 remain fixed. The integer census expands as intended;
-// M4b drops from 38 to 5 because the new target-aware opaque forms replace
-// most previously unparsed numeric spellings with exact integer tokens.
+// Goal 7 transport fragmentation (2026-09-18), Luau side. As on Lua 5.1,
+// M5/M7 prove that no 500-byte-class transport token remains; the 65..66-byte
+// entries are fragments. The dedicated RNG keeps M1/M2/KAT/M3b/M4b/M6 and
+// downstream draws stable; only the joiner's 0/1/2/11 counts enter M4.
 const PINS_LUAU_7351: AuditPins = (
     96,
     (1501, 1, 1, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
     (339, 9007532102839320, 4503599627370496),
     [
-        (1, 710),
-        (2, 581),
-        (0, 573),
+        (1, 719),
+        (2, 584),
+        (0, 576),
         (3, 193),
         (4, 141),
         (5, 127),
         (6, 121),
         (16, 81),
         (8, 78),
+        (11, 73),
         (95, 72),
-        (11, 68),
         (13, 61),
     ],
     5,
-    (4, 1760),
+    (8, 587),
     (0, 0),
-    ([550, 541, 535, 134, 15], 401),
+    ([134, 66, 65, 65, 65], 0),
 );
 
 /// Value of an integer number token in any spelling the emitter produces
@@ -565,7 +565,7 @@ fn audit_metrics(target: Target, seed: u64) -> AuditPins {
     let tokens = crate::lexer::lex(&output, target).unwrap();
 
     // M1/M2: the base86 stream (transport surface, template-independent).
-    let segments = transport::segment_literals(&output, target, seed).unwrap();
+    let segments = segment_literals(&output, target, seed).unwrap();
     // K3-FULL 第二步: `segment_literals` admits the union of the three
     // per-segment tables, and M1 re-derives that filter, so it unions too. The
     // "exactly one table can write this segment" claim is pinned in

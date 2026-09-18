@@ -14,6 +14,7 @@ mod native {
 include!("tests/runtime.rs");
 include!("tests/semantic_corruption.rs");
 include!("tests/transport.rs");
+include!("tests/transport_fragments.rs");
 include!("tests/semantic.rs");
 include!("tests/transport_chain.rs");
 include!("tests/seed_v1.rs");

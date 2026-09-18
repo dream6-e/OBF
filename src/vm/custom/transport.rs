@@ -341,54 +341,6 @@ pub(crate) fn opaque_split(rng: &mut crate::random::Prng, value: u64) -> (u64, u
     }
 }
 
-/// The three payload segment literals of a generated VM script: decoded
-/// string literals at least 12 bytes long whose bytes all belong to the
-/// one of the three per-segment alphabets (union admission, K3-FULL 第二步),
-/// longest three win. The baked ALPHA table is emitted as
-/// eight sub-12 fragments so it can never enter the top three; short
-/// literals such as format strings or probe tags never reach it either. No
-/// divisibility rule: mixed groups make length residues meaningless (T9).
-pub(crate) fn segment_literals(
-    source: &str,
-    target: Target,
-    seed: u64,
-) -> Result<Vec<Vec<u8>>, Diagnostic> {
-    // K3-FULL 第二步: membership is tested against the **union** of the three
-    // per-segment tables. The audit cannot know which literal is which segment
-    // until the chain resolves, so the admission filter stays permissive and the
-    // chain itself does the disambiguating -- `chained_segment_orders` decodes
-    // chain position `k` with segment `k`'s own table, and a symbol outside that
-    // table fails the decode. Since each table is 86 of the same 99 characters, a
-    // foreign segment's text lands inside a given table with probability around
-    // (86/99)^length, i.e. dead for every length the filter admits (>= 12).
-    let alphabets = base86_segment_alphabets(seed);
-    let mut member = [false; 256];
-    for alphabet in &alphabets {
-        for &byte in alphabet {
-            member[byte as usize] = true;
-        }
-    }
-    let mut candidates = Vec::new();
-    for token in crate::lexer::lex(source, target)? {
-        if token.kind != crate::lexer::TokenKind::String {
-            continue;
-        }
-        let value = crate::minify::literal_bytes(token.text(source), target)
-            .map_err(|error| Diagnostic::new(format!("generated VM blob: {error}")))?;
-        if value.len() >= 12 && value.iter().all(|&byte| member[byte as usize]) {
-            candidates.push(value);
-        }
-    }
-    if candidates.len() < 3 {
-        return Err(Diagnostic::new(
-            "generated VM is missing its three payload segments",
-        ));
-    }
-    candidates.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
-    candidates.truncate(3);
-    Ok(candidates)
-}
-
 /// K19: every segment order whose decode chains from head to tail. The head
 /// segment (the one carrying the transport watermark) uses an unrotated digit
 /// table; each later segment rotates by the fold of the previous segment's

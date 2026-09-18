@@ -58,6 +58,7 @@ mod structure;
 #[cfg(test)]
 mod tests;
 mod transport;
+mod transport_fragments;
 
 use crate::bytecode::custom::{self, Opcode, Program};
 use crate::{Diagnostic, Target};
@@ -78,6 +79,7 @@ pub use transport::{
     base86_decode_mixed, base86_image_alphabet, base86_segment_alphabet, decrypt_embedded,
     extract_embedded,
 };
+pub(crate) use transport_fragments::*;
 
 pub fn compile(source: &str, target: Target) -> Result<Vec<u8>, Diagnostic> {
     custom::encode(&crate::ir::compile(source, target)?)

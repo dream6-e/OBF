@@ -1680,7 +1680,12 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
                         crate::minify::literal_bytes(t.text(&output), target).unwrap(),
                     )
                 })
-                .find(|(_, bytes)| bytes == literal)
+                .find(|(_, bytes)| {
+                    bytes.len() >= 12
+                        && literal
+                            .windows(bytes.len() - 1)
+                            .any(|window| window == &bytes[1..])
+                })
                 .map(|(span, _)| span)
                 .unwrap();
             let innermost = functions
@@ -1689,13 +1694,10 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
                 .max_by_key(|(start, _)| *start)
                 .unwrap();
             let chunk = output[innermost.0..innermost.1].to_owned();
-            // Seven positional parameters (E,SB,NCH,TC,DB,GI,LS pre-rename).
             let params = chunk["function".len()..].trim_start();
             assert!(params.starts_with('('), "{target}: {params:?}");
             let arity = params[1..params.find(')').unwrap()].split(',').count();
-            // K19: the chain root takes seven parameters; a chained field takes
-            // an eighth -- the previous part's decoded string.
-            let want = if positions[index] == 0 { 7 } else { 8 };
+            let want = if positions[index] == 0 { 8 } else { 9 };
             assert_eq!(arity, want, "{target}: segment field arity moved");
             chunks.push(chunk);
         }
@@ -1714,10 +1716,10 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
                 format!(",\"{}\"", lua_escape_string(&chained[position - 1]))
             };
             let harness = format!(
-                "local SB=string.byte;local NCH=string.char;local TC=table.concat;\
+                "local SB=string.byte;local NCH=string.char;local TC=table.concat;local SS=string.sub;\
 local E=function() error(\"boom\") end;local DB=true;local LS=function() end;\
 local GI=function() return {stub} end;local F={chunk};\
-local r=F(E,SB,NCH,TC,DB,GI,LS{prev_arg});local h=\"\";\
+local r=F(E,SB,NCH,TC,SS,DB,GI,LS{prev_arg});local h=\"\";\
 for i=1,#r do h=h..string.format(\"%02x\",SB(r,i)) end;print(h)"
             );
             let workspace = native::Workspace::new();

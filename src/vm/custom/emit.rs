@@ -229,20 +229,10 @@ if d7+d8*65521~={fake_adler} then E()end;"
         program.target,
         &chacha,
     );
-    // Transport layer (K9a): the framed double-ChaCha8 image is split into
-    // three byte parts; each part is mixed-group base86 (4-char length
-    // prefix, chained 4/5/6-char groups, padded tails) over the per-image
-    // 86-subset alphabet, and lands in a seed-shuffled payload-table
-    // function. Each segment function re-runs the audited
-    // native-loadstring probe and decodes only its own slice through a
-    // seeded 4-state machine (prefix, main, tail, done) with VAL-table
-    // digits -- no digit arithmetic, no length rule, no clean constant.
-    // Fixed transport watermark: the decoded stream must begin with the
-    // literal bytes "XXS:". The check itself is split across two payload
-    // functions -- a generic big-endian packer over the first four bytes of
-    // the first stream segment, and a comparator against one opaque u32 --
-    // so neither function spells out the watermark and the string "XXS:"
-    // never appears in the script. A mismatch aborts silently via E().
+    // Three independently keyed mixed-base86 parts wrap the double-ChaCha8
+    // frame. Each runs its own native probe and four-state decoder. Goal 7
+    // fragments and source-shuffles every encoded part before runtime joining.
+    // The split opaque watermark check still fails closed before decryption.
     let expected_watermark = u32::from_be_bytes(*b"XXS:");
     let mut marked = Vec::with_capacity(encrypted.len() + 4);
     marked.extend_from_slice(b"XXS:");
@@ -290,7 +280,10 @@ if d7+d8*65521~={fake_adler} then E()end;"
             text.len() >= 12,
             "K9a: segment too short for the length filter"
         );
-        let literal = lua_escape_string(text.as_bytes());
+        let mut fragment_rng = crate::random::Prng::sfc(
+            seed ^ 0x6737_6672_6167_6d31 ^ (part as u64).wrapping_mul(0x9e37_79b9),
+        );
+        let fragments = fragment_segment_literal(&text, alphabet, &mut fragment_rng);
         // Opaque splits, fresh per segment: radix 86 = c1+c2, byte width
         // 256 = m1+m2, length modulus 2^24 = a24+b24; every addend avoids
         // the audit's nice set, so no clean transport constant survives.
@@ -390,11 +383,13 @@ end;if i~=#S+1 then E()end;{go_done}",
         // different source than the transitions do).
         let st_prefix = structure.opaque_literal(u64::from(k_prefix), luau, "i");
         let mut body = format!(
-            "local ALPHA={alpha};local S=\"{literal}\";local r={c1}+{c2};local MM={m1}+{m2};\
-local M24={a24}+{b24};local o={{}};local B=0;local R=0;local pv=0;local i=1;\
-{fold_into_b}{val_build}local st={st_prefix};{machine}",
+            "local ALPHA={alpha};local o={fragments};local r={c1}+{c2};local MM={m1}+{m2};\
+local M24={a24}+{b24};local B=0;local R={{}};local pv=0;local i=1;\
+{fold_into_b}{val_build}for j=1,#o do pv=(VAL[SB(o[j],1)]-B)%r;\
+if pv<1 or pv>#o or R[pv]then E()end;R[pv]=SS(o[j],2)end;local S=TC(R);o={{}};R=0;pv=0;\
+local st={st_prefix};{machine}",
             alpha = alpha_literal,
-            literal = literal,
+            fragments = fragments,
             c1 = c1,
             c2 = c2,
             m1 = m1,
@@ -417,7 +412,7 @@ local M24={a24}+{b24};local o={{}};local B=0;local R=0;local pv=0;local i=1;\
         let mut chunk = String::new();
         write!(
             chunk,
-            "[{key}]=function(E,SB,NCH,TC,DB,GI,LS{prev_param})local A={probe};{gate}\
+            "[{key}]=function(E,SB,NCH,TC,SS,DB,GI,LS{prev_param})local A={probe};{gate}\
 local g={{}};{body}end,",
             key = keys[8 + hold[part]],
             probe = probe,
@@ -1085,7 +1080,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         cn2 = probe_order[2] + 1,
     );
     let segment_stage = format!(
-        "{}Y1=VMS[{}](E,SB,NCH,TC,DBG,GI,LS);{}Y2=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y1);{}Y3=VMS[{}](E,SB,NCH,TC,DBG,GI,LS,Y2);{}local mV=VMS[{}](Y1,E,SB);{}VMS[{}](mV,E);{go_decode}",
+        "{}Y1=VMS[{}](E,SB,NCH,TC,SS,DBG,GI,LS);{}Y2=VMS[{}](E,SB,NCH,TC,SS,DBG,GI,LS,Y1);{}Y3=VMS[{}](E,SB,NCH,TC,SS,DBG,GI,LS,Y2);{}local mV=VMS[{}](Y1,E,SB);{}VMS[{}](mV,E);{go_decode}",
         scatter.blob(4),
         keys[8 + hold[0]],
         scatter.blob(5),

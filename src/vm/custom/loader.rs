@@ -120,6 +120,53 @@ fn simple_unequal(rest: &str) -> Option<((&str, &str), usize)> {
     Some(((lhs, rhs), tail + " then".len()))
 }
 
+// Generated payload strings can contain arbitrary alphabet text such as `t.`
+// or `VMS`; only identifiers in Lua code are shell-handle captures.
+fn has_shell_capture(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\'' | b'"') {
+            let quote = bytes[index];
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else {
+                    let done = bytes[index] == quote;
+                    index += 1;
+                    if done {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if is_atom_byte(bytes[index]) && !bytes[index].is_ascii_digit() {
+            let start = index;
+            while index < bytes.len() && is_atom_byte(bytes[index]) {
+                index += 1;
+            }
+            let name = &body[start..index];
+            if name == "VMS" {
+                return true;
+            }
+            if name == "t" {
+                let mut next = index;
+                while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                    next += 1;
+                }
+                if bytes.get(next) == Some(&b'.') {
+                    return true;
+                }
+            }
+            continue;
+        }
+        index += 1;
+    }
+    false
+}
+
 /// 从一个字段文本 `[k]=function(...) ... end[,?]` 中取出键与函数文本。
 fn split_field(field: &str) -> Option<(u64, String)> {
     let rest = field.strip_prefix('[')?;
@@ -169,7 +216,7 @@ pub(crate) fn scatter(
         };
         // 搬迁后字段体里任何对壳句柄的自由引用都会指向入口局部变量，
         // 语义静默改变；这种字段永不搬迁。
-        if body.contains("t.") || body.contains("VMS") {
+        if has_shell_capture(&body) {
             kept.push(field);
             continue;
         }
@@ -268,4 +315,18 @@ impl Scatter {
 /// 由装载点列表重建折叠期望值，供门校验生成器与壳内常量一致。
 pub(crate) fn fold_of(keys: &[u64]) -> u64 {
     keys.iter().fold(0u64, |acc, key| acc.wrapping_add(*key))
+}
+
+#[cfg(test)]
+mod capture_scan_tests {
+    use super::has_shell_capture;
+
+    #[test]
+    fn payload_text_cannot_fake_a_shell_handle_capture() {
+        assert!(!has_shell_capture(
+            "function()local s='noise:t.more:VMS[9]' return s end"
+        ));
+        assert!(has_shell_capture("function()return t.e end"));
+        assert!(has_shell_capture("function()return VMS[9]()end"));
+    }
 }
