@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+# Goal 7 construction window (2026-09-18): the user explicitly requested that
+# both artifact-size gates stay suspended while the static-recovery signatures
+# are being redesigned. Child cargo tests and bench-vm inherit these values;
+# every gate site still prints its measured size and a WARN instead of failing.
+# Remove these two exports before the Goal 7 acceptance/regeneration commit.
+export OBF_BENCH_SCRIPT_CAP=off
+export OBF_SHELL_CAP=off
+printf '%s\n' '[matrix] WARN Goal 7 construction window: raw and shell size gates are suspended'
+
 # The artifact-size gates: since K4 (2026-09-14, user instruction 体积门设置为压缩后的大小)
 # the deliverable budget is the *compressed* shell's byte count -- pinned in the appended
 # "[matrix] XXS shell wrapper" step below (90,000 / 90,000 B since the goal-5 batch,
