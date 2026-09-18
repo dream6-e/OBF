@@ -505,30 +505,31 @@ const PINS_LUA51_7001: AuditPins = (
 //   M4b skipped 38, M5 (4, 1760), M7 ([550, 541, 535, 134, 15], 401), M3a/M6 zeros:
 //       re-measured with the same text.
 //   M1 (96) unchanged.
-// Goal 7 transport fragmentation (2026-09-18), Luau side. As on Lua 5.1,
-// M5/M7 prove that no 500-byte-class transport token remains; the 65..66-byte
-// entries are fragments. The dedicated RNG keeps M1/M2/KAT/M3b/M4b/M6 and
-// downstream draws stable; only the joiner's 0/1/2/11 counts enter M4.
+// Goal 7 buffer-backed opaque entry transitions (2026-09-18): M1/M2/KAT,
+// the fragmented M5/M7 transport surface and M6 ciphertext repeat gate stay
+// fixed. M3b/M4/M4b move because five transitions now carry independently
+// permuted byte fragments, bit32 masks, typed reads and erase/checkpoint code;
+// the counts are measured, not relaxed (M3a still has only two env captures).
 const PINS_LUAU_7351: AuditPins = (
     96,
     (1501, 1, 1, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (339, 9007532102839320, 4503599627370496),
+    (340, 9007532843931141, 4503599627370496),
     [
-        (1, 719),
-        (2, 584),
-        (0, 576),
-        (3, 193),
-        (4, 141),
-        (5, 127),
-        (6, 121),
-        (16, 81),
-        (8, 78),
-        (11, 73),
-        (95, 72),
-        (13, 61),
+        (1, 834),
+        (2, 644),
+        (0, 587),
+        (3, 304),
+        (4, 261),
+        (5, 161),
+        (8, 158),
+        (6, 126),
+        (20, 77),
+        (26, 76),
+        (17, 74),
+        (31, 73),
     ],
-    5,
+    3,
     (8, 587),
     (0, 0),
     ([134, 66, 65, 65, 65], 0),

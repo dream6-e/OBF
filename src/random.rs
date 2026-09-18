@@ -67,6 +67,18 @@ pub(crate) fn scale(raw: u64, upper: usize) -> usize {
     }
 }
 
+/// Luau-only transient-buffer reconstruction widths. Entry transitions use a
+/// shuffled permutation of all five, so one generated VM mixes the APIs rather
+/// than merely making them probabilistically reachable across many seeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BufferRead {
+    U8,
+    U16,
+    U32,
+    I32,
+    F64,
+}
+
 impl Prng {
     pub fn new(seed: u64) -> Self {
         Self::with_family(Family::Xs, seed)
@@ -568,6 +580,22 @@ impl Prng {
             }
         }
         arms.retain(|arm| !Self::spells_value(value, arm));
+        // Normally the random offsets plus the other families already leave at
+        // least two arms. If every candidate was filtered, finish the same
+        // offset family deterministically without perturbing successful seeds.
+        if arms.len() < 2 {
+            for k in 1..=199u64 {
+                if k != value && !Self::audit_nice(k) && !Self::audit_nice(value + k) {
+                    let arm = format!("({}-{k})", value + k);
+                    if !Self::spells_value(value, &arm) && !arms.contains(&arm) {
+                        arms.push(arm);
+                    }
+                    if arms.len() >= 2 {
+                        break;
+                    }
+                }
+            }
+        }
         assert!(
             arms.len() >= 2,
             "opaque_literal: value {value} has {} usable decompositions",
@@ -586,6 +614,154 @@ impl Prng {
         debug_assert!(
             !Self::spells_value(value, &text),
             "opaque_literal: {text} still spells {value}"
+        );
+        text
+    }
+
+    /// Luau entry-transition reconstruction backed by two fresh, per-use
+    /// buffers. The first buffer receives source/checkpoint-masked bytes in a
+    /// seeded physical permutation; the second is normalized immediately before
+    /// the selected typed read. Both are overwritten and released before return.
+    ///
+    /// This is deliberately inline rather than a common `decode(buffer, mode)`
+    /// helper: each site has its own offsets, byte order, mask rotations and
+    /// statement order. `ck` and `source` are sampled before and after the read,
+    /// while every byte transform goes through captured bit32 functions. The
+    /// other arm is the existing arithmetic reconstruction, so either guard
+    /// result is exactly `value`.
+    pub(crate) fn entry_buffer_literal(
+        &mut self,
+        value: u64,
+        source: &str,
+        read: BufferRead,
+    ) -> String {
+        assert!(value < (1 << 31), "entry_buffer_literal value out of range");
+        let arithmetic = self.opaque_literal(value, true, source);
+        let width = if read == BufferRead::F64 { 8 } else { 4 };
+        let bytes: Vec<u8> = if read == BufferRead::F64 {
+            (value as f64).to_bits().to_le_bytes().to_vec()
+        } else {
+            (value as u32).to_le_bytes().to_vec()
+        };
+        let input_offset = 1 + self.index(4);
+        let output_offset = 1 + self.index(4);
+        let mut physical: Vec<usize> = (0..width).collect();
+        self.shuffle(&mut physical);
+        let mut writes: Vec<usize> = (0..width).collect();
+        let mut normalizes = writes.clone();
+        let mut erases = writes.clone();
+        self.shuffle(&mut writes);
+        self.shuffle(&mut normalizes);
+        self.shuffle(&mut erases);
+        let rot_a = 1 + self.index(31);
+        let rot_b = 1 + self.index(31);
+
+        // Avoid reintroducing the value as an infrastructure/byte token when it
+        // is itself small (notably 0, 1, 2, 85, 86 or 256).
+        let token = |number: usize| {
+            if number as u64 != value {
+                return number.to_string();
+            }
+            let k = (1usize..16)
+                .find(|k| {
+                    *k as u64 != value
+                        && (number + *k) as u64 != value
+                        && !Self::audit_nice(*k as u64)
+                        && !Self::audit_nice((number + *k) as u64)
+                })
+                .unwrap();
+            format!("({}-{})", number + k, k)
+        };
+        let byte = |number: u8| {
+            let number = usize::from(number);
+            if number as u64 == value {
+                let k = (1usize..16)
+                    .find(|k| {
+                        *k as u64 != value
+                            && (number + *k) as u64 != value
+                            && !Self::audit_nice(*k as u64)
+                            && !Self::audit_nice((number + *k) as u64)
+                    })
+                    .unwrap();
+                format!("({}-{})", number + k, k)
+            } else {
+                Self::byte_token(number as u8)
+            }
+        };
+
+        let mut body = format!(
+            "local g={{BNE({}),BNE({}),BX(ck,{source})%4294967296}};g[4]=BA(BX(g[3],LR(g[3],{rot_a})),{});",
+            token(input_offset + width),
+            token(output_offset + width),
+            token(255),
+        );
+        for logical in writes {
+            write!(
+                body,
+                "BW8(g[1],{},BX({},g[4]));",
+                token(input_offset + physical[logical]),
+                byte(bytes[logical]),
+            )
+            .unwrap();
+        }
+        write!(body, "if BX(ck,{source})%4294967296~=g[3] then E()end;").unwrap();
+        for logical in normalizes {
+            write!(
+                body,
+                "BW8(g[2],{},BX(BR8(g[1],{}),g[4]));",
+                token(output_offset + logical),
+                token(input_offset + physical[logical]),
+            )
+            .unwrap();
+        }
+        let read_expr = match read {
+            BufferRead::U8 => format!(
+                "BO(BO(BR8(g[2],{a}),SHL(BR8(g[2],{b}),8)),BO(SHL(BR8(g[2],{c}),16),SHL(BR8(g[2],{d}),24)))",
+                a = token(output_offset),
+                b = token(output_offset + 1),
+                c = token(output_offset + 2),
+                d = token(output_offset + 3),
+            ),
+            BufferRead::U16 => format!(
+                "BO(BR2(g[2],{}),SHL(BR2(g[2],{}),16))",
+                token(output_offset),
+                token(output_offset + 2),
+            ),
+            BufferRead::U32 => format!("BR3(g[2],{})", token(output_offset)),
+            BufferRead::I32 => format!("BRI(g[2],{})", token(output_offset)),
+            BufferRead::F64 => format!("BRF(g[2],{})", token(output_offset)),
+        };
+        write!(
+            body,
+            "g[6]={read_expr};g[5]=BA(BX(g[3],LR(g[3],{rot_b})),{});",
+            token(255)
+        )
+        .unwrap();
+        for logical in erases {
+            write!(
+                body,
+                "BW8(g[1],{},BX(g[5],{}));BW8(g[2],{},BX(g[5],{}));",
+                token(input_offset + physical[logical]),
+                token(logical),
+                token(output_offset + logical),
+                token(width - logical),
+            )
+            .unwrap();
+        }
+        write!(
+            body,
+            "g[1]=nil;g[2]=nil;if BX(ck,{source})%4294967296~=g[3] then E()end;return g[6]"
+        )
+        .unwrap();
+        let buffer = format!("(function(){body};end)()");
+        let guard = self.opaque_guard(source, value, true);
+        // Entry states are validated integers, so this guard selects the
+        // buffer arm in every normal run. The arithmetic arm remains an exact
+        // fallback: soundness never depends on treating it as unreachable.
+        let text = format!("({guard}and{buffer}or{arithmetic})");
+        debug_assert!(
+            !Self::spells_value(value, &text),
+            "buffer form spells {value}: {text}"
         );
         text
     }
@@ -701,7 +877,7 @@ pub(crate) fn fresh_seed() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{fresh_seed, scale, Family, Prng, LCG_INCR, LCG_MULT};
+    use super::{fresh_seed, scale, BufferRead, Family, Prng, LCG_INCR, LCG_MULT};
 
     #[test]
     fn default_seeds_are_distinct_across_threads() {
@@ -1512,6 +1688,35 @@ mod tests {
                     });
                 }
             }
+        }
+    }
+
+    #[test]
+    fn luau_buffer_reconstructions_are_inline_mixed_and_parseable() {
+        use crate::target::Target;
+        let reads = [
+            BufferRead::U8,
+            BufferRead::U16,
+            BufferRead::U32,
+            BufferRead::I32,
+            BufferRead::F64,
+        ];
+        let signatures = ["BO(BO(BR8", "BR2(g[2]", "BR3(g[2]", "BRI(g[2]", "BRF(g[2]"];
+        for (index, read) in reads.into_iter().enumerate() {
+            let value = 30_001 + index as u64 * 997;
+            let mut random = Prng::lcg(0x6275_6666_6572_0000 ^ value);
+            let text = random.entry_buffer_literal(value, "es", read);
+            assert!(!Prng::spells_value(value, &text), "{text}");
+            assert_eq!(text.matches("BNE(").count(), 2, "{text}");
+            assert!(text.contains("BW8(") && text.contains(signatures[index]));
+            assert!(text.matches("BX(ck,es)").count() >= 3, "{text}");
+            assert!(!text.contains("BFS("), "fromstring is forbidden: {text}");
+            assert!(text.contains("g[1]=nil;g[2]=nil"));
+            let source = format!(
+                "local BNE,BW8,BR8,BR2,BR3,BRI,BRF,BX,BA,BO,LR,SHL,E;local ck,es=9,7;es={text};return es"
+            );
+            crate::parser::parse_source(&source, Target::Luau)
+                .unwrap_or_else(|error| panic!("{read:?}: {error:?}\n{text}"));
         }
     }
 

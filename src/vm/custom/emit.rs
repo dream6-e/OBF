@@ -1049,13 +1049,36 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         entry_states[4],
         entry_states[5],
     );
-    // Goal 6 (part 3): the entry graph's stage labels are opaque, like every
-    // other CFF state number -- see `structure::state_assign`.
-    let go_probe = state_assign(&mut structure, "es", e_probe, luau);
-    let go_segments = state_assign(&mut structure, "es", e_segments, luau);
-    let go_decode = state_assign(&mut structure, "es", e_decode, luau);
-    let go_bind = state_assign(&mut structure, "es", e_bind, luau);
-    let go_run = state_assign(&mut structure, "es", e_run, luau);
+    // Luau entry transitions mix all five typed reads; each owns and erases its
+    // checkpoint-bound buffers. Lua 5.1 stays arithmetic-only.
+    let mut buffer_reads = [
+        crate::random::BufferRead::U8,
+        crate::random::BufferRead::U16,
+        crate::random::BufferRead::U32,
+        crate::random::BufferRead::I32,
+        crate::random::BufferRead::F64,
+    ];
+    if luau {
+        structure.shuffle(&mut buffer_reads);
+    }
+    let mut read_at = 0usize;
+    let mut transition = |value: u16| {
+        if luau {
+            let read = buffer_reads[read_at];
+            read_at += 1;
+            format!(
+                "es={};",
+                structure.entry_buffer_literal(u64::from(value), "es", read)
+            )
+        } else {
+            state_assign(&mut structure, "es", value, false)
+        }
+    };
+    let go_probe = transition(e_probe);
+    let go_segments = transition(e_segments);
+    let go_decode = transition(e_decode);
+    let go_bind = transition(e_bind);
+    let go_run = transition(e_run);
     let prelude_stage = format!(
         "{}{ret_names}=VMS[{}]();{go_probe}",
         scatter.blob(0),

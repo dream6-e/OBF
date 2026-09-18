@@ -80,7 +80,7 @@ pub(crate) fn emit_prelude(
         // touches. All resolve through the char pool; none is ever spelled.
         hidden.extend([
             "bit32", "buffer", "bxor", "band", "bor", "bnot", "lrotate", "lshift", "rshift",
-            "create", "writeu8", "readu8", "readu32",
+            "create", "writeu8", "readu8", "readu16", "readu32", "readi32", "readf64",
         ]);
     } else {
         hidden.push("getinfo");
@@ -213,7 +213,7 @@ pub(crate) fn emit_prelude(
         units.push((
                 "B32",
                 format!(
-                    "local B32,BUF=G[{0}],G[{1}];local BX,BA,BO,BN,LR,SHL,RS=B32[{2}],B32[{3}],B32[{4}],B32[{5}],B32[{6}],B32[{7}],B32[{8}];local BNE,BW8,BR8,BFS,BR3=BUF[{9}],BUF[{10}],BUF[{11}],BUF[{12}],BUF[{13}];",
+                    "local B32,BUF=G[{0}],G[{1}];local BX,BA,BO,BN,LR,SHL,RS=B32[{2}],B32[{3}],B32[{4}],B32[{5}],B32[{6}],B32[{7}],B32[{8}];local BNE,BW8,BR8,BR2,BFS,BR3,BRI,BRF=BUF[{9}],BUF[{10}],BUF[{11}],BUF[{12}],BUF[{13}],BUF[{14}],BUF[{15}],BUF[{16}];",
                     var_of["bit32"],
                     var_of["buffer"],
                     var_of["bxor"],
@@ -226,8 +226,11 @@ pub(crate) fn emit_prelude(
                     var_of["create"],
                     var_of["writeu8"],
                     var_of["readu8"],
+                    var_of["readu16"],
                     var_of["fromstring"],
                     var_of["readu32"],
+                    var_of["readi32"],
+                    var_of["readf64"],
                 ),
             ));
     }
@@ -297,6 +300,9 @@ pub(crate) fn emit_prelude(
         "B32", "BUF", "BX", "BA", "BO", "BN", "LR", "SHL", "RS", "BNE", "BW8", "BR8", "BFS", "BR3",
         "UK", "U32", "NU",
     ];
+    if program.target.is_luau() {
+        ret_order.extend(["BR2", "BRI", "BRF"]);
+    }
     ret_order.extend(probe_transcript.as_ref().map(|t| t.unit));
     structure.shuffle(&mut ret_order);
     let ret_names = ret_order.join(",");
