@@ -1,0 +1,2528 @@
+===== o=0 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                  GUARD o < 5
+                      GUARD not ( o >= 2 )
+                          GUARD o ~= 1
+                            ( B ) [ l [ K ] ] = B [ Q [ K ] ] .. B [ k [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=1 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                  GUARD o < 5
+                      GUARD not ( o >= 2 )
+                            I = ( nil ) ; Z = ( nil ) ; u = nil ; X = ( 21 ) ; while true do if X == 25 then if j [ 37 ] == 236 then u = j [ 42 ] ; end ; break ; elseif X == 112 then Z = 0 ; X = - 33 + ( j [ 42 ] [ 19 ] ( ( j [ 42 ] [ 23 ] ( ( j [ 42 ] [ 20 ] ( ( j [ 42 ] [ 24 ] ( ( j [ 42 ] [ 20 ] ( k [ K ] == X and X or X ) 
+                              GUARD j [ 37 ] == 236
+                                p = ( nil ) ; X = ( 6 ) ;
+                            ; while true do if X == 45 then u = ( u [ p ] ) ; break ; elseif X ~= 6 then else p = ( 19 ) ; X = ( 17 + ( ( j [ 42 ] [ 24 ] ( ( j [ 42 ] [ 23 ] ( o + X - o <= k [ K ] and k [ K ] or o , o ) ) ) ) + o ) ) ; end ; end ;
+                              GUARD j [ 37 ] ~= 162
+                                c = ( 105 ) ; ( j ) [ 4 ] , j [ 54 ] = 192 - 142 ~= - 111 , j [ 37 ] ;
+                            ; p = j [ 42 ] ; U = ( nil ) ; X = 97 ; while true do if X == 76 then p = ( p [ U ] ) ; break ; elseif X ~= 97 then else U = 20 ; X = ( - 6422340 + ( ( j [ 42 ] [ 27 ] ( ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 28 ] ( ( j [ 42 ] [ 21 ] ( o ) ) - X , k [ K ] ) ) , o , X ) ) , k [ K ] ) ) - k [ K ] ) ) ; cont
+                              GUARD j [ 59 ] ~= j [ 36 ]
+                                S = o ; N -= S ; X = ( 33 ) ; while true do if X <= 12 then N += S ; break ; else S = J [ K ] ; X = 12 + ( j [ 42 ] [ 21 ] ( ( j [ 42 ] [ 20 ] ( ( j [ 42 ] [ 26 ] ( X + o , ( o ) ) ) ) ) + k [ K ] + X , o , k [ K ] ) ) ; continue ; end ; end ; S = ( k [ K ] ) ; c = o ; d = d ( N , S , c ) ; X = ( 49
+                            ; p = p ( U ) ; X = ( 6 ) ; while true do if v ~= j [ 42 ] then if X == 6 then U = ( J [ K ] ) ; X = 39 + ( ( j [ 42 ] [ 25 ] ( ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 25 ] ( X ) ) - o + o , X , X ) ) ) ) + X ) ; continue ; else p -= U ; break ; end ; end ; end ; U = ( k [ K ] ) ; u = u ( p , U ) ; Z += u 
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=2 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                  GUARD o < 5
+                            B [ k [ K ] ] = j [ 42 ] [ Q [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=3 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                  GUARD o < 5
+                          GUARD o >= 3
+                              GUARD o ~= 4
+                                u = ( u [ X ] ) ; X = B ; p = l [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=4 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                  GUARD o < 5
+                          GUARD o >= 3
+                                u = B ; X = l [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=5 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                      GUARD j [ 52 ] ~= j [ 10 ]
+                        while j [ 37 ] do return - j [ 50 ] ; end ;
+                    ;
+                          GUARD o ~= 6
+                              GUARD B [ k [ K ] ] == B [ l [ K ] ]
+                                K = ( Q [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=6 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                      GUARD j [ 52 ] ~= j [ 10 ]
+                        while j [ 37 ] do return - j [ 50 ] ; end ;
+                    ;
+                            u = u [ X ] ; X = C [ K ] ; u += X ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=7 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                      GUARD j [ 52 ] ~= j [ 10 ]
+                        while j [ 37 ] do return - j [ 50 ] ; end ;
+                    ;
+                      GUARD o >= 7
+                          GUARD o < 8
+                              GUARD j [ 37 ] == 239
+                                u = ( k [ K ] ) ;
+                            ; X = I ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=8 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                      GUARD j [ 52 ] ~= j [ 10 ]
+                        while j [ 37 ] do return - j [ 50 ] ; end ;
+                    ;
+                      GUARD o >= 7
+                                  GUARD j [ 36 ] ~= j [ 47 ]
+                                    ( j ) [ 2 ] , j [ 55 ] = j [ 37 ] , ( j [ 37 ] == 68 ) ;
+                                ; I = l [ K ] ; Z = Q [ K ] ; u = ( B [ I ] ) ; ( j [ 41 ] ) ( B , I + 1 , I + k [ K ] , Z + 1 , u ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=9 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+              GUARD not ( o >= 10 )
+                      GUARD j [ 52 ] ~= j [ 10 ]
+                        while j [ 37 ] do return - j [ 50 ] ; end ;
+                    ;
+                      GUARD o >= 7
+                              GUARD o == 9
+                                ( B ) [ Q [ K ] ] = B [ k [ K ] ] - B [ l [ K ] ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=10 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                      GUARD o < 12
+                              GUARD B [ k [ K ] ] ~= B [ Q [ K ] ]
+                                K = ( l [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=11 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                      GUARD o < 12
+                          GUARD o == 11
+                            ( B ) [ k [ K ] ] = j [ 29 ] ( l [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=12 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                            u = ( u [ X ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=13 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                          GUARD not ( o < 13 )
+                              GUARD j [ 52 ] ~= j [ 14 ]
+                                j [ 44 ] = ( 179 ) ;
+                            ;
+                                ( B ) [ k [ K ] ] = ( B [ Q [ K ] ] % B [ l [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=14 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                          GUARD not ( o < 13 )
+                              GUARD j [ 52 ] ~= j [ 14 ]
+                                j [ 44 ] = ( 179 ) ;
+                            ;
+                              GUARD o == 14
+                                I = nil ; Z = ( nil ) ; u = nil ; X = 31 ; while true do if X > 31 then if X > 41 then Z = ( 0 ) ; u = ( 4503599627370495 ) ; X = ( - 59 + ( ( j [ 42 ] [ 19 ] ( ( j [ 42 ] [ 21 ] ( X , X ) ) , ( o ) ) ) + X - o - X + X ) ) ; else Z *= u ; break ; end ; else I = - 4294967176 ; X = ( 66 + ( ( j [ 42 ]
+                                    u = ( j [ 42 ] ) ; p = ( nil ) ; U = nil ; d = ( nil ) ; X = ( 39 ) ;
+                                ; while true do if X > 28 and X < 46 then p = 25 ; X = 82 + ( ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 21 ] ( o - o - o , o ) ) , o , X ) ) , o ) ) - X ) ; continue ; elseif X < 39 then U = 23 ; X = ( 48 + ( j [ 42 ] [ 25 ] ( ( j [ 42 ] [ 23 ] ( X - X - X + o - o , o , o ) ) ) ) ) ; cont
+                                  GUARD j [ 37 ] ~= 197
+                                    U = ( U [ d ] ) ;
+                                ; N = ( nil ) ; X = ( 108 ) ; while true do if not ( X <= 91 ) then d = ( o ) ; X = ( - 17 + ( ( j [ 42 ] [ 25 ] ( ( j [ 42 ] [ 27 ] ( ( j [ 42 ] [ 19 ] ( o - o - o , ( o ) ) ) , ( o ) ) ) ) ) ~= o and X or X ) ) ; continue ; else N = o ; d += N ; break ; end ; end ; N = o ; d -= N ; N = J [ K ] ; X
+                                  GUARD not ( not d )
+                                    d = ( J [ K ] ) ;
+                                ; N = ( o ) ; S = ( o ) ; X = 120 ; while true do if X == 120 then U = U ( d , N , S ) ; p = p ( U ) ; X = ( - 4294967174 + ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 25 ] ( ( j [ 42 ] [ 20 ] ( ( j [ 42 ] [ 22 ] ( X + o , o ) ) + o ) ) ) ) ) ) ) ; elseif X ~= 119 then else u = u ( p ) ; break ; end ; end ; Z 
+                                  GUARD j [ 37 ] == 236
+                                    Z = ( k [ K ] ) ;
+                                ; X = 83 ; while true do if X ~= 22 then u = ( l ) ; X = - 4294967190 + ( j [ 42 ] [ 25 ] ( ( j [ 42 ] [ 21 ] ( ( j [ 42 ] [ 20 ] ( ( X >= o and X or o ) + o ) ) + X ) ) ) ) ; else I [ Z ] = ( u ) ; break ; end ; end ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=15 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                  GUARD not ( o < 15 )
+                      GUARD not ( o >= 17 )
+                            I = nil ; Z = nil ; u = nil ; X = 108 ; while true do if X == 69 then if j [ 37 ] == 15 then j [ 50 ] , j [ 4 ] = j [ 37 ] , ( j [ 16 ] ) ; if not ( j [ 37 ] * - 48 ) then else ( j ) [ 38 ] = ( j [ 37 ] <= j [ 53 ] ) ; end ; end ; Z *= u ; u = j [ 42 ] ; break ; elseif X == 108 then I = ( 95 ) ; X =
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=16 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                  GUARD not ( o < 15 )
+                      GUARD not ( o >= 17 )
+                          GUARD o == 16
+                              GUARD j [ 37 ] == 236
+                            ; I = l [ K ] ; Z , u , X = E ( ) ;
+                              GUARD Z
+                                    ( B ) [ I + 1 ] = u ;
+                                ; B [ I + 2 ] = X ; K = ( k [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=17 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                  GUARD not ( o < 15 )
+                            ( B ) [ l [ K ] ] = B [ Q [ K ] ] ~= C [ K ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=18 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                  GUARD not ( o < 15 )
+                          GUARD not ( o < 18 )
+                              GUARD o ~= 19
+                                ; I = nil ; Z = nil ; u = ( nil ) ; X = ( 126 ) ; while true do if X == 63 then Z *= u ; break ; elseif X == 126 then I = ( 128 ) ; X = - 58 + ( ( j [ 42 ] [ 23 ] ( ( j [ 42 ] [ 20 ] ( X - X + X ) ) , o ) ) - o + X ) ; continue ; elseif X == 69 then if j [ 37 ] ~= 8 then else while 146 do ( j ) [ 36
+                                    X = 0 ; while true do if X > 50 then if not ( X > 52 ) then Z += u ; break ; else if not ( X > 95 ) then if j [ 37 ] ~= 155 then u -= p ; X = ( - 4980762 + ( ( j [ 42 ] [ 26 ] ( ( X + o == o and l [ K ] or o ) < o and o or l [ K ] , ( o ) ) ) - l [ K ] + X ) ) ; continue ; end ; else if j [ 37 ] == 
+                                ; J [ K ] = ( I ) ; X = ( 97 ) ; while true do if X < 76 then I [ Z ] = u ; break ; elseif X < 97 and X > 59 then if j [ 37 ] ~= 236 then while j [ 16 ] do return ; end ; end ; Z = l [ K ] ; u = ( J ) ; X = - 17 + ( ( ( j [ 42 ] [ 25 ] ( ( j [ 42 ] [ 25 ] ( ( j [ 42 ] [ 19 ] ( X - X , l [ K ] ) ) ) 
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=19 =====
+  GUARD not ( o >= 80 )
+          GUARD o < 20
+                  GUARD not ( o < 15 )
+                          GUARD not ( o < 18 )
+                                  GUARD j [ 37 ] ~= 155
+                                    return ;
+                                ; I = ( B ) ; Z = k [ K ] ; I = ( I [ Z ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=20 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                          GUARD j [ 37 ] == 69
+                            while j [ 37 ] do j [ 14 ] , v = 179 , ( j [ 37 ] ) ; ( j ) [ 45 ] , j [ 10 ] = 114 , 126 ; end ;
+                              GUARD j [ 53 ]
+                                ( j ) [ 24 ] , j [ 47 ] = j [ 59 ] , ( - 142 + j [ 62 ] ) ; j [ 51 ] = ( j [ 37 ] ) ;
+                            ;
+                        ;
+                          GUARD not ( o >= 22 )
+                                  GUARD j [ 37 ] ~= 116
+                                    for m = 1 , Q [ K ] , 1 do B [ m ] = ( D [ m ] ) ; end ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=21 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                          GUARD j [ 37 ] == 69
+                            while j [ 37 ] do j [ 14 ] , v = 179 , ( j [ 37 ] ) ; ( j ) [ 45 ] , j [ 10 ] = 114 , 126 ; end ;
+                              GUARD j [ 53 ]
+                                ( j ) [ 24 ] , j [ 47 ] = j [ 59 ] , ( - 142 + j [ 62 ] ) ; j [ 51 ] = ( j [ 37 ] ) ;
+                            ;
+                        ;
+                          GUARD not ( o >= 22 )
+                              GUARD o == 21
+                                I = ( B ) ; Z = ( k [ K ] ) ; u = B ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=22 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                          GUARD j [ 37 ] == 69
+                            while j [ 37 ] do j [ 14 ] , v = 179 , ( j [ 37 ] ) ; ( j ) [ 45 ] , j [ 10 ] = 114 , 126 ; end ;
+                              GUARD j [ 53 ]
+                                ( j ) [ 24 ] , j [ 47 ] = j [ 59 ] , ( - 142 + j [ 62 ] ) ; j [ 51 ] = ( j [ 37 ] ) ;
+                            ;
+                        ;
+                                  GUARD not ( o >= 23 )
+                                      GUARD j [ 37 ] == 236
+                                        I = ( Q [ K ] ) ;
+                                    ; ( B [ I ] ) ( B [ I + 1 ] ) ; e = I - 1 ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=23 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                          GUARD j [ 37 ] == 69
+                            while j [ 37 ] do j [ 14 ] , v = 179 , ( j [ 37 ] ) ; ( j ) [ 45 ] , j [ 10 ] = 114 , 126 ; end ;
+                              GUARD j [ 53 ]
+                                ( j ) [ 24 ] , j [ 47 ] = j [ 59 ] , ( - 142 + j [ 62 ] ) ; j [ 51 ] = ( j [ 37 ] ) ;
+                            ;
+                        ;
+                                        I = ( k [ K ] ) ; B [ I ] ( B [ I + 1 ] , B [ I + 2 ] ) ; e = I - 1 ;
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=24 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                          GUARD j [ 37 ] == 69
+                            while j [ 37 ] do j [ 14 ] , v = 179 , ( j [ 37 ] ) ; ( j ) [ 45 ] , j [ 10 ] = 114 , 126 ; end ;
+                              GUARD j [ 53 ]
+                                ( j ) [ 24 ] , j [ 47 ] = j [ 59 ] , ( - 142 + j [ 62 ] ) ; j [ 51 ] = ( j [ 37 ] ) ;
+                            ;
+                        ;
+                                      GUARD o == 24
+                                        I = nil ; Z = nil ; u = ( nil ) ; X = 86 ; while true do if X == 119 then Z *= u ; break ; elseif X == 120 then u = ( 4503599627370495 ) ; X = - 26505 + ( j [ 42 ] [ 26 ] ( ( j [ 42 ] [ 23 ] ( ( j [ 42 ] [ 26 ] ( ( j [ 42 ] [ 19 ] ( k [ K ] - k [ K ] , ( o ) ) ) , k [ K ] ) ) + k [ K ] , o , X ) ) ,
+                                          GUARD j [ 37 ] == 62
+                                            d = ( nil ) ; X = 5 ; while true do if X > 5 then if X == 32 then U = k [ K ] ; X = 58 + ( ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 19 ] ( o - o ~= X and o or k [ K ] , ( o ) ) ) + o , o , X ) ) - X ) ; else if j [ 57 ] ~= j [ 14 ] then d = ( k [ K ] ) ; p = p ( U , d ) ; end ; break ; end ; else p = ( p [ 
+                                        ;
+                                        ;
+                                          GUARD j [ 37 ] == 91
+                                            U = ( k [ K ] ) ; p -= U ; X = ( 80 ) ; while true do if j [ 37 ] ~= 236 then return j [ 36 ] ; elseif X > 80 then p -= U ; break ; elseif not ( X < 111 ) then else U = k [ K ] ; X = - 4294967128 + ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 21 ] ( ( j [ 42 ] [ 25 ] ( X ) ) - k [ K ] + k [ K ] + o ) ) ) ) ; co
+                                        ; while true do if not ( X > 42 ) then if X ~= 42 then U = ( o ) ; X = ( - 2147483552 + ( ( j [ 42 ] [ 27 ] ( ( X == X and X or o ) + k [ K ] , ( X ) ) ) + X - X + k [ K ] ) ) ; continue ; else p += U ; X = ( - 23 + ( ( j [ 42 ] [ 24 ] ( ( j [ 42 ] [ 23 ] ( ( j [ 42 ] [ 23 ] ( k [ K ] ) ) ) ) - X ) 
+                                          GUARD not ( not p )
+                                            p = ( J [ K ] ) ;
+                                        ;
+                                          GUARD j [ 52 ] ~= v
+                                              GUARD not ( j [ 28 ] )
+                                                return ;
+                                            ;
+                                        ; U = ( k [ K ] ) ; p -= U ; u = u ( p ) ; X = 50 ; while true do if j [ 37 ] ~= 236 then while 143 do return 109 ; end ; j [ 10 ] = j [ 60 ] ; elseif j [ 37 ] == 189 then ( j ) [ 60 ] = 112 ; if - j [ 37 ] then ( j ) [ 53 ] = j [ 37 ] * j [ 55 ] ; end ; elseif X > 6 then if not ( X > 50 ) then p = 
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=25 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                      GUARD not ( o < 25 )
+                          GUARD o < 27
+                              GUARD o ~= 26
+                                ( B ) [ l [ K ] ] = B [ k [ K ] ] == B [ Q [ K ] ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=26 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                      GUARD not ( o < 25 )
+                          GUARD o < 27
+                                I = B ; Z = ( Q [ K ] ) ; u = ( q ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=27 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                      GUARD not ( o < 25 )
+                              GUARD j [ 37 ] == 186
+                                      GUARD not ( w )
+                                        for m , s in w do if m >= 1 then if j [ 56 ] ~= j [ 14 ] then s [ 2 ] = ( s ) ; ( s ) [ 3 ] = ( B [ m ] ) ; end ; ( s ) [ 1 ] = 3 ; ( w ) [ m ] = ( nil ) ; end ; end ;
+                                    ; return true , Q [ K ] , 0 ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=28 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                      GUARD not ( o < 25 )
+                              GUARD j [ 37 ] == 186
+                                  GUARD not ( o < 28 )
+                                      GUARD o ~= 29
+                                        u = ( B ) ;
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=29 =====
+  GUARD not ( o >= 80 )
+              GUARD not ( o >= 30 )
+                  GUARD j [ 37 ] ~= 233
+                      GUARD not ( o < 25 )
+                              GUARD j [ 37 ] == 186
+                                  GUARD not ( o < 28 )
+                                        I = ( B ) ; Z = k [ K ] ;
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=30 =====
+  GUARD not ( o >= 80 )
+                      GUARD not ( o >= 32 )
+                          GUARD j [ 37 ] == 0
+                            ( j ) [ 59 ] = 43 ; j [ 10 ] , j [ 56 ] = j [ 27 ] , ( 202 ) ;
+                            ( B ) [ k [ K ] ] = ( j [ 6 ] ( B [ Q [ K ] ] , h [ K ] ) ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=31 =====
+  GUARD not ( o >= 80 )
+                      GUARD not ( o >= 32 )
+                          GUARD j [ 37 ] == 0
+                            ( j ) [ 59 ] = 43 ; j [ 10 ] , j [ 56 ] = j [ 27 ] , ( 202 ) ;
+                          GUARD o == 31
+                            X = ( X [ p ] ) ; u = ( u [ X ] ) ; ( I ) [ Z ] = u ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=32 =====
+  GUARD not ( o >= 80 )
+                          GUARD o < 33
+                              GUARD j [ 37 ] == 236
+                                X = ( Q [ K ] ) ; I = ( I [ X ] ) ;
+                            ; ( Z ) [ u ] = I ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=33 =====
+  GUARD not ( o >= 80 )
+                              GUARD j [ 37 ] == 199
+                                while j [ 60 ] - - 134 do return j [ 46 ] ; end ; ( j ) [ 54 ] = ( j [ 14 ] ) ;
+                              GUARD o ~= 34
+                                E = H [ 2 ] ; W = ( H [ 5 ] ) ; n = H [ 4 ] ; H = H [ 3 ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=34 =====
+  GUARD not ( o >= 80 )
+                              GUARD j [ 37 ] == 199
+                                while j [ 60 ] - - 134 do return j [ 46 ] ; end ; ( j ) [ 54 ] = ( j [ 14 ] ) ;
+                                B [ k [ K ] ] = ( P [ K ] ^ B [ l [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=35 =====
+  GUARD not ( o >= 80 )
+                  GUARD o >= 35
+                      GUARD j [ 38 ] == j [ 36 ]
+                        j [ 53 ] , j [ 57 ] = - ( - 86 ) , 144 ; j [ 60 ] = - ( - 3 ) ;
+                      GUARD o < 37
+                          GUARD o ~= 36
+                            B [ l [ K ] ] [ B [ Q [ K ] ] ] = C [ K ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=36 =====
+  GUARD not ( o >= 80 )
+                  GUARD o >= 35
+                      GUARD j [ 38 ] == j [ 36 ]
+                        j [ 53 ] , j [ 57 ] = - ( - 86 ) , 144 ; j [ 60 ] = - ( - 3 ) ;
+                      GUARD o < 37
+                              GUARD j [ 37 ] == 126
+                                while - j [ 55 ] do return - j [ 45 ] ; end ;
+                              GUARD j [ 37 ] == 127
+                                return ;
+                              GUARD not ( not ( h [ K ] <= B [ Q [ K ] ] ) )
+                                K = k [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=37 =====
+  GUARD not ( o >= 80 )
+                  GUARD o >= 35
+                      GUARD j [ 38 ] == j [ 36 ]
+                        j [ 53 ] , j [ 57 ] = - ( - 86 ) , 144 ; j [ 60 ] = - ( - 3 ) ;
+                          GUARD o < 38
+                              GUARD w
+                                for m , s , V in w do if m >= 1 then ( s ) [ 2 ] = ( s ) ; if j [ 37 ] == 236 then else return ( 29 + 102 ) / j [ 26 ] ; end ; s [ 3 ] = B [ m ] ; ( s ) [ 1 ] = ( 3 ) ; ( w ) [ m ] = nil ; end ; end ;
+                            ; return ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=38 =====
+  GUARD not ( o >= 80 )
+                  GUARD o >= 35
+                      GUARD j [ 38 ] == j [ 36 ]
+                        j [ 53 ] , j [ 57 ] = - ( - 86 ) , 144 ; j [ 60 ] = - ( - 3 ) ;
+                                X = k [ K ] ; u = ( u [ X ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=39 =====
+  GUARD not ( o >= 80 )
+                  GUARD o >= 35
+                      GUARD j [ 38 ] == j [ 36 ]
+                        j [ 53 ] , j [ 57 ] = - ( - 86 ) , 144 ; j [ 60 ] = - ( - 3 ) ;
+                              GUARD o == 39
+                                p = ( 2 ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=40 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                  GUARD not ( o >= 45 )
+                      GUARD j [ 53 ] ~= v
+                          GUARD o < 42
+                            ;
+                              GUARD j [ 37 ] == 213
+                                return ;
+                              GUARD j [ 45 ] == j [ 4 ]
+                                while - j [ 37 ] do ( j ) [ 47 ] = 39 ; end ;
+                                  GUARD j [ 37 ] ~= 109
+                                    j [ 26 ] = ( ( 131 <= 119 ) ^ j [ 28 ] ) ;
+                                        return 117 ;
+                                    ;
+                                ;
+                                  GUARD w
+                                    for m , s , V in w do if not ( m >= 1 ) then else s [ 2 ] = ( s ) ; s [ 3 ] = B [ m ] ; ( s ) [ 1 ] = 3 ; w [ m ] = nil ; end ; end ;
+                                ; I = ( Q [ K ] ) ; return false , I , I + l [ K ] - 2 ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=41 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                  GUARD not ( o >= 45 )
+                      GUARD j [ 53 ] ~= v
+                          GUARD o < 42
+                            ;
+                              GUARD j [ 37 ] == 213
+                                return ;
+                              GUARD j [ 45 ] == j [ 4 ]
+                                while - j [ 37 ] do ( j ) [ 47 ] = 39 ; end ;
+                              GUARD o == 41
+                                I = B ; Z = ( l [ K ] ) ; u = B ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=42 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                  GUARD not ( o >= 45 )
+                      GUARD j [ 53 ] ~= v
+                                I = ( a [ k [ K ] ] ) ; ( I [ 2 ] ) [ I [ 1 ] ] = B [ Q [ K ] ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=43 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                  GUARD not ( o >= 45 )
+                      GUARD j [ 53 ] ~= v
+                              GUARD o >= 43
+                                    B [ k [ K ] ] [ h [ K ] ] = B [ Q [ K ] ] ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=44 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                  GUARD not ( o >= 45 )
+                      GUARD j [ 53 ] ~= v
+                              GUARD o >= 43
+                                  GUARD o == 44
+                                    I = I [ Z ] ; Z = I ; u = ( 2 ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=45 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                      GUARD o < 47
+                              GUARD j [ 37 ] ~= 125
+                                  GUARD 140
+                                    return ;
+                                ;
+                                  GUARD ( 220 or 82 ) - j [ 37 ]
+                                    return ;
+                                ;
+                            ; G = l [ K ] ; for m = 1 , G , 1 do B [ m ] = D [ m ] ; end ; g = ( G + 1 ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=46 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                      GUARD o < 47
+                          GUARD o == 46
+                              GUARD not B [ l [ K ] ]
+                                K = k [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=47 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                            e = Q [ K ] ; B [ e ] = B [ e ] ( ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=48 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                          GUARD not ( o < 48 )
+                                I = I [ Z ] ; Z = ( h [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=49 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+              GUARD o < 50
+                          GUARD not ( o < 48 )
+                              GUARD o == 49
+                                  GUARD not ( not ( B [ l [ K ] ] < B [ k [ K ] ] ) )
+                                    K = Q [ K ] ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=50 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                          GUARD j [ 37 ] == 24
+                            while j [ 37 ] do ( j ) [ 24 ] , j [ 54 ] = - j [ 37 ] , j [ 51 ] * ( 32 < 14 ) ; ( j ) [ 51 ] = ( - ( - 238 ) ) ; end ;
+                              GUARD j [ 36 ] ~= j [ 57 ]
+                                  GUARD not ( j [ 37 ] )
+                                    j [ 24 ] , j [ 57 ] = j [ 37 ] , ( j [ 27 ] ) ;
+                                ;
+                            ; Z = Z [ u ] ; u = I ; I = 1 ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=51 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                          GUARD j [ 37 ] == 24
+                            while j [ 37 ] do ( j ) [ 24 ] , j [ 54 ] = - j [ 37 ] , j [ 51 ] * ( 32 < 14 ) ; ( j ) [ 51 ] = ( - ( - 238 ) ) ; end ;
+                          GUARD o == 51
+                            X = ( Q [ K ] ) ; u = u [ X ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=52 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                      GUARD o >= 52
+                            u = I ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=53 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                      GUARD o >= 52
+                          GUARD not ( o < 53 )
+                              GUARD o ~= 54
+                                X = ( X [ p ] ) ; ( Z ) [ u ] = ( X ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=54 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                      GUARD o >= 52
+                          GUARD not ( o < 53 )
+                                ( B ) [ Q [ K ] ] = B [ k [ K ] ] // h [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=55 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                  GUARD not ( o < 55 )
+                      GUARD not ( o >= 57 )
+                            B [ l [ K ] ] = B [ k [ K ] ] [ P [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=56 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                  GUARD not ( o < 55 )
+                      GUARD not ( o >= 57 )
+                          GUARD o == 56
+                            I = ( a ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=57 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                  GUARD not ( o < 55 )
+                            I = a ; Z = k [ K ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=58 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                  GUARD not ( o < 55 )
+                          GUARD o >= 58
+                              GUARD o ~= 59
+                                ;
+                                  GUARD j [ 10 ] == j [ 14 ]
+                                        j [ 53 ] = j [ 36 ] ;
+                                    ;
+                                  GUARD j [ 28 ] == j [ 16 ]
+                                    return 205 ;
+                                  GUARD not ( B [ k [ K ] ] )
+                                    K = ( Q [ K ] ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=59 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+          GUARD o < 60
+                  GUARD not ( o < 55 )
+                          GUARD o >= 58
+                                X = C [ K ] ; u = u [ X ] ; ( I ) [ Z ] = u ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=60 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                      GUARD j [ 37 ] ~= 234
+                          GUARD not ( o >= 62 )
+                              GUARD j [ 55 ] ~= j [ 16 ]
+                                    ; I = ( P [ K ] ) ; Z = I [ 4 ] ; I = ( # Z ) ; u = I > 0 and { } ;
+                                      GUARD u
+                                        for m = 1 , I do X = Z [ m ] ; p = X [ 2 ] ; U = ( X [ 1 ] ) ; if p == 0 then ( u ) [ m - 1 ] = B [ U ] ; elseif p == 3 then u [ m - 1 ] = ( a [ U ] ) ; elseif p == 1 then if not w then if j [ 37 ] ~= 192 then w = ( { } ) ; end ; end ; X = ( w [ U ] ) ; if not ( not X ) then else X = { [ 2 ] = B , [
+                                    ; Z = R [ h [ K ] ] ( u ) ; ( j [ 32 ] ) ( Z , q ) ; B [ k [ K ] ] = ( Z ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=61 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                      GUARD j [ 37 ] ~= 234
+                          GUARD not ( o >= 62 )
+                              GUARD j [ 55 ] ~= j [ 16 ]
+                                  GUARD o == 61
+                                    B [ Q [ K ] ] = { } ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=62 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                      GUARD j [ 37 ] ~= 234
+                                  GUARD j [ 37 ] ~= 194
+                                    j [ 14 ] = - j [ 37 ] ; return - ( - 55 ) ;
+                                ;
+                                    H = { [ 5 ] = W , [ 4 ] = n , [ 2 ] = E , [ 3 ] = H } ; e = l [ K ] ; I = j [ 63 ] ( function ( ... ) ( j [ 61 ] ) ( ) ; for m , s in ... do j [ 61 ] ( true , m , s ) ; end ; end ) ; ( I ) ( B [ e ] , B [ e + 1 ] , B [ e + 2 ] ) ; E = I ; K = k [ K ] ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=63 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                      GUARD j [ 37 ] ~= 234
+                              GUARD not ( o < 63 )
+                                  GUARD o ~= 64
+                                    I = nil ; Z = ( nil ) ; u = ( nil ) ; X = nil ; p = ( 94 ) ; while true do if p == 31 then Z *= u ; p = ( 114 + ( j [ 42 ] [ 23 ] ( ( j [ 42 ] [ 21 ] ( ( j [ 42 ] [ 24 ] ( ( j [ 42 ] [ 25 ] ( o ) ) - p ) ) ) ) + p , p ) ) ) ; elseif p == 94 then I = ( 103 ) ; p = ( - 2097146 + ( ( j [ 42 ] [ 23 ] ( 
+                                      GUARD j [ 4 ] == j [ 51 ]
+                                        j [ 54 ] , j [ 4 ] = j [ 37 ] or j [ 37 ] , ( j [ 51 ] ) ;
+                                    ; U = 24 ; d = nil ; p = 25 ; while true do if p > 25 then U = j [ 42 ] ; d = 22 ; U = U [ d ] ; break ; elseif j [ 37 ] == 203 then while j [ 37 ] do j [ 60 ] = j [ 37 ] <= - 197 ; end ; return ; elseif p < 36 then X = ( X [ U ] ) ; p = ( - 14 + ( ( j [ 42 ] [ 28 ] ( ( ( j [ 42 ] [ 26 ] ( p , ( p )
+                                    ; S = ( nil ) ; p = 17 ; while true do if p > 17 then if j [ 37 ] == 245 then ( j ) [ 60 ] , j [ 45 ] = 209 , ( j [ 62 ] ) ; while j [ 50 ] do return ; end ; elseif j [ 37 ] ~= 236 then return ; elseif p >= 107 then if j [ 47 ] ~= j [ 42 ] then else if j [ 37 ] then return ; end ; return j [ 36 ] ; 
+                                      GUARD j [ 37 ] == 109
+                                        U = U ( d , N ) ; p = 68 ; while true do if not ( p >= 83 ) then if j [ 37 ] ~= 240 then X = X ( U ) ; U = J [ K ] ; end ; X += U ; p = ( - 20971369 + ( ( j [ 42 ] [ 28 ] ( ( j [ 42 ] [ 23 ] ( ( j [ 42 ] [ 20 ] ( ( j [ 42 ] [ 20 ] ( o - o ) ) ) ) ) ) , ( 22 ) ) ) - p ) ) ; continue ; else U = o ; br
+                                    ; X += U ; U = o ; p = 117 ; while true do if p < 117 then Z += u ; break ; else X += U ; u = u ( X ) ; p = ( 48 + ( j [ 42 ] [ 20 ] ( ( j [ 42 ] [ 19 ] ( ( j [ 42 ] [ 22 ] ( p + p ) ) + p + o , ( 23 ) ) ) ) ) ) ; continue ; end ; end ; p = ( 33 ) ; while true do if p == 33 then if j [ 37 ] ~= 190 t
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=64 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                      GUARD j [ 37 ] ~= 234
+                              GUARD not ( o < 63 )
+                                    I = Q [ K ] ; e = ( I + k [ K ] - 1 ) ; ( B ) [ I ] = B [ I ] ( j [ 28 ] ( B , e , I + 1 ) ) ; e = I ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=65 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                  GUARD o >= 65
+                      GUARD o < 67
+                            I = Q [ K ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=66 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                  GUARD o >= 65
+                      GUARD o < 67
+                          GUARD o == 66
+                            ( B ) [ l [ K ] ] = ( B [ k [ K ] ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=67 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                  GUARD o >= 65
+                          GUARD not ( o >= 68 )
+                            u = u [ X ] ; X = ( h [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=68 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                  GUARD o >= 65
+                              GUARD j [ 24 ] == v
+                                ( j ) [ 44 ] , j [ 59 ] = 189 , ( - ( 80 % 164 ) ) ; return ;
+                                Z = ( h [ K ] ) ; u = ( P [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=69 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+              GUARD o < 70
+                  GUARD o >= 65
+                              GUARD j [ 24 ] == v
+                                ( j ) [ 44 ] , j [ 59 ] = 189 , ( - ( 80 % 164 ) ) ; return ;
+                              GUARD o == 69
+                                ( Z ) [ u ] = I ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=70 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                      GUARD o < 72
+                            I = k [ K ] ; Z = ( l [ K ] ) ; u = ( B [ I ] ) ; ( j [ 41 ] ) ( B , I + 1 , e , Z + 1 , u ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=71 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                      GUARD o < 72
+                          GUARD o == 71
+                            I = B ; Z = Q [ K ] ; u = ( nil ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=72 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                          GUARD j [ 37 ] ~= 41
+                              GUARD o < 73
+                                  GUARD j [ 37 ] == 236
+                                    B [ k [ K ] ] = ( # B [ l [ K ] ] ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=73 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                          GUARD j [ 37 ] ~= 41
+                                      GUARD not ( B [ Q [ K ] ] <= h [ K ] )
+                                        K = ( k [ K ] ) ;
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=74 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                          GUARD j [ 37 ] ~= 41
+                                  GUARD o == 74
+                                      GUARD j [ 37 ] == 236
+                                        B [ l [ K ] ] = B [ Q [ K ] ] / B [ k [ K ] ] ;
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=75 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                  GUARD o >= 75
+                      GUARD not ( o >= 77 )
+                          GUARD o ~= 76
+                            u = ( u [ I ] ) ; I = ( h [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=76 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                  GUARD o >= 75
+                      GUARD not ( o >= 77 )
+                            B [ l [ K ] ] = B ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=77 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                  GUARD o >= 75
+                        ;
+                          GUARD not ( o >= 78 )
+                            B [ l [ K ] ] = B [ k [ K ] ] % P [ K ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=78 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                  GUARD o >= 75
+                        ;
+                              GUARD o ~= 79
+                                B [ Q [ K ] ] = ( nil ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=79 =====
+  GUARD not ( o >= 80 )
+      GUARD not ( o < 40 )
+                  GUARD o >= 75
+                        ;
+                                B [ Q [ K ] ] = ( C [ K ] + B [ l [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=80 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                      GUARD j [ 37 ] == 166
+                          GUARD not ( j [ 37 ] )
+                            S , j [ 38 ] = - c , ( - ( 131 / 50 ) ) ; return N ;
+                        ;
+                      GUARD not ( o >= 82 )
+                            Z = l [ K ] ; for O = I , Z do if j [ 26 ] ~= j [ 16 ] then else j [ 36 ] , N = j [ 16 ] == 136 , j [ 37 ] ; end ; u = B ; X = O ; O = ( nil ) ; ( u ) [ X ] = ( O ) ; end ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=81 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                      GUARD j [ 37 ] == 166
+                          GUARD not ( j [ 37 ] )
+                            S , j [ 38 ] = - c , ( - ( 131 / 50 ) ) ; return N ;
+                        ;
+                      GUARD not ( o >= 82 )
+                          GUARD o == 81
+                            ( B ) [ l [ K ] ] = ( j [ 20 ] ( B [ Q [ K ] ] , C [ K ] ) ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=82 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                      GUARD j [ 37 ] == 166
+                          GUARD not ( j [ 37 ] )
+                            S , j [ 38 ] = - c , ( - ( 131 / 50 ) ) ; return N ;
+                        ;
+                            B [ k [ K ] ] = ( B [ Q [ K ] ] [ B [ l [ K ] ] ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=83 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                      GUARD j [ 37 ] == 166
+                          GUARD not ( j [ 37 ] )
+                            S , j [ 38 ] = - c , ( - ( 131 / 50 ) ) ; return N ;
+                        ;
+                          GUARD o >= 83
+                              GUARD o ~= 84
+                                  GUARD j [ 51 ] == j [ 42 ]
+                                    I = ( k [ K ] ) ;
+                                ; Z = B [ Q [ K ] ] ; B [ I + 1 ] = ( Z ) ; ( B ) [ I ] = ( Z [ h [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=84 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                      GUARD j [ 37 ] == 166
+                          GUARD not ( j [ 37 ] )
+                            S , j [ 38 ] = - c , ( - ( 131 / 50 ) ) ; return N ;
+                        ;
+                          GUARD o >= 83
+                                ( B ) [ Q [ K ] ] = ( j [ 8 ] ( B [ l [ K ] ] , C [ K ] ) ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=85 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                  GUARD not ( o < 85 )
+                          GUARD o ~= 86
+                            local O = ( k [ K ] ) ;
+                              GUARD not ( w )
+                                for x , D in w do if x >= O then D [ 2 ] = D ; D [ 3 ] = ( B [ x ] ) ; ( D ) [ 1 ] = ( 3 ) ; ( w ) [ x ] = nil ; end ; end ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=86 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                  GUARD not ( o < 85 )
+                            I = ( l [ K ] ) ; B [ I ] = B [ I ] ( B [ I + 1 ] ) ; e = I ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=87 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                  GUARD not ( o < 85 )
+                      GUARD not ( o < 87 )
+                            ( B ) [ Q [ K ] ] = ( B [ k [ K ] ] / h [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=88 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                  GUARD not ( o < 85 )
+                      GUARD not ( o < 87 )
+                          GUARD not ( o < 88 )
+                              GUARD o ~= 89
+                                ( B ) [ Q [ K ] ] = ( q [ C [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=89 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+              GUARD o < 90
+                  GUARD not ( o < 85 )
+                      GUARD not ( o < 87 )
+                          GUARD not ( o < 88 )
+                                I = ( nil ) ;
+                                  GUARD j [ 37 ] == 236
+                                    Z = ( nil ) ; u = ( nil ) ; X = ( 120 ) ;
+                                ; while true do if X == 119 then Z = 0 ; u = 4503599627370495 ; break ; elseif X == 120 then local O = 197 ; if O == 197 then I = 22 ; X = - 15241 + ( j [ 42 ] [ 26 ] ( ( j [ 42 ] [ 23 ] ( ( o + X < X and o or o ) + X , o , o ) ) <= X and X or X , ( 7 ) ) ) ; end ; continue ; end ; end ; Z *= u ; p 
+                                  GUARD j [ 57 ] ~= j [ 42 ]
+                                    while N do ( j ) [ 44 ] , j [ 60 ] = 15 , ( 58 > 16 < - 100 ) ; end ; return j [ 37 ] ;
+                                ; X = 48 ; while true do if X < 79 then if j [ 37 ] ~= 236 then else d = ( J [ K ] ) ; U = U <= d ; end ; X = ( 75 + ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 20 ] ( ( j [ 42 ] [ 22 ] ( X >= o and X or o , o , X ) ) - X - o ) ) ) ) ) ; elseif X > 48 then if j [ 37 ] ~= 236 then if j [ 59 ] then j [ 28 ] , j 
+                                  GUARD not ( not U )
+                                    U = J [ K ] ;
+                                ;
+                                  GUARD j [ 56 ] == j [ 4 ]
+                                    return ;
+                                ; X = 42 ; while true do if X == 1 then if j [ 37 ] == 249 then while 13 do return j [ 37 ] ; end ; j [ 14 ] = j [ 37 ] ; end ; U -= d ; X = - 159 + ( ( j [ 42 ] [ 22 ] ( ( j [ 42 ] [ 21 ] ( ( j [ 42 ] [ 28 ] ( X , ( X ) ) ) >= o and o or o , o , o ) ) , X ) ) + o + o ) ; continue ; elseif X == 108 
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=90 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                  GUARD o < 95
+                            H = ( { [ 5 ] = W , [ 4 ] = n , [ 2 ] = E , [ 3 ] = H } ) ; I = k [ K ] ; n = B [ I + 2 ] + 0 ; W = B [ I + 1 ] + 0 ; E = B [ I ] - n ; K = ( l [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=91 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                  GUARD o < 95
+                          GUARD o == 91
+                            I = ( a [ Q [ K ] ] ) ; ( B ) [ k [ K ] ] = I [ 2 ] [ I [ 1 ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=92 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                  GUARD o < 95
+                      GUARD not ( o < 92 )
+                              GUARD j [ 37 ] == 236
+                                B [ l [ K ] ] = ( B [ k [ K ] ] * P [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=93 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                  GUARD o < 95
+                      GUARD not ( o < 92 )
+                          GUARD o >= 93
+                              GUARD o ~= 94
+                                ( B ) [ Q [ K ] ] = B [ k [ K ] ] == h [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=94 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                  GUARD o < 95
+                      GUARD not ( o < 92 )
+                          GUARD o >= 93
+                                ;
+                                  GUARD j [ 37 ] == 245
+                                    ( j ) [ 44 ] , j [ 24 ] = 15 , 78 ; while j [ 14 ] do ( j ) [ 2 ] = ( j [ 37 ] ) ; ( j ) [ 10 ] , j [ 2 ] = j [ 37 ] , ( - 132 ) ; end ;
+                                ; I = ( k [ K ] ) ; Z = ( l [ K ] ) ; e = ( I + Z - 1 ) ;
+                                  GUARD w
+                                      GUARD j [ 37 ] ~= 252
+                                        for O , x in w do if not ( O >= 1 ) then else ( x ) [ 2 ] = ( x ) ; ( x ) [ 3 ] = B [ O ] ; x [ 1 ] = ( 3 ) ; w [ O ] = ( nil ) ; end ; end ;
+                                    ;
+                                ; return true , I , Z ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=95 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                      GUARD not ( o >= 97 )
+                          GUARD o ~= 96
+                              GUARD j [ 4 ] ~= j [ 60 ]
+                                while 133 ^ ( 193 == 235 ) do return ; end ;
+                            ; I = ( k [ K ] ) ; e = I + Q [ K ] - 1 ; ( B [ I ] ) ( j [ 28 ] ( B , e , I + 1 ) ) ; e = I - 1 ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=96 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                      GUARD not ( o >= 97 )
+                            B [ Q [ K ] ] = B [ k [ K ] ] >= B [ l [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=97 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                          GUARD o < 98
+                            ( B ) [ k [ K ] ] = B [ l [ K ] ] ~= B [ Q [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=98 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                                Z = ( l [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=99 =====
+          GUARD o < 100
+              GUARD j [ 37 ] == 236
+            ;
+                              GUARD o == 99
+                                  GUARD j [ 37 ] == 201
+                                    I = 1 ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=100 =====
+                    ;
+                      GUARD not ( o >= 102 )
+                          GUARD o ~= 101
+                              GUARD j [ 37 ] == 236
+                                B [ Q [ K ] ] = ( j [ 20 ] ( B [ l [ K ] ] , B [ k [ K ] ] ) ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=101 =====
+                    ;
+                      GUARD not ( o >= 102 )
+                              GUARD j [ 37 ] == 53
+                                while j [ 37 ] do return ; end ; ( j ) [ 4 ] , j [ 46 ] = j [ 24 ] , j [ 59 ] ;
+                            ; Z = ( k [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=102 =====
+                    ;
+                          GUARD not ( o >= 103 )
+                              GUARD B [ Q [ K ] ] == C [ K ]
+                                  GUARD j [ 57 ] == j [ 14 ]
+                                    K = ( l [ K ] ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=103 =====
+                    ;
+                              GUARD j [ 37 ] == 236
+                            ;
+                              GUARD j [ 54 ] == j [ 4 ]
+                                  GUARD - j [ 55 ]
+                                    return ;
+                                ;
+                              GUARD o ~= 104
+                                B [ Q [ K ] ] = Q ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=104 =====
+                    ;
+                              GUARD j [ 37 ] == 236
+                            ;
+                              GUARD j [ 54 ] == j [ 4 ]
+                                  GUARD - j [ 55 ]
+                                    return ;
+                                ;
+                                X = P [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=105 =====
+                  GUARD not ( o < 105 )
+                      GUARD o < 107
+                          GUARD o ~= 106
+                            B [ k [ K ] ] = l ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=106 =====
+                  GUARD not ( o < 105 )
+                      GUARD o < 107
+                            ( B ) [ l [ K ] ] = P [ K ] * B [ k [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=107 =====
+                  GUARD not ( o < 105 )
+                              GUARD j [ 47 ] == j [ 14 ]
+                                return - 248 or 191 ;
+                            ; u = j [ 42 ] ; X = ( Q [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=108 =====
+                  GUARD not ( o < 105 )
+                          GUARD o >= 108
+                              GUARD o ~= 109
+                                a [ k [ K ] ] [ h [ K ] ] = ( B [ Q [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=109 =====
+                  GUARD not ( o < 105 )
+                          GUARD o >= 108
+                                u = a ; X = ( Q [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=110 =====
+              GUARD not ( o < 110 )
+                  GUARD not ( o >= 115 )
+                      GUARD not ( o >= 112 )
+                          GUARD o ~= 111
+                            B [ l [ K ] ] = J ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=111 =====
+              GUARD not ( o < 110 )
+                  GUARD not ( o >= 115 )
+                      GUARD not ( o >= 112 )
+                            X = ( Q [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=112 =====
+              GUARD not ( o < 110 )
+                  GUARD not ( o >= 115 )
+                            B [ l [ K ] ] = j [ 12 ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=113 =====
+              GUARD not ( o < 110 )
+                  GUARD not ( o >= 115 )
+                          GUARD not ( o < 113 )
+                                ( B ) [ l [ K ] ] = B [ k [ K ] ] + B [ Q [ K ] ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=114 =====
+              GUARD not ( o < 110 )
+                  GUARD not ( o >= 115 )
+                          GUARD not ( o < 113 )
+                              GUARD o == 114
+                                I = a [ k [ K ] ] ; ( I [ 2 ] ) [ I [ 1 ] ] = ( h [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=115 =====
+              GUARD not ( o < 110 )
+                      GUARD j [ 37 ] ~= 128
+                          GUARD N
+                            return ;
+                        ; while j [ 37 ] do j [ 24 ] = ( 56 ) ; end ;
+                    ;
+                      GUARD j [ 37 ] ~= 54
+                          GUARD not ( o >= 117 )
+                              GUARD j [ 37 ] == 236
+                                    B [ k [ K ] ] = ( h [ K ] ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=116 =====
+              GUARD not ( o < 110 )
+                      GUARD j [ 37 ] ~= 128
+                          GUARD N
+                            return ;
+                        ; while j [ 37 ] do j [ 24 ] = ( 56 ) ; end ;
+                    ;
+                      GUARD j [ 37 ] ~= 54
+                          GUARD not ( o >= 117 )
+                              GUARD j [ 37 ] == 236
+                                  GUARD o == 116
+                                    I = Q [ K ] ; Z = l [ K ] ; u = ( k [ K ] ) ;
+                                      GUARD Z ~= 0
+                                        e = ( I + Z - 1 ) ;
+                                    ; X , p = ( nil ) ;
+                                      GUARD Z == 1
+                                        X , p = j [ 62 ] ( B [ I ] ( ) ) ;
+                                        X , p = j [ 62 ] ( B [ I ] ( j [ 28 ] ( B , e , I + 1 ) ) ) ;
+                                    ;
+                                      GUARD u == 1
+                                        e = ( I - 1 ) ;
+                                          GUARD u ~= 0
+                                            X = ( I + u - 2 ) ; e = ( X + 1 ) ;
+                                                X = ( X + I - 1 ) ;
+                                            ; e = ( X ) ;
+                                        ; Z = 0 ; for O = I , X , 1 do Z += 1 ; B [ O ] = p [ Z ] ; end ;
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=117 =====
+              GUARD not ( o < 110 )
+                      GUARD j [ 37 ] ~= 128
+                          GUARD N
+                            return ;
+                        ; while j [ 37 ] do j [ 24 ] = ( 56 ) ; end ;
+                    ;
+                      GUARD j [ 37 ] ~= 54
+                              GUARD not ( o >= 118 )
+                                  GUARD j [ 37 ] == 253
+                                    ( j ) [ 44 ] = ( - j [ 37 ] ) ;
+                                ; B [ l [ K ] ] [ B [ Q [ K ] ] ] = ( B [ k [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=118 =====
+              GUARD not ( o < 110 )
+                      GUARD j [ 37 ] ~= 128
+                          GUARD N
+                            return ;
+                        ; while j [ 37 ] do j [ 24 ] = ( 56 ) ; end ;
+                    ;
+                      GUARD j [ 37 ] ~= 54
+                                  GUARD o ~= 119
+                                    I = ( k [ K ] ) ; B [ I ] = B [ I ] ( j [ 28 ] ( B , e , I + 1 ) ) ; e = ( I ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=119 =====
+              GUARD not ( o < 110 )
+                      GUARD j [ 37 ] ~= 128
+                          GUARD N
+                            return ;
+                        ; while j [ 37 ] do j [ 24 ] = ( 56 ) ; end ;
+                    ;
+                      GUARD j [ 37 ] ~= 54
+                                        u = ( u [ X ] ) ;
+                                    ; X = ( h [ K ] ) ; u = ( u [ X ] ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=120 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                      GUARD not ( o >= 122 )
+                          GUARD j [ 54 ] == v
+                            return j [ 37 ] ;
+                          GUARD j [ 37 ] == 135
+                            j [ 62 ] = j [ 2 ] ;
+                          GUARD o ~= 121
+                              GUARD j [ 37 ] == 236
+                            ; u = ( h [ K ] ) ; ( I ) [ Z ] = u ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=121 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                      GUARD not ( o >= 122 )
+                          GUARD j [ 54 ] == v
+                            return j [ 37 ] ;
+                          GUARD j [ 37 ] == 135
+                            j [ 62 ] = j [ 2 ] ;
+                            B [ k [ K ] ] = a [ Q [ K ] ] [ h [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=122 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                          GUARD j [ 14 ] ~= j [ 50 ]
+                              GUARD o < 123
+                                K = Q [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=123 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                          GUARD j [ 14 ] ~= j [ 50 ]
+                                  GUARD o ~= 124
+                                    I = l [ K ] ; B [ I ] ( j [ 28 ] ( B , e , I + 1 ) ) ; e = I - 1 ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=124 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                          GUARD j [ 14 ] ~= j [ 50 ]
+                                    B [ k [ K ] ] = ( j [ 40 ] ) ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=125 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                  GUARD o >= 125
+                          GUARD j [ 50 ] == j [ 51 ]
+                              GUARD not ( 126 * j [ 54 ] )
+                                j [ 59 ] = ( j [ 37 ] ) ; return ;
+                            ; return ;
+                          GUARD j [ 37 ] == 202
+                            while j [ 37 ] do return 120 > 209 ; end ;
+                              GUARD not ( j [ 26 ] )
+                                return 18 ;
+                            ;
+                            ( B ) [ l [ K ] ] = ( B [ Q [ K ] ] <= B [ k [ K ] ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=126 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                  GUARD o >= 125
+                          GUARD j [ 50 ] == j [ 51 ]
+                              GUARD not ( 126 * j [ 54 ] )
+                                j [ 59 ] = ( j [ 37 ] ) ; return ;
+                            ; return ;
+                          GUARD j [ 37 ] == 202
+                            while j [ 37 ] do return 120 > 209 ; end ;
+                              GUARD not ( j [ 26 ] )
+                                return 18 ;
+                            ;
+                          GUARD o == 126
+                            I = B ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=127 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                  GUARD o >= 125
+                      GUARD o >= 127
+                              GUARD not ( not ( P [ K ] < B [ l [ K ] ] ) )
+                                K = ( k [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=128 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                  GUARD o >= 125
+                      GUARD o >= 127
+                          GUARD o >= 128
+                                B [ Q [ K ] ] = ( B [ k [ K ] ] // B [ l [ K ] ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=129 =====
+      GUARD not ( o < 120 )
+              GUARD o < 130
+                  GUARD o >= 125
+                      GUARD o >= 127
+                          GUARD o >= 128
+                              GUARD o == 129
+                                B [ Q [ K ] ] = ( B [ l [ K ] ] + C [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=130 =====
+      GUARD not ( o < 120 )
+                            p = I ; I = ( 1 ) ; p = p [ I ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=131 =====
+      GUARD not ( o < 120 )
+                          GUARD o == 131
+                              GUARD j [ 37 ] == 6
+                                  GUARD j [ 4 ]
+                                    return ;
+                                ;
+                              GUARD j [ 27 ] == j [ 14 ]
+                                j [ 59 ] , j [ 26 ] = 74 , 31 ; while 134 do j [ 42 ] = ( 229 - 247 ~= 194 ) ; N = - j [ 37 ] ; end ;
+                              GUARD B [ k [ K ] ] ~= h [ K ]
+                                K = Q [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=132 =====
+      GUARD not ( o < 120 )
+                      GUARD not ( o < 132 )
+                              GUARD j [ 37 ] == 236
+                                I = I [ Z ] ;
+                            ; Z = I ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=133 =====
+      GUARD not ( o < 120 )
+                      GUARD not ( o < 132 )
+                          GUARD not ( o < 133 )
+                              GUARD o ~= 134
+                                j [ 42 ] [ l [ K ] ] = B [ k [ K ] ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=134 =====
+      GUARD not ( o < 120 )
+                      GUARD not ( o < 132 )
+                          GUARD not ( o < 133 )
+                                  GUARD j [ 59 ] == j [ 10 ]
+                                      GUARD not ( j [ 37 ] )
+                                        ( j ) [ 26 ] = j [ 51 ] ;
+                                    ;
+                                ; e = Q [ K ] ; ( B [ e ] ) ( ) ; e -= 1 ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=135 =====
+      GUARD not ( o < 120 )
+                  GUARD not ( o < 135 )
+                      GUARD o < 137
+                            I = ( false ) ; E += n ;
+                              GUARD not ( n <= 0 )
+                                  GUARD j [ 2 ] ~= j [ 36 ]
+                                    while 119 do ( j ) [ 44 ] = ( j [ 37 ] ) ; return - ( - 148 ) ; end ;
+                                      GUARD 81
+                                        v , j [ 47 ] = j [ 37 ] , ( - j [ 24 ] ) ;
+                                    ;
+                                ; I = ( E <= W ) ;
+                                I = E >= W ;
+                            ;
+                              GUARD not ( I )
+                                ( B ) [ Q [ K ] + 3 ] = ( E ) ; K = ( k [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=136 =====
+      GUARD not ( o < 120 )
+                  GUARD not ( o < 135 )
+                      GUARD o < 137
+                          GUARD o == 136
+                              GUARD j [ 37 ] ~= 153
+                                  GUARD w
+                                    for O , x , D in w do if O >= 1 then if j [ 47 ] == j [ 24 ] then ( j ) [ 62 ] , j [ 60 ] = 210 , j [ 37 ] ; j [ 59 ] , j [ 2 ] = j [ 37 ] , ( j [ 37 ] ) ; end ; ( x ) [ 2 ] = x ; ( x ) [ 3 ] = ( B [ O ] ) ; ( x ) [ 1 ] = ( 3 ) ; ( w ) [ O ] = ( nil ) ; end ; end ;
+                                ; return false , Q [ K ] , e ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=137 =====
+      GUARD not ( o < 120 )
+                  GUARD not ( o < 135 )
+                              GUARD j [ 16 ] ~= j [ 50 ]
+                                I = ( h [ K ] ) ;
+                            ; Z = I [ 4 ] ; u = # Z ; X = ( u > 0 and { } ) ; p = j [ 64 ] ( I , X ) ; j [ 32 ] ( p , q ) ; ( B ) [ Q [ K ] ] = ( p ) ;
+                              GUARD X
+                                  GUARD j [ 37 ] == 229
+                                    ( j ) [ 10 ] , S = j [ 37 ] , ( j [ 37 ] ) ;
+                                      GUARD j [ 24 ]
+                                        j [ 57 ] = j [ 37 ] ;
+                                    ;
+                                ; for O = 1 , u do I = ( Z [ O ] ) ; p = I [ 2 ] ; U = ( I [ 1 ] ) ; if p == 1 then if j [ 37 ] == 236 then else ( j ) [ 4 ] = X ; end ; if not ( not w ) then else w = ( { } ) ; end ; d = ( w [ U ] ) ; if not ( not d ) then else d = { [ 2 ] = B , [ 1 ] = U } ; ( w ) [ U ] = d ; end ; ( X ) [ O - 1 ]
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=138 =====
+      GUARD not ( o < 120 )
+                  GUARD not ( o < 135 )
+                          GUARD o >= 138
+                              GUARD o ~= 139
+                                B [ Q [ K ] ] = B [ k [ K ] ] - h [ K ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=139 =====
+      GUARD not ( o < 120 )
+                  GUARD not ( o < 135 )
+                          GUARD o >= 138
+                                I = B ; Z = ( Q [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=140 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                  GUARD o < 145
+                      GUARD o < 142
+                          GUARD o ~= 141
+                            I = k [ K ] ; ( B ) [ I ] = B [ I ] ( B [ I + 1 ] , B [ I + 2 ] ) ; e = I ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=141 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                  GUARD o < 145
+                      GUARD o < 142
+                              GUARD j [ 37 ] ~= 84
+                                while - j [ 59 ] do ( j ) [ 36 ] , j [ 51 ] = - j [ 37 ] , ( 150 ) ; return ; end ; j [ 53 ] = 186 ;
+                            ; Z = Q [ K ] ; I = ( I [ Z ] ) ; Z = B ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=142 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                  GUARD o < 145
+                            u = u [ I ] ; I = B ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=143 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                  GUARD o < 145
+                          GUARD not ( o < 143 )
+                              GUARD o ~= 144
+                                for m = Q [ K ] , l [ K ] , 1 do ( B ) [ m ] = ( nil ) ; end ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=144 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                  GUARD o < 145
+                          GUARD not ( o < 143 )
+                                ( B ) [ k [ K ] ] = a [ Q [ K ] ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=145 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                          GUARD o ~= 146
+                            X = ( X [ p ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=146 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                              GUARD j [ 38 ] == j [ 16 ]
+                                ( B ) [ Q [ K ] ] = O ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=147 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                      GUARD not ( o < 147 )
+                          GUARD o < 148
+                            ( I ) [ Z ] = u ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=148 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                      GUARD not ( o < 147 )
+                                I = l [ K ] ; Z = ( x - G - 1 ) ;
+                                  GUARD Z < 0
+                                    Z = ( - 1 ) ;
+                                ;
+                                  GUARD j [ 37 ] == 236
+                                    u = ( 0 ) ;
+                                ; for x = I , I + Z , 1 do ( B ) [ x ] = ( D [ g + u ] ) ; u += 1 ; end ; e = I + Z ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=149 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+              GUARD not ( o >= 150 )
+                  GUARD j [ 37 ] == 236
+                ;
+                      GUARD not ( o < 147 )
+                              GUARD o == 149
+                                u -= X ; I [ Z ] = ( u ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=150 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                      GUARD j [ 37 ] == 37
+                        while - O do j [ 38 ] , S = j [ 37 ] , - j [ 37 ] ; j [ 60 ] = ( j [ 14 ] ) ; end ; while j [ 59 ] do return ; end ;
+                      GUARD not ( o >= 152 )
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=151 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                      GUARD j [ 37 ] == 37
+                        while - O do j [ 38 ] , S = j [ 37 ] , - j [ 37 ] ; j [ 60 ] = ( j [ 14 ] ) ; end ; while j [ 59 ] do return ; end ;
+                      GUARD not ( o >= 152 )
+                          GUARD o == 151
+                              GUARD not ( not ( B [ k [ K ] ] < P [ K ] ) )
+                                K = ( l [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=152 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                      GUARD j [ 37 ] == 37
+                        while - O do j [ 38 ] , S = j [ 37 ] , - j [ 37 ] ; j [ 60 ] = ( j [ 14 ] ) ; end ; while j [ 59 ] do return ; end ;
+                            ( B ) [ l [ K ] ] = ( not B [ k [ K ] ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=153 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                      GUARD j [ 37 ] == 37
+                        while - O do j [ 38 ] , S = j [ 37 ] , - j [ 37 ] ; j [ 60 ] = ( j [ 14 ] ) ; end ; while j [ 59 ] do return ; end ;
+                          GUARD not ( o < 153 )
+                              GUARD j [ 28 ] ~= j [ 14 ]
+                                while j [ 37 ] do return 44 ; end ;
+                                  GUARD 188
+                                    j [ 59 ] = ( - ( 102 - 7 ) ) ; j [ 16 ] = ( c ) ;
+                                ;
+                            ;
+                              GUARD o ~= 154
+                                  GUARD w
+                                    for O , x in w do if j [ 4 ] ~= j [ 47 ] then else return ; end ; if O >= 1 then ( x ) [ 2 ] = x ; x [ 3 ] = ( B [ O ] ) ; ( x ) [ 1 ] = ( 3 ) ; w [ O ] = nil ; end ; end ;
+                                ; I = l [ K ] ; return false , I , I ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=154 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                      GUARD j [ 37 ] == 37
+                        while - O do j [ 38 ] , S = j [ 37 ] , - j [ 37 ] ; j [ 60 ] = ( j [ 14 ] ) ; end ; while j [ 59 ] do return ; end ;
+                          GUARD not ( o < 153 )
+                              GUARD j [ 28 ] ~= j [ 14 ]
+                                while j [ 37 ] do return 44 ; end ;
+                                  GUARD 188
+                                    j [ 59 ] = ( - ( 102 - 7 ) ) ; j [ 16 ] = ( c ) ;
+                                ;
+                            ;
+                                  GUARD j [ 37 ] == 236
+                                      GUARD not ( B [ k [ K ] ] <= B [ Q [ K ] ] )
+                                        K = l [ K ] ;
+                                    ;
+                                ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=155 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                  GUARD o >= 155
+                            B [ l [ K ] ] = - B [ Q [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=156 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                  GUARD o >= 155
+                          GUARD o == 156
+                            ( B ) [ k [ K ] ] = B [ Q [ K ] ] * B [ l [ K ] ] ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=157 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                  GUARD o >= 155
+                      GUARD not ( o < 157 )
+                          GUARD O == 127
+                                return ;
+                            ;
+                            B [ k [ K ] ] [ h [ K ] ] = ( P [ K ] ) ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=158 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                  GUARD o >= 155
+                      GUARD not ( o < 157 )
+                          GUARD O == 127
+                                return ;
+                            ;
+                          GUARD not ( o < 158 )
+                                Z = Q [ K ] ; u = ( B ) ; X = ( k [ K ] ) ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=159 =====
+      GUARD not ( o < 120 )
+          GUARD not ( o < 140 )
+                local O = 214 ;
+                  GUARD o >= 155
+                      GUARD not ( o < 157 )
+                          GUARD O == 127
+                                return ;
+                            ;
+                          GUARD not ( o < 158 )
+                              GUARD o == 159
+                                u = ( 2 ) ; Z = Z [ u ] ;
+                            ;
+                        ;
+                    ;
+                ;
+            ;
+        ;
+    ;
+===== o=4503599627370495 =====
