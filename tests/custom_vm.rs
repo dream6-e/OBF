@@ -532,45 +532,50 @@ fn encrypted_payload_probes_fail_closed_on_tampered_environments() {
         assert_eq!(generated.matches("1,5,9,13").count(), 1);
         let helper_tamper = generated.replacen("1,5,9,13", "1,5,9,12", 1);
         assert_ne!(helper_tamper, generated);
-        // K7 shuffles the attestation fold terms and respells its modulus. The
-        // packed payload mutation remains a stable syntax-preserving tamper
-        // and must fail before user code runs.
-        // K13c step 2 (2026-09-11): the packed payload is emitted as `".."`-joined
-        // escape chunks in a seed-shuffled order, so "first \029 in the script text"
-        // no longer implies "first byte of the image" -- it can land in the 32-byte
-        // prefix that the fold deliberately skips, where a flip is inert. Take the
-        // middle occurrence instead: it is inside the image body, which `AD` covers.
-        // K17 (2026-09-11): decimal escapes are now spelled as shortly as their
-        // follower allows, so byte 29 appears as `\29` unless a digit follows it
-        // (`\029`). Match either width and flip it to the *same-width* spelling of
-        // 30, which keeps the mutation one-for-one in source characters.
-        // The two spellings never overlap: the padded form is only emitted when a
-        // digit follows, and then a bare `\29` cannot occur at that offset.
-        let mut marks: Vec<(usize, usize)> = generated
-            .match_indices("\\029")
-            .chain(generated.match_indices("\\29"))
-            .map(|(at, text)| (at, text.len()))
+        // Mutate a symbol inside one of the three actual payload segments. Do
+        // not search for a particular escaped byte: opaque-literal expansion
+        // changes the surrounding RNG draws and can move such a byte into the
+        // deliberately unauthenticated transport prefix. Segment discovery and
+        // the owning alphabet make this syntax-preserving and load-bearing.
+        let mut spans = segment_spans(&generated, target, 735);
+        spans.sort_by_key(|&(start, end)| std::cmp::Reverse(end - start));
+        spans.truncate(3);
+        assert_eq!(spans.len(), 3, "{target}: payload segment count");
+        let (start, end) = spans[0];
+        let owner = (0..3)
+            .find(|part| {
+                let table = vm::custom::base86_segment_alphabet(735, *part);
+                span_bytes(&generated, target, (start, end))
+                    .iter()
+                    .all(|&byte| table.contains(&byte))
+            })
+            .expect("payload segment has no owning alphabet");
+        let inner = &generated[start..end];
+        let map = raw_char_map(inner);
+        let usable: Vec<usize> = (12..map.len())
+            .filter_map(|decoded_at| {
+                let raw_end = if decoded_at + 1 < map.len() {
+                    map[decoded_at + 1]
+                } else {
+                    inner.len()
+                };
+                (raw_end - map[decoded_at] == 1).then_some(start + map[decoded_at])
+            })
             .collect();
-        marks.sort_unstable();
-        assert!(marks.len() >= 3, "no stable tamper target: {marks:?}");
-        let (at, width) = marks[marks.len() / 2];
-        assert!(at > 64, "tamper target sits in the transport header");
-        let flipped = if width == 4 { "\\030" } else { "\\30" };
-        assert_eq!(flipped.len(), width, "tamper must preserve source width");
-        let wrong_attestation = format!(
-            "{}{}{}",
-            &generated[..at],
-            flipped,
-            &generated[at + width..]
-        );
-        assert_ne!(wrong_attestation, generated);
+        assert!(!usable.is_empty(), "{target}: no payload tamper position");
+        let at = usable[usable.len() / 2];
+        let table = vm::custom::base86_segment_alphabet(735, owner);
+        let flipped = adjacent_plain(generated.as_bytes()[at], &table);
+        let mut damaged_payload = generated.clone();
+        damaged_payload.replace_range(at..at + 1, &(flipped as char).to_string());
+        assert_ne!(damaged_payload, generated);
         for (name, source, expect_success) in [
             ("control", control, true),
             ("loadstring-hook", tampered, false),
             ("wrong-witness", wrong_witness, false),
             ("native-byte-hook", native_hook, false),
             ("chacha-helper-tamper", helper_tamper, false),
-            ("wrong-attestation", wrong_attestation, false),
+            ("payload-tamper", damaged_payload, false),
         ] {
             let path = workspace.0.join(format!("{name}.lua"));
             fs::write(&path, source).unwrap();

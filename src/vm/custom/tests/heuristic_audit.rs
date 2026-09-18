@@ -317,24 +317,29 @@ type AuditPins = (
 //   M5 (4, 1779) -> (4, 1787)      four long blobs, 8 B more text.
 //   M7 gap 408 -> 399              same strings, top-5 order re-measured.
 //   M1 (96), M3a, M6 (0, 0)        untouched.
+// Goal 6 part 3 (2026-09-18) -- opaque spellings for status values, dispatch
+// boundaries, ChaCha constants, record kinds and wrapper operands move only
+// the numeric-token census. M1/M2/KAT/M4b/M5/M6/M7 remain byte-for-byte fixed;
+// the larger M3b/M4 counts are the deliberately expanded equivalent arithmetic,
+// not new payload or API surface.
 const PINS_LUA51_7001: AuditPins = (
     96,
     (1501, 1, 1, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (379, 9007554604575187, 4503599627370496),
+    (385, 9007538239491966, 4503599627370496),
     [
-        (1, 526),
-        (0, 506),
-        (2, 335),
-        (3, 164),
-        (4, 129),
-        (15, 100),
-        (5, 82),
-        (75, 70),
-        (16, 68),
-        (28, 68),
-        (8, 67),
-        (7, 64),
+        (0, 682),
+        (1, 619),
+        (2, 470),
+        (3, 181),
+        (4, 151),
+        (5, 80),
+        (53, 76),
+        (8, 71),
+        (16, 71),
+        (15, 70),
+        (6, 58),
+        (23, 54),
     ],
     0,
     (4, 1787),
@@ -500,26 +505,30 @@ const PINS_LUA51_7001: AuditPins = (
 //   M4b skipped 38, M5 (4, 1760), M7 ([550, 541, 535, 134, 15], 401), M3a/M6 zeros:
 //       re-measured with the same text.
 //   M1 (96) unchanged.
+// Goal 6 part 3 (2026-09-18) -- the Luau side of the opaque-literal batch.
+// M1/M2/KAT/M5/M6/M7 remain fixed. The integer census expands as intended;
+// M4b drops from 38 to 5 because the new target-aware opaque forms replace
+// most previously unparsed numeric spellings with exact integer tokens.
 const PINS_LUAU_7351: AuditPins = (
     96,
     (1501, 1, 1, 1),
     [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-    (319, 9007529202821988, 4503599627370496),
+    (339, 9007532102839320, 4503599627370496),
     [
-        (1, 547),
-        (0, 472),
-        (2, 313),
-        (3, 171),
-        (4, 155),
-        (8, 89),
-        (5, 82),
-        (18, 60),
-        (16, 57),
-        (36, 50),
-        (42, 50),
-        (6, 46),
+        (1, 710),
+        (2, 581),
+        (0, 573),
+        (3, 193),
+        (4, 141),
+        (5, 127),
+        (6, 121),
+        (16, 81),
+        (8, 78),
+        (95, 72),
+        (11, 68),
+        (13, 61),
     ],
-    38,
+    5,
     (4, 1760),
     (0, 0),
     ([550, 541, 535, 134, 15], 401),

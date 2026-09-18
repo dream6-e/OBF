@@ -126,9 +126,9 @@ fn decimal_spelling_census_ignores_glued_and_nondecimal_forms() {
 /// to leave the shipped file smaller than the same file with the pass switched off.
 /// The exception is allowed to spend the one write that populates a field -- that
 /// is its whole price -- but it is never allowed to turn the table into a cost.
-/// Measured saving on the two golden configs: 376 B (Lua 5.1) and 322 B (Luau);
-/// the assertion only demands 64 B, so a batch that trades a little of that for a
-/// legitimate reason still passes while a size sink fails loudly.
+/// Goal 6 part 3 moves most eligible constants into per-use opaque expressions,
+/// so the remaining lift is intentionally small. The invariant here is exact: the
+/// pass may shrink or break even, but may never make either shipped script larger.
 #[test]
 fn the_wrapper_field_pass_never_costs_the_shipped_script_bytes() {
     for (target, fixture, seed) in [
@@ -147,7 +147,7 @@ fn the_wrapper_field_pass_never_costs_the_shipped_script_bytes() {
         let without = super::emit_unlifted(&data, target, seed).unwrap();
         let with = super::emit(&data, target, seed).unwrap();
         assert!(
-            with.len() + 64 <= without.len(),
+            with.len() <= without.len(),
             "{target} seed {seed}: the constant-field pass grew the script ({} -> {} B). Admitting a spelling to the wrapper table is only allowed for the one audit-anchor case, and only while every use stays price neutral -- re-measure `plan`/`admits` before touching this bound, and never by relaxing the `text.len() >= read` side of the exception.",
             without.len(),
             with.len()

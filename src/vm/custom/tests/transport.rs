@@ -1614,7 +1614,8 @@ fn k9a_segment_fields_match_rust_decode_in_native_runners() {
     }
     for (target, seed) in [(Target::Lua51, 7001u64), (Target::Luau, 7351u64)] {
         let data = compile("local function f(x)return x+1 end print(f(41))", target).unwrap();
-        let output = emit(&data, target, seed).unwrap();
+        // The extracted field has no outer wrapper; test the pre-lift codec.
+        let output = emit_unlifted(&data, target, seed).unwrap();
         let segments = segment_literals(&output, target, seed).unwrap();
         // K19: the parts only decode as a chain, so they are recovered with the
         // same resolver the audit path uses. `positions` maps a segment's file
