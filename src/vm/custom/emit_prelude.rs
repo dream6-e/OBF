@@ -80,7 +80,7 @@ pub(crate) fn emit_prelude(
         // touches. All resolve through the char pool; none is ever spelled.
         hidden.extend([
             "bit32", "buffer", "bxor", "band", "bor", "bnot", "lrotate", "lshift", "rshift",
-            "create", "writeu8", "readu8", "readu16", "readu32", "readi32", "readf64",
+            "create", "writeu8", "readu8", "readu16", "readu32", "readi32", "readf64", "len",
         ]);
     } else {
         hidden.push("getinfo");
@@ -213,7 +213,7 @@ pub(crate) fn emit_prelude(
         units.push((
                 "B32",
                 format!(
-                    "local B32,BUF=G[{0}],G[{1}];local BX,BA,BO,BN,LR,SHL,RS=B32[{2}],B32[{3}],B32[{4}],B32[{5}],B32[{6}],B32[{7}],B32[{8}];local BNE,BW8,BR8,BR2,BFS,BR3,BRI,BRF=BUF[{9}],BUF[{10}],BUF[{11}],BUF[{12}],BUF[{13}],BUF[{14}],BUF[{15}],BUF[{16}];",
+                    "local B32,BUF=G[{0}],G[{1}];local BX,BA,BO,BN,LR,SHL,RS=B32[{2}],B32[{3}],B32[{4}],B32[{5}],B32[{6}],B32[{7}],B32[{8}];local BNE,BW8,BR8,BR2,BFS,BR3,BRI,BRF,BL=BUF[{9}],BUF[{10}],BUF[{11}],BUF[{12}],BUF[{13}],BUF[{14}],BUF[{15}],BUF[{16}],BUF[{17}];",
                     var_of["bit32"],
                     var_of["buffer"],
                     var_of["bxor"],
@@ -231,6 +231,7 @@ pub(crate) fn emit_prelude(
                     var_of["readu32"],
                     var_of["readi32"],
                     var_of["readf64"],
+                    var_of["len"],
                 ),
             ));
     }
@@ -287,8 +288,13 @@ pub(crate) fn emit_prelude(
     // coefficients are baked into `write_constant_block` on the encoder side,
     // and `pool_roll_triple` derives them from the image fields so an
     // independent decoder does not need this text.
+    let uk_byte = if program.target.is_luau() {
+        "BR8(S,p+j-2)"
+    } else {
+        "SB(S,p+j-1)"
+    };
     s.push_str(&format!(
-        "local UK=function(S,p,n,acc)local o={{}};local k=(acc+119)%256;\nfor j=1,n do local b=(SB(S,p+j-1)+256-k)%256;o[j]=NCH(b);k=(k*{mul}+b*{mix}+{add})%256 end;\nreturn TC(o)end;",
+        "local UK=function(S,p,n,acc)local o={{}};local k=(acc+119)%256;\nfor j=1,n do local b=({uk_byte}+256-k)%256;o[j]=NCH(b);k=(k*{mul}+b*{mix}+{add})%256 end;\nreturn TC(o)end;",
         mul = roll.0,
         mix = roll.1,
         add = roll.2,
@@ -301,7 +307,7 @@ pub(crate) fn emit_prelude(
         "UK", "U32", "NU",
     ];
     if program.target.is_luau() {
-        ret_order.extend(["BR2", "BRI", "BRF"]);
+        ret_order.extend(["BR2", "BRI", "BRF", "BL"]);
     }
     ret_order.extend(probe_transcript.as_ref().map(|t| t.unit));
     structure.shuffle(&mut ret_order);

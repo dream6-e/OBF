@@ -1106,11 +1106,7 @@ fn stages_are_flattened_into_seeded_state_machines() {
 
 #[test]
 fn decoder_splits_into_seeded_random_sections() {
-    // The transport inverse, bounded LZW stages, semantic readers and parse
-    // core are sibling payload fields at independently shuffled positions.
-    // Depending on the seed the bit reader is either its own field or fused
-    // with the LZW dictionary field; semantic readers independently use one or
-    // two fields. Entry wiring alone carries the dependency order.
+    // Decoder fields shuffle independently; wiring preserves dependency order.
     let source = "local t={} for i=1,4 do t[i]=i*3 end print(t[2],#t)";
     for target in [Target::Lua51, Target::Luau] {
         let data = compile(source, target).unwrap();
@@ -1130,8 +1126,9 @@ fn decoder_splits_into_seeded_random_sections() {
                 keys[23]
             )));
             assert!(raw.contains(&format!("[{}]=function", keys[22])));
+            let core_tail = if target.is_luau() { ",BFS)" } else { ")" };
             assert!(raw.contains(&format!(
-                "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num)",
+                "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num{core_tail}",
                 keys[20]
             )));
             assert!(raw.contains("function()return bp end"));

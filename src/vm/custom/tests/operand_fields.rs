@@ -45,8 +45,9 @@ fn operand_features_are_split_into_separate_shuffled_fields() {
             // Goal 5: the semantic validator takes the per-use constant
             // synthesizer as its last parameter -- it validates each prototype's
             // code-resident constant block through it during decoding.
+            let semantic_tail = if target.is_luau() { ",BL,TY)" } else { ")" };
             assert!(raw.contains(&format!(
-                "[{}]=function(P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC)",
+                "[{}]=function(P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC{semantic_tail}",
                 keys[2]
             )));
             // The packed form strings are the only short `g[key]="..."`

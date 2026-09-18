@@ -93,8 +93,12 @@ pub(crate) fn constant_walker_lua(
     } else {
         "E();".to_owned()
     };
-    let string_arm =
-        "ln=U32(Q,at+2);if ln<0 or off+ln+5>blen then E()end;p=at+5;code=3;".to_owned();
+    let string_arm = if luau {
+        "ln=BR3(Q,at+1);if ln<0 or off+ln+5>blen then E()end;p=at+5;code=3;"
+    } else {
+        "ln=U32(Q,at+2);if ln<0 or off+ln+5>blen then E()end;p=at+5;code=3;"
+    }
+    .to_owned();
     let extent_arms = vec![
         decode_arm(structure, luau, "tg", 0, "p=at+1;ln=0;code=0;"),
         decode_arm(structure, luau, "tg", 1, "p=at+1;ln=1;code=1;"),
@@ -164,8 +168,9 @@ pub(crate) fn constant_walker_lua(
         luau,
         false,
     );
+    let qbyte = if luau { "BR8(Q,at)" } else { "SB(Q,at+1)" };
     let loop_body = format!(
-        "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg=SB(Q,at+1);if tg==nil then E()end;{go_extent}"
+        "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg={qbyte};if tg==nil then E()end;{go_extent}"
     );
     let extent_body = format!("{extent}{go_advance}");
     // One entry consumed: the entry-level chain folds its keyed length (what
@@ -200,8 +205,13 @@ pub(crate) fn constant_walker_lua(
     // `off` is already bound (to 0) in the walker's own head, so it can carry
     // the guard of the initial-state reconstruction.
     let w_start = structure.opaque_literal(u64::from(s_loop), luau, "off");
+    let (qlen, trailer) = if luau {
+        ("BL(Q)", "BR3(Q,kend)")
+    } else {
+        ("#Q", "U32(Q,kend+1)")
+    };
     format!(
-        "KGC=function(Q,n,m,KS,KT,ST)\nlocal kend=#Q-4;if kend<0 then E()end;local blen=U32(Q,kend+1);if blen<0 or blen>kend then E()end;\nlocal z,off,bk,at,tg,ln,p,code,ix,v=kend-blen,0,0,0,0,0,0,0,0,nil;local seed=KS~=nil;\nif seed then if n%1~=0 or n<0 or n>65536 then E()end else if m%1~=0 or m<0 or m>=n then E()end end;\nif not seed then if ST==nil then off,bk,ix=0,0,0 else off,bk,ix=ST[1],ST[2],ST[3];if ST[4]~=Q then off,bk,ix=0,0,0;ST[4]=Q end;if ix>m then off,bk,ix=0,0,0 end end end;\nlocal w={w_start};{machine}end;\n"
+        "KGC=function(Q,n,m,KS,KT,ST)\nlocal kend={qlen}-4;if kend<0 then E()end;local blen={trailer};if blen<0 or blen>kend then E()end;\nlocal z,off,bk,at,tg,ln,p,code,ix,v=kend-blen,0,0,0,0,0,0,0,0,nil;local seed=KS~=nil;\nif seed then if n%1~=0 or n<0 or n>65536 then E()end else if m%1~=0 or m<0 or m>=n then E()end end;\nif not seed then if ST==nil then off,bk,ix=0,0,0 else off,bk,ix=ST[1],ST[2],ST[3];if ST[4]~=Q then off,bk,ix=0,0,0;ST[4]=Q end;if ix>m then off,bk,ix=0,0,0 end end end;\nlocal w={w_start};{machine}end;\n"
     )
 }
 

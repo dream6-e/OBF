@@ -635,6 +635,11 @@ local check=b32();if {ad_guard} then E()end;
     // encoder keyed with, so both Lua sides agree without a shared table.
     let (pool_mask, pool_mod) = semantic::pool_key_pair(&semantic_image);
     let capture_pool = capture_pool_lua(field_order, pool_add, pool_multiplier);
+    let carrier_store = if luau {
+        "SP[2]=BFS(code);code=nil"
+    } else {
+        "SP[2]=code"
+    };
     core_text.push_str(&state_machine(
         &mut structure,
         "w",
@@ -656,7 +661,7 @@ local check=b32();if {ad_guard} then E()end;
             (
                 c_fin,
                 format!(
-                    "local Q={{}};local SN=np*2;for slot=1,SN do {segment_decode}local sid=(st[sont[1]]-slot*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or Q[sid]then E()end;local owner=MF((sid-1)/2);local claimed=(st[sont[2]]-sid*{segment_multiplier}-slot-{segment_add})%65536;if claimed~=owner then E()end;local part=(sid-1)%2;local SP=P[owner].__obf_proto_code;local nxt=(st[sont[3]]-sid*{segment_multiplier}-owner-{segment_add})%65536;local split=1+MF((SP[1]-1)*(({segment_add}+owner*{segment_multiplier})%65536)/65536);local n=part==0 and split or SP[1]-split;Q[sid]={{owner,nxt,take(n)}}end;if pos()~=#B+1 then E()end;local used={{}};local roots={{}};for owner=0,np-1 do local SP=P[owner].__obf_proto_code;local sid=(SP[2]-owner*{segment_multiplier}-{segment_add})%65536;if sid~=owner*2+1 or roots[sid]then E()end;roots[sid]=1;local code='';for count=1,2 do local S=Q[sid];if not S or S[1]~=owner or used[sid]then E()end;used[sid]=1;code=code..S[3];sid=S[2]end;if sid~=0 or #code~=SP[1]then E()end;SP[2]=code end;for sid=1,SN do if not used[sid]then E()end end;B=nil;break;",
+                    "local Q={{}};local SN=np*2;for slot=1,SN do {segment_decode}local sid=(st[sont[1]]-slot*{segment_multiplier}-{segment_add})%65536;if sid<1 or sid>SN or Q[sid]then E()end;local owner=MF((sid-1)/2);local claimed=(st[sont[2]]-sid*{segment_multiplier}-slot-{segment_add})%65536;if claimed~=owner then E()end;local part=(sid-1)%2;local SP=P[owner].__obf_proto_code;local nxt=(st[sont[3]]-sid*{segment_multiplier}-owner-{segment_add})%65536;local split=1+MF((SP[1]-1)*(({segment_add}+owner*{segment_multiplier})%65536)/65536);local n=part==0 and split or SP[1]-split;Q[sid]={{owner,nxt,take(n)}}end;if pos()~=#B+1 then E()end;local used={{}};local roots={{}};for owner=0,np-1 do local SP=P[owner].__obf_proto_code;local sid=(SP[2]-owner*{segment_multiplier}-{segment_add})%65536;if sid~=owner*2+1 or roots[sid]then E()end;roots[sid]=1;local code='';for count=1,2 do local S=Q[sid];if not S or S[1]~=owner or used[sid]then E()end;used[sid]=1;code=code..S[3];sid=S[2]end;if sid~=0 or #code~=SP[1]then E()end;{carrier_store} end;for sid=1,SN do if not used[sid]then E()end end;B=nil;break;",
                     segment_decode = field_order.segment_decode_lua(),
                 ),
             ),
@@ -672,12 +677,13 @@ local check=b32();if {ad_guard} then E()end;
             "legacy", "tag", "index", "parent", "v", "lo", "hi", "CU", "CK",
         ],
     );
+    let core_buffer = if luau { ",BFS" } else { "" };
     decoder_fields.push(format!(
-        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num)\nlocal g={{}};{core_text}end,",
+        "[{}]=function(B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num{core_buffer})\nlocal g={{}};{core_text}end,",
         keys[20]
     ));
     decoder_wiring.push_str(&format!(
-        "\nlocal P,np,entry=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num);",
+        "\nlocal P,np,entry=VMS[{}](B,E,SB,SF,NCH,TC,MF,IF,AD,SS,b8,b16,b32,take,str,pos,num{core_buffer});",
         keys[20]
     ));
     let f3_start = s.len();
@@ -833,20 +839,17 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
     // label-keyed table, checks every primitive operand,
     // rejects control operations in the middle of a recipe, and verifies all
     // graph successors only after the shuffled records have been read.
+    let semantic_buffer_param = if luau { ",BL,TY" } else { "" };
     write!(
         s,
-        "[{}]=function(P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC)\n",
+        "[{}]=function(P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC{semantic_buffer_param})\n",
         keys[2]
     )
     .unwrap();
-    // Goal 5: the constants are no longer rebuilt into a `__obf_proto_k` table.
-    // The block is *validated* here -- one seed-mode walk over all entries, whose
-    // returned extent must cover exactly the block and whose entry count must be
-    // `nk` -- and only the tag vector survives, because the validator's
-    // ReadGlobal/WriteGlobal arms need to know which slots are strings. Values
-    // are synthesized per use by `KGC` inside the interpreter, so nothing in the
-    // parse path ever holds one.
-    let kimg_pass = "local kend=#CD-4;if kend<0 then E()end;local ke=kend-U32(CD,kend+1);if ke<0 then E()end;if F.__obf_proto_nk>0 then local KS,KT={{}},{{}};local eo,ei=KGC(CD,F.__obf_proto_nk,nil,KS,KT,nil);if eo~=kend-ke or ei~=F.__obf_proto_nk then E()end;F.__obf_proto_tags=KT else F.__obf_proto_tags={{}} end;";
+    // Validate constants; KGC synthesizes per use.
+    let code_len = if luau { "BL(CD)" } else { "#CD" };
+    let proto_len = if luau { "BL(SP[2])" } else { "#SP[2]" };
+    let kimg_pass = format!("local kend={code_len}-4;if kend<0 then E()end;local ke=kend-U32(CD,kend+1);if ke<0 then E()end;if F.__obf_proto_nk>0 then local KS,KT={{{{}}}},{{{{}}}};local eo,ei=KGC(CD,F.__obf_proto_nk,nil,KS,KT,nil);if eo~=kend-ke or ei~=F.__obf_proto_nk then E()end;F.__obf_proto_tags=KT else F.__obf_proto_tags={{{{}}}} end;");
     let recipe_decoder = layered_recipe_decoder(&mut structure, &semantic_image.token_layers, luau);
     let edge_decoder = layered_edge_decoder(&mut structure, &semantic_image.edge_layers, luau);
     let tuple_slots = field_order.tuple_slots();
@@ -858,10 +861,11 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
     let route_mul = 3 + (route_random.index(251)) * 2;
     let route_add = 1 + route_random.index(65520);
     let route_salt = 1 + route_random.index(65520);
+    let decoded_guard = if luau { "TY(CD)==TY(P)" } else { "CD[0]~=nil" };
     let semantic_validator = format!(
         r#"{edge_decoder}{recipe_decoder}{operand_getter}
 local DC=function(id)
- local F=P[id];local CD=F.__obf_proto_code;if CD[0]~=nil then return CD end;local p=1;{operand_profile}{field_profile}
+ local F=P[id];local CD=F.__obf_proto_code;if {decoded_guard} then return CD end;local p=1;{operand_profile}{field_profile}
  local D16=function()local a,b=SB(CD,p),SB(CD,p+1);if b==nil then E()end;p=p+2;return a+b*256 end;
  {kimg_pass} local nr=D16();if nr==0 or nr>512 then E()end;local RM={{}};local VR={{}};
  for z=1,nr do {dict_head}if rid==0 or n==nil or n<1 or n>4 or RM[rid]~=nil then E()end;
@@ -886,7 +890,7 @@ local DC=function(id)
   elseif code[next1]==nil or skip~=0 then E()end;
  end;code[0]=start;code[-1]=CD;F.__obf_proto_code=code;F.__obf_proto_routes=VR;return code
 end;
-for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;P[id].__obf_proto_tags=nil;end;return RD,ED,OG,DC;"#,
+for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or {proto_len}~=SP[1] then E()end;P[id].__obf_proto_code=SP[2];DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;P[id].__obf_proto_tags=nil;end;return RD,ED,OG,DC;"#,
         kimg_pass = kimg_pass,
         mask_mul = semantic_image.mask_mul,
         mask_add = semantic_image.mask_add,
@@ -1117,11 +1121,6 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         scatter.blob(8),
         keys[12],
     );
-    // Goal 5: `KGC` is declared with the other wrapper-method locals and
-    // *assigned* here -- after the prelude has bound `U32`/`UK`/`NU`/`SB`/`E`
-    // and before the decoder binds every prototype (`DC` validates each
-    // prototype's constant block through it). A `local` in this branch would be
-    // scoped to the state machine's arm, so this must be an assignment.
     let walker = constant_walker_lua(&mut structure, program.target, pool_mask, pool_mod);
     let decoder_stage = format!("{walker}{decoder_stage}");
     let decode_stage = format!("{}{decoder_stage}{go_bind}", scatter.blob(9));
@@ -1130,8 +1129,19 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     } else {
         ""
     };
+    let carrier_byte_arg = if luau {
+        "function(q,i)return BR8(q,i-1)end"
+    } else {
+        "SB"
+    };
+    let carrier_u32_arg = if luau {
+        "function(q,i)return BR3(q,i-1)end"
+    } else {
+        "U32"
+    };
+    let semantic_buffer_arg = if luau { ",BL,TY" } else { "" };
     let bind_stage = format!(
-        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E{validator_buffer_args});RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC);CV,SV,Lookup=VMS[{}](TY,E);{go_run}",
+        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,{carrier_byte_arg});local vld=VMS[{}](E{validator_buffer_args});RD,ED,OG,DC=VMS[{}](P,np,{carrier_byte_arg},E,dec,vld,NX,SS,NCH,TC,IF,SF,{carrier_u32_arg},UK,NU,KGC{semantic_buffer_arg});CV,SV,Lookup=VMS[{}](TY,E);{go_run}",
         scatter.blob(10),
         keys[14], keys[15], keys[2], keys[3],
     );
@@ -1317,8 +1327,6 @@ end;
     let v_disp =
         selected_masked_state_value(&mut structure, k_disp, k_disp_alt, control_mask, luau);
     let dispatch_first = !structure.coin();
-    // Seed-ISA v1 prelude: after Make binds (so the helper pool captures
-    // live values) and before H (so every arm reaches it lexically).
     let mut seed_used = 0u64;
     for recipe in &semantic_image.recipes {
         for op in &recipe.execute_ops {
@@ -1336,9 +1344,14 @@ end;
         route_salt = route_salt,
         ctx_reset = ctx_reset,
     );
+    let needs_decode = if luau {
+        "TY(code)~=TY(P)"
+    } else {
+        "not code[0]"
+    };
     write!(
         s,
-        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_tags=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;if not code[0] then code=DC(fid) end;K=code[-1];LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};local {wire},{key},{control}=0,0,P.__obf_proto_control;\n  while true do\n   {machine_open}",
+        "local LVC={{}};local LVE=function(f,v)local o=LVC[f];if o==1 then LVC[f]=nil;local G=P[f];local C=G.__obf_proto_code;if C[-1]then G.__obf_proto_code=C[-1];G.__obf_proto_routes=nil;G.__obf_proto_tags=nil end else LVC[f]=o-1 end;return v end;\nH=function(fid,args,ups)\n local F,R,va,RX,RF,K;\n{seed_loop} while true do\n  F,R,va,RX,RF=SETUP(fid,args);\n  local code=F.__obf_proto_code;if {needs_decode} then code=DC(fid) end;K=code[-1];LVC[fid]=(LVC[fid] or 0)+1;local pc=code[0];\n  local I,rid,sid,next1,skip1,a,b,c,k,j,route,route_info;local w={v_fetch};local {wire},{key},{control}=0,0,P.__obf_proto_control;\n  while true do\n   {machine_open}",
         seed_loop = seed_loop_lua(program.target, seed),
         wire = context::WIRE_VAR,
         key = context::KEY_VAR,

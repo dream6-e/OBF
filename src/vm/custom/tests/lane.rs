@@ -191,10 +191,15 @@ fn prototype_code_words_are_decoded_lazily_and_released_after_validation() {
                 raw.contains("DC(id);P[id].__obf_proto_code=SP[2];P[id].__obf_proto_routes=nil;"),
                 "{target} seed {seed}: load pass must release decoded words after validation"
             );
-            assert!(
-                raw.contains("if not code[0] then code=DC(fid) end"),
-                "{target} seed {seed}: interpreter must decode lazily on first execution"
-            );
+            let decode_gate = if target.is_luau() {
+                "if TY(code)~=TY(P) then code=DC(fid) end"
+            } else {
+                "if not code[0] then code=DC(fid) end"
+            };
+            assert!(raw.contains(decode_gate), "{target} seed {seed}: lazy decode gate");
+            if target.is_luau() {
+                assert!(raw.contains("SP[2]=BFS(code);code=nil"), "cipher carrier is not a buffer");
+            }
             assert!(
                 raw.contains("return RD,ED,OG,DC;"),
                 "{target} seed {seed}: DC must be exported with the token helpers"
@@ -326,11 +331,12 @@ fn constants_are_synthesized_per_use_with_no_value_table_in_the_text() {
                 1,
                 "{target} seed {seed}: per-use synthesizer"
             );
-            assert_eq!(
-                raw.matches("local kend=#Q-4;").count(),
-                1,
-                "{target} seed {seed}: block-length tail read"
-            );
+            let tail = if target.is_luau() {
+                "local kend=BL(Q)-4;"
+            } else {
+                "local kend=#Q-4;"
+            };
+            assert_eq!(raw.matches(tail).count(), 1, "{target} seed {seed}: block tail");
             // The walk keeps its state in one dispatch variable and reaches the
             // value form through a second, value-keyed decision; both are seeded
             // state ids/shuffled trees, so no canonical order survives.
