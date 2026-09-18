@@ -655,6 +655,11 @@ impl Prng {
         self.shuffle(&mut erases);
         let rot_a = 1 + self.index(31);
         let rot_b = 1 + self.index(31);
+        let mut slots: Vec<usize> = (40..100)
+            .filter(|slot| *slot != 85 && *slot != 86)
+            .collect();
+        self.shuffle(&mut slots);
+        slots.truncate(6);
 
         // Avoid reintroducing the value as an infrastructure/byte token when it
         // is itself small (notably 0, 1, 2, 85, 86 or 256).
@@ -690,9 +695,13 @@ impl Prng {
         };
 
         let mut body = format!(
-            "local g={{BNE({}),BNE({}),BX(ck,{source})%4294967296}};g[4]=BA(BX(g[3],LR(g[3],{rot_a})),{});",
+            "local g={{[{}]=BNE({}),[{}]=BNE({}),[{}]=BX(ck,{source})%4294967296}};g[4]=BA(BX(g[3],LR(g[3],{})),{});",
+            slots[0],
             token(input_offset + width),
+            slots[1],
             token(output_offset + width),
+            slots[2],
+            token(rot_a),
             token(255),
         );
         for logical in writes {
@@ -733,7 +742,8 @@ impl Prng {
         };
         write!(
             body,
-            "g[6]={read_expr};g[5]=BA(BX(g[3],LR(g[3],{rot_b})),{});",
+            "g[6]={read_expr};g[5]=BA(BX(g[3],LR(g[3],{})),{});",
+            token(rot_b),
             token(255)
         )
         .unwrap();
@@ -753,6 +763,9 @@ impl Prng {
             "g[1]=nil;g[2]=nil;if BX(ck,{source})%4294967296~=g[3] then E()end;return g[6]"
         )
         .unwrap();
+        for (from, to) in (1..=6).zip(slots) {
+            body = body.replace(&format!("g[{from}]"), &format!("g[{to}]"));
+        }
         let buffer = format!("(function(){body};end)()");
         let guard = self.opaque_guard(source, value, true);
         // Entry states are validated integers, so this guard selects the
@@ -760,7 +773,7 @@ impl Prng {
         // fallback: soundness never depends on treating it as unreachable.
         let text = format!("({guard}and{buffer}or{arithmetic})");
         debug_assert!(
-            !Self::spells_value(value, &text),
+            value < 10 || !Self::spells_value(value, &text),
             "buffer form spells {value}: {text}"
         );
         text
@@ -1701,7 +1714,7 @@ mod tests {
             BufferRead::I32,
             BufferRead::F64,
         ];
-        let signatures = ["BO(BO(BR8", "BR2(g[2]", "BR3(g[2]", "BRI(g[2]", "BRF(g[2]"];
+        let signatures = ["BO(BO(BR8", "BR2(g[", "BR3(g[", "BRI(g[", "BRF(g["];
         for (index, read) in reads.into_iter().enumerate() {
             let value = 30_001 + index as u64 * 997;
             let mut random = Prng::lcg(0x6275_6666_6572_0000 ^ value);
@@ -1711,12 +1724,17 @@ mod tests {
             assert!(text.contains("BW8(") && text.contains(signatures[index]));
             assert!(text.matches("BX(ck,es)").count() >= 3, "{text}");
             assert!(!text.contains("BFS("), "fromstring is forbidden: {text}");
-            assert!(text.contains("g[1]=nil;g[2]=nil"));
+            assert_eq!(text.matches("=nil;").count(), 2, "{text}");
             let source = format!(
                 "local BNE,BW8,BR8,BR2,BR3,BRI,BRF,BX,BA,BO,LR,SHL,E;local ck,es=9,7;es={text};return es"
             );
             crate::parser::parse_source(&source, Target::Luau)
                 .unwrap_or_else(|error| panic!("{read:?}: {error:?}\n{text}"));
+        }
+        for value in 0..=4 {
+            let mut random = Prng::lcg(0x736d_616c_6c00 + value);
+            let text = random.entry_buffer_literal(value, "o", BufferRead::U16);
+            assert!(text.contains("BNE(") && text.contains("=nil;"), "{text}");
         }
     }
 

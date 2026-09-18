@@ -496,9 +496,11 @@ fn pins_luau() -> AuditPins {
         //     Luau 上翻到 1，不是新构造。
         //   check8 字面量间距 (1, 64) -> (1, 69)，gcd 仍为 1。
         // check1/2/3/7/9 一字未动。
+        // Goal 7 predicate correction: transient selector fragments move check5
+        // 13 -> 12, while the validator's captured API list moves check6 0 -> 1.
         check4_thresholds: (3, 65535, false),
         check5_templates: (
-            13,
+            12,
             vec![
                 ("X=X+N".to_string(), 31),
                 ("X[N]=X[N]+X[N]*X[N]X[N]=X[N]*X[N]X".to_string(), 18),
@@ -513,7 +515,7 @@ fn pins_luau() -> AuditPins {
                 ("X=(X+X+(N*X.X+N))%X.X".to_string(), 8),
             ],
         ),
-        check6_alias_prologues: 0,
+        check6_alias_prologues: 1,
         check7_dead_tables: Vec::new(),
         check8_literal_gcd: (1, 69),
         // The token walker sees a 2,691-byte fragment rather than the

@@ -104,7 +104,8 @@ pub(crate) fn constant_walker_lua(
         decode_arm(structure, luau, "tg", 5, &string_arm),
     ];
     let extent_groups = (2 + structure.index(2)) as u8;
-    let extent = super::structure::grouped_tree(structure, extent_arms, extent_groups, "tg", luau);
+    let extent =
+        super::structure::grouped_tree(structure, extent_arms, extent_groups, "tg", luau, false);
     // Value form by conversion code. Goal 6: a leaf no longer returns
     // straight out -- it assigns the synthesized value to `v` and hands control
     // to the commit state, which folds the entry into the *rolling cursor* and
@@ -155,8 +156,14 @@ pub(crate) fn constant_walker_lua(
         decode_arm(structure, luau, "code", 4, &commit_go(int_form)),
     ];
     let convert_groups = (2 + structure.index(2)) as u8;
-    let convert =
-        super::structure::grouped_tree(structure, convert_arms, convert_groups, "code", luau);
+    let convert = super::structure::grouped_tree(
+        structure,
+        convert_arms,
+        convert_groups,
+        "code",
+        luau,
+        false,
+    );
     let loop_body = format!(
         "if off>=blen then if seed then return off,ix else E()end end;at=z+off;tg=SB(Q,at+1);if tg==nil then E()end;{go_extent}"
     );

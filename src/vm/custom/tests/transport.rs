@@ -1196,20 +1196,20 @@ fn dispatch_chains_split_into_seeded_subchains() {
                 .expect("bounds closure");
             let vld_end = vld_at + raw[vld_at..].find("E()end;return true").unwrap();
             let bounds = &raw[vld_at..vld_end];
-            // The `%` right-hand side has to be a *comparison* against a
-            // constant: Goal 6's guards spell `(o%2==o%2)`, which is not a
-            // selector, so the census is token-aware (`residue_selector_moduli`).
+            // Count raw Lua 5.1 selectors and transient Luau selector fragments.
             let moduli = residue_selector_moduli(bounds, target, "o");
-            let mut modulus = None;
-            for value in &moduli {
-                assert!((2..=4).contains(value), "selector modulus {value}");
-                match modulus {
-                    Some(seen) => assert_eq!(seen, *value, "mixed sub-chain moduli"),
-                    None => modulus = Some(*value),
-                }
-            }
-            let groups = modulus.expect("no sub-chain selector");
-            assert_eq!(moduli.len(), groups as usize, "one selector per group");
+            let groups = if target.is_luau() {
+                assert!(moduli.is_empty(), "Luau selector leaked a raw modulus");
+                let fragments = bounds.matches("BNE(").count();
+                assert_eq!(fragments % 4, 0, "incomplete buffered selector");
+                (fragments / 4) as u64
+            } else {
+                let modulus = *moduli.first().expect("no sub-chain selector");
+                assert!(moduli.iter().all(|value| *value == modulus), "mixed sub-chain moduli");
+                assert_eq!(moduli.len(), modulus as usize, "one selector per group");
+                modulus
+            };
+            assert!((2..=4).contains(&groups), "selector groups {groups}");
             // Interpreter chain: the residue selectors are gone, the interval
             // partition takes their place. Counted on the whole raw text because
             // `rid`/`sid` appear nowhere else.

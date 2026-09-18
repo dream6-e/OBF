@@ -37,7 +37,11 @@ fn operand_features_are_split_into_separate_shuffled_fields() {
             assert!(raw.contains(&format!("[{}]=function(E,SB)", keys[13])));
             assert!(raw.contains(&format!("VMS[{}](E,SB)", keys[13])));
             assert!(raw.contains(&format!("[{}]=function(E,SB)", keys[14])));
-            assert!(raw.contains(&format!("[{}]=function(E)", keys[15])));
+            if target.is_luau() {
+                assert!(raw.contains(&format!("[{}]=function(E,BNE,BW8", keys[15])));
+            } else {
+                assert!(raw.contains(&format!("[{}]=function(E)", keys[15])));
+            }
             // Goal 5: the semantic validator takes the per-use constant
             // synthesizer as its last parameter -- it validates each prototype's
             // code-resident constant block through it during decoding.

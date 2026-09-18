@@ -777,9 +777,6 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
     // The shape branch works in plain locals instead: `slot_rewrite` turns `local x`
     // into a table write, and this closure runs once per decoded operand, so the hot
     // values stay locals. `sf` is a parameter (a slot target in a parameter list is not
-    // Lua at all), and a declaration with no initialiser stays a plain local -- a
-    // slotted one would have to be rewritten into `g[k],g[k]=nil,nil`, which the
-    // emitted-token pass then glues onto the following keyword.
     decode_body = slot_rewrite(&mut structure, &decode_body, &["w", "v"]);
     let decode_field = decode_body;
     let mut f3_arms: Vec<(u8, String)> = primitive_ops
@@ -809,12 +806,18 @@ else E()end;local k=b+c*256;return a,b,c,a+k*256,k,p2 end;\nend,",
             f3_arms,
             f3_groups,
             "o",
+            program.target.is_luau(),
             program.target.is_luau()
         ),
     );
     let validate_body = slot_rewrite(&mut structure, &validate_body, &["ok"]);
+    let validator_buffer_params = if luau {
+        ",BNE,BW8,BR8,BR2,BR3,BRI,BRF,BX,BA,BO,LR,SHL,ck"
+    } else {
+        ""
+    };
     let validate_field = format!(
-        "[{key}]=function(E)\nreturn function(o,a,b,c,j,k,at,F,P,id)local g={{}};{body} end;\nend,",
+        "[{key}]=function(E{validator_buffer_params})\nreturn function(o,a,b,c,j,k,at,F,P,id)local g={{}};{body} end;\nend,",
         key = keys[15],
         body = validate_body,
     );
@@ -1049,8 +1052,7 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
         entry_states[4],
         entry_states[5],
     );
-    // Luau entry transitions mix all five typed reads; each owns and erases its
-    // checkpoint-bound buffers. Lua 5.1 stays arithmetic-only.
+    // Luau mixes all five typed reads; Lua 5.1 stays arithmetic-only.
     let mut buffer_reads = [
         crate::random::BufferRead::U8,
         crate::random::BufferRead::U16,
@@ -1123,8 +1125,13 @@ for id=0,np-1 do local SP=P[id].__obf_proto_code;if not SP[2] or #SP[2]~=SP[1] t
     let walker = constant_walker_lua(&mut structure, program.target, pool_mask, pool_mod);
     let decoder_stage = format!("{walker}{decoder_stage}");
     let decode_stage = format!("{}{decoder_stage}{go_bind}", scatter.blob(9));
+    let validator_buffer_args = if luau {
+        ",BNE,BW8,BR8,BR2,BR3,BRI,BRF,BX,BA,BO,LR,SHL,ck"
+    } else {
+        ""
+    };
     let bind_stage = format!(
-        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E);RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC);CV,SV,Lookup=VMS[{}](TY,E);{go_run}",
+        "{}P.__obf_proto_control=(c1+c2+c3)%65520;local dec=VMS[{}](E,SB);local vld=VMS[{}](E{validator_buffer_args});RD,ED,OG,DC=VMS[{}](P,np,SB,E,dec,vld,NX,SS,NCH,TC,IF,SF,U32,UK,NU,KGC);CV,SV,Lookup=VMS[{}](TY,E);{go_run}",
         scatter.blob(10),
         keys[14], keys[15], keys[2], keys[3],
     );

@@ -98,6 +98,7 @@ pub(crate) fn grouped_tree(
     groups: u8,
     value_var: &str,
     luau: bool,
+    buffered_selectors: bool,
 ) -> String {
     structure.shuffle(&mut arms);
     // K18: a leaf may merge at most three arms. The previous 2..=4 draw let one
@@ -108,7 +109,11 @@ pub(crate) fn grouped_tree(
     let leaf_max = 2 + (structure.index(2)) as usize;
     let mut text = String::new();
     for group in 0..groups {
-        let condition = selector_condition(structure, value_var, groups, group);
+        let condition = if buffered_selectors && luau {
+            buffered_selector_condition(structure, value_var, groups, group)
+        } else {
+            selector_condition(structure, value_var, groups, group)
+        };
         write!(
             text,
             "{} {condition} then ",
@@ -447,6 +452,35 @@ pub(crate) fn grouped_interval_chain(
     );
     text.push_str(" end;");
     text
+}
+
+/// Luau validator selector whose modulus and residue are each reconstructed by
+/// an independent transient buffer expression. The enclosing validator captures
+/// the low-level buffer/bit functions and the completed install fold as `ck`.
+fn buffered_selector_condition(
+    structure: &mut crate::random::Prng,
+    value_var: &str,
+    modulus: u8,
+    group: u8,
+) -> String {
+    use crate::random::BufferRead;
+    let reads = [
+        BufferRead::U8,
+        BufferRead::U16,
+        BufferRead::U32,
+        BufferRead::I32,
+        BufferRead::F64,
+    ];
+    let modulus_read = reads[structure.index(reads.len())];
+    let modulus = structure.entry_buffer_literal(u64::from(modulus), value_var, modulus_read);
+    let group_read = reads[structure.index(reads.len())];
+    let group = structure.entry_buffer_literal(u64::from(group), value_var, group_read);
+    match structure.index(4) {
+        0 => format!("{value_var}%{modulus}=={group}"),
+        1 => format!("{group}=={value_var}%{modulus}"),
+        2 => format!("not({value_var}%{modulus}~={group})"),
+        _ => format!("{value_var}%{modulus}-{group}==0"),
+    }
 }
 
 /// Sub-chain selector condition, one of four exactly equivalent spellings
