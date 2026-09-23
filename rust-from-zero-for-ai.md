@@ -362,6 +362,192 @@ curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -
 
 ---
 
+## 12. 连不上 crates.io（或其他 registry）怎么办
+
+**先分清两件事**：`rustc`/`cargo` 本体**不需要** crates.io；只有引入第三方依赖（`[dependencies]`）时才需要 registry。
+所以「装好 Rust 但访问不了 crates.io」通常**不影响**编译零依赖项目——实测：`CARGO_NET_OFFLINE=true` + 清空 `target/` + `HOME` 未设置，`cargo build` 与 `cargo run` 全部成功。
+
+> 本章所有「实测 ✓」= 在只开放 `github.com` 与 `registry.npmjs.org`、**crates.io 与所有国内镜像均不可达**的沙箱里跑通的真实命令与输出。
+
+### 12.1 第一步：判定到底什么被挡住（不要靠猜）
+
+```bash
+for u in https://crates.io https://static.crates.io https://index.crates.io/config.json \
+         https://rsproxy.cn/index/config.json https://github.com https://registry.npmjs.org; do
+  printf '%-58s ' "$u"; curl -s -o /dev/null -m 8 -w '%{http_code}\n' "$u" || echo FAIL
+done
+```
+
+- `200` = 可用；**`000` = 这个端点根本连不上**（不是慢、不是重试能好）。
+- 某次实测样本：`crates.io` 000、`static.crates.io` 000、`index.crates.io` 000、`rsproxy/ustc/tuna` 000，而 **`github.com` 200、`registry.npmjs.org` 200**。
+  ⇒ 这种环境下的正确策略是「**绕开 registry，把依赖换成源码**」，而不是换镜像（镜像也不通）。
+
+### 12.2 六条可用路线（按推荐顺序，附实测状态）
+
+#### 路线 0：零依赖（std-only）——什么都不用配 ✓ 实测
+
+自写代码只用标准库时，直接构建即可，网络完全不参与：
+
+```bash
+cargo new solo && cd solo && CARGO_NET_OFFLINE=true cargo build && ./target/debug/solo
+```
+
+#### 路线 1：本地 path 依赖 ✓ 实测
+
+依赖源码就在本机（自己拆的模块、拷来的库）时最省事：
+
+```toml
+[dependencies]
+foo = { path = "../foo" }
+```
+
+#### 路线 2：vendor 目录 + directory source（**最通用的离线方案**）✓ 实测
+
+原理：把每个依赖的源码目录放进 `vendor/`，并让 cargo 用「目录源」替代 crates.io。
+
+```toml
+# 项目内 .cargo/config.toml（或 $CARGO_HOME/config.toml 全局）
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "/abs/path/to/vendor"      # 建议绝对路径
+```
+
+有网机器上生成（推荐，会写正确的 checksum）：
+
+```bash
+cargo vendor --versioned-dirs vendor   # 并把它打印出来的配置抄进 .cargo/config.toml
+```
+
+无网机器上只要 `vendored-sources` 里能找齐全部依赖（含传递依赖）即可：
+
+```bash
+CARGO_NET_OFFLINE=true cargo build
+```
+
+- 手工凑 vendor 目录也**可行**（实测）：`vendor/<crate>/{Cargo.toml,src/,…}` + `.cargo-checksum.json`，内容写 `{"files":{}}` 即被接受（真实 `cargo vendor` 会写逐文件 sha256；手写空表能用但失去校验）。
+- 缺依赖时的确切报错（据此判断是「源里没有」而不是「代码错」）：
+  `error: no matching package found / searched package name: \`bar\` … location searched: directory source \`…\` (which is replacing registry \`crates-io\`)`。
+
+#### 路线 3：把依赖换成 GitHub 上的 git 依赖 ✓ 实测
+
+GitHub 通常比 crates.io 更容易放行；用 tag/rev 钉死版本保证可复现：
+
+```toml
+[dependencies]
+itoa = { git = "https://github.com/dtolnay/itoa", tag = "1.0.15" }
+# 或 rev = "<40位commit>"；内部 GitLab/Gitea 同理填其 https 地址
+```
+
+```bash
+cargo build                 # 首次必须允许联网到该 git 主机
+cargo build --offline       # 缓存到 $CARGO_HOME/git/ 之后可离线
+```
+
+两个实测到的坑：
+
+- **`--offline` 不接受首次 clone**：`can't checkout from '…': you are in the offline mode (--offline)`。先联网跑一次即可。
+- `cargo vendor --versioned-dirs` 对 git 依赖同样有效，并会打印这种配置（实测原文）：
+  ```toml
+  [source."git+https://github.com/dtolnay/itoa?tag=1.0.15"]
+  git = "https://github.com/dtolnay/itoa"
+  tag = "1.0.15"
+  replace-with = "vendored-sources"
+
+  [source.vendored-sources]
+  directory = "/abs/path/vend-gh"
+  ```
+
+#### 路线 4：GitHub 源码 tarball → 手工 vendor ✓ 实测
+
+适合「依赖仓库在 GitHub，但构建机连不上 crates.io 也连不上 git 协议」：
+
+```bash
+curl -sL -o itoa.tar.gz https://github.com/dtolnay/itoa/archive/refs/tags/1.0.15.tar.gz
+mkdir -p vendor && tar -xzf itoa.tar.gz -C vendor && mv vendor/itoa-1.0.15 vendor/itoa
+printf '{"files":{}}\n' > vendor/itoa/.cargo-checksum.json    # 然后按路线 2 配 directory source
+CARGO_NET_OFFLINE=true cargo build                            # 实测 ✓
+```
+
+（crate 源码目录里有 `Cargo.toml` 就能作为 vendor 项；版本必须与 `Cargo.toml`/`Cargo.lock` 的要求相容。）
+
+#### 路线 5：搬运依赖缓存（有网机器 → 无网机器）
+
+```bash
+# 有网机器（同一项目先构建一次）
+tar -C ~/.cargo -czf cargo-cache.tgz registry git
+# 无网机器
+tar -C ~/.cargo -xzf cargo-cache.tgz
+CARGO_NET_OFFLINE=true cargo build --locked
+```
+
+`Cargo.lock` 必须一起带过去（它锁版本；`--locked`/`--frozen` = 锁定 + 离线），否则解析会去找 registry。
+（本沙箱从未从 crates.io 下载过 crate，故这条**未实测**，属标准做法。）
+
+#### 路线 6：镜像 / 代理（**只在端点可达时才有用**）
+
+```toml
+# $CARGO_HOME/config.toml —— 三选一，替换 with 的名字随意
+[source.crates-io]
+replace-with = "mirror"
+
+[source.mirror]
+registry = "sparse+https://rsproxy.cn/index/"                                  # 字节跳动
+# registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"             # 中科大
+# registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"    # 清华
+
+[net]
+git-fetch-with-cli = true      # git 依赖交给系统 git，兼容代理/凭据助手
+```
+
+纪律：**配置前先 `curl -sI -m 8 <index-url>` 确认 200**；本次沙箱三个镜像全 000 ⇒ 配了也没用，属「先验证再配置」的典型场景。
+
+企业代理 / TLS 拦截环境：
+
+```bash
+export HTTPS_PROXY=http://proxy.corp:8080 HTTP_PROXY=http://proxy.corp:8080
+export CARGO_HTTP_PROXY=http://proxy.corp:8080
+export CARGO_HTTP_CAINFO=/path/to/corp-ca.pem      # 自签 CA 时
+export CARGO_HTTP_MULTIPLEXING=false               # 某些代理下更稳
+export CARGO_HTTP_TIMEOUT=60 CARGO_NET_RETRY=5
+```
+
+#### 路线 7：`[patch.crates-io]` 用本地源码顶替 ✓ 实测
+
+已有 `foo = "0.1"` 形式的声明、手上又有源码时，可以不动依赖行：
+
+```toml
+[dependencies]
+foo = "0.1.0"
+
+[patch.crates-io]
+foo = { path = "../foo" }
+```
+
+实测在 `CARGO_NET_OFFLINE=true` 下可直接构建。限制：**传递依赖仍需能解析**（即其余依赖要么也在 patch/vendor 里，要么已在缓存），故只适合替换少量 crate。
+
+### 12.3 新增的确切报错 → 处置（实测原文）
+
+| 报错 | 含义 | 处置 |
+|---|---|---|
+| `error: no matching package found / searched package name: \`bar\` … location searched: directory source \`…\` (which is replacing registry \`crates-io\`)` | vendor 目录里没有这个（含传递）依赖 | 把该 crate 源码补进 vendor，或改走 git/tarball 路线 |
+| `can't checkout from 'file:///…': you are in the offline mode (--offline)` | `--offline` 下首次拉 git 依赖被拒（即使 URL 是本机 `file://`） | 先允许联网构建一次完成 checkout，之后 `--offline` 即可；或把依赖改成 vendor 目录 |
+| `error: the crate \`serde\` could not be found in registry index.` （`cargo add`） | 离线/registry 不通时无法 `cargo add` | 手工编辑 `Cargo.toml` 写依赖；不要在断网时用 `cargo add`/`cargo search` |
+| `There is no dependency to vendor in this project.` | `cargo vendor` 的对象为空 | 先在 `Cargo.toml` 写依赖，再 vendor |
+| `warning: spurious network error (3 tries remaining): [35] SSL connect error` → `download of config.json failed` | registry 端点不可达（被墙/无代理） | 走本章路线 0–4；或先做 §12.1 的端点探测，别反复重试 |
+| 构建成功但运行时报缺共享库 | 动态链接到本机没有的 `.so` | 用 `musl` 静态目标：`rustup target add x86_64-unknown-linux-musl` + `cargo build --target x86_64-unknown-linux-musl` |
+
+### 12.4 明确的「不要做」
+
+1. **不要指望 npm 上能找到 crate**：npm 上没有 crates.io 的通用镜像/对应物；能用的是 GitHub 通道（路线 3/4）。
+2. **不要删掉 `Cargo.lock` 试图「重解析」**：离线环境下它恰恰是能构建的依据。
+3. **不要反复重试网络**：`000` 端点是硬不可达，`--offline` + 源码方案才是出路。
+4. **不要把 `--offline` 的解析失败当成代码 bug**，也不要为绕过它而删依赖、删测试。
+5. **不要在多台机器上依赖「本地 home 里碰巧有的缓存」而不写进仓库**：可复现的离线交付应把 `vendor/` + `.cargo/config.toml` 或 git 依赖（带 tag/rev）提交进版本库。
+
+---
+
 ### 附：实测过的数据（供估算）
 
 | 项 | 实测值 |
