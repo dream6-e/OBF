@@ -1,0 +1,223 @@
+//! Only the generated VM's closed schema is renamed; public keys stay public.
+mod support;
+use obf::{bytecode::custom as bc, lexer, vm, Target};
+use std::fs;
+use std::process::Command;
+use support::{compile_and_run, success, Workspace};
+
+const LONG_FIELDS: &[&str] = &[
+    "code", "tags", "parent", "flags", "shared", "self", "cached", "control",
+];
+
+fn embedded(source: &str, target: Target, seed: u64) -> Vec<u8> {
+    // Removing outer ChaCha8, frame v2, inner ChaCha8, and strict LZW reveals
+    // the private seed-specific semantic image, not the public canonical
+    // bytecode supplied to `emit`.
+    vm::custom::decrypt_embedded(source, target, seed).unwrap()
+}
+
+fn assert_semantic_image(image: &[u8], canonical: &[u8], target: Target) {
+    assert_ne!(image, canonical);
+    assert_eq!(&image[..4], b"OBF\x02");
+    assert_eq!(image[4], if target.is_luau() { 0x75 } else { 0x51 });
+    assert_eq!(image[6], 1, "generated scripts require private encoding 1");
+    assert_eq!(
+        u32::from_le_bytes(image[24..28].try_into().unwrap()),
+        19,
+        "generated scripts require private ISA19 images: the constant pool is gone -- \
+         each prototype's code region ends with `[constants block][u32 block_len]`, so \
+         the runtime validates the block once (seed-mode walk, count == nk) and keeps \
+         only the tag vector, synthesizing every value per use. The ISA18 recipe \
+         dictionary (renumbered opcode + operand form as a byte pair, no form or \
+         permutation table rebuilt) and the K13c keyed payloads still hold underneath"
+    );
+}
+
+fn assert_private_names_hidden(output: &str, target: Target) {
+    let tokens = lexer::lex(output, target).unwrap();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != lexer::TokenKind::Identifier {
+            continue;
+        }
+        let prev = index.checked_sub(1).map(|i| tokens[i].text(output));
+        if prev == Some(".") {
+            assert!(
+                !LONG_FIELDS.contains(&token.text(output)),
+                "unshortened field: {}",
+                token.text(output)
+            );
+        }
+        // Names after ':' are user-provided NAMECALL adapters, not metadata.
+        if prev != Some(":") {
+            assert!(!token.text(output).starts_with("__obf_proto_"));
+        }
+    }
+    assert!(!output.contains(['\r', '\n']));
+}
+
+#[test]
+fn prototype_field_shortening_preserves_bytecode_public_keys_and_runtime_output() {
+    let source = r#"
+        local user={code='code',tags='tags',parent=3,flags=4,shared=5,self=6,cached=7,control=8,__obf_proto_code=9,__obf_proto_control=10}
+        local alias=user alias.flags=alias.flags+1
+        local value='code tags parent flags shared self cached control \000\255'
+        print(user.code,user['tags'],alias.parent,user.flags,user.shared,user.self,user.cached,user.control,user.__obf_proto_code,user.__obf_proto_control,#value,string.byte(value,-1))
+        local function capture(delta)return function()user.flags=user.flags+delta return user.flags,nil,user.code end end
+        print(capture(2)())
+        local called=setmetatable({}, {__call=function(_,x)return x+1 end,__index=function(_,key)return key end})
+        print(called(3),called.code)
+    "#;
+    let work = Workspace::new();
+    let path = work.0.join("subject.lua");
+    for target in [Target::Lua51, Target::Luau] {
+        fs::write(&path, source).unwrap();
+        let expected = compile_and_run(target, &path);
+        let bytes = vm::custom::compile(source, target).unwrap();
+        for seed in [0, 1, 735, u64::MAX] {
+            let output = vm::custom::emit(&bytes, target, seed).unwrap();
+            assert_eq!(output, vm::custom::emit(&bytes, target, seed).unwrap());
+            assert_private_names_hidden(&output, target);
+            let image = embedded(&output, target, seed);
+            assert_semantic_image(&image, &bytes, target);
+            let decoded = bc::decode(&bytes, target).unwrap();
+            assert_eq!(bc::serialize(&decoded).unwrap(), bytes);
+            fs::write(&path, output).unwrap();
+            assert_eq!(compile_and_run(target, &path), expected);
+        }
+    }
+}
+
+#[test]
+fn ordinary_minification_does_not_opt_user_fields_into_the_private_schema() {
+    let source = r#"
+        local record={code='code',tags='tags',parent=3,flags=4,shared=5,self=6,cached=7,control=8,__obf_proto_code=9,__obf_proto_control=10}
+        local alias=record alias.code=alias.tags
+        print(record.code,record.tags,record.parent,record.flags,record.shared,record.self,record.cached,record.control,record.__obf_proto_code,record.__obf_proto_control)
+    "#;
+    let work = Workspace::new();
+    let path = work.0.join("public.lua");
+    for target in [Target::Lua51, Target::Luau] {
+        fs::write(&path, source).unwrap();
+        let expected = compile_and_run(target, &path);
+        for seed in [0, 735, u64::MAX] {
+            let output =
+                obf::minify_with_options(source, target, obf::minify::Options::seeded(seed))
+                    .unwrap();
+            for name in LONG_FIELDS {
+                assert!(output.contains(&format!(".{name}")));
+            }
+            assert!(output.contains(".__obf_proto_code"));
+            assert!(output.contains(".__obf_proto_control"));
+            fs::write(&path, output).unwrap();
+            assert_eq!(compile_and_run(target, &path), expected);
+        }
+    }
+}
+
+#[test]
+fn static_userdata_namecalls_with_public_or_marker_like_names_are_not_rewritten() {
+    let source = r#"
+        local object=newproxy(true)
+        getmetatable(object).__namecall=function(self,value,...)
+            assert(self==object) return value,select('#',...),...
+        end
+        print(object:code(1,nil,2)) print(object:tags(3,nil,4)) print(object:control(5,nil,6))
+        print(object:__obf_proto_code(7,nil,8)) print(object:__obf_proto_control(9,nil,10)) print(object:__obf_proto_typo(11,nil,12))
+        local tableObject={code=function(self,value)return value+1 end,__obf_proto_tags=function(self,value)return value+2 end,__obf_proto_control=function(self,value)return value+3 end}
+        print(tableObject:code(13),tableObject:__obf_proto_tags(14),tableObject:__obf_proto_control(15))
+    "#;
+    let work = Workspace::new();
+    let path = work.0.join("methods.luau");
+    fs::write(&path, source).unwrap();
+    let expected = compile_and_run(Target::Luau, &path);
+    for seed in [0, 735, u64::MAX] {
+        let output = vm::custom::virtualize(source, Target::Luau, seed).unwrap();
+        assert_private_names_hidden(&output, Target::Luau);
+        for method in [
+            "code",
+            "tags",
+            "control",
+            "__obf_proto_code",
+            "__obf_proto_tags",
+            "__obf_proto_control",
+            "__obf_proto_typo",
+        ] {
+            assert!(output.contains(&format!(":{method}(")), "{method}");
+        }
+        fs::write(&path, output).unwrap();
+        assert_eq!(compile_and_run(Target::Luau, &path), expected);
+    }
+}
+
+#[test]
+fn exported_module_keys_stay_readable_and_unchanged() {
+    let source="export const code='code' export const tags='tags' export const parent=3 export const flags=4 export const shared=5 export const cached=6 export const __obf_proto_code=7";
+    let work = Workspace::new();
+    let module = work.0.join("subject.luau");
+    let main = work.0.join("main.luau");
+    fs::write(&main,"local m=require('./subject') print(table.isfrozen(m),m.code,m.tags,m.parent,m.flags,m.shared,m.cached,m.__obf_proto_code)").unwrap();
+    fs::write(&module, source).unwrap();
+    let expected = compile_and_run(Target::Luau, &main);
+    for seed in [0, 735, u64::MAX] {
+        let output = vm::custom::virtualize(source, Target::Luau, seed).unwrap();
+        assert_private_names_hidden(&output, Target::Luau);
+        fs::write(&module, output).unwrap();
+        assert_eq!(compile_and_run(Target::Luau, &main), expected);
+    }
+}
+
+#[test]
+fn cli_virtualize_compile_wrap_and_isa1_all_use_the_short_field_pipeline() {
+    let work = Workspace::new();
+    let source = work.0.join("source.lua");
+    let file = work.0.join("program.obf");
+    fs::write(&source, "local function f(x)return x+1 end print(f(2))").unwrap();
+    for target in [Target::Lua51, Target::Luau] {
+        let target_name = target.to_string();
+        let compiled = success(
+            Command::new(env!("CARGO_BIN_EXE_obf"))
+                .args(["compile", "--target", &target_name])
+                .arg(&source),
+        )
+        .stdout;
+        fs::write(&file, &compiled).unwrap();
+        let output = success(
+            Command::new(env!("CARGO_BIN_EXE_obf"))
+                .args(["virtualize", "--target", &target_name, "--seed", "735"])
+                .arg(&source)
+                .env("OBF_LUAC51", "/missing-compiler")
+                .env("OBF_LUAU_COMPILE", "/missing-compiler"),
+        )
+        .stdout;
+        let wrapped = success(
+            Command::new(env!("CARGO_BIN_EXE_obf"))
+                .args(["wrap-bytecode", "--target", &target_name, "--seed", "735"])
+                .arg(&file),
+        )
+        .stdout;
+        assert_eq!(output, wrapped);
+        assert_private_names_hidden(std::str::from_utf8(&output).unwrap(), target);
+        let image = embedded(std::str::from_utf8(&output).unwrap(), target, 735);
+        assert_semantic_image(&image, &compiled, target);
+        let mut old = bc::decode(&compiled, target).unwrap();
+        old.isa_version = 1;
+        for prototype in &mut old.prototypes {
+            prototype.flags &= 7;
+        }
+        let legacy = bc::serialize(&old).unwrap();
+        fs::write(&file, &legacy).unwrap();
+        let wrapped = success(
+            Command::new(env!("CARGO_BIN_EXE_obf"))
+                .args(["wrap-bytecode", "--target", &target_name, "--seed", "735"])
+                .arg(&file),
+        )
+        .stdout;
+        let wrapped = String::from_utf8(wrapped).unwrap();
+        assert_private_names_hidden(&wrapped, target);
+        let image = embedded(&wrapped, target, 735);
+        assert_semantic_image(&image, &legacy, target);
+        let script = work.0.join("old.lua");
+        fs::write(&script, wrapped).unwrap();
+        assert_eq!(compile_and_run(target, &script), b"3\n");
+    }
+}

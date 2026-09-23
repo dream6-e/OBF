@@ -1,0 +1,567 @@
+/// ISA12's per-prototype operand ABI. The three independently affine profile
+/// components use pairwise-coprime moduli whose product is 32,772, so every one
+/// of the at-most 32,767 private prototype ids receives a distinct
+/// (family, rotation, lane) tuple. The Lua parser stores decoded operands
+/// through that tuple and the interpreter recovers
+/// them only when a semantic fragment runs; there is no image-wide `6+3*i`
+/// operand convention left for a static handler scanner to reuse.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OperandLayout {
+    pub(crate) family_multiplier: u8,
+    pub(crate) family_add: u8,
+    pub(crate) rotation_multiplier: u8,
+    pub(crate) rotation_add: u8,
+    pub(crate) lane_multiplier: u16,
+    pub(crate) lane_add: u16,
+}
+
+pub(crate) const OPERAND_LAYOUT_FAMILIES: usize = 4;
+pub(crate) const OPERAND_LAYOUT_ROTATIONS: usize = 3;
+// 2,731 is prime and 4 * 3 * 2,731 = 32,772, just above the private image's
+// strict 32,767-prototype ceiling. The sparse numeric key remains at most 35,507.
+pub(crate) const OPERAND_LAYOUT_LANES: usize = 2_731;
+#[cfg(test)]
+pub(crate) const OPERAND_LAYOUT_PRIVATE_PROTOTYPE_LIMIT: usize = 32_767;
+#[cfg(test)]
+pub(crate) const OPERAND_LAYOUT_UNIQUE_SPAN: usize =
+    OPERAND_LAYOUT_FAMILIES * OPERAND_LAYOUT_ROTATIONS * OPERAND_LAYOUT_LANES;
+pub(crate) const OPERAND_BINDING_FORMS: usize = 4;
+
+pub(crate) fn operand_layout(seed: u64) -> OperandLayout {
+    // This stream is independent of section/layout randomization. Adding a new
+    // handler does not silently perturb the ABI selected for existing ids.
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6f70_6572_616e_6431);
+    OperandLayout {
+        family_multiplier: [1, 3][(random.index(2)) as usize],
+        family_add: (random.index(OPERAND_LAYOUT_FAMILIES)) as u8,
+        rotation_multiplier: [1, 2][(random.index(2)) as usize],
+        rotation_add: (random.index(OPERAND_LAYOUT_ROTATIONS)) as u8,
+        // 2,731 is prime, so every non-zero multiplier is invertible.
+        lane_multiplier: (1 + random.index(OPERAND_LAYOUT_LANES - 1)) as u16,
+        lane_add: (random.index(OPERAND_LAYOUT_LANES)) as u16,
+    }
+}
+
+impl OperandLayout {
+    #[cfg(test)]
+    pub(crate) fn profile(self, prototype: usize) -> (usize, usize, usize) {
+        (
+            (prototype * usize::from(self.family_multiplier) + usize::from(self.family_add))
+                % OPERAND_LAYOUT_FAMILIES,
+            (prototype * usize::from(self.rotation_multiplier) + usize::from(self.rotation_add))
+                % OPERAND_LAYOUT_ROTATIONS,
+            (prototype * usize::from(self.lane_multiplier) + usize::from(self.lane_add))
+                % OPERAND_LAYOUT_LANES,
+        )
+    }
+
+    /// Lua definitions shared by the strict validator and the interpreter.
+    /// Four layouts are intentionally structurally different:
+    ///
+    /// 0. one rotated packed-u24 slot;
+    /// 1. reverse-indexed AC pair plus a separate B lane;
+    /// 2. three rotated transposed columns;
+    /// 3. reverse-indexed table with rotated component keys.
+    ///
+    /// `form` also changes the five-result binding order. Every caller lists
+    /// the matching lvalues, so this is semantic-preserving while removing the
+    /// report's one canonical `a,b,c=record[...] ; k=... ; j=...` prelude.
+    pub(crate) fn getter_lua(self) -> String {
+        format!(
+            "local OG=function(fid,I,qi,form)local om=(fid*{fm}+{fa})%4;local rot=(fid*{rm}+{ra})%3;local lane=(fid*{lm}+{la})%{lanes};local ob=6+lane*13;local a,b,c,v=0,0,0,0;if om==0 then v=I[ob+(qi-1+rot)%4];a=v%256;v=(v-a)/256;b=v%256;c=(v-b)/256 elseif om==1 then local at=ob+4-qi;v=I[at];a=v%256;c=(v-a)/256;b=I[at+4]elseif om==2 then a=I[ob+qi-1+rot*4];b=I[ob+qi-1+((rot+1)%3)*4];c=I[ob+qi-1+((rot+2)%3)*4]else v=I[ob+4-qi];a=v[1+rot];b=v[1+(rot+1)%3];c=v[1+(rot+2)%3]end;local k=b+c*256;local j=a+k*256;if form==0 then return a,b,c,k,j elseif form==1 then return j,c,a,k,b elseif form==2 then return b,j,k,a,c else return k,a,j,c,b end end;",
+            fm = self.family_multiplier,
+            fa = self.family_add,
+            rm = self.rotation_multiplier,
+            ra = self.rotation_add,
+            lm = self.lane_multiplier,
+            la = self.lane_add,
+            lanes = OPERAND_LAYOUT_LANES,
+        )
+    }
+
+    /// Compute one prototype's profile once before its records are normalized.
+    pub(crate) fn parser_profile_lua(self) -> String {
+        format!(
+            "local om=(id*{fm}+{fa})%4;local rot=(id*{rm}+{ra})%3;local lane=(id*{lm}+{la})%{lanes};local ob=6+lane*13;",
+            fm = self.family_multiplier,
+            fa = self.family_add,
+            rm = self.rotation_multiplier,
+            ra = self.rotation_add,
+            lm = self.lane_multiplier,
+            la = self.lane_add,
+            lanes = OPERAND_LAYOUT_LANES,
+        )
+    }
+
+    /// Store the current decoder locals `a,b,c` for operation `qi` according
+    /// to the current prototype's `om,rot,ob` profile locals.
+    pub(crate) fn parser_store_lua() -> &'static str {
+        "if om==0 then I[ob+(qi-1+rot)%4]=a+b*256+c*65536 elseif om==1 then local at=ob+4-qi;I[at]=a+c*256;I[at+4]=b elseif om==2 then I[ob+qi-1+rot*4]=a;I[ob+qi-1+((rot+1)%3)*4]=b;I[ob+qi-1+((rot+2)%3)*4]=c else local v={};v[1+rot]=a;v[1+(rot+1)%3]=b;v[1+(rot+2)%3]=c;I[ob+4-qi]=v end;"
+    }
+}
+
+pub(crate) fn operand_binding_lhs(form: usize) -> &'static str {
+    match form {
+        0 => "a,b,c,k,j",
+        1 => "j,c,a,k,b",
+        2 => "b,j,k,a,c",
+        3 => "k,a,j,c,b",
+        _ => panic!("invalid operand binding form"),
+    }
+}
+
+pub(crate) fn operand_binding_lua(operation: usize, form: usize) -> String {
+    format!(
+        "{}=OG(fid,I,{operation},{form});",
+        operand_binding_lhs(form)
+    )
+}
+
+/// ISA12-B's private register ABI. The profile moduli are pairwise coprime and
+/// have a 130,556-id product, so the complete 32,767-prototype private range has
+/// no repeated (family, stride, shift) tuple. Each family maps the 256 logical
+/// register ids injectively into one of four disjoint 257-key physical banks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RegisterLayout {
+    pub(crate) family_multiplier: u8,
+    pub(crate) family_add: u8,
+    pub(crate) stride_multiplier: u8,
+    pub(crate) stride_add: u8,
+    pub(crate) shift_multiplier: u16,
+    pub(crate) shift_add: u16,
+}
+
+pub(crate) const REGISTER_LAYOUT_FAMILIES: usize = 4;
+pub(crate) const REGISTER_LAYOUT_STRIDES: usize = 127;
+pub(crate) const REGISTER_LAYOUT_SHIFTS: usize = 257;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_LOGICAL_SLOTS: usize = 256;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_PHYSICAL_SLOTS: usize =
+    REGISTER_LAYOUT_FAMILIES * REGISTER_LAYOUT_SHIFTS;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_PRIVATE_PROTOTYPE_LIMIT: usize = 32_767;
+#[cfg(test)]
+pub(crate) const REGISTER_LAYOUT_UNIQUE_SPAN: usize =
+    REGISTER_LAYOUT_FAMILIES * REGISTER_LAYOUT_STRIDES * REGISTER_LAYOUT_SHIFTS;
+
+pub(crate) fn register_layout(seed: u64) -> RegisterLayout {
+    let mut random = crate::random::Prng::lcg(seed ^ 0x7265_6769_7374_6572);
+    RegisterLayout {
+        family_multiplier: [1, 3][(random.index(2)) as usize],
+        family_add: (random.index(REGISTER_LAYOUT_FAMILIES)) as u8,
+        // 127 and 257 are prime, so all non-zero multipliers are invertible.
+        stride_multiplier: (1 + random.index(126)) as u8,
+        stride_add: (random.index(REGISTER_LAYOUT_STRIDES)) as u8,
+        shift_multiplier: (1 + random.index(256)) as u16,
+        shift_add: (random.index(REGISTER_LAYOUT_SHIFTS)) as u16,
+    }
+}
+
+impl RegisterLayout {
+    #[cfg(test)]
+    pub(crate) fn profile(self, prototype: usize) -> (usize, usize, usize) {
+        (
+            (prototype * usize::from(self.family_multiplier) + usize::from(self.family_add))
+                % REGISTER_LAYOUT_FAMILIES,
+            (prototype * usize::from(self.stride_multiplier) + usize::from(self.stride_add))
+                % REGISTER_LAYOUT_STRIDES,
+            (prototype * usize::from(self.shift_multiplier) + usize::from(self.shift_add))
+                % REGISTER_LAYOUT_SHIFTS,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn physical_key(self, prototype: usize, register: usize) -> usize {
+        debug_assert!(register < REGISTER_LAYOUT_LOGICAL_SLOTS);
+        let (family, stride, shift) = self.profile(prototype);
+        let multiplier = 1 + stride * 2;
+        let offset = match family {
+            0 => (register * multiplier + shift) % REGISTER_LAYOUT_SHIFTS,
+            1 => {
+                REGISTER_LAYOUT_SHIFTS
+                    - 1
+                    - (register * multiplier + shift) % REGISTER_LAYOUT_SHIFTS
+            }
+            2 => {
+                ((REGISTER_LAYOUT_LOGICAL_SLOTS - 1 - register) * multiplier + shift)
+                    % REGISTER_LAYOUT_SHIFTS
+            }
+            3 => {
+                (((register + shift) % REGISTER_LAYOUT_SHIFTS) * multiplier + stride)
+                    % REGISTER_LAYOUT_SHIFTS
+            }
+            _ => unreachable!(),
+        };
+        family * REGISTER_LAYOUT_SHIFTS + offset
+    }
+
+    /// Build the two frame-local register closures used by ISA12-C. `RX`
+    /// maps logical ids to the private physical bank. `RF` is the fused-read
+    /// forwarding primitive: when a second primitive consumes the first
+    /// primitive's destination it returns the carried value directly,
+    /// including nil/false, rather than loading the just-written register.
+    ///
+    /// The forwarding predicate follows the same per-prototype family as the
+    /// register mapper (logical equality, inverted equality, physical-key
+    /// equality, or a shifted mod-257 equality). Thus fused handlers remain
+    /// shared globally while their register/dataflow ABI differs by frame; no
+    /// 256-entry map and no per-prototype handler copy is emitted.
+    pub(crate) fn factory_lua(self) -> String {
+        format!(
+            "local RK=function(fid,R)local rf=(fid*{fm}+{fa})%4;local rs=(fid*{sm}+{sa})%127;local rt=(fid*{tm}+{ta})%257;local m=1+rs*2;local base=rf*257;local RX;if rf==0 then RX=function(r)return base+(r*m+rt)%257 end elseif rf==1 then RX=function(r)return base+256-(r*m+rt)%257 end elseif rf==2 then RX=function(r)return base+((255-r)*m+rt)%257 end else RX=function(r)return base+(((r+rt)%257)*m+rs)%257 end end;local RF;if rf==0 then RF=function(q,k,v)if q==k then return v end;return R[RX(q)]end elseif rf==1 then RF=function(q,k,v)if q~=k then return R[RX(q)]end;return v end elseif rf==2 then RF=function(q,k,v)local p=RX(q);if p==RX(k)then return v end;return R[p]end else RF=function(q,k,v)if (q+rt)%257==(k+rt)%257 then return v end;return R[RX(q)]end end;return RX,RF end;",
+            fm = self.family_multiplier,
+            fa = self.family_add,
+            sm = self.stride_multiplier,
+            sa = self.stride_add,
+            tm = self.shift_multiplier,
+            ta = self.shift_add,
+        )
+    }
+}
+
+/// ISA13's private field-order layout. Every multi-field wire structure is
+/// parsed as anonymous fixed-width slots; the slot-to-meaning map is never a
+/// fixed canonical order:
+///
+/// * record headers (4 x u16) use a per-prototype permutation computed from
+///   `(prototype * multiplier + add) % 24` with a multiplier coprime to 24,
+///   decoded by an identical factorial routine on both ends;
+/// * segment tokens (3 x u16) use a per-segment permutation computed from
+///   `(physical_slot * multiplier + add) % 6`;
+/// * pooled capture/constant tokens (3 x u16) use a per-record permutation
+///   computed from `(pool_slot * multiplier + add) % 6` with pool-specific
+///   keys, so neither global pool keeps a canonical field order;
+/// * dictionary entry headers ([rid:u16, len:u8] vs [len:u8, rid:u8]), the
+///   prototype metadata width groups (u32 x 4, u16 x 3, u8 x 2) and the
+///   in-memory record tuple slots are per-image permutations baked into the
+///   generated parser text, so only one order is ever visible per script.
+///
+/// Fixed-width slot reads stay in place; only the semantic assignment
+/// permutes. A wrong order trips the pre-existing label/token/operand/count
+/// gates before any user code runs. No complete permutation table is emitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FieldLayout {
+    pub(crate) record_mul: u8,
+    pub(crate) record_add: u8,
+    pub(crate) segment_mul: u8,
+    pub(crate) segment_add: u8,
+    pub(crate) dict_flipped: bool,
+    pub(crate) pool_mul: u8,
+    pub(crate) pool_add: u8,
+    /// u32 metadata field at each wire slot: 0=parent, 1=nk, 2=nc, 3=codelen.
+    pub(crate) meta_u32: [u8; 4],
+    /// u16 metadata field at each wire slot: 0=registers, 1=nu, 2=root.
+    pub(crate) meta_u16: [u8; 3],
+    /// u8 metadata field at each wire slot: 0=parameters, 1=flags.
+    pub(crate) meta_u8: [u8; 2],
+    /// Record field at each in-memory tuple slot: 0=token, 1=next, 2=skip.
+    pub(crate) tuple: [u8; 3],
+}
+
+pub(crate) const FIELD_RECORD_ORDERS: usize = 24;
+pub(crate) const FIELD_SEGMENT_ORDERS: usize = 6;
+pub(crate) const FIELD_POOL_ORDERS: usize = 6;
+
+/// Byte offsets of prototype metadata fields under an [`FieldLayout`].
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MetadataPositions {
+    pub parent: usize,
+    pub registers: usize,
+    pub parameters: usize,
+    pub flags: usize,
+    pub captures: usize,
+    pub root: usize,
+    pub constants: usize,
+    pub records: usize,
+    pub code_len: usize,
+}
+
+pub(crate) fn field_layout(seed: u64) -> FieldLayout {
+    // Independent stream: adding a field never perturbs operand, register,
+    // section, or transport randomization.
+    let mut random = crate::random::Prng::lcg(seed ^ 0x6669_656c_645f_3133);
+    let units_24 = [1u8, 5, 7, 11, 13, 17, 19, 23];
+    let mut meta_u32 = [0u8, 1, 2, 3];
+    random.shuffle(&mut meta_u32);
+    let mut meta_u16 = [0u8, 1, 2];
+    random.shuffle(&mut meta_u16);
+    let mut meta_u8 = [0u8, 1];
+    random.shuffle(&mut meta_u8);
+    let mut tuple = [0u8, 1, 2];
+    random.shuffle(&mut tuple);
+    FieldLayout {
+        record_mul: units_24[(random.index(units_24.len())) as usize],
+        record_add: (random.index(FIELD_RECORD_ORDERS)) as u8,
+        segment_mul: [1u8, 5][(random.index(2)) as usize],
+        segment_add: (random.index(FIELD_SEGMENT_ORDERS)) as u8,
+        dict_flipped: random.index(2) == 1,
+        // ISA14 pool draws stay last: every earlier draw (and every
+        // pre-existing layout value) is unchanged.
+        pool_mul: [1u8, 5][(random.index(2)) as usize],
+        pool_add: (random.index(FIELD_POOL_ORDERS)) as u8,
+        meta_u32,
+        meta_u16,
+        meta_u8,
+        tuple,
+    }
+}
+
+/// Factorial (factoradic) decode shared conceptually by the Rust encoder and
+/// the generated Lua parser. Returns the field index stored at each wire
+/// slot, in slot order. Both ends implement this same loop; execution parity
+/// tests prove they agree.
+pub(crate) fn factorial_field_at_slot(q: usize, fields: usize) -> Vec<usize> {
+    let mut remaining: Vec<usize> = (0..fields).collect();
+    let mut order = Vec::with_capacity(fields);
+    let mut q = q;
+    for position in 1..=fields {
+        let mut divisor = 1usize;
+        for factor in 2..=(fields - position) {
+            divisor *= factor;
+        }
+        let index = q / divisor;
+        q %= divisor;
+        order.push(remaining.remove(index));
+    }
+    order
+}
+
+fn invert_order(field_at_slot: &[usize]) -> Vec<usize> {
+    let mut slot_of_field = vec![0usize; field_at_slot.len()];
+    for (slot, &field) in field_at_slot.iter().enumerate() {
+        slot_of_field[field] = slot;
+    }
+    slot_of_field
+}
+
+impl FieldLayout {
+    pub(crate) fn record_quotient(self, prototype: usize) -> usize {
+        (prototype * usize::from(self.record_mul) + usize::from(self.record_add))
+            % FIELD_RECORD_ORDERS
+    }
+
+    pub(crate) fn segment_quotient(self, physical_slot: usize) -> usize {
+        debug_assert!(physical_slot >= 1);
+        (physical_slot * usize::from(self.segment_mul) + usize::from(self.segment_add))
+            % FIELD_SEGMENT_ORDERS
+    }
+
+    /// Pool-slot quotient shared by both global capture/constant pools.
+    /// Each pool numbers its own records from 1; the two position spaces
+    /// are independent, exactly like the segment pool slot space.
+    pub(crate) fn pool_quotient(self, physical_slot: usize) -> usize {
+        debug_assert!(physical_slot >= 1);
+        (physical_slot * usize::from(self.pool_mul) + usize::from(self.pool_add))
+            % FIELD_POOL_ORDERS
+    }
+
+    /// Byte offsets (relative to the 24-byte header start) of each metadata
+    /// field under the per-image width-group permutation. Consumed only by
+    /// the verification harness, which must parse the same anonymous slots.
+    #[cfg(test)]
+    pub(crate) fn metadata_positions(self) -> MetadataPositions {
+        const WIDE_SLOTS: [usize; 4] = [0, 12, 16, 20];
+        const MEDIUM_SLOTS: [usize; 3] = [4, 8, 10];
+        const NARROW_SLOTS: [usize; 2] = [6, 7];
+        let mut wide = [0usize; 4];
+        for (slot, &field) in self.meta_u32.iter().enumerate() {
+            wide[field as usize] = WIDE_SLOTS[slot];
+        }
+        let mut medium = [0usize; 3];
+        for (slot, &field) in self.meta_u16.iter().enumerate() {
+            medium[field as usize] = MEDIUM_SLOTS[slot];
+        }
+        let mut narrow = [0usize; 2];
+        for (slot, &field) in self.meta_u8.iter().enumerate() {
+            narrow[field as usize] = NARROW_SLOTS[slot];
+        }
+        MetadataPositions {
+            parent: wide[0],
+            constants: wide[1],
+            records: wide[2],
+            code_len: wide[3],
+            registers: medium[0],
+            captures: medium[1],
+            root: medium[2],
+            parameters: narrow[0],
+            flags: narrow[1],
+        }
+    }
+
+    /// Wire-slot position of each record field
+    /// ([label, next_token, skip_token, recipe_token]).
+    #[cfg(test)]
+    pub(crate) fn record_field_slots(self, prototype: usize) -> [usize; 4] {
+        let order = factorial_field_at_slot(self.record_quotient(prototype), 4);
+        let inverted = invert_order(&order);
+        [inverted[0], inverted[1], inverted[2], inverted[3]]
+    }
+
+    /// Field index at each record wire slot, in slot order.
+    pub(crate) fn record_slot_fields(self, prototype: usize) -> [usize; 4] {
+        let order = factorial_field_at_slot(self.record_quotient(prototype), 4);
+        [order[0], order[1], order[2], order[3]]
+    }
+
+    /// Wire-slot position of each segment token ([id, owner, next]).
+    /// `physical_slot` is the Lua-visible 1-based pool position.
+    #[cfg(test)]
+    pub(crate) fn segment_field_slots(self, physical_slot: usize) -> [usize; 3] {
+        let order = factorial_field_at_slot(self.segment_quotient(physical_slot), 3);
+        let inverted = invert_order(&order);
+        [inverted[0], inverted[1], inverted[2]]
+    }
+
+    /// Wire-slot position of each pool token ([owner, slot, payload]).
+    /// `physical_slot` is the Lua-visible 1-based pool position within
+    /// its own pool. Consumed only by the verification harness.
+    #[cfg(test)]
+    pub(crate) fn pool_field_slots(self, physical_slot: usize) -> [usize; 3] {
+        let order = factorial_field_at_slot(self.pool_quotient(physical_slot), 3);
+        let inverted = invert_order(&order);
+        [inverted[0], inverted[1], inverted[2]]
+    }
+
+    /// Token index at each segment wire slot, in slot order.
+    pub(crate) fn segment_slot_fields(self, physical_slot: usize) -> [usize; 3] {
+        let order = factorial_field_at_slot(self.segment_quotient(physical_slot), 3);
+        [order[0], order[1], order[2]]
+    }
+
+    /// Token index at each pool wire slot, in slot order. Shared by the
+    /// capture pool ([owner, slot, payload]) and the constant pool
+    /// ([owner, index, tag]); both records carry three anonymous u16 slots.
+    pub(crate) fn pool_slot_fields(self, physical_slot: usize) -> [usize; 3] {
+        let order = factorial_field_at_slot(self.pool_quotient(physical_slot), 3);
+        [order[0], order[1], order[2]]
+    }
+
+    /// In-memory tuple slot (1-based Lua index) of each record field
+    /// ([token, next_token, skip_token]).
+    pub(crate) fn tuple_slots(self) -> [usize; 3] {
+        let order: Vec<usize> = self.tuple.iter().map(|&slot| slot as usize).collect();
+        let inverted = invert_order(&order);
+        [inverted[0] + 1, inverted[1] + 1, inverted[2] + 1]
+    }
+
+    /// Per-prototype record-order decode. Emits `ford[1..4]`, the 1-based wire
+    /// slot of [label, next, skip, recipe]. Runs once per prototype before its
+    /// record loop; `id` is the parser loop variable. Uses only exact integer
+    /// arithmetic and small tables, so Lua 5.1 and Luau agree bit for bit.
+    pub(crate) fn record_profile_lua(self) -> String {
+        let record_mul = usize::from(self.record_mul);
+        let record_add = usize::from(self.record_add);
+        let key = 1 + (record_mul * 7 + record_add * 11) % 251;
+        let salt = (record_mul * 13 + record_add * 17) % 257;
+        let entries = (0..24)
+            .map(|q| {
+                let order = factorial_field_at_slot(q, 4);
+                let inverse = invert_order(&order);
+                let packed = inverse[0] + inverse[1] * 4 + inverse[2] * 16 + inverse[3] * 64;
+                (packed + ((q + 1) * key + salt) % 257) % 257
+            })
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "local fq=(id*{mul}+{add})%24;local fp={{{entries}}};local fv=(fp[fq+1]-((fq+1)*{key}+{salt})%257)%257;local fa=fv%4;fv=(fv-fa)/4;local fb=fv%4;fv=(fv-fb)/4;local fc=fv%4;local ford={{fa+1,fb+1,fc+1,(fv-fc)/4+1}};",
+            mul = self.record_mul,
+            add = self.record_add,
+        )
+    }
+
+    /// Record header read. Slot reads stay in place; the semantic assignment
+    /// follows the per-prototype `ford` map computed above.
+    pub(crate) fn record_head_lua() -> &'static str {
+        "local fs1,fs2,fs3,fs4=D16(),D16(),D16(),D16();local fsl={fs1,fs2,fs3,fs4};local label=fsl[ford[1]];local nextToken=fsl[ford[2]];local skipToken=fsl[ford[3]];local token=fsl[ford[4]];"
+    }
+
+    /// In-memory record tuple construction with the per-image slot order.
+    pub(crate) fn tuple_construct_lua(self) -> String {
+        let names = ["token", "nextToken", "skipToken"];
+        let slots: Vec<&str> = self
+            .tuple
+            .iter()
+            .map(|&field| names[field as usize])
+            .collect();
+        format!(
+            // K3-FULL: the dictionary already carries the renumbered id (plus the
+            // operand form in its high bits), so the tuple takes the id straight from
+            // the slot -- no permutation table read per materialized record.
+            "local I={{{},{},{},recipe[#recipe]%256,#recipe}};",
+            slots[0], slots[1], slots[2]
+        )
+    }
+
+    /// Dictionary entry header read in the per-image order.
+    pub(crate) fn dictionary_head_lua(self) -> &'static str {
+        if self.dict_flipped {
+            "local n=SB(CD,p);p=p+1;local rid=D16();"
+        } else {
+            "local rid=D16();local n=SB(CD,p);p=p+1;"
+        }
+    }
+
+    /// Prototype metadata reads. The wire read sequence is unchanged; only
+    /// the destination fields follow the per-image width-group permutations.
+    pub(crate) fn metadata_reads_lua(self) -> String {
+        let u32_names = [
+            "F.__obf_proto_parent",
+            "F.__obf_proto_nk",
+            "F.__obf_proto_nc",
+            "local VMCS",
+        ];
+        let u16_names = ["F.__obf_proto_m", "F.__obf_proto_nu", "local RT"];
+        let u8_names = ["F.__obf_proto_p", "F.__obf_proto_flags"];
+        let mut reads = String::new();
+        reads.push_str(&format!("{}=b32();", u32_names[self.meta_u32[0] as usize]));
+        reads.push_str(&format!("{}=b16();", u16_names[self.meta_u16[0] as usize]));
+        reads.push_str(&format!("{}=b8();", u8_names[self.meta_u8[0] as usize]));
+        reads.push_str(&format!("{}=b8();", u8_names[self.meta_u8[1] as usize]));
+        reads.push_str(&format!("{}=b16();", u16_names[self.meta_u16[1] as usize]));
+        reads.push_str(&format!("{}=b16();", u16_names[self.meta_u16[2] as usize]));
+        reads.push_str(&format!("{}=b32();", u32_names[self.meta_u32[1] as usize]));
+        reads.push_str(&format!("{}=b32();", u32_names[self.meta_u32[2] as usize]));
+        reads.push_str(&format!("{}=b32();", u32_names[self.meta_u32[3] as usize]));
+        reads
+    }
+
+    fn keyed_perm3_lua(mul: usize, add: usize, domain: usize) -> String {
+        let key = 1 + (mul * 7 + add * 11 + domain) % 29;
+        let salt = (mul * 13 + add * 17 + domain * 19) % 31;
+        let mut entries = Vec::with_capacity(6);
+        for q in 0..6 {
+            let order = factorial_field_at_slot(q, 3);
+            let inverse = invert_order(&order);
+            let packed = inverse[0] + inverse[1] * 3 + inverse[2] * 9;
+            let mask = ((q + 1) * key + salt) % 31;
+            entries.push((packed + mask) % 31);
+        }
+        format!(
+            "local tk1,tk2,tk3=b16(),b16(),b16();local sq=(slot*{mul}+{add})%6;local sp={{{}}};local sv=(sp[sq+1]-((sq+1)*{key}+{salt})%31)%31;local sa=sv%3;sv=(sv-sa)/3;local sb=sv%3;local sont={{sa+1,sb+1,(sv-sb)/3+1}};local st={{tk1,tk2,tk3}};",
+            entries.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+        )
+    }
+
+    /// Per-segment token-order decode for the global pool reader. `slot` is
+    /// the 1-based physical position. Emits `sont[1..3]`, the 1-based wire
+    /// slot of [id, owner, next], plus the three raw token reads in `st`.
+    pub(crate) fn segment_decode_lua(self) -> String {
+        Self::keyed_perm3_lua(
+            usize::from(self.segment_mul),
+            usize::from(self.segment_add),
+            7,
+        )
+    }
+
+    /// Per-record pool-token decode. Emits `sont[1..3]`, the 1-based wire
+    /// slot of [owner, slot, payload]. The generated pool loops reuse the
+    /// exact segment-profile variable names (`slot`, `st`, `skey`, `sont`),
+    /// so both pools and the segment graph share one textual shape with
+    /// pool-specific baked keys.
+    pub(crate) fn pool_decode_lua(self) -> String {
+        Self::keyed_perm3_lua(usize::from(self.pool_mul), usize::from(self.pool_add), 23)
+    }
+}
