@@ -545,26 +545,143 @@ impl Generator {
         ));
         
         let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=='function' and 0 or {}); local mt_vc={{}}; mt_vc[\"__\"..\"mode\"]='k'; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3);
-        let block_dec_helpers = format!("local function {}(a, b) local r, p, c = 0, 1, 0; while a > 0 or b > 0 do local ra, rb = a % 2, b % 2; if ra ~= rb then c = c + p end; a, b, p = math_floor(a / 2), math_floor(b / 2), p * 2 end; return c end; local function {}(x, n) if n == 0 then return x end return ((x * (2^(8-n))) % 256) + math_floor(x / (2^n)) end; local function {}() local enc = {}(); local dec = (enc - 66 + 256) % 256; dec = {}(dec, k4); dec = {}(dec, k3 % 8); dec = (dec + k2) % 256; dec = {}(dec, k1); local orig = dec; k1 = (k1 + orig) % 256; k1 = ((k1 * 2) % 256) + math_floor(k1 / 128); k1 = (k1 + 27) % 256; k2 = (k2 * 3 + enc) % 256; k2 = ((k2 * 64) % 256) + math_floor(k2 / 4); k3 = {}(k3, (k1 - k4 + 256) % 256); k4 = (k4 + k2) % 256; k4 = ((k4 * 8) % 256) + math_floor(k4 / 32); return orig end; ", fn_bxor, fn_b_rotr, fn_read_dec, fn_a3, fn_bxor, fn_b_rotr, fn_bxor, fn_bxor);
-        let block_dec_readers = format!("local function {}() local {}={{}}; for i=1,4 do {}[i]={}() end; return {}[1]+({}[2]*256)+({}[3]*65536)+({}[4]*16777216) end; local function {}() local {}={{}}; for i=1,4 do {}[i]={}() end; return {}[1]+({}[2]*{})+({}[3]*{})+({}[4]*{}) end; local function {}() local {}={}(); if {}=={} then return '' end; local {}={{}}; for _={},{} do {}[_]=string_char({}()) end; return table_concat({}) end; local function {}() local {}={}(); if {}>=2^31 then return {}-2^32 else return {} end end; ", fn_u32_dec, var__a, var__a, fn_read_dec, var__a, var__a, var__a, var__a, fn_a5, var__a, var__a, fn_read_dec, var__a, var__a, rng.obfuscate_num(256i64, 1, &keys), var__a, rng.obfuscate_num(65536i64, 1, &keys), var__a, rng.obfuscate_num(16777216i64, 1, &keys), fn_read_string, l, fn_a5, l, rng.obfuscate_num(0i64, 1, &keys), s_t, rng.obfuscate_num(1i64, 1, &keys), l, s_t, fn_read_dec, s_t, fn_a10, v, fn_a5, v, v, v);
+        // ── 解码链（第 6 项：解密逻辑打乱）──
+        // 这几个函数只在产物加载时跑一次（冷路径），所以放心打乱形态，不用为性能保留原样。
+        let (v_bx_a, v_bx_b, v_bx_r, v_bx_w, v_bx_g, v_bx_s) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let (v_rt_x, v_rt_n, v_rt_d, v_rt_g, v_rt_t) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let (v_rd_o, v_rd_g, v_rd_e) = (rng.name(), rng.name(), rng.name());
+        let (v_rd_c1, v_rd_c2, v_rd_c3, v_rd_c4, v_rd_c5) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+
+        // 注意：产物里的 k1..k4 是固定局部名，模板里只能写裸标识符 k1 —— 写成 {k1}
+        // 会被 Rust format! 的**隐式捕获**抓走同名的生成器变量（实测变成 189 这种数字，产物直接语法错）；
+        // 同理 Lua 的空表要写 {{}}，裸 {} 是位置参数占位符。
+        // 原形态：教科书式「逐位比较、if 累加权重」「n==0 早返回的循环右移」「滚动密钥顺序赋值」。
+        // 现在：位异或写成 (xa+xb)%2 再乘权重、循环右移用 256/2^n 代替 2^(8-n) 且去掉了早返回、
+        // 解密链拆成 5 个互不相同的中间变量、密钥演化全部换成等价变形（-229 代替 +27、
+        // 整数除法 (v-v%d)/d 代替 math.floor(v/d)、k2*2+k2 代替 k2*3），并包进单次循环 + 影子计数器。
+        let block_dec_helpers = format!(
+            "local function {bx}({a},{b}) local {r},{w},{g},{s}=0,1,0,0; \
+             while {g}<({r}-{r})+1 do \
+             if {a}<=0 and {b}<=0 then {g}={g}+1 else \
+             {s}=(({a}%2)+({b}%2))%2; {r}={r}+{s}*{w}; \
+             {a}=({a}-({a}%2))/2; {b}=({b}-({b}%2))/2; {w}={w}+{w}; end end; \
+             return {r} end; \
+             local function {rt}({x},{n}) local {d},{g},{t}=2^{n},0,0; \
+             while {g}<({t}-{t})+1 do \
+             {t}=(({x}*(256/{d}))%256)+(({x}-({x}%{d}))/{d}); {g}={g}+1; end; \
+             return {t} end; \
+             local function {rd}() local {o},{g}=0,0; \
+             while {g}<1 do \
+             local {e}={a3}(); \
+             local {c1}=({e}+190)%256; \
+             local {c2}={bx}({c1},k4); \
+             local {c3}={rt}({c2},k3%8); \
+             local {c4}=({c3}+k2)%256; \
+             local {c5}={bx}({c4},k1); \
+             {o}={c5}; \
+             k1=(k1+{c5})%256; \
+             k1=((k1*2)%256)+((k1-(k1%128))/128); \
+             k1=(k1-229)%256; \
+             k2=(k2*2+k2+{e})%256; \
+             k2=((k2*64)%256)+((k2-(k2%4))/4); \
+             k3={bx}(k3,(k1-k4+256)%256); \
+             k4=(k4+k2)%256; \
+             k4=((k4*8)%256)+((k4-(k4%32))/32); \
+             {g}={g}+1; end; return {o} end; ",
+            bx = fn_bxor, a = v_bx_a, b = v_bx_b, r = v_bx_r, w = v_bx_w, g = v_bx_g, s = v_bx_s,
+            rt = fn_b_rotr, x = v_rt_x, n = v_rt_n, d = v_rt_d, t = v_rt_t,
+            rd = fn_read_dec, a3 = fn_a3, o = v_rd_o, e = v_rd_e,
+            c1 = v_rd_c1, c2 = v_rd_c2, c3 = v_rd_c3, c4 = v_rd_c4, c5 = v_rd_c5
+        );
+        let (v_u32_t, v_u32_n, v_u32_i, v_u32_v) = (rng.name(), rng.name(), rng.name(), rng.name());
+        let (v_a5_t, v_a5_n, v_a5_i) = (rng.name(), rng.name(), rng.name());
+        let (v_rs_l, v_rs_t, v_rs_i) = (rng.name(), rng.name(), rng.name());
+        let (v_a10_v, v_a10_h) = (rng.name(), rng.name());
+
+        // 原形态：for 循环按 1..4 读、再按固定顺序累加、权重全是十进制常量；
+        // 现在：while + 显式自增下标、累加项顺序打乱（整数加法精确，顺序无影响）、
+        // 权重换成 2^8/2^16/2^24 与「先减自身得零」的初值、长度 0 短路与有符号转换也改形。
+        let block_dec_readers = format!(
+            "local function {u32}() local {t},{n},{i}={{}},4,0; \
+             while {i}<{n} do {i}={i}+1; {t}[{i}]={rd}() end; \
+             local {v}=({t}[3]-{t}[3]); \
+             {v}={v}+({t}[4]*2^24); {v}={v}+{t}[1]; {v}={v}+({t}[2]*2^8); {v}={v}+({t}[3]*2^16); \
+             return {v} end; \
+             local function {a5}() local {t},{n},{i}={{}},4,0; \
+             while {i}<{n} do {i}={i}+1; {t}[{i}]={rd}() end; \
+             return ({t}[3]*2^16)+({t}[1]+({t}[4]*2^24))+({t}[2]*2^8) end; \
+             local function {rs}() local {l}={a5}(); \
+             if {l}=={zero} then return '' end; \
+             local {t},{i}={{}},0; \
+             while {i}<{l} do {i}={i}+1; {t}[{i}]=string_char({rd}()) end; \
+             return table_concat({t}) end; \
+             local function {a10}() local {v}={a5}(); local {h}=2^31; \
+             if {v}>=2*{h}-{h} then return {v}-{h}-{h} end; \
+             return {v} end; ",
+            u32 = fn_u32_dec, rd = fn_read_dec, t = v_u32_t, n = v_u32_n, i = v_u32_i, v = v_u32_v,
+            a5 = fn_a5, rs = fn_read_string, l = v_rs_l, zero = rng.obfuscate_num(0i64, 1, &keys),
+            a10 = fn_a10, h = v_a10_h
+        );
         
         let mut f64_parts = vec![format!("({}[7]%16)*2^48", var__b), format!("({}[6]*2^40)", var__b), format!("({}[5]*2^32)", var__b), format!("({}[4]*2^24)", var__b), format!("({}[3]*2^16)", var__b), format!("({}[2]*2^8)", var__b), format!("{}[1]", var__b)];
         rng.shuffle(&mut f64_parts);
 
+        let (v_num_i, v_num_g, v_num_ks) = (rng.name(), rng.name(), rng.name());
+        // 原形态：for 循环 + 「v[8]>=128 and -1 or 1」+ math.floor 取指数 —— 一眼就是 IEEE754 拆解。
+        // 现在：while + 显式下标；符号位改成 1-2*((v8-v8%128)/128)；
+        // 指数位用 (v8%128)*8*2 + (v7-v7%16)/16（等价于 (v8%128)*16+floor(v7/16)）；
+        // 三种情况的分支顺序也换了（互斥，顺序无关）。2^(-1074) / 2^(exp-1075) 是浮点语义，
+        // 绝不能改成 1/2^1074 这类写法（会下溢成 0），所以原样保留。
         let block_dec_numbers = format!(
-            "local function {fn_dec_num}(v_enc, pool_idx) local ks={fn_chacha_stream}(pool_idx,{kind_num},8); local {vb}={{}}; for i=1,8 do {vb}[i]={xt}[v_enc[i]][ks[i]] end; local {v_sign} = {vb}[8]>=128 and -1 or 1; local {v_exp} = ({vb}[8]%128)*16+math_floor({vb}[7]/16); local {v_mant} = {f64parts}; if {v_exp}==0 then return {v_sign}*{v_mant}*(2^(-1074)) elseif {v_exp}==2047 then return {v_mant}==0 and {v_sign}*(1/0) or (0/0) else return {v_sign}*({v_mant}+2^52)*(2^({v_exp}-1075)) end end; ",
-            fn_dec_num = fn_dec_num, fn_chacha_stream = fn_chacha_stream, kind_num = kind_num_obf, vb = var__b, xt = xor_tbl_var,
-            v_sign = v_sign, v_exp = v_exp, v_mant = v_mant, f64parts = f64_parts.join("+"));
+            "local function {fn_dec_num}(v_enc, pool_idx) local {ks}={fn_chacha_stream}(pool_idx,{kind_num},8); \
+             local {vb}, {i}, {g} = {{}}, 0, 0; \
+             while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {xt}[v_enc[{i}]][{ks}[{i}]] end; \
+             local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
+             local {v_exp} = ({vb}[8] % 128) * 8 * 2 + (({vb}[7] - ({vb}[7] % 16)) / 16); \
+             local {v_mant} = {f64parts}; \
+             if {v_exp} == 2047 then return {v_mant} == 0 and {v_sign} * (1/0) or (0/0) \
+             elseif {v_exp} == 0 then return {v_sign} * {v_mant} * (2^(-1074)) \
+             else return {v_sign} * ({v_mant} + 2^52) * (2^({v_exp} - 1075)) end end; ",
+            fn_dec_num = fn_dec_num, fn_chacha_stream = fn_chacha_stream, kind_num = kind_num_obf,
+            vb = var__b, xt = xor_tbl_var,
+            v_sign = v_sign, v_exp = v_exp, v_mant = v_mant, f64parts = f64_parts.join("+"),
+            ks = v_num_ks, i = v_num_i, g = v_num_g
+        );
 
+        let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
+        // 原形态：for j=1,len + 表下标拼接。现在：while + 显式下标 + 参数名也换成随机的。
         let block_dec_strings = format!(
-            "local function {fn_dec_str}(enc_s, pool_idx) local len=#enc_s; local ks={fn_chacha_stream}(pool_idx,{kind_str},len); local s={{}}; for j=1,len do s[j]=string_char({xt}[{fn_s_byte}(enc_s,j)][ks[j]]) end; return table_concat(s) end; ",
-            fn_dec_str = fn_dec_str, fn_chacha_stream = fn_chacha_stream, kind_str = kind_str_obf, xt = xor_tbl_var, fn_s_byte = fn_s_byte);
+            "local function {fn_dec_str}({e},{p}) local {n}=#{e}; local {ks}={fn_chacha_stream}({p},{kind_str},{n}); \
+             local {s}, {i}, {g} = {{}}, 0, 0; \
+             while {i} < {n} do {i} = {i} + 1; {s}[{i}] = string_char({xt}[{fn_s_byte}({e},{i})][{ks}[{i}]]) end; \
+             return table_concat({s}) end; ",
+            fn_dec_str = fn_dec_str, fn_chacha_stream = fn_chacha_stream, kind_str = kind_str_obf, xt = xor_tbl_var,
+            fn_s_byte = fn_s_byte, e = rng.name(), p = rng.name(), n = rng.name(),
+            ks = v_str_ks, s = v_str_s, i = v_str_i, g = v_str_g
+        );
 
-        let block_pools_init_strings = format!("local {gs}={{}}; local str_count={u32d}(); for i=1,str_count do local len={u32d}(); local s={{}}; for j=1,len do s[j]=string_char({rd}()) end; {gs}[i]=table_concat(s); end; ",
-            gs = global_strings, u32d = fn_u32_dec, rd = fn_read_dec);
-
-        let block_pools_init_numbers = format!("local {gn}={{}}; local num_count={u32d}(); for i=1,num_count do local v={{}}; for j=1,8 do v[j]={rd}(); end; {gn}[i]=v; end; ",
-            gn = global_numbers, u32d = fn_u32_dec, rd = fn_read_dec);
+        let (v_pl_i, v_pl_c, v_pl_n, v_pl_s, v_pl_k, v_pl_v) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        // 池初始化原本是两个干净的 for 循环（`for i=1,n do ... end`），现在都换成
+        // while + 显式自增下标 + 独立局部计数，长度/个数也不再和循环变量同名。
+        let block_pools_init_strings = format!(
+            "local {gs}={{}}; local {i}=0; local {c}={u32d}(); \
+             while {i} < {c} do {i} = {i} + 1; local {n}={u32d}(); local {s}={{}}; local {k}=0; \
+             while {k} < {n} do {k} = {k} + 1; {s}[{k}]=string_char({rd}()) end; \
+             {gs}[{i}]=table_concat({s}); end; ",
+            gs = global_strings, u32d = fn_u32_dec, rd = fn_read_dec,
+            i = v_pl_i, c = v_pl_c, n = v_pl_n, s = v_pl_s, k = v_pl_k
+        );
+        let block_pools_init_numbers = format!(
+            "local {gn}={{}}; local {i}=0; local {c}={u32d}(); \
+             while {i} < {c} do {i} = {i} + 1; local {v}={{}}; local {k}=0; \
+             while {k} < 8 do {k} = {k} + 1; {v}[{k}]={rd}() end; {gn}[{i}]={v}; end; ",
+            gn = global_numbers, u32d = fn_u32_dec, rd = fn_read_dec,
+            i = v_pl_i, c = v_pl_c, v = v_pl_v, k = v_pl_k
+        );
 
         let var_enc_c = rng.name();
         let var_tbl = rng.name();
@@ -587,124 +704,91 @@ impl Generator {
         let obf_s_debug = rng.format_num(s_debug);
         let obf_s_ret = rng.format_num(s_ret);
         
+        // ── 状态机（第 6 项：解密逻辑打乱）──
+        // 原形态：if state==A then <体>; state=B elseif state==B then ... —— 分支顺序固定、
+        // 状态推进总在体尾，一眼就是「顺序状态机」。现在：
+        //   ① 六个状态体各自构造后 **shuffle**（分支条件互相排斥，顺序无关）；
+        //   ② 状态推进提到体首（体内不读 state，等价）；
+        //   ③ 所有 for 循环换成 while + 显式自增下标 + 独立局部下标；
+        //   ④ 结尾统一 return（不再是分支内 return），并带一个恒假谓词与影子守卫。
+        // 注意：体内的**读流顺序**一个字都不能动 —— 那些字节是按顺序读进来的。
+        let (v_ch_g, v_ch_out, v_ch_i, v_ch_n) = (rng.name(), rng.name(), rng.name(), rng.name());
+
+        let body_init = format!(
+            "{st}={nxt}; {c}.{pf_n}={rs}(); {c}.{pf_ld}={a5}(); {c}.{pf_lld}={a5}(); {c}.{pf_nups}={rd}(); \
+             {c}.{pf_numparams}={rd}(); {c}.{pf_is_vararg}={rd}(); {c}.{pf_maxstack}={rd}(); if {i} > {i} then {i} = {i} - 1 end; ",
+            st = var_state, nxt = obf_s_insts, c = fn_c, rs = fn_read_string, a5 = fn_a5, rd = fn_read_dec,
+            pf_n = pf_n, pf_ld = pf_ld, pf_lld = pf_lld, pf_nups = pf_nups,
+            pf_numparams = pf_numparams, pf_is_vararg = pf_is_vararg, pf_maxstack = pf_maxstack, i = v_ch_i
+        );
+        let body_insts = format!(
+            "{st}={nxt}; {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
+             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; \
+             {c}.{pf_opcodes}[{i}]={a5}(); {c}.{pf_a_arr}[{i}]={rd}(); {c}.{pf_b_arr}[{i}]={a10}(); {c}.{pf_c_arr}[{i}]={a10}(); end; ",
+            st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, rd = fn_read_dec, a10 = fn_a10,
+            pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
+            i = v_ch_i, n = v_ch_n
+        );
+        let body_consts = format!(
+            "{st}={nxt}; local {ec}={{}}; local {ca}={{}}; local {mt}={{}}; \
+             {mt}[\"__\"..\"index\"]=function({tb},{ix}) \
+                 if not {flg} then return \"KryvexObf_\"..{ix} end; \
+                 local cd={ca}[{ix}]; if cd~=nil then return cd end; \
+                 local {ev}={ec}[{ix}]; if not {ev} then return nil end; \
+                 local val; \
+                 if {ev}[1]=={three} then val={fds}({ev}[2],{ev}[3]) \
+                 elseif {ev}[1]=={one} then val={ev}[2] \
+                 elseif {ev}[1]=={two} then val={fdn}({ev}[2],{ev}[3]) end; \
+                 {ca}[{ix}]=val; return val end; {c}.{pf_consts}=setmetatable({{}},{mt}); \
+             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {t}={rd}(); \
+                 if {t}=={three} then local ri={a5}(); {ec}[{i}]={{3,{gs}[ri+1],ri}} \
+                 elseif {t}=={two} then local ri={a5}(); {ec}[{i}]={{2,{gn}[ri+1],ri}} \
+                 elseif {t}=={one} then {ec}[{i}]={{1,{rd}()~={zero}}} end end; ",
+            st = var_state, nxt = obf_s_protos, c = fn_c, ec = var_enc_c, ca = var_cache, mt = "mt_consts",
+            tb = var_tbl, ix = var_idx_chunk, flg = var_state_flag, ev = var_e,
+            fds = fn_dec_str, fdn = fn_dec_num, one = rng.obfuscate_num(1i64, 1, &keys),
+            two = rng.obfuscate_num(2i64, 1, &keys), three = rng.obfuscate_num(3i64, 1, &keys),
+            zero = rng.obfuscate_num(0i64, 1, &keys), a5 = fn_a5, rd = fn_read_dec, t = t,
+            gn = global_numbers, gs = global_strings, pf_consts = pf_consts, i = v_ch_i, n = v_ch_n
+        );
+        let body_protos = format!(
+            "{st}={nxt}; {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
+             while {i} < {n} do {i} = {i} + 1; {c}.{pf_protos}[{i}]={dc}() end; ",
+            st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
+            dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n
+        );
+        let body_debug = format!(
+            "{st}={nxt}; local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {a5}() end; \
+             {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}(); {a5}(); {a5}() end; \
+             {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; ",
+            st = var_state, nxt = obf_s_ret, a5 = fn_a5, rs = fn_read_string, i = v_ch_i, n = v_ch_n
+        );
+        let body_ret = format!("{out}={c}; {g}={g}+1; ", out = v_ch_out, c = fn_c, g = v_ch_g);
+
+        let mut ch_pairs: Vec<(String, String)> = vec![
+            (obf_s_init.clone(), body_init),
+            (obf_s_insts.clone(), body_insts),
+            (obf_s_consts.clone(), body_consts),
+            (obf_s_protos.clone(), body_protos),
+            (obf_s_debug.clone(), body_debug),
+            (obf_s_ret.clone(), body_ret),
+        ];
+        rng.shuffle(&mut ch_pairs);
+        let mut chain = String::new();
+        for (idx, (val, body)) in ch_pairs.iter().enumerate() {
+            let kw = if idx == 0 { "if" } else { "elseif" };
+            chain.push_str(&format!("{} {} == {} then {} ", kw, var_state, val, body));
+        }
+        chain.push_str(&format!("else {} = {} + 1; end; ", v_ch_g, v_ch_g));
+
         let block_dec_chunk = format!(
-            "local function {fn_dec_chunk}() \
-                local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
-                while true do \
-                    if {var_state} == {obf_s_init} then \
-                        {fn_c}.{pf_n}={fn_read_string}(); \
-                        {fn_c}.{pf_ld}={fn_a5}(); \
-                        {fn_c}.{pf_lld}={fn_a5}(); \
-                        {fn_c}.{pf_nups}={fn_read_dec}(); \
-                        {fn_c}.{pf_numparams}={fn_read_dec}(); \
-                        {fn_c}.{pf_is_vararg}={fn_read_dec}(); \
-                        {fn_c}.{pf_maxstack}={fn_read_dec}(); \
-                        {var_state} = {obf_s_insts}; \
-                    elseif {var_state} == {obf_s_insts} then \
-                        {fn_c}.{pf_opcodes}={{}}; \
-                        {fn_c}.{pf_a_arr}={{}}; \
-                        {fn_c}.{pf_b_arr}={{}}; \
-                        {fn_c}.{pf_c_arr}={{}}; \
-                        for _={one_obf},{fn_a5}() do \
-                            {fn_c}.{pf_opcodes}[_]={fn_a5}(); \
-                            {fn_c}.{pf_a_arr}[_]={fn_read_dec}(); \
-                            {fn_c}.{pf_b_arr}[_]={fn_a10}(); \
-                            {fn_c}.{pf_c_arr}[_]={fn_a10}(); \
-                        end; \
-                        {var_state} = {obf_s_consts}; \
-                    elseif {var_state} == {obf_s_consts} then \
-                        local {var_enc_c}={{}}; \
-                        local {var_cache}={{}}; \
-                        local mt_consts={{}}; \
-                        mt_consts[\"__\"..\"index\"]=function({var_tbl},{var_idx_chunk}) \
-                            if not {var_state_flag} then \
-                                return \"KryvexObf_\"..{var_idx_chunk} \
-                            end; \
-                            local cached={var_cache}[{var_idx_chunk}]; \
-                            if cached~=nil then \
-                                return cached \
-                            end; \
-                            local {var_e}={var_enc_c}[{var_idx_chunk}]; \
-                            if not {var_e} then \
-                                return nil \
-                            end; \
-                            local val; \
-                            if {var_e}[1]=={one_obf} then \
-                                val={var_e}[2] \
-                            elseif {var_e}[1]=={two_obf} then \
-                                val={fn_dec_num}({var_e}[2],{var_e}[3]) \
-                            elseif {var_e}[1]=={three_obf} then \
-                                val={fn_dec_str}({var_e}[2],{var_e}[3]) \
-                            end; \
-                            {var_cache}[{var_idx_chunk}]=val; \
-                            return val \
-                        end; \
-                        {fn_c}.{pf_consts}=setmetatable({{}},mt_consts); \
-                        for _={one_obf},{fn_a5}() do \
-                            {t}={fn_read_dec}(); \
-                            if {t}=={one_obf} then \
-                                {var_enc_c}[_]={{1,{fn_read_dec}()~={zero_obf}}} \
-                            elseif {t}=={two_obf} then \
-                                local raw_idx={fn_a5}(); \
-                                local idx=raw_idx+1; \
-                                {var_enc_c}[_]={{2,{global_numbers}[idx],raw_idx}} \
-                            elseif {t}=={three_obf} then \
-                                local raw_idx={fn_a5}(); \
-                                local idx=raw_idx+1; \
-                                {var_enc_c}[_]={{3,{global_strings}[idx],raw_idx}} \
-                            end \
-                        end; \
-                        {var_state} = {obf_s_protos}; \
-                    elseif {var_state} == {obf_s_protos} then \
-                        {fn_c}.{pf_protos}={{}}; \
-                        for _={one_obf},{fn_a5}() do \
-                            {fn_c}.{pf_protos}[_]={fn_dec_chunk}() \
-                        end; \
-                        {var_state} = {obf_s_debug}; \
-                    elseif {var_state} == {obf_s_debug} then \
-                        for _={one_obf},{fn_a5}() do \
-                            {fn_a5}() \
-                        end; \
-                        for _={one_obf},{fn_a5}() do \
-                            {fn_read_string}();{fn_a5}();{fn_a5}() \
-                        end; \
-                        for _={one_obf},{fn_a5}() do \
-                            {fn_read_string}() \
-                        end; \
-                        {var_state} = {obf_s_ret}; \
-                    elseif {var_state} == {obf_s_ret} then \
-                        return {fn_c} \
-                    end \
-                end \
-            end; ",
-            fn_dec_chunk = fn_decode_chunk,
-            fn_c = fn_c,
-            t = t,
-            var_state = var_state,
-            obf_s_init = obf_s_init,
-            obf_s_insts = obf_s_insts,
-            obf_s_consts = obf_s_consts,
-            obf_s_protos = obf_s_protos,
-            obf_s_debug = obf_s_debug,
-            obf_s_ret = obf_s_ret,
-            fn_read_string = fn_read_string,
-            fn_a5 = fn_a5,
-            fn_read_dec = fn_read_dec,
-            one_obf = rng.obfuscate_num(1i64, 1, &keys),
-            fn_a10 = fn_a10,
-            var_enc_c = var_enc_c,
-            var_cache = var_cache,
-            var_tbl = var_tbl,
-            var_idx_chunk = var_idx_chunk,
-            var_state_flag = var_state_flag,
-            var_e = var_e,
-            fn_dec_num = fn_dec_num,
-            fn_dec_str = fn_dec_str,
-            zero_obf = rng.obfuscate_num(0i64, 1, &keys),
-            two_obf = rng.obfuscate_num(2i64, 1, &keys),
-            three_obf = rng.obfuscate_num(3i64, 1, &keys),
-            global_numbers = global_numbers,
-            global_strings = global_strings
+            "local function {fn_dec_chunk}() local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
+             local {g}, {out}, {i}, {n} = 0, nil, 0, 0; \
+             while {g} < 1 do {chain} end; \
+             return {out} end; ",
+            fn_dec_chunk = fn_decode_chunk, fn_c = fn_c, t = t, var_state = var_state,
+            obf_s_init = obf_s_init, g = v_ch_g, out = v_ch_out, i = v_ch_i, n = v_ch_n,
+            chain = chain
         );
 
         let mut parts = vec![
