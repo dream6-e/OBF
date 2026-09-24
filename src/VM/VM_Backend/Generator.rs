@@ -136,13 +136,22 @@ impl Generator {
         // 共用一条连续的 keystream。指令流此前是明文追加的，固定 10 字节一条，
         // 剥掉外层 base86 之后可以直接切片还原；现在和池一样被覆盖。
         // Lua 侧的 chunk 读取器相应改成走 fn_read_dec（见 block_dec_readers）。
+        // ⑤ 这道滚动变换的常数（原来写死 0x42 / 0x1B / 乘 3 / 旋 1、2、3）逐产物随机：
+        //    同一份「加密器指纹」连着几个产物都对得上，等于白送。字节旋转量仍由 k3 决定
+        //    （本来就随数据走），其余六个常数从产物自己的随机源取，Lua 侧解码器用同一组。
+        let sc_add = 1u8 + (rng.next() & 0xFE) as u8;
+        let sc_rot_in = 1 + (rng.next() % 7) as u32;
+        let sc_add_k1 = 1u8 + (rng.next() & 0xFE) as u8;
+        let sc_mul_k2 = 2 + (rng.next() % 6) as u8;
+        let sc_rot_k2 = 1 + (rng.next() % 7) as u32;
+        let sc_rot_k4 = 1 + (rng.next() % 7) as u32;
         for b in combined_payload[4..].iter_mut() {
             let orig = *b;
-            *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(0x42);
-            k1 = k1.wrapping_add(orig).rotate_left(1).wrapping_add(0x1B);
-            k2 = k2.wrapping_mul(3).wrapping_add(*b).rotate_right(2);
+            *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(sc_add);
+            k1 = k1.wrapping_add(orig).rotate_left(sc_rot_in).wrapping_add(sc_add_k1);
+            k2 = k2.wrapping_mul(sc_mul_k2).wrapping_add(*b).rotate_right(sc_rot_k2);
             k3 = k3 ^ k1.wrapping_sub(k4);
-            k4 = k4.wrapping_add(k2).rotate_left(3);
+            k4 = k4.wrapping_add(k2).rotate_left(sc_rot_k4);
         }
         
         let key_kryvex = String::from("x1"); let p_out: Vec<String> = (0..6).map(|_| rng.name()).collect();
@@ -313,37 +322,40 @@ impl Generator {
         // ① 方法化 + ② 数据流打乱：块内不再直接引用 execute 的局部变量，
         // 而是按随机槽位号从 VM 对象里取自己的那份状态，出口再写回。
         // 每个块的局部别名逐块新取，同一个逻辑变量跨块看到的不是同一个名字。
-        let k_pc = rng.slot(); let k_stk = rng.slot(); let k_top = rng.slot();
-        let k_ops = rng.slot(); let k_aa = rng.slot(); let k_bb = rng.slot(); let k_cc = rng.slot();
-        let k_consts = rng.slot(); let k_protos = rng.slot();
-        let k_upv = rng.slot(); let k_env = rng.slot();
-        let k_va = rng.slot(); let k_valen = rng.slot();
-        let k_vc = rng.slot(); let k_breg = rng.slot();
-        let k_state = rng.slot(); let k_mode = rng.slot();
-        let k_retv = rng.slot(); let k_retf = rng.slot(); let k_rett = rng.slot();
+        // ④ 槽位号不再写死在产物里：运行期由一段线性同余序列推出来（见
+        // `GenRng::slot_key_block`）。这里拿到的全是**局部名字**，插值进 Lua 源码。
+        let (sk, sk_setup) = rng.slot_key_block(20);
+        let k_pc = sk[0].clone(); let k_stk = sk[1].clone(); let k_top = sk[2].clone();
+        let k_ops = sk[3].clone(); let k_aa = sk[4].clone(); let k_bb = sk[5].clone(); let k_cc = sk[6].clone();
+        let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
+        let k_upv = sk[9].clone(); let k_env = sk[10].clone();
+        let k_va = sk[11].clone(); let k_valen = sk[12].clone();
+        let k_vc = sk[13].clone(); let k_breg = sk[14].clone();
+        let k_state = sk[15].clone(); let k_mode = sk[16].clone();
+        let k_retv = sk[17].clone(); let k_retf = sk[18].clone(); let k_rett = sk[19].clone();
 
         // 表类状态按块取一次（表是引用，不需要写回）；pc/top 是标量，
         // 直接把槽位表达式替换进块体 —— 就地读写，不依赖出口写回
         // （Lua 的 `return` 必须是块的最后一条语句，写回语句没法追加在它后面）。
-        let state_fields: Vec<(String, i64, bool)> = vec![
-            (var_opcodes.clone(), k_ops, false),
-            (var_a_arr.clone(), k_aa, false),
-            (var_b_arr.clone(), k_bb, false),
-            (var_c_arr.clone(), k_cc, false),
-            (var_stk.clone(), k_stk, false),
-            (var_consts.clone(), k_consts, false),
-            (var_protos.clone(), k_protos, false),
-            (var_upvals.clone(), k_upv, false),
-            (var_env.clone(), k_env, false),
-            (var_varargs.clone(), k_va, false),
-            (var_varargs_len.clone(), k_valen, false),
-            (var_vc.clone(), k_vc, false),
-            (var_builtin_reg.clone(), k_breg, false),
+        let state_fields: Vec<(String, String, bool)> = vec![
+            (var_opcodes.clone(), k_ops.clone(), false),
+            (var_a_arr.clone(), k_aa.clone(), false),
+            (var_b_arr.clone(), k_bb.clone(), false),
+            (var_c_arr.clone(), k_cc.clone(), false),
+            (var_stk.clone(), k_stk.clone(), false),
+            (var_consts.clone(), k_consts.clone(), false),
+            (var_protos.clone(), k_protos.clone(), false),
+            (var_upvals.clone(), k_upv.clone(), false),
+            (var_env.clone(), k_env.clone(), false),
+            (var_varargs.clone(), k_va.clone(), false),
+            (var_varargs_len.clone(), k_valen.clone(), false),
+            (var_vc.clone(), k_vc.clone(), false),
+            (var_builtin_reg.clone(), k_breg.clone(), false),
         ];
         let mut defs: Vec<String> = Vec::new();
         let mut tree_entries: Vec<(u32, String)> = Vec::new();
         // 热块内联时要用的状态名 → 槽位号（驱动里声明成局部变量）
-        let mut hot_locals: Vec<(String, i64)> = Vec::new();
+        let mut hot_locals: Vec<(String, String)> = Vec::new();
         for (ops, code, name, st) in blocks.iter() {
             let st_lua = rng.format_num(*st as i64);
             // 预算：热路径（算术/比较/跳转/栈与表存取）保留**内联**，冷路径
@@ -360,11 +372,11 @@ impl Generator {
             if cold {
                 let mut body = code.clone();
                 // 标量状态：槽位表达式就地替换（pc/top 的读写直接落在 VM 对象上）
-                body = rename_ident(&body, &var_pc, &format!("self[{}]", k_pc));
-                body = rename_ident(&body, &var_top, &format!("self[{}]", k_top));
+                body = rename_ident(&body, &var_pc, &format!("self[{}]", &k_pc));
+                body = rename_ident(&body, &var_top, &format!("self[{}]", &k_top));
                 // CLOSURE 模板里有字面量 env（内层闭包用），方法表是共享的，
                 // 必须走槽位拿当前调用的环境，不能捕获第一次调用的 env。
-                body = rename_ident(&body, "env", &format!("self[{}]", k_env));
+                body = rename_ident(&body, "env", &format!("self[{}]", &k_env));
                 let mut fetch = String::new();
                 for (old, key, _mutable) in state_fields.iter() {
                     if !uses_ident(&body, old) { continue; }
@@ -375,7 +387,7 @@ impl Generator {
                 body = body.replace("{STOREBACK}", "");
                 let mut text = String::from("local rk1,rk2;");
                 // 状态号自校验：分发器刚把本块的状态号写进槽位，对不上说明跳错了块
-                text.push_str(&format!("if self[{}]~={} then return end;", k_state, st_lua));
+                text.push_str(&format!("if self[{}]~={} then return end;", &k_state, st_lua));
                 text.push_str(&fetch);
                 text.push_str(&body);
                 // 必须用 `.名字=function` 注册：压缩器的改名器只把 `.名字`/`:名字`
@@ -385,9 +397,9 @@ impl Generator {
                 // 并把本块状态号写进槽位（方法入口自校验）。
                 let leaf = format!(
                     "{}[{}]={};{}[{}]={};{}[{}]={};{},{},{}={}:{}(op,inst_A,inst_B,inst_C);{}={}[{}];{}={}[{}]",
-                    var_vm, k_pc, var_pc, var_vm, k_top, var_top, var_vm, k_state, st_lua,
+                    var_vm, &k_pc, var_pc, var_vm, &k_top, var_top, var_vm, &k_state, st_lua,
                     var_r1, var_r2, var_r3, var_vm, name,
-                    var_pc, var_vm, k_pc, var_top, var_vm, k_top
+                    var_pc, var_vm, &k_pc, var_top, var_vm, &k_top
                 );
                 for &op in ops.iter() {
                     tree_entries.push((op, leaf.clone()));
@@ -398,7 +410,7 @@ impl Generator {
                 let body = code.replace("{STOREBACK}", "").replace("self:", &format!("{}:", var_vm));
                 for (old, key, _mutable) in state_fields.iter() {
                     if uses_ident(&body, old) && !hot_locals.iter().any(|(n, _)| n == old) {
-                        hot_locals.push((old.clone(), *key));
+                        hot_locals.push((old.clone(), key.clone()));
                     }
                 }
                 for &op in ops.iter() {
@@ -431,14 +443,14 @@ impl Generator {
         block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
         block_execute_def.push_str(&format!("local {} = setmetatable({{}}, {}); ", var_vm, var_proto));
-        block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, obf1, var_vm, k_stk, var_vm, k_top, obf0));
-        block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_ops, pf_opcodes, var_vm, k_aa, pf_a_arr, var_vm, k_bb, pf_b_arr, var_vm, k_cc, pf_c_arr));
-        block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_consts, pf_consts, var_vm, k_protos, pf_protos));
-        block_execute_def.push_str(&format!("{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};", var_vm, k_upv, var_vm, k_env, var_vm, k_vc, var_vc, var_vm, k_breg, var_builtin_reg));
-        block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1] = {}[{}](_,...) end; ", pf_numparams, var_vm, k_stk, var_s, hex_select_idx));
+        block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={{}};{}[{}]={};", var_vm, &k_pc, obf1, var_vm, &k_stk, var_vm, &k_top, obf0));
+        block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, &k_ops, pf_opcodes, var_vm, &k_aa, pf_a_arr, var_vm, &k_bb, pf_b_arr, var_vm, &k_cc, pf_c_arr));
+        block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, &k_consts, pf_consts, var_vm, &k_protos, pf_protos));
+        block_execute_def.push_str(&format!("{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};", var_vm, &k_upv, var_vm, &k_env, var_vm, &k_vc, var_vc, var_vm, &k_breg, var_builtin_reg));
+        block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1] = {}[{}](_,...) end; ", pf_numparams, var_vm, &k_stk, var_s, hex_select_idx));
         block_execute_def.push_str(&format!("local {} = {} - chunk.{}; local {} = {{{}[{}](chunk.{} + 1, ...)}}; ", var_varargs_len, var_L, pf_numparams, var_varargs, var_s, hex_select_idx, pf_numparams));
-        block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};", var_vm, k_va, var_varargs, var_vm, k_valen, var_varargs_len));
-        block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};{}[{}]=nil;{}[{}]={};{}[{}]={};", var_vm, k_state, obf0, var_vm, k_mode, obf0, var_vm, k_retv, var_vm, k_retf, obf0, var_vm, k_rett, obf0));
+        block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};", var_vm, &k_va, var_varargs, var_vm, &k_valen, var_varargs_len));
+        block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};{}[{}]=nil;{}[{}]={};{}[{}]={};", var_vm, &k_state, obf0, var_vm, &k_mode, obf0, var_vm, &k_retv, var_vm, &k_retf, obf0, var_vm, &k_rett, obf0));
         // 热块内联时用到的状态：取成 execute 的局部变量（表是引用，和槽位同一份）
         if !hot_locals.is_empty() {
             // 注意：Lua 里一个 local 只能有一个 `=`，必须写成
@@ -448,18 +460,18 @@ impl Generator {
             block_execute_def.push_str(&format!("local {};{}={};", names.join(","), names.join(","), vals.join(",")));
         }
         // 返回钩子也是方法（挂在共享方法表上），块里用 `:` 调
-        block_methods.push_str(&format!("{}.{}=function(self)self[{}]={};return true end;", var_methods, fn_ret0, k_mode, obf0));
-        block_methods.push_str(&format!("{}.{}=function(self,v)self[{}]={};self[{}]=v;return true end;", var_methods, fn_ret1, k_mode, obf1, k_retv));
-        block_methods.push_str(&format!("{}.{}=function(self,t,f,l)self[{}]={};self[{}]=t;self[{}]=f;self[{}]=l;return true end;", var_methods, fn_ret2, k_mode, obf2, k_retv, k_retf, k_rett));
+        block_methods.push_str(&format!("{}.{}=function(self)self[{}]={};return true end;", var_methods, fn_ret0, &k_mode, obf0));
+        block_methods.push_str(&format!("{}.{}=function(self,v)self[{}]={};self[{}]=v;return true end;", var_methods, fn_ret1, &k_mode, obf1, &k_retv));
+        block_methods.push_str(&format!("{}.{}=function(self,t,f,l)self[{}]={};self[{}]=t;self[{}]=f;self[{}]=l;return true end;", var_methods, fn_ret2, &k_mode, obf2, &k_retv, &k_retf, &k_rett));
 
 
 
         // 数组槽位只读一次（热路径每指令都读会白花 4 次哈希查找）
         let arrs = format!("{}, {}, {}, {}", var_opcodes, var_a_arr, var_b_arr, var_c_arr);
-        block_execute_def.push_str(&format!("local {};{}={}[{}],{}[{}],{}[{}],{}[{}];", arrs, arrs, var_vm, k_ops, var_vm, k_aa, var_vm, k_bb, var_vm, k_cc));
+        block_execute_def.push_str(&format!("local {};{}={}[{}],{}[{}],{}[{}],{}[{}];", arrs, arrs, var_vm, &k_ops, var_vm, &k_aa, var_vm, &k_bb, var_vm, &k_cc));
         // pc/top 是**循环外**的局部变量：热块直接改它们（与基线同速），
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
-        block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, k_pc, var_vm, k_top));
+        block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, &k_pc, var_vm, &k_top));
 
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）：保持一个可运行的空循环
@@ -477,7 +489,7 @@ impl Generator {
 
             block_execute_def.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
             block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, "op", &keys, &mut rng));
-            block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
+            block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, &k_mode, var_md, obf1, var_vm, &k_retv, var_md, obf2, var_vm, &k_retv, var_vm, &k_retf, var_vm, &k_rett));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
         }
@@ -580,25 +592,31 @@ impl Generator {
              local function {rd}() local {o},{g}=0,0; \
              while {g}<1 do \
              local {e}={a3}(); \
-             local {c1}=({e}+190)%256; \
+             local {c1}=({e}+{sc1})%256; \
              local {c2}={bx}({c1},k4); \
              local {c3}={rt}({c2},k3%8); \
              local {c4}=({c3}+k2)%256; \
              local {c5}={bx}({c4},k1); \
              {o}={c5}; \
              k1=(k1+{c5})%256; \
-             k1=((k1*2)%256)+((k1-(k1%128))/128); \
-             k1=(k1-229)%256; \
-             k2=(k2*2+k2+{e})%256; \
-             k2=((k2*64)%256)+((k2-(k2%4))/4); \
+             k1={rt}(k1,{sc_rot_in_inv}); \
+             k1=(k1+{sc_add_k1})%256; \
+             k2=(k2*{sc_mul_k2}+{e})%256; \
+             k2={rt}(k2,{sc_rot_k2}); \
              k3={bx}(k3,(k1-k4+256)%256); \
              k4=(k4+k2)%256; \
-             k4=((k4*8)%256)+((k4-(k4%32))/32); \
+             k4={rt}(k4,{sc_rot_k4_inv}); \
              {g}={g}+1; end; return {o} end; ",
             bx = fn_bxor, a = v_bx_a, b = v_bx_b, r = v_bx_r, w = v_bx_w, g = v_bx_g, s = v_bx_s,
             rt = fn_b_rotr, x = v_rt_x, n = v_rt_n, d = v_rt_d, t = v_rt_t,
             rd = fn_read_dec, a3 = fn_a3, o = v_rd_o, e = v_rd_e,
-            c1 = v_rd_c1, c2 = v_rd_c2, c3 = v_rd_c3, c4 = v_rd_c4, c5 = v_rd_c5
+            c1 = v_rd_c1, c2 = v_rd_c2, c3 = v_rd_c3, c4 = v_rd_c4, c5 = v_rd_c5,
+            sc1 = 256 - sc_add as u32,
+            sc_rot_in_inv = 8 - sc_rot_in,
+            sc_add_k1 = sc_add_k1,
+            sc_mul_k2 = sc_mul_k2,
+            sc_rot_k2 = sc_rot_k2,
+            sc_rot_k4_inv = 8 - sc_rot_k4
         );
         let (v_u32_t, v_u32_n, v_u32_i, v_u32_v) = (rng.name(), rng.name(), rng.name(), rng.name());
         let (v_a5_t, v_a5_n, v_a5_i) = (rng.name(), rng.name(), rng.name());
@@ -826,6 +844,7 @@ impl Generator {
         out.push_str(&format!("local {} = ...;\n", var_l));
         out.push_str(&header_block);
         out.push_str(&at.setup);
+        out.push_str(&sk_setup);
         out.push_str(&format!(" local {} = 0; ", key_seed_var));
         out.push_str(" ");
         out.push_str("local math_floor, string_char, string_sub, string_byte, table_concat = math.floor, string.char, string.sub, string.byte, table.concat; ");

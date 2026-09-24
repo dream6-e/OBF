@@ -1,6 +1,6 @@
 use rand::{thread_rng, Rng};
 
-use super::Generator_util::{mix_encrypt, mix_key, poly_hash};
+use super::Generator_util::{hash_params, mix_encrypt, mix_key, poly_hash, set_hash_params, HashParams};
 
 pub struct AntiTamperResult {
     pub setup: String,
@@ -32,6 +32,30 @@ fn shuffle_vec(vec: &mut Vec<usize>) {
     for i in (1..vec.len()).rev() {
         let j = rng.gen_range(0..=i);
         vec.swap(i, j);
+    }
+}
+
+/// 把常量写成「运行期算出来」的形态（④ 能动态生成的就动态生成）：
+/// `(0X<A>-0X<B>)` / `(0X<A>+0X<B>)` / `(0X<A>*0X2+0X<C>)`，
+/// 三种写法求值都恰好等于 `val`，但产物里再也看不到 `val` 本身，
+/// 同一个常量在不同位置也会被写成不同片段（无法搜索替换）。
+/// 只用于守卫键 / 状态种子 / 增量这一类「必须存在但不必以字面量存在」的数字。
+fn derived_num(val: u64, rng: &mut impl Rng) -> String {
+    match rng.gen_range(0..3) {
+        0 => {
+            let b = rng.gen_range(0x1000u64..0xFF_FFFF);
+            format!("(0X{:X}-0X{:X})", val + b, b)
+        }
+        1 => {
+            let b = rng.gen_range(1u64..0x8000);
+            if val > b {
+                format!("(0X{:X}+0X{:X})", val - b, b)
+            } else {
+                let c = rng.gen_range(0x1000u64..0xFF_FFFF);
+                format!("(0X{:X}-0X{:X})", val + c, c)
+            }
+        }
+        _ => format!("(0X{:X}*0X2+0X{:X})", val / 2, val % 2),
     }
 }
 
@@ -75,6 +99,23 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         }
     };
     let pool_key = pk0 * 256 + pk1;
+    // ⑤ 池键哈希参数逐产物随机（把 djb2 的 5381/33 指纹抹掉）：
+    //    多重抽几次参数，直到所有池条目的键互不相同（撞键会让池条目互相覆盖）。
+    let _hp: HashParams = loop {
+        let p = HashParams {
+            mult: rng.gen_range(3..0x1_0000u32) | 1,
+            add: rng.gen_range(0..0x1_0000u32),
+            seed: rng.gen_range(0x1000..0x100000u32),
+        };
+        set_hash_params(p);
+        let mut hs: Vec<u32> = strings.iter().map(|s| poly_hash(s)).collect();
+        hs.sort_unstable();
+        hs.dedup();
+        if hs.len() == strings.len() {
+            break p;
+        }
+    };
+
     let mut pool_entries = Vec::new();
     for s in &strings {
         let hash = poly_hash(s);
@@ -83,8 +124,15 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     }
 
     // 生成一个随机变量名用于毒药表（Poison Pill）注入
-    let rand_str = random_string();
-    let rand_hash = poly_hash(&rand_str);
+    let rand_hash = loop {
+        let rs = random_string();
+        let h = poly_hash(&rs);
+        if !strings.iter().any(|s| poly_hash(s) == h) {
+            break (rs, h);
+        }
+    };
+    let rand_str = rand_hash.0;
+    let rand_hash = rand_hash.1;
     let enc: Vec<String> = mix_encrypt(rand_str.as_bytes(), pk0, pk1).iter().map(|c| c.to_string()).collect();
     pool_entries.push(format!("[{}]={{{}}}", rand_hash, enc.join(",")));
     
@@ -171,7 +219,15 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     setup.push_str(&format!(
     "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if z(te)~=v then c(b,n) else g(1) end;break;end;end;rt(typeof,raknet,error,print,_VERSION);\n"
 ));
+    // 网表的陷阱门：任何取不到的键（例如有人删掉/改掉了某一块的键，或自己构造下标来
+    // 试探）都会返回爆栈函数 —— 表现为直接卡死，而不是抛一句读得懂的
+    // 「attempt to call a nil value」暴露出结构。
     setup.push_str(&format!("local {}={{}};\n", v_net));
+    setup.push_str(&format!(
+        "{}({},{{[{}]=function() return {} end}});\n",
+        format!("{}({})", v_res, poly_hash("setmetatable")),
+        v_net, format!("{}({})", v_dec, poly_hash("__index")), v_crash
+    ));
 
     let mut current_expected: i64 = rng.gen_range(1000..9999);
     let initial_token = current_expected;
@@ -180,26 +236,68 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     shuffle_vec(&mut guards_indices);
     guards_indices.push(6);
     shuffle_vec(&mut guards_indices);
-    
+
+    // ── ③ 代码块互锁（紧密耦合 / 互相嵌合） ──
+    // 三件事让「逐段破解」失效：
+    //   ① 网表不再用 0/1/2… 这种顺序下标：每个守卫挂在一个随机 u32 键上，
+    //      「下一块」也要靠链上的键去找 —— 光看代码看不出执行顺序；
+    //   ② 全链共享一个运行期状态量 {state}：每块入口按自己的 (乘数, 加数) 推进它，
+    //      并把「自己算出来的状态 − 这一步应有的状态」混进传给下一块的令牌里。
+    //      链路完整时这一项恒为 0（令牌与以前一模一样）；少跑/改跑/换序任何一块，
+    //      状态就对不上，令牌被污染 → 链尾自检失败 → 卡死。
+    //      因为校正项是「自然抵消」而不是一句 if，产物里没有「检查状态」的痕迹；
+    //   ③ 再挂两个不参与链的诱饵条目（同样带池取值、同样动状态），增加误导。
+    let n_guards = guards_indices.len();
+    let mut keys: Vec<u64> = Vec::new();
+    while keys.len() < n_guards + 2 {
+        let k = rng.gen_range(0x1000_0000u64..0x7FFF_FFFF);
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    let v_state = rand_var();
+    let mut step_a: Vec<u64> = Vec::new();
+    let mut step_b: Vec<u64> = Vec::new();
+    let mut state_at: Vec<u64> = vec![(rng.gen_range(1..0xFFFFu64) << 16) | rng.gen_range(1..0xFFFFu64)];
+    for _ in 0..n_guards {
+        // 乘数取小（< 1000）保证 x*A+B < 2^42，double 里是精确整数
+        let a = rng.gen_range(3..997u64) | 1;
+        let b = rng.gen_range(1..0xFFFF_FFFFu64);
+        step_a.push(a);
+        step_b.push(b);
+        let prev = *state_at.last().unwrap();
+        state_at.push((prev.wrapping_mul(a).wrapping_add(b)) % 0x1_0000_0000);
+    }
+    setup.push_str(&format!("local {}={};\n", v_state, derived_num(state_at[0], &mut rng)));
+
     let mut guards_code = Vec::new();
     
     for i in 0..guards_indices.len() {
         let delta = rng.gen_range(10..99);
         let guard_type = guards_indices[i];
-        
-        let next_good = if i == guards_indices.len() - 1 {
-            format!("return k+{}", delta)
+
+        // ③ 每块入口先推进共享状态，并把「实算状态 − 本步应有状态」混进传下去的令牌：
+        //    链路完整 ⇒ 这一项恒为 0（令牌与不加它时逐位相同）；否则令牌被污染，
+        //    一路带到链尾自检 → 不匹配 → 卡死。全程不出现「比较状态」的语句。
+        let state_step = format!(
+            "{}=({}*{}+{})%0X100000000;",
+            v_state, v_state, derived_num(step_a[i], &mut rng), derived_num(step_b[i], &mut rng)
+        );
+        let corr = format!("+({}-0X{:X})", v_state, state_at[i + 1]);
+        let next_key = derived_num(keys[i + 1], &mut rng);
+        let next_good = if i == n_guards - 1 {
+            format!("return k+{}{}", delta, corr)
         } else {
-            format!("return {}[{}](k+{})", v_net, i + 1, delta)
+            format!("return {}[{}](k+{}{})", v_net, next_key, delta, corr)
         };
-        
+
         // 异常增量先抽出来：守卫 8 要用它算「异常档」的取值，不再只看拼好的语句。
         // 抽取顺序与以前一致（每轮正好一次），不影响其它随机量。
         let delta_bad = rng.gen_range(100..999);
-        let next_bad = if i == guards_indices.len() - 1 {
-            format!("return k-{}", delta_bad)
+        let next_bad = if i == n_guards - 1 {
+            format!("return k-{}{}", delta_bad, corr)
         } else {
-            format!("return {}[{}](k-{})", v_net, i + 1, delta_bad)
+            format!("return {}[{}](k-{}{})", v_net, next_key, delta_bad, corr)
         };
         
         let mut check_code = String::new();
@@ -294,15 +392,18 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                          else \
                              local {ok},{inf} = p(gi, p); \
                              if not {ok} or {tp}({inf})~={tb} then {bad} else \
-                             local w={inf}[{dec}({h_what})]; local h=5381; \
-                             for idx=1,#w do h=(h*33+string.byte(w,idx))%4294967296 end; \
+                             local w={inf}[{dec}({h_what})]; local h={hp_seed}; \
+                             for idx=1,#w do h=(h*{hp_mult}+string.byte(w,idx)+{hp_add})%4294967296 end; \
                              if h~={hc} then {bad} else {good} end end end end\n",
                         res = v_res, h_dbg = hash_debug, h_pc = hash_pcall,
                         h_tp = poly_hash("type"), bad = next_bad, ok = rand_var(),
                         dec = v_dec, h_gi = hash_getinfo,
                         h_info = hash_info, good = next_good,
                         tp = rand_var(), inf = rand_var(), tb = format!("{}({})", v_dec, poly_hash("table")),
-                        h_what = poly_hash("what"), hc = hash_C
+                        h_what = poly_hash("what"), hc = hash_C,
+                        hp_seed = format!("0X{:X}", hash_params().seed),
+                        hp_mult = format!("0X{:X}", hash_params().mult),
+                        hp_add = format!("0X{:X}", hash_params().add)
                     );
                 } else {
                     check_code = format!("{}\n", next_good);
@@ -445,12 +546,12 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let k_resid_a = rng.gen_range(3..=97);
                 let k_resid_b = rng.gen_range(3..=97);
                 let decoy_rounds = rng.gen_range(2..=6);
-                let tail = if i == guards_indices.len() - 1 {
-                    format!("return k+{m}[{r}*{r}]", m = g_m, r = g_r)
+                let tail = if i == n_guards - 1 {
+                    format!("return k+{m}[{r}*{r}]{corr}", m = g_m, r = g_r, corr = corr)
                 } else {
                     format!(
-                        "return {net}[{idx}](k+{m}[{r}*{r}])",
-                        net = v_net, idx = i + 1, m = g_m, r = g_r
+                        "return {net}[{idx}](k+{m}[{r}*{r}]{corr})",
+                        net = v_net, idx = next_key, m = g_m, r = g_r, corr = corr
                     )
                 };
                 check_code = format!(
@@ -526,14 +627,32 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         }
         
         current_expected += delta;
-        let single_guard_raw = format!("{}[{}]=function(k)\n{}end;\n", v_net, i, check_code);
+        // 定义处也写派生形态：同一个键在定义点/调用点各是一个不同的算式，
+        // 文本搜索对不上号；键值本身在产物里从头到尾没有字面量。
+        let single_guard_raw = format!(
+            "{}[{}]=function(k)\n{}{}end;\n",
+            v_net, derived_num(keys[i], &mut rng), state_step, check_code
+        );
         let minified_guard = minify_lua(&single_guard_raw);
         guards_code.push(minified_guard);
+    }
+
+    // 诱饵条目：形状与守卫一致（照样从池里取值、照样动状态），但不参与链条。
+    for d in 0..2 {
+        let kx = keys[n_guards + d];
+        let probe = if d == 0 { "table" } else { "number" };
+        guards_code.push(format!(
+            "{}[{}]=function(k) local y={}({});{}={}*0X3+0X5;if y then return k end return k end;",
+            v_net, derived_num(kx, &mut rng), v_res, poly_hash(probe), v_state, v_state
+        ));
     }
     
     let v_jump = rand_var();
     let mut trigger = String::new();
-    trigger.push_str(&format!("{}={}[0]({});\n", key_var, v_net, initial_token));
+    trigger.push_str(&format!(
+        "{}={}[{}]({});\n",
+        key_var, v_net, derived_num(keys[0], &mut rng), initial_token
+    ));
     trigger.push_str(&format!(
         "local {} = setmetatable({{}}, {{ [{}({})] = function() return {} end }});\n",
         v_jump, v_dec, poly_hash("__index"), v_crash
