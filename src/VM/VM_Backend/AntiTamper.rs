@@ -136,7 +136,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     let mut current_expected: i64 = rng.gen_range(1000..9999);
     let initial_token = current_expected;
     
-    let mut guards_indices = vec![0, 1, 2, 3, 4, 5, 7];
+    let mut guards_indices = vec![0, 1, 2, 3, 4, 5, 7, 8];
     shuffle_vec(&mut guards_indices);
     guards_indices.push(6);
     shuffle_vec(&mut guards_indices);
@@ -352,6 +352,56 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                     e = g_e, env = v_env, t = g_t, flag = g_flag, mt = g_mt,
                     meta = meta_lines.join(" "), pk = g_pk, j = g_j, ok = g_ok,
                     bad = next_bad, good = next_good, dec = v_dec, h = rand_hash
+                );
+            }
+            8 => {
+                // ── 反美化守卫（anti-beautify）──
+                // 产物整体写在极少的物理行里，所以「同一行上定义的函数」的 linedefined 必然相等，
+                // pcall 捕获的错误消息里的行号、以及当前执行行也必须落在同一行。
+                // 一旦被 beautifier / 格式化工具重排（每个语句一行），这些等式立刻不成立 → next_bad。
+                // 取行号用的是用户给的写法：先 string.find 抓数字，再分别用 sub 与 char+byte 往返两次取值，
+                // 两次不一致就说明行号被动过手脚。
+                // 判据刻意不比较「错误行号 vs linedefined」——两者来源不同（错误消息 vs debug），
+                // 在 Roblox 一类环境里格式可能有差异会误杀；改成比较同源的
+                // 「错误行号 vs 当前执行行 currentline」，两边都在同一 chunk 里，行号口径一致。
+                // 成员一律字符串键（压缩器的成员改名器会改点访问，见 §5.11）；
+                // 任何一步取不到信息都直接放行，绝不误杀（没有 debug 库的环境也能跑）。
+                let (g_f1, g_f2, g_f3, g_q) = (rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_d, g_gi, g_i1, g_i2, g_l1, g_l2) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_ok, g_msg, g_sp, g_ep, g_num) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_u, g_v, g_tn, g_cur, g_cl) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                check_code = format!(
+                    "local {f1}=function() local {q}=nil; return {q}[1] end; \
+                     local {f2}=function() return 1 end; \
+                     local {f3}=function() return 2 end; \
+                     local {d}=debug; \
+                     if type({d})~='table' then {good} else \
+                     local {gi}={d}['getinfo']; \
+                     if type({gi})~='function' then {good} else \
+                     local {tn}=tonumber; \
+                     if type({tn})~='function' then {good} else \
+                     local {i1},{i2}={gi}({f2},'S'),{gi}({f3},'S'); \
+                     if type({i1})~='table' or type({i2})~='table' then {good} else \
+                     local {l1},{l2}={i1}['linedefined'],{i2}['linedefined']; \
+                     if type({l1})~='number' or type({l2})~='number' then {good} else \
+                     local {ok},{msg}=pcall({f1}); \
+                     if type({msg})~='string' then {msg}='' end; \
+                     local {sp},{ep},{num}=string.find({msg},':(%d+)[:\\r\\n ]'); \
+                     if not {sp} or not {ep} then {good} else \
+                     local {u}=string.sub({msg},{sp}+1,{ep}-1); \
+                     local {v}=string.char(string.byte({msg},{sp}+1,{ep}-1)); \
+                     local {cur}={gi}(1,'l'); \
+                     local {cl}={cur} and {cur}['currentline']; \
+                     if not {u} or not {v} then {good} \
+                     elseif {u}~={v} then {bad} \
+                     elseif ({l1}-{l1})+{l1}~={l2} then {bad} \
+                     elseif {cl}~=nil and {tn}({num})~=nil and {tn}({num})~={cl} then {bad} \
+                     else {good} end end end end end end end\n",
+                    f1 = g_f1, f2 = g_f2, f3 = g_f3, q = g_q, d = g_d, gi = g_gi,
+                    i1 = g_i1, i2 = g_i2, l1 = g_l1, l2 = g_l2,
+                    ok = g_ok, msg = g_msg, sp = g_sp, ep = g_ep, num = g_num,
+                    u = g_u, v = g_v, tn = g_tn, cur = g_cur, cl = g_cl,
+                    good = next_good, bad = next_bad
                 );
             }
             _ => {

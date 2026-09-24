@@ -498,6 +498,72 @@ impl Packer {
         let combined_alpha_expr = parts_exprs.join(",");
 
         let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, rng);
+        // ── 第 2 项：这层解码器也不再是「初始化 → 拆分 → 解码 → 执行」的清晰骨架 ──
+        // 状态表构造里 32 个键值对彼此独立，顺序打乱；stage2 里 16 条初始化赋值同样打乱
+        // （data/len 那一对有先后依赖，单独保持原序）；gmatch 的 for-in 拆成显式迭代器 + 影子守卫。
+        let mut pk_pairs: Vec<String> = vec![
+            format!("{} = data", p_data),
+            format!("{} = {}", p_pc, pc_state0),
+            format!("{} = {{}}", p_insts),
+            format!("{} = {}", p_tamper, tamper_val),
+            format!("{} = {{}}", p_handlers),
+            format!("{} = false", p_r_flg),
+            format!("{} = {{}}", p_r_vals),
+            format!("{} = 0", p_r_len),
+            format!("{} = false", p_tail_flg),
+            format!("{} = {{}}", p_map),
+            format!("{} = 1", p_idx),
+            format!("{} = #data", p_len),
+            format!("{} = {{}}", p_k),
+            format!("{} = 0", p_kidx),
+            format!("{} = {{}}", p_buf),
+            format!("{} = {{}}", p_memo),
+            format!("{} = unpack", p_unpack),
+            format!("{} = char", p_char),
+            format!("{} = byte", p_byte),
+            format!("{} = floor", p_floor),
+            format!("{} = insert", p_insert),
+            format!("{} = concat", p_concat),
+            format!("{} = remove", p_remove),
+            format!("{} = reverse", p_reverse),
+            format!("{} = 0", p_bc),
+            format!("{} = {{}}", p_res),
+            format!("{} = 0", p_f),
+            format!("{} = 0", p_p1),
+            format!("{} = 0", p_p2),
+            format!("{} = 0", p_w),
+            format!("{} = 0", p_u),
+            format!("{} = 0", p_ptr),
+        ];
+        rng.shuffle(&mut pk_pairs);
+        let pk_init_table = pk_pairs.join(", ");
+
+        // 注意：这里必须写源字段名（s.idx 等），重命名由后面的
+        // rename_state_fields 统一处理（它按 "s." + 源名匹配），
+        // 直接写最终随机名会导致该处字段漏改、运行时对不上。
+        let mut pk_s2: Vec<String> = vec![
+            "s.idx = 1".to_string(),
+            "s.kidx = 0".to_string(),
+            "s.buf = {}".to_string(),
+            "s.res = {}".to_string(),
+            format!("s.pc = {}", pc_state0),
+            "s.bc = 0".to_string(),
+            "s.f = 0".to_string(),
+            "s.p1 = 0".to_string(),
+            "s.p2 = 0".to_string(),
+            "s.w = 0".to_string(),
+            "s.u = 0".to_string(),
+            "s.ptr = 0".to_string(),
+            "s.r_flg = false".to_string(),
+            "s.r_vals = {}".to_string(),
+            "s.r_len = 0".to_string(),
+            "s.tail_flg = false".to_string(),
+        ];
+        rng.shuffle(&mut pk_s2);
+        let pk_s2_assigns = pk_s2.join(" ");
+        let (pk_parts, pk_it, pk_tick) = (rng.name(), rng.name(), rng.name());
+        let (pk_fet, pk_code, pk_env, pk_maker) = (rng.name(), rng.name(), rng.name(), rng.name());
+
         let script = format!("
 local function {f_entry}({v_data})
     {probe}
@@ -560,32 +626,16 @@ end,
         {m_init_map} = function(q, s, parts, alpha, i, kparts, kstr)
             parts = {{{combined_alpha_expr}}};
             alpha = \"\";
-            i = 1;
-            while true do
-                if i > {num_actual_parts} then break end;
-                alpha = alpha .. parts[i];
-                i = i + 1;
-            end;
-            i = 1;
-            while true do
-                if i > #alpha then break end;
-                s.map[s.byte(alpha, i)] = i - 1;
-                i = i + 1;
-            end;
+            i = 0;
+            while i < {num_actual_parts} do i = i + 1; alpha = alpha .. parts[i]; end;
+            i = 0;
+            while i < #alpha do i = i + 1; s.map[s.byte(alpha, i)] = i - 1; end;
             kparts = {{{combined_key_expr}}};
             kstr = \"\";
-            i = 1;
-            while true do
-                if i > {num_actual_key_parts} then break end;
-                kstr = kstr .. kparts[i];
-                i = i + 1;
-            end;
-            i = 1;
-            while true do
-                if i > #kstr then break end;
-                s.k[i] = s.byte(kstr, i);
-                i = i + 1;
-            end;
+            i = 0;
+            while i < {num_actual_key_parts} do i = i + 1; kstr = kstr .. kparts[i]; end;
+            i = 0;
+            while i < #kstr do i = i + 1; s.k[i] = s.byte(kstr, i); end;
         end,
         {m_init_insts} = function(q, s, st)
             {init_insts_loop}
@@ -602,36 +652,36 @@ end,
                 q:{m_init_insts}(s);
                 q:{m_init_handlers}(s);
                 
-                local parts = {{}}
-                for part in gmatch(s.data, \"[^~]+\") do
-                    insert(parts, part)
+                local {pk_parts} = {{}}
+                local {pk_it} = gmatch(s.data, \"[^~]+\");
+                if {pk_it} ~= nil then
+                    while true do
+                        local {pk_tick} = {pk_it}();
+                        if {pk_tick} == nil then break end;
+                        if {pk_tick} == {pk_parts} then break end;
+                        insert({pk_parts}, {pk_tick});
+                    end
                 end
                 
-                s.data = parts[1];
+                s.data = {pk_parts}[1];
                 s.len = #s.data;
                 local sb_expr = q:{m_run}(s);
                 
-                local get_sb_code = load_func(\"return \" .. sb_expr);
-                local sb_code = get_sb_code and get_sb_code() or \"\";
-                local env_maker_chunk = load_func(sb_code, \"kryvex\");
+                local {pk_fet} = load_func(\"return \" .. sb_expr);
+                local {pk_code} = {pk_fet} and {pk_fet}() or \"\";
+                local {pk_env} = load_func({pk_code}, \"kryvex\");
                 
                 local stage2 = function()
-                    s.data = parts[2];
+                    {pk_s2_assigns}
+                    s.data = {pk_parts}[2];
                     s.len = #s.data;
-                    s.idx = 1; s.kidx = 0; s.buf = {{}}; s.res = {{}};
-                    s.pc = {pc_state0}; s.bc = 0; s.f = 0; s.p1 = 0; s.p2 = 0; s.w = 0; s.u = 0; s.ptr = 0;
-                    s.r_flg = false; s.r_vals = {{}}; s.r_len = 0; s.tail_flg = false;
                     return q:{m_run}(s);
                 end
                 
-                local env_maker = env_maker_chunk and env_maker_chunk(stage2) or stage2;
-                return env_maker();
+                local {pk_maker} = {pk_env} and {pk_env}(stage2) or stage2;
+                return {pk_maker}();
             end)({{
-                {p_data} = data, {p_pc} = {pc_state0}, {p_insts} = {{}}, {p_tamper} = {tamper_val}, {p_handlers} = {{}},
-                {p_r_flg} = false, {p_r_vals} = {{}}, {p_r_len} = 0, {p_tail_flg} = false,
-                {p_map} = {{}}, {p_idx} = 1, {p_len} = #data, {p_k} = {{}}, {p_kidx} = 0, {p_buf} = {{}}, {p_memo} = {{}},
-                {p_unpack} = unpack, {p_char} = char, {p_byte} = byte, {p_floor} = floor, {p_insert} = insert, {p_concat} = concat, {p_remove} = remove, {p_reverse} = reverse,
-                {p_bc} = 0, {p_res} = {{}}, {p_f} = 0, {p_p1} = 0, {p_p2} = 0, {p_w} = 0, {p_u} = 0, {p_ptr} = 0
+                {pk_init_table}
             }});
         end
     }}):{m_main}({v_data}, unpack or table.unpack, string.char, string.byte, math.floor, table.insert, table.concat, table.remove, string.reverse, string.sub, {v_pload}, string.gmatch);
