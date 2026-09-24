@@ -1,0 +1,31 @@
+[package]
+name = "kryvex_ob"
+version = "0.1.0"
+edition = "2024"
+default-run = "kryvex-simple"
+
+[dependencies]
+rand = "0.9"
+regex = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+debug = true
+
+[lib]
+name = "kryvex_ob"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kryvex-simple"
+path = "src/main.rs"
+
+[workspace]
+members = ["CLI"]
+default-members = ["."]

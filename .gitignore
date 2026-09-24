@@ -1,0 +1,7 @@
+# Rust 构建产物（cargo build/test 输出，勿入库）
+/target/
+**/*.rs.bk
+
+# kryvex-simple 每次运行都会在当前工作目录生成的中间/成品文件
+/process/
+obfuscated.lua
