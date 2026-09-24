@@ -12,8 +12,8 @@ use super::AntiTamper;
 // GenRng 继续从这里 re-export，保持 crate 内既有的引用路径不变。
 pub use super::Generator_util::{ControlFlowBuilder, CipherKeys, GenRng};
 use super::Generator_util::{
-    build_opcode_tree, chacha8_xor, emit_stage_struct, rename_ident, rewrite_chunk,
-    scan_setglobal_targets, scan_used_opcodes, uses_ident, write_string, PayloadReader, StagePlan,
+    build_opcode_tree, chacha8_xor, rename_ident, rewrite_chunk, scan_setglobal_targets,
+    scan_used_opcodes, uses_ident, write_string, PayloadReader,
 };
 
 
@@ -483,10 +483,12 @@ impl Generator {
                 }
                 let hi0 = tree_entries[segs[0].1 - 1].0 as i64;
                 let hi1 = tree_entries[segs[1].1 - 1].0 as i64;
-                let c0 = ControlFlowBuilder::generate_opaque_predicate(hi0, "op", "<=", &keys, &mut rng);
-                let c1 = ControlFlowBuilder::generate_opaque_predicate(hi1, "op", "<=", &keys, &mut rng);
-                let j0 = c0;
-                let j1 = c1;
+                // 排查开关：KRYVEX_JUNCTION=plain 用普通比较（绕开 opaque predicate）
+                let plain = std::env::var("KRYVEX_JUNCTION").map(|v| v == "plain").unwrap_or(false);
+                let c0 = if plain { ControlFlowBuilder::format_num(hi0, &mut rng) } else { ControlFlowBuilder::generate_opaque_predicate(hi0, "op", "<=", &keys, &mut rng) };
+                let c1 = if plain { ControlFlowBuilder::format_num(hi1, &mut rng) } else { ControlFlowBuilder::generate_opaque_predicate(hi1, "op", "<=", &keys, &mut rng) };
+                let j0 = if plain { format!("op<={}", c0) } else { c0 };
+                let j1 = if plain { format!("op<={}", c1) } else { c1 };
                 dispatch_code.push_str(&format!(
                     "if {} then {} elseif {} then {} else {} end ",
                     j0, calls[0], j1, calls[1], calls[2]
@@ -777,51 +779,21 @@ impl Generator {
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         // 池初始化原本是两个干净的 for 循环（`for i=1,n do ... end`），现在都换成
         // while + 显式自增下标 + 独立局部计数，长度/个数也不再和循环变量同名。
-        // 本轮：池初始化的双层 while 拆成乱序闭包（建表+读条数 / 「读一条」闭包 / 灌表循环），
-        // 顺序表驱动，定义顺序随机；gs/i/c/读一条闭包都是外层局部（段间靠 upvalue 传数据）。
-        let pool_rd_str = rng.name();
-        let mut nm_pool: Vec<String> = (0..16).map(|_| rng.name()).collect();
-        let strings_plan = StagePlan {
-            hoist: vec![global_strings.clone(), v_pl_i.clone(), v_pl_c.clone(), pool_rd_str.clone()],
-            stages: vec![
-                format!("{}={{}};{}=0;{}={}();", global_strings, v_pl_i, v_pl_c, fn_u32_dec),
-                format!(
-                    "{f}=function() local {n}={u32d}(); local {s}={{}}; local {k}=0; while {k}<{n} do {k}={k}+1; {s}[{k}]=string_char({rd}()) end; return table_concat({s}) end;",
-                    f = pool_rd_str, n = v_pl_n, u32d = fn_u32_dec, s = v_pl_s, k = v_pl_k, rd = fn_read_dec
-                ),
-                format!(
-                    "while {i}<{c} do {i}={i}+1; {gs}[{i}]={f}() end;",
-                    i = v_pl_i, c = v_pl_c, gs = global_strings, f = pool_rd_str
-                ),
-            ],
-        };
-        let block_pools_init_strings = {
-            let mut nm_cb = || nm_pool.pop().unwrap_or_else(|| "kzPoolNmFb".to_string());
-            let mut num_cb = |v: i64| format!("0X{:X}", v);
-            emit_stage_struct(&strings_plan, &mut nm_cb, &mut num_cb)
-        };
-        // 数字池：同一套拆法（8 字节一组 → 「读一组」闭包）。
-        let pool_rd_num = rng.name();
-        let mut nm_pool2: Vec<String> = (0..16).map(|_| rng.name()).collect();
-        let numbers_plan = StagePlan {
-            hoist: vec![global_numbers.clone(), v_pl_i.clone(), v_pl_c.clone(), pool_rd_num.clone()],
-            stages: vec![
-                format!("{}={{}};{}=0;{}={}();", global_numbers, v_pl_i, v_pl_c, fn_u32_dec),
-                format!(
-                    "{f}=function() local {v}={{}}; local {k}=0; while {k}<8 do {k}={k}+1; {v}[{k}]={rd}() end; return {v} end;",
-                    f = pool_rd_num, v = v_pl_v, k = v_pl_k, rd = fn_read_dec
-                ),
-                format!(
-                    "while {i}<{c} do {i}={i}+1; {gn}[{i}]={f}() end;",
-                    i = v_pl_i, c = v_pl_c, gn = global_numbers, f = pool_rd_num
-                ),
-            ],
-        };
-        let block_pools_init_numbers = {
-            let mut nm_cb2 = || nm_pool2.pop().unwrap_or_else(|| "kzPoolNmFb2".to_string());
-            let mut num_cb2 = |v: i64| format!("0X{:X}", v);
-            emit_stage_struct(&numbers_plan, &mut nm_cb2, &mut num_cb2)
-        };
+        let block_pools_init_strings = format!(
+            "local {gs}={{}}; local {i}=0; local {c}={u32d}(); \
+             while {i} < {c} do {i} = {i} + 1; local {n}={u32d}(); local {s}={{}}; local {k}=0; \
+             while {k} < {n} do {k} = {k} + 1; {s}[{k}]=string_char({rd}()) end; \
+             {gs}[{i}]=table_concat({s}); end; ",
+            gs = global_strings, u32d = fn_u32_dec, rd = fn_read_dec,
+            i = v_pl_i, c = v_pl_c, n = v_pl_n, s = v_pl_s, k = v_pl_k
+        );
+        let block_pools_init_numbers = format!(
+            "local {gn}={{}}; local {i}=0; local {c}={u32d}(); \
+             while {i} < {c} do {i} = {i} + 1; local {v}={{}}; local {k}=0; \
+             while {k} < 8 do {k} = {k} + 1; {v}[{k}]={rd}() end; {gn}[{i}]={v}; end; ",
+            gn = global_numbers, u32d = fn_u32_dec, rd = fn_read_dec,
+            i = v_pl_i, c = v_pl_c, v = v_pl_v, k = v_pl_k
+        );
 
         let var_enc_c = rng.name();
         let var_tbl = rng.name();
