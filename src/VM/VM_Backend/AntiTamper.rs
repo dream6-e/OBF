@@ -72,15 +72,20 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     // 使用 getgenv() 完美适配 Roblox 执行器全局环境
     setup.push_str(&format!("local {} = getgenv and getgenv() or getfenv and getfenv() or _ENV or _G or {{}};\n", v_env));
     
-    // 纯物理爆栈导致卡死，无视 Roblox 的 string.rep / 内存上限等沙盒过滤
+    // 递归爆栈用的两个隐藏名：函数名 + 参数名，逐产物随机
+    let fn_crash_rec = rand_var();
+    let v_crash_arg = rand_var();
+    // 纯物理爆栈导致卡死，无视 Roblox 的 string.rep / 内存上限等沙盒过滤。
+    // 递归写成「把要递归的函数当参数传进去」的形式（`f(o) o(f,o)`），
+    // 产物里看不到 `pcall(f)` 这种一眼可辨的图案。
     setup.push_str(&format!(
     "local function {}() \
         local j,s,k,v=_ENV,false;local t={{}};local p=type;if not k then v=s end;if p(t)~=\"table\" then p=j end;repeat p={{}} until v; \
-         local function f() pcall(f) pcall(f) end; \
-         pcall(f); \
+         local function {}({}) {}({},{}); {}({},{}) end \
+         {}(pcall); \
      local function we(x) return not x end;local gd if we(gd) then while we(s) do end;end \
      end;\n",
-    v_crash
+    v_crash, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, fn_crash_rec
 ));
     setup.push_str(&format!("local {} = {{{}}};\n", v_pool, pool_data));
     setup.push_str(&format!(
