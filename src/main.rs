@@ -141,18 +141,9 @@ fn main() {
             let _ = std::fs::write("process/process3.lua", &processed_vm);
 
             let final_code = if args.contains(&"MB".to_string()) {
-                let packed_vm = packer::pack_lua(&processed_vm);
-                let compressed_packed_vm = match Compressor::compress(&packed_vm) {
-                    Ok(code) => code,
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        process::exit(1);
-                    }
-                };
-                format!(
-                    "{}",
-                    compressed_packed_vm
-                )
+                // MB：新外壳自带解压器（DP/LZ + base85），不需要再过源码级压缩器；
+                // 外壳里的负载已经是压缩态，再解析一遍只会白花时间。
+                packer::pack_lua(&processed_vm)
             } else {
                 format!(
     "--Kryvex v2.2,by 1%@\n{}",

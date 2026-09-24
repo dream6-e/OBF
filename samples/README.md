@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，106,807 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（加壳 + 二次压缩），55,309 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，137,854 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，105,037 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），50,658 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，139,104 B |
 
 前两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
 
@@ -19,6 +19,8 @@
 十六进制数字一律写成 `0X` 前缀 + 大写 A-F；ChaCha 的 4 个 sigma 常量不再以字面量出现，
 改成逐产物由随机 key 派生；载荷解码链（bxor/rotr/read_dec/u32/字符串/状态机）已整体换形（§5.13），
 解码器外层（m_main/m_init_map）也已打乱并可反美化（行号校验守卫，§5.14）——产物被拆行格式化后会失效。
+MB 模式改用了新的自解压外壳（DP/LZ + base85，§5.15）：同一输入下比上一代管线小 9%、
+启动（解压 + 加载）快 31%。
 
 自己复现：
 
