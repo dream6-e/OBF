@@ -453,7 +453,7 @@ fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSet<Vec<u8>>,
     for _ in 0..upv_count { r.read_string(); }
 }
 
-fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mut Vec<Vec<u8>>, numbers: &mut Vec<u64>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], rng: &mut StdRng) {
+fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mut Vec<Vec<u8>>, numbers: &mut Vec<u64>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], rng: &mut StdRng) {
     write_string(w, r.read_string());
     w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec()); w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
@@ -512,20 +512,99 @@ fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mut Vec<Vec<u
         }
     }
 
+    // ---- 融合前的准备：算出所有可能成为跳转目标的 pc ----
+    //
+    // 融合会把三条指令压成一条，handler 里 `pc += 2` 跳过两个死槽。死槽本身
+    // 仍然占位（所以其余跳转偏移一个都不用改），但前提是**绝不能有控制流
+    // 直接落进死槽**。两类来源都要排除：
+    //   1. 相对跳转的目标：pc 在取指时已经自增过 1，所以目标是 (i + 1 + sBx)
+    //   2. 条件跳下一条的指令（Eq/Lt/Le/Test/TestSet/TForLoop），目标是 i + 1
+    const REL_JUMP_OPS: &[u8] = &[22, 31, 32, 48, 81, 82, 83, 84]; // Jmp ForLoop ForPrep TForPrep JmpIf JmpIfNot JmpEq JmpNe
+    const SKIP_NEXT_OPS: &[u8] = &[23, 24, 25, 26, 27, 33];        // Eq Lt Le Test TestSet TForLoop
+    const NO_FALLTHROUGH_OPS: &[u8] = &[29, 30, 85, 86, 87];       // TailCall Return Return0 Return1 Return2
+    let mut jump_targets: HashSet<usize> = HashSet::new();
+    for (i, (op, _a, b, _c)) in raw_insts.iter().enumerate() {
+        let real = inverse_opcode_map[*op as usize];
+        if REL_JUMP_OPS.contains(&real) {
+            let t = i as i64 + 1 + *b as i32 as i64;
+            if t >= 0 {
+                jump_targets.insert(t as usize);
+            }
+        }
+        if SKIP_NEXT_OPS.contains(&real) {
+            jump_targets.insert(i + 1);
+        }
+    }
+
     w.extend_from_slice(&inst_count.to_le_bytes());
-    for (op, a, b, c) in &raw_insts {
-        if *op == getglobal_op || *op == getglobalstr_op {
-            if let Some(slot) = builtin_rewrite.get(&(*b as usize)) {
+    let n_insts = raw_insts.len();
+    let mut i = 0usize;
+    let mut fused_count = 0usize;
+    while i < n_insts {
+        let (op, a, b, c) = raw_insts[i];
+
+        // ---- SuperOperator: builtin-load + LoadK + Call(B=2, C=1) -> 1 条 ----
+        if (op == getglobal_op || op == getglobalstr_op)
+            && i + 2 < n_insts
+            && !jump_targets.contains(&(i + 1))
+            && !jump_targets.contains(&(i + 2))
+        {
+            // i == 0 是函数入口，没有前驱指令，控制流只能从这里开始，天然安全；
+            // i > 0 则要求前一条指令一定会顺序落入本条（不会跳走、不会跳过本条）。
+            let prev_falls_through = if i == 0 {
+                true
+            } else {
+                let prev_real = inverse_opcode_map[raw_insts[i - 1].0 as usize];
+                !SKIP_NEXT_OPS.contains(&prev_real)
+                    && !REL_JUMP_OPS.contains(&prev_real)
+                    && !NO_FALLTHROUGH_OPS.contains(&prev_real)
+            };
+            if prev_falls_through {
+                if let Some(&slot) = builtin_rewrite.get(&(b as usize)) {
+                    let (op1, a1, b1, _c1) = raw_insts[i + 1];
+                    let (op2, a2, b2, c2) = raw_insts[i + 2];
+                    let is_loadk = inverse_opcode_map[op1 as usize] == 1 && a1 as u32 == a as u32 + 1;
+                    let is_call_1arg_0ret =
+                        inverse_opcode_map[op2 as usize] == 28 && a2 == a && b2 == 2 && c2 == 1;
+                    // 常量必须没被 omit_const 抹掉，否则 CONSTS[b1+1] 会取错
+                    let const_alive = !omit_const.contains(&(b1 as usize));
+                    if is_loadk && is_call_1arg_0ret && const_alive {
+                        // 必须和 builtin-load 一样过 slot_perm：handler 是按
+                        // fused_map[perm[名字下标]] 注册的，指令侧要用同一个下标。
+                        let fused_vals = fused_map.get(slot_perm[slot]).map(|v| v.as_slice()).unwrap_or(&[]);
+                        if !fused_vals.is_empty() {
+                            let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
+                            w.extend_from_slice(&selected_op.to_le_bytes());
+                            w.push(a);
+                            w.extend_from_slice(&0u32.to_le_bytes());
+                            w.extend_from_slice(&b1.to_le_bytes()); // 常量下标搬进 C
+                            fused_used.insert(slot_perm[slot]);
+                            fused_count += 1;
+                            i += 1; // i+1 / i+2 照常写出，成为永不执行的死槽
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        if op == getglobal_op || op == getglobalstr_op {
+            if let Some(slot) = builtin_rewrite.get(&(b as usize)) {
                 let op_index = crate::VM::Opcodes::builtins::BUILTIN_OP_BASE + slot_perm[*slot];
                 let mapped_vals = builtin_map.get(op_index).map(|v| v.as_slice()).unwrap_or(&[]);
                 let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op_index as u32 };
-                w.extend_from_slice(&selected_op.to_le_bytes()); w.push(*a); w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
+                w.extend_from_slice(&selected_op.to_le_bytes()); w.push(a); w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
+                i += 1;
                 continue;
             }
         }
-        let mapped_vals = mapped_opcodes.get(*op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
-        let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { *op as u32 };
-        w.extend_from_slice(&selected_op.to_le_bytes()); w.push(*a); w.extend_from_slice(&b.to_le_bytes()); w.extend_from_slice(&c.to_le_bytes());
+        let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
+        let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 };
+        w.extend_from_slice(&selected_op.to_le_bytes()); w.push(a); w.extend_from_slice(&b.to_le_bytes()); w.extend_from_slice(&c.to_le_bytes());
+        i += 1;
+    }
+    if fused_count > 0 && std::env::var("KRYVEX_DEBUG_FUSION").is_ok() {
+        eprintln!("[kryvex] 融合了 {} 组指令", fused_count);
     }
 
     w.extend_from_slice(&const_count.to_le_bytes());
@@ -553,7 +632,7 @@ fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mut Vec<Vec<u
 
     let p_count = r.read_u32();
     w.extend_from_slice(&p_count.to_le_bytes());
-    for _ in 0..p_count { rewrite_chunk(r, w, strings, numbers, mapped_opcodes, builtin_map, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, rng); }
+    for _ in 0..p_count { rewrite_chunk(r, w, strings, numbers, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, rng); }
     let l_count = r.read_u32();
     w.extend_from_slice(&l_count.to_le_bytes());
     r.read_bytes((l_count * 4) as usize);
@@ -659,6 +738,7 @@ impl Generator {
         { let mut sg_reader = PayloadReader { data: payload, pos: 0 }; scan_setglobal_targets(&mut sg_reader, &mut setglobal_targets, setglobal_op); }
 
         let mut mapped_opcodes: [Vec<u32>; Opcodes::builtins::TOTAL_OPCODES] = std::array::from_fn(|_| Vec::new());
+        let mut fused_opcodes: [Vec<u32>; Opcodes::builtins::FUSED_OP_COUNT] = std::array::from_fn(|_| Vec::new());
         let mut transpile_map: [Vec<u32>; 90] = std::array::from_fn(|_| Vec::new());
         {
             let mut map_rng = StdRng::seed_from_u64(self.ctx.seed);
@@ -682,12 +762,23 @@ impl Generator {
                     }
                 }
             }
+            // 融合指令（SuperOperator）也各分一组别名，和 builtin-load 一样按 slot 索引
+            for i in 0..Opcodes::builtins::FUSED_OP_COUNT {
+                let count = map_rng.random_range(3..=6);
+                for _ in 0..count {
+                    loop {
+                        let val = map_rng.random_range(80000..99999);
+                        if used.insert(val) { fused_opcodes[i].push(val); break; }
+                    }
+                }
+            }
         }
 
         let mut strings = Vec::new(); let mut numbers = Vec::new(); let mut rewritten_chunks = Vec::new();
         let mut reader = PayloadReader { data: payload, pos: 0 };
         let mut rewrite_rng = StdRng::seed_from_u64(self.ctx.seed + 1);
-        rewrite_chunk(&mut reader, &mut rewritten_chunks, &mut strings, &mut numbers, &transpile_map, &mapped_opcodes, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &mut rewrite_rng);
+        let mut fused_used: HashSet<usize> = HashSet::new();
+        rewrite_chunk(&mut reader, &mut rewritten_chunks, &mut strings, &mut numbers, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &mut rewrite_rng);
 
         let mut builtin_pool_indices: Vec<usize> = Vec::with_capacity(Opcodes::builtins::BUILTIN_NAMES.len());
         for name in Opcodes::builtins::BUILTIN_NAMES.iter() {
@@ -818,7 +909,7 @@ impl Generator {
         block_execute_def.push_str(&format!("{} = {} + 1; ", var_pc, var_pc));
         
         let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: "chunk.consts".to_string(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: "upvals".to_string(), env: "env".to_string(), protos: "chunk.protos".to_string(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: var_builtin_reg.clone() };
-        let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
+        let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
         
         raw_handlers = raw_handlers.replace(
             &format!("{}[{}][1]", var_insts, var_pc),

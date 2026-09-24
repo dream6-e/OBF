@@ -146,7 +146,7 @@ pub fn generate_opcode_map() -> [Vec<u32>; builtins::TOTAL_OPCODES] {
     map
 }
 
-pub fn generate_handlers(opcode_map: &[Vec<u32>; builtins::TOTAL_OPCODES], cfg: &OpcodeConfig, seed: u64) -> String {
+pub fn generate_handlers(opcode_map: &[Vec<u32>; builtins::TOTAL_OPCODES], fused_map: &[Vec<u32>; builtins::FUSED_OP_COUNT], fused_used: &std::collections::HashSet<usize>, cfg: &OpcodeConfig, seed: u64) -> String {
     let mut rng = OpcodesRng::new(seed as u32);
     let perm = builtins::slot_permutation(seed);
     let mut out = String::new();
@@ -156,6 +156,7 @@ pub fn generate_handlers(opcode_map: &[Vec<u32>; builtins::TOTAL_OPCODES], cfg: 
     out.push_str(&control_flow::generate(opcode_map, cfg, &mut rng));
     out.push_str(&environment::generate(opcode_map, cfg, &mut rng));
     out.push_str(&builtins::generate(opcode_map, cfg, &mut rng, &perm));
+    out.push_str(&builtins::generate_fused(fused_map, cfg, &mut rng, &perm, fused_used));
     out
 }
 
