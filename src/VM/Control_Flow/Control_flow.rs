@@ -19,9 +19,9 @@ impl ControlFlowBuilder {
         match rng.range(0, 2) {
             0 => {
                 if val < 0 {
-                    format!("-0x{:x}", val.unsigned_abs())
+                    format!("-0X{:X}", val.unsigned_abs())
                 } else {
-                    format!("0x{:x}", val)
+                    format!("0X{:X}", val)
                 }
             }
             _ => val.to_string(),

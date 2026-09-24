@@ -11,14 +11,14 @@ fn convert_number_complex(num_str: &str, num_type: usize, rng: &mut impl Rng) ->
     match num_type {
         0 => {
             let zeros = "0".repeat(rng.gen_range(1..3));
-            format!("0x{}{:X}", zeros, num)
+            format!("0X{}{:X}", zeros, num)
         }
         1 => {
-            format!("0x{:X}", num)
+            format!("0X{:X}", num)
         }
         2 => {
             let zeros = "0".repeat(rng.gen_range(3..5));
-            format!("0x{}{:X}", zeros, num)
+            format!("0X{}{:X}", zeros, num)
         }
         _ => num_str.to_string(),
     }

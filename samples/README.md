@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，105,264 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（加壳 + 二次压缩），54,496 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，134,831 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，104,444 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（加壳 + 二次压缩），54,805 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，132,519 B |
 
 前两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
 
@@ -16,6 +16,8 @@
 池解码器、毒表守卫（§5.11）已做逻辑/数据流打乱；脚本头那段原生 `loadstring` 探测里
 9 个字符串（`getinfo`/`what`/`source`/`getgenv`/`getrenv`/`loadstring`/`load`/`C`/`=[C]`）已 XOR 加密，
 产物里不出现明文。
+十六进制数字一律写成 `0X` 前缀 + 大写 A-F；ChaCha 的 4 个 sigma 常量不再以字面量出现，
+改成逐产物由随机 key 派生（上面两项是 2026-09-24 用户新要求）。
 
 自己复现：
 

@@ -283,9 +283,9 @@ return (function(...)
     local {f_load}=function(c) local f;if not(f) then return ({v_pload} or loadstring or load)(c) else return {{}} end;end
     local {f_pcall}=function(r) local c,v=3,type;if v(c)==\"string\" then return error(r) else return pcall(r) end;end
     local {f_char}=function(...) return string.char(...) end
-    local {f_byte} = function(...) local k,g=3.0,0x0;local ui=k+g;if ui < k-g then return math.floor(...) elseif ui==k-g then return string.byte(...) end;end
+    local {f_byte} = function(...) local k,g=3.0,0X0;local ui=k+g;if ui < k-g then return math.floor(...) elseif ui==k-g then return string.byte(...) end;end
     local {f_floor} = function(x) return math.floor(x) end
-    local {f_concat} = function(t, sep) local fg=function(sd,qw) if true then return math.random(sd,qw) end end;local ty,zx,nm=0x1,5,0x14; if fg(ty,zx) <= fg(zx,nm) then return table.concat(t, sep) else return tonumber(t,sep) end;end
+    local {f_concat} = function(t, sep) local fg=function(sd,qw) if true then return math.random(sd,qw) end end;local ty,zx,nm=0X1,5,0X14; if fg(ty,zx) <= fg(zx,nm) then return table.concat(t, sep) else return tonumber(t,sep) end;end
     local {f_gsub} = function(s, p, r) return string.gsub(s, p, r) end
     local {f_remove} = function(t, pos) return table.remove(t, pos) end
     local function {v_entry}({v_data}, ...)

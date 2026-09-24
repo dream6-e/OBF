@@ -71,9 +71,9 @@ impl ControlFlowBuilder {
         match rng.range(0, 2) {
             0 => {
                 if val < 0 {
-                    format!("-0x{:x}", val.unsigned_abs())
+                    format!("-0X{:X}", val.unsigned_abs())
                 } else {
-                    format!("0x{:x}", val)
+                    format!("0X{:X}", val)
                 }
             }
             _ => val.to_string(),
@@ -683,7 +683,7 @@ impl GenRng {
         for i in (1..slice.len()).rev() { slice.swap(i, r.random_range(0..=i)); }
     }
     pub fn format_num(&mut self, val: i64) -> String {
-        match self.range(0, 2) { 0 => { if val < 0 { format!("-0x{:x}", val.unsigned_abs()) } else { format!("0x{:x}", val) } } _ => val.to_string() }
+        match self.range(0, 2) { 0 => { if val < 0 { format!("-0X{:X}", val.unsigned_abs()) } else { format!("0X{:X}", val) } } _ => val.to_string() }
     }
     pub fn obfuscate_num(&mut self, val: i64, depth: usize, keys: &CipherKeys) -> String {
         if depth == 0 { return self.format_num(val); }
@@ -823,7 +823,7 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
     );
     let mut keys_lua = String::new();
     for i in 0..PLAIN.len() {
-        keys_lua.push_str(&format!("local {}={}({},0x{:02X});", names[i], v_dx, lits[i], ks[i]));
+        keys_lua.push_str(&format!("local {}={}({},0X{:02X});", names[i], v_dx, lits[i], ks[i]));
     }
 
     let v_d = rng.name();

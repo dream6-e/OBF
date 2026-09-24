@@ -147,7 +147,7 @@ impl Generator {
         
         let key_kryvex = String::from("x1"); let p_out: Vec<String> = (0..6).map(|_| rng.name()).collect();
         let var_s = rng.name(); let fn_N_ = rng.name(); let var_fU = rng.name(); let var_L = rng.name(); let var_get_count = rng.name();
-        let hex_select_idx = format!("{:#x}", rng.range(10, 255));
+        let hex_select_idx = format!("0X{:X}", rng.range(10, 255));
         let var_state_flag = rng.name();
         let wai = rng.name();
         let mut header_block = String::new();
@@ -500,6 +500,20 @@ impl Generator {
         let chacha_key_lua = (0..8).map(|i| rng.obfuscate_num(chacha_key[i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
         let chacha_salt_lua = rng.obfuscate_num(chacha_salt as i64, 1, &keys);
 
+        // ChaCha 的 4 个 sigma 常量（"expand 32-byte k"）不再以字面量出现在产物里。
+        // 改成逐产物派生：sigma_i = (d_i + K[idx_i]) mod 2^32，其中
+        // d_i = sigma_i - K[idx_i]（wrapping_sub），K 就是下面那份随机 key 的 Lua 表。
+        // idx 故意打乱（3,7,2,6）—— 恢复式子与 K 的实际排列不对应，静态看不出原始值。
+        let sigma: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
+        let sig_idx: [usize; 4] = [3, 7, 2, 6];
+        let sigma_lua = (0..4)
+            .map(|i| {
+                let d = sigma[i].wrapping_sub(chacha_key[sig_idx[i] - 1]);
+                format!("(({}+K[{}])%4294967296)", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i])
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
         let mut block_chacha_setup = String::new();
         block_chacha_setup.push_str(&format!(
             "local {xt}={{}}; for a=0,255 do local row={{}}; for b=0,255 do local x,y,r,p=a,b,0,1; while x>0 or y>0 do local rx,ry=x%2,y%2; if rx~=ry then r=r+p end; x,y,p=math_floor(x/2),math_floor(y/2),p*2 end; row[b]=r end; {xt}[a]=row end; ",
@@ -522,8 +536,8 @@ impl Generator {
             ckey = chacha_key_var, key_lua = chacha_key_lua, csalt = chacha_salt_var, salt_lua = chacha_salt_lua
         ));
         block_chacha_setup.push_str(&format!(
-            "local function {cblock}(n1,n2,n3,ctr) local K={ckey}; local s={{0x61707865,0x3320646e,0x79622d32,0x6b206574,K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
-            cblock = fn_chacha_block, ckey = chacha_key_var, qr = fn_qr
+            "local function {cblock}(n1,n2,n3,ctr) local K={ckey}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
+            cblock = fn_chacha_block, ckey = chacha_key_var, qr = fn_qr, sig = sigma_lua
         ));
         block_chacha_setup.push_str(&format!(
             "local function {cstream}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cblock}({csalt},pool_idx,kind,ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
