@@ -772,11 +772,60 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
 /// 线性逻辑/数据流同样打乱：定位到原生候选后用改下标的方式跳出循环
 /// （而不是 return），末尾再用影子变量返回。
 ///
-/// 注意：这段代码会进 VM 文本、过一遍压缩器的**成员改名器**，所以
-/// `debug.getinfo` / `info.what` / `info.source` 一律写成 `['getinfo']` /
-/// `['what']` / `['source']` 这种字符串键 —— 改名器只改 `.名字`/`:名字`，
-/// 字符串键不动；写成点访问会被改成随机名，探测就会永远走兜底分支、形同虚设。
+/// 注意一（改名器）：这段代码会进 VM 文本、过一遍压缩器的**成员改名器**，
+/// 所以 `debug.getinfo` / `info.what` / `info.source` 一律写成**字符串键**，
+/// 绝不能写成点访问 —— 改名器只改 `.名字`/`:名字`，字符串键不动；
+/// 写点访问会被改成随机名，探测永远走兜底分支、形同虚设。
+///
+/// 注意二（明文）：字符串键留在产物里本身也是特征（`['getinfo']`、`'=[C]'`
+/// 一眼就是「原生函数探测」），所以下面 9 个字符串**全部 XOR 加密**，
+/// 以 `"\ddd\ddd…"` 十进制转义字面量出现，运行时用纯算术异或解回来
+/// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
+/// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
+/// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
 pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -> String {
+    // ── 要隐藏的字符串：顺序与下面 format! 里的 k1…k9 一一对应 ──
+    const PLAIN: [&str; 9] = [
+        "getinfo",    // info 表的键
+        "what",       // 判定是否为原生函数
+        "C",          // what 的值
+        "source",     // 源名
+        "=[C]",       // 原生函数的 source 形状
+        "getgenv",    // 执行器环境表键
+        "getrenv",    // 执行器环境表键
+        "loadstring", // 候选名
+        "load",       // 候选名
+    ];
+    let mut names: Vec<String> = Vec::with_capacity(PLAIN.len());
+    let mut lits: Vec<String> = Vec::with_capacity(PLAIN.len());
+    let mut ks: Vec<u8> = Vec::with_capacity(PLAIN.len());
+    for p in PLAIN.iter() {
+        let k = xor_key(p, rng);
+        names.push(rng.name());
+        lits.push(xor_lit(p, k));
+        ks.push(k);
+    }
+
+    // ── 解密器：纯算术 XOR，不用任何位库 ──
+    let v_dx = rng.name();
+    let (v_s, v_k) = (rng.name(), rng.name());
+    let (v_o, v_i, v_n) = (rng.name(), rng.name(), rng.name());
+    let (v_a, v_b, v_r, v_p, v_w) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let (v_xb, v_yb) = (rng.name(), rng.name());
+    let dx_def = format!(
+        "local function {dx}({s},{k}) local {o},{i}='',0; local {n}=#{s}; \
+         while {i}<{n} do {i}={i}+1; local {a},{b}={k},string.byte({s},{i}); \
+         local {r},{p}=0,1; for {w}=1,8 do local {xb},{yb}={a}%2,{b}%2; \
+         if {xb}~={yb} then {r}={r}+{p} end; {a}=({a}-{xb})/2; {b}=({b}-{yb})/2; {p}={p}*2; end; \
+         {o}={o}..string.char({r}); end; return {o}; end;",
+        dx = v_dx, s = v_s, k = v_k, o = v_o, i = v_i, n = v_n,
+        a = v_a, b = v_b, r = v_r, p = v_p, w = v_w, xb = v_xb, yb = v_yb
+    );
+    let mut keys_lua = String::new();
+    for i in 0..PLAIN.len() {
+        keys_lua.push_str(&format!("local {}={}({},0x{:02X});", names[i], v_dx, lits[i], ks[i]));
+    }
+
     let v_d = rng.name();
     let v_gi = rng.name();
     let v_list = rng.name();
@@ -791,24 +840,24 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
     let v_gg = rng.name();
     let v_ge = rng.name();
     let v_env2 = rng.name();
-    format!(
+    let body = format!(
         "local function {nat}({f}) \
             local {d} = debug; \
             if type({d}) ~= 'table' then return true end; \
-            local {gi} = {d}['getinfo']; \
+            local {gi} = {d}[{k1}]; \
             if type({gi}) ~= 'function' then return true end; \
             local {ok}, {inf} = pcall({gi}, {f}, 'S'); \
             if not {ok} or type({inf}) ~= 'table' then return true end; \
-            return {inf}['what'] == 'C' and {inf}['source'] == '=[C]'; \
+            return {inf}[{k2}] == {k3} and {inf}[{k4}] == {k5}; \
         end; \
         local function {getf}() \
             local {g} = (getfenv and getfenv()) or _G; \
-            local {gg} = {g}['getgenv']; \
+            local {gg} = {g}[{k6}]; \
             if type({gg}) == 'function' then {g} = {gg}() or {g}; end; \
-            local {ge} = {g}['getrenv']; \
+            local {ge} = {g}[{k7}]; \
             local {env} = {g}; \
             if type({ge}) == 'function' then {env} = {ge}() or {g}; end; \
-            local {list} = {{ loadstring, {env}['loadstring'], {env}['load'], load }}; \
+            local {list} = {{ loadstring, {env}[{k8}], {env}[{k9}], load }}; \
             local {alt}, {i} = nil, 0; \
             local {n} = #{list}; \
             while {i} < {n} do \
@@ -825,6 +874,31 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
         local {pl} = {getf}();\n",
         nat = nat, getf = getf, pl = pl, d = v_d, gi = v_gi, list = v_list, alt = v_alt,
         i = v_i, n = v_n, f = v_f, t = v_t, g = v_g, ok = v_ok, inf = v_inf,
-        gg = v_gg, ge = v_ge, env = v_env2
-    )
+        gg = v_gg, ge = v_ge, env = v_env2,
+        k1 = names[0], k2 = names[1], k3 = names[2], k4 = names[3], k5 = names[4],
+        k6 = names[5], k7 = names[6], k8 = names[7], k9 = names[8]
+    );
+    format!("{dx_def}{keys_lua}{body}")
+}
+
+/// 把明文按密钥异或后写成 Lua 的 `\ddd` 十进制转义字符串字面量。
+/// 全三位定宽，所以后面跟数字也不会被读成别的转义。
+fn xor_lit(plain: &str, key: u8) -> String {
+    let mut out = String::from("\"");
+    for b in plain.bytes() {
+        out.push_str(&format!("\\{:03}", b ^ key));
+    }
+    out.push('"');
+    out
+}
+
+/// 取一个随机单字节密钥，且**不落在明文出现过的字节里** ——
+/// 这样异或结果不会出现 `\000`（Lua 字符串能装 NUL，但没必要给
+/// 压缩器的 lexer 找麻烦）。
+fn xor_key(plain: &str, rng: &mut GenRng) -> u8 {
+    let bytes: Vec<u8> = plain.bytes().collect();
+    loop {
+        let k = rng.range(1, 256) as u8;
+        if !bytes.contains(&k) { return k; }
+    }
 }
