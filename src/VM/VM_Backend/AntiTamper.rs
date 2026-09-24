@@ -1,6 +1,6 @@
 use rand::{thread_rng, Rng};
 
-use super::Generator_util::{hash_params, mix_encrypt, mix_key, poly_hash, set_hash_params, HashParams};
+use super::Generator_util::{emit_stage_struct, hash_params, mix_encrypt, mix_key, poly_hash, rename_ident_code, set_hash_params, split_stages, HashParams};
 
 pub struct AntiTamperResult {
     pub setup: String,
@@ -57,6 +57,48 @@ fn derived_num(val: u64, rng: &mut impl Rng) -> String {
         }
         _ => format!("(0X{:X}*0X2+0X{:X})", val / 2, val % 2),
     }
+}
+
+/// ⑥ 本轮：Luraph 风格「逻辑拆分」——
+/// 一个守卫体（状态推进 + 探测/判定链，几百个字节、一条直下）拆成 2~3 个闭包：
+///   * 闭包定义顺序随机、执行顺序藏在派生大数写成的顺序表里；
+///   * 段间的数据靠提升到外层的局部变量（闭包 upvalue）传递；
+///   * 再随机把 1~2 个提升变量搬进「黑板表」——键由一段运行期线性同余序列算出，
+///     于是连「这个值从哪来」都要先跑一遍那段循环才知道（数据流也打散）。
+/// 守卫里的 `return`（令牌链）由驱动循环原样冒泡，语义不变。
+fn split_guard_body(body: &str, want: usize, rng: &mut impl Rng) -> String {
+    let mut plan = split_stages(body, want);
+    if plan.stages.len() < 2 {
+        return plan.stages.pop().unwrap_or_default();
+    }
+    let mut board_head = String::new();
+    if !plan.hoist.is_empty() && rng.gen_bool(0.75) {
+        let b = rand_var();
+        let s = rand_var();
+        let x = rand_var();
+        let i = rand_var();
+        let m = rng.gen_range(3..0x1_0000u64) | 1;
+        let seed = rng.gen_range(1..0x7FFF_0000u64);
+        let rounds = 3 + rng.gen_range(0..4usize);
+        board_head.push_str(&format!(
+            "local {b}={{}};local {s}={{}};local {x}={seed};local {i}=0;while {i}<{rounds} do {i}={i}+1;{x}=({x}*{m})%4294967296;{s}[{i}]={x} end;",
+            b = b, s = s, x = x, seed = seed, i = i, rounds = rounds, m = m
+        ));
+        let n_pick = if plan.hoist.len() >= 2 && rng.gen_bool(0.5) { 2 } else { 1 };
+        for j in 0..n_pick {
+            let pick = rng.gen_range(0..plan.hoist.len());
+            let name = plan.hoist.remove(pick);
+            let key = format!("{}[{}]", s, j + 1);
+            for st in plan.stages.iter_mut() {
+                *st = rename_ident_code(st, &name, &key);
+            }
+        }
+    }
+    let mut num_rng = thread_rng();
+    let mut nm = || rand_var();
+    let mut num = |v: i64| derived_num(v.max(0) as u64, &mut num_rng);
+    let core = emit_stage_struct(&plan, &mut nm, &mut num);
+    format!("{}{}", board_head, core)
 }
 
 pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
@@ -629,10 +671,17 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         current_expected += delta;
         // 定义处也写派生形态：同一个键在定义点/调用点各是一个不同的算式，
         // 文本搜索对不上号；键值本身在产物里从头到尾没有字面量。
+        // ⑥ 逻辑拆分：整段守卫体（状态推进 + 探测/判定）拆成 2~3 个乱序闭包
+        let guard_body = format!("{}{}", state_step, check_code);
+        let want = if rng.gen_bool(0.35) { 2 } else { 3 };
+        let guard_core = split_guard_body(&guard_body, want, &mut rng);
         let single_guard_raw = format!(
-            "{}[{}]=function(k)\n{}{}end;\n",
-            v_net, derived_num(keys[i], &mut rng), state_step, check_code
+            "{}[{}]=function(k)\n{}end;\n",
+            v_net, derived_num(keys[i], &mut rng), guard_core
         );
+        if std::env::var("KRYVEX_DUMP_GUARD").is_ok() {
+            let _ = std::fs::write(format!("process/guard_{}.lua", i), &single_guard_raw);
+        }
         let minified_guard = minify_lua(&single_guard_raw);
         guards_code.push(minified_guard);
     }
