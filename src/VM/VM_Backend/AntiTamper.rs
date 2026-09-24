@@ -1,12 +1,16 @@
 use rand::{thread_rng, Rng};
 
-use super::Generator_util::{mix_encrypt, mix_key};
+use super::Generator_util::{mix_encrypt, mix_key, poly_hash};
 
 pub struct AntiTamperResult {
     pub setup: String,
     pub guards: Vec<String>,
     pub trigger: String,
     pub expected_final: i64,
+    /// 池解码器 / 池取全局 的函数名。同一份 chunk 里其它模块（如 packer 的探测代码）
+    /// 要隐藏字符串时，直接引用这两个名字即可，不必自己再带一份表。
+    pub dec_fn: String,
+    pub res_fn: String,
 }
 
 fn rand_var() -> String {
@@ -21,14 +25,6 @@ fn random_string() -> String {
     let len = rng.gen_range(8..=16);
     let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
     (0..len).map(|_| chars[rng.gen_range(0..chars.len())]).collect()
-}
-
-fn poly_hash(s: &str) -> u32 {
-    let mut h: u64 = 5381;
-    for b in s.bytes() {
-        h = (h * 33 + b as u64) % 4294967296;
-    }
-    h as u32
 }
 
 fn shuffle_vec(vec: &mut Vec<usize>) {
@@ -52,12 +48,20 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     // 将所有敏感 API 存入基于哈希的加密池
     // （池里除全局 API 名，还有行号守卫要用的字段名与模式串 —— 见下面的 pool_strings）
     let strings: Vec<String> = vec![
+        // 全局 API 名
         "debug".into(), "pcall".into(), "sethook".into(), "gethook".into(), "getinfo".into(),
         "C".into(), "string".into(), "dump".into(), "error".into(), "info".into(), "math".into(),
-        "type".into(), "tonumber".into(), "table".into(), "number".into(), "function".into(),
-        // 行号守卫（反美化）用到的字符串，一个都不留在明文里
+        "type".into(), "setmetatable".into(), "getfenv".into(), "_G".into(), "byte".into(),
+        // type() 的返回值：产物里不再出现 'table' / 'function' / 'number' / 'nil'
+        "table".into(), "number".into(), "function".into(), "nil".into(),
+        // 行号守卫（反美化）用到的选项与字段
         "S".into(), "l".into(), "linedefined".into(), "currentline".into(),
-        ":(%d+)[:\r\n ]".into(),
+        // 成员键（`.what` 之类的点访问会被成员改名器盯上，统一走池 + 字符串键）
+        "what".into(),
+        // 元方法名（原来以 "__".."xxx" 拼接，一眼就是元表陷阱）
+        "__index".into(), "__newindex".into(), "__tostring".into(), "__call".into(),
+        "__add".into(), "__sub".into(), "__mul".into(), "__mode".into(),
+        "__eq".into(), "__concat".into(), "k".into(),
     ];
     // 池级密钥（16 位）逐产物随机；所有条目共用一组，解码器只需要带一个常量。
     // 与探测串同一套混合：密文按位置相关密钥生成，不是单字节 XOR，肉眼算不出来。
@@ -90,21 +94,6 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     // 使用 getgenv() 完美适配 Roblox 执行器全局环境
     setup.push_str(&format!("local {} = getgenv and getgenv() or getfenv and getfenv() or _ENV or _G or {{}};\n", v_env));
     
-    // 递归爆栈用的两个隐藏名：函数名 + 参数名，逐产物随机
-    let fn_crash_rec = rand_var();
-    let v_crash_arg = rand_var();
-    // 纯物理爆栈导致卡死，无视 Roblox 的 string.rep / 内存上限等沙盒过滤。
-    // 递归写成「把要递归的函数当参数传进去」的形式（`f(o) o(f,o)`），
-    // 产物里看不到 `pcall(f)` 这种一眼可辨的图案。
-    setup.push_str(&format!(
-    "local function {}() \
-        local j,s,k,v=_ENV,false;local t={{}};local p=type;if not k then v=s end;if p(t)~=\"table\" then p=j end;repeat p={{}} until v; \
-         local function {}({}) {}({},{}); {}({},{}) end \
-         {}(pcall); \
-     local function we(x) return not x end;local gd if we(gd) then while we(s) do end;end \
-     end;\n",
-    v_crash, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, fn_crash_rec
-));
     setup.push_str(&format!("local {} = {{{}}};\n", v_pool, pool_data));
     // 池解码器的「打乱线性逻辑 / 数据流」版本：
     //   ① 循环写成 while + 自增下标（数字 for 太规整）；下标先取出来再自己加；
@@ -163,6 +152,22 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
          end;\n",
          v_res, v_dec, v_env
     ));
+    // 递归爆栈用的两个隐藏名：函数名 + 参数名，逐产物随机
+    let fn_crash_rec = rand_var();
+    let v_crash_arg = rand_var();
+    // 纯物理爆栈导致卡死，无视 Roblox 的 string.rep / 内存上限等沙盒过滤。
+    // 递归写成「把要递归的函数当参数传进去」的形式（`f(o) o(f,o)`），
+    // 产物里看不到 `pcall(f)` 这种一眼可辨的图案。
+    setup.push_str(&format!(
+    "local function {}() \
+        local j,s,k,v=_ENV,false;local t={{}};local p=type;if not k then v=s end;if p(t)~={dec}({h_tb}) then p=j end;repeat p={{}} until v; \
+         local function {}({}) {}({},{}); {}({},{}) end \
+         {}(pcall); \
+     local function we(x) return not x end;local gd if we(gd) then while we(s) do end;end \
+     end;\n",
+    v_crash, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, fn_crash_rec,
+        dec = v_dec, h_tb = poly_hash("table")
+));
     setup.push_str(&format!(
     "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if z(te)~=v then c(b,n) else g(1) end;break;end;end;rt(typeof,raknet,error,print,_VERSION);\n"
 ));
@@ -188,10 +193,13 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
             format!("return {}[{}](k+{})", v_net, i + 1, delta)
         };
         
+        // 异常增量先抽出来：守卫 8 要用它算「异常档」的取值，不再只看拼好的语句。
+        // 抽取顺序与以前一致（每轮正好一次），不影响其它随机量。
+        let delta_bad = rng.gen_range(100..999);
         let next_bad = if i == guards_indices.len() - 1 {
-            format!("return k-{}", rng.gen_range(100..999))
+            format!("return k-{}", delta_bad)
         } else {
-            format!("return {}[{}](k-{})", v_net, i + 1, rng.gen_range(100..999))
+            format!("return {}[{}](k-{})", v_net, i + 1, delta_bad)
         };
         
         let mut check_code = String::new();
@@ -201,29 +209,40 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let fnv_string = poly_hash("string");
                 let fnv_math = poly_hash("math");
                 // 用哈希组精确取值校验，避免受 pairs 迭代 __index 失效的影响
+                // type 与 'nil' 都从池里取：产物里不再出现这两个字面量。
                 check_code = format!(
-                    "local sc_val = 0; \
+                    "local {tp}={res}({h_tp}); local sc_val = 0; \
                      local chk = {{{}, {}, {}}}; \
                      for idx = 1, 3 do \
-                         if type({}(chk[idx])) ~= 'nil' then sc_val = sc_val + 1 end \
+                         if {tp}({res}(chk[idx])) ~= {nil_} then sc_val = sc_val + 1 end \
                      end; \
-                     if sc_val ~= 3 then {} else {} end\n",
-                    fnv_pcall, fnv_string, fnv_math, v_res, next_bad, next_good
+                     if sc_val ~= 3 then {bad} else {good} end\n",
+                    fnv_pcall, fnv_string, fnv_math,
+                    tp = rand_var(), res = v_res, h_tp = poly_hash("type"),
+                    nil_ = format!("{}({})", v_dec, poly_hash("nil")),
+                    bad = next_bad, good = next_good
                 );
             }
             1 => {
                 let hash_pcall = poly_hash("pcall");
+                let hash_sm = poly_hash("setmetatable");
+                // 四个元方法名不再以 "__".."xxx" 拼接（那是一眼可见的元表陷阱），改从池里取。
+                let (h_add, h_sub, h_mul, h_call) = (
+                    poly_hash("__add"), poly_hash("__sub"), poly_hash("__mul"), poly_hash("__call"),
+                );
                 check_code = format!(
-                    "local z = setmetatable({{}}, {{ \
-                        [\"__\"..\"add\"]=function(a)return a end, \
-                        [\"__\"..\"sub\"]=function(a)return a end, \
-                        [\"__\"..\"mul\"]=function(a)return a end, \
-                        [\"__\"..\"call\"]=function(...)return ... end \
+                    "local {sm}={res}({h_sm}); local p={res}({h_pc}); if not (p and {sm}) then {bad} else \
+                     local z = {sm}({{}}, {{ \
+                        [{dec}({h_add})]=function(q)return q end, \
+                        [{dec}({h_sub})]=function(q)return q end, \
+                        [{dec}({h_mul})]=function(q)return q end, \
+                        [{dec}({h_call})]=function(...)return ... end \
                      }}); \
-                     local p={}({}); if not p then {} else \
                      local st,r=p(function() local x=z+z-z*z; local y=z(z); return x==z and y==z end); \
-                     if not st or not r then {} else {} end end\n",
-                    v_res, hash_pcall, next_bad, next_bad, next_good
+                     if not st or not r then {bad} else {good} end end\n",
+                    sm = rand_var(), h_sm = hash_sm, res = v_res, h_pc = hash_pcall,
+                    dec = v_dec, h_add = h_add, h_sub = h_sub, h_mul = h_mul, h_call = h_call,
+                    bad = next_bad, good = next_good
                 );
             }
             2 => {
@@ -267,23 +286,23 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                     let hash_info = poly_hash("info");
                     let hash_C = poly_hash("C");
                     check_code = format!(
-                        "local d={}({}); local p={}({}); \
-                         if not (d and p) then {} else \
-                         local gi = d[{}({})]; \
+                        "local d={res}({h_dbg}); local p={res}({h_pc}); local {tp}={res}({h_tp}); \
+                         if not (d and p) then {bad} else \
+                         local gi = d[{dec}({h_gi})]; \
                          if not gi then \
-                             if d[{}({})] then {} else {} end \
+                             if d[{dec}({h_info})] then {good} else {bad} end \
                          else \
-                             local ok, inf = p(gi, p); \
-                             if not ok or type(inf)~='table' then {} else \
-                             local w=inf.what; local h=5381; \
+                             local {ok},{inf} = p(gi, p); \
+                             if not {ok} or {tp}({inf})~={tb} then {bad} else \
+                             local w={inf}[{dec}({h_what})]; local h=5381; \
                              for idx=1,#w do h=(h*33+string.byte(w,idx))%4294967296 end; \
-                             if h~={} then {} else {} end end end end\n",
-                        v_res, hash_debug, v_res, hash_pcall,
-                        next_bad,
-                        v_dec, hash_getinfo,
-                        v_dec, hash_info, next_good, next_bad,
-                        next_bad,
-                        hash_C, next_bad, next_good
+                             if h~={hc} then {bad} else {good} end end end end\n",
+                        res = v_res, h_dbg = hash_debug, h_pc = hash_pcall,
+                        h_tp = poly_hash("type"), bad = next_bad, ok = rand_var(),
+                        dec = v_dec, h_gi = hash_getinfo,
+                        h_info = hash_info, good = next_good,
+                        tp = rand_var(), inf = rand_var(), tb = format!("{}({})", v_dec, poly_hash("table")),
+                        h_what = poly_hash("what"), hc = hash_C
                     );
                 } else {
                     check_code = format!("{}\n", next_good);
@@ -358,117 +377,147 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let g_j = rand_var();
                 let g_ok = rand_var();
                 let mut meta_lines: Vec<String> = Vec::new();
-                let mut mms: Vec<&str> = vec!["tostring", "index", "newindex", "call"];
+                let mut mms: Vec<String> = vec![
+                    "__tostring".to_string(),
+                    "__index".to_string(),
+                    "__newindex".to_string(),
+                    "__call".to_string(),
+                ];
                 for i in (1..mms.len()).rev() {
                     let j = rng.gen_range(0..=i);
                     mms.swap(i, j);
                 }
-                let decoy = if rng.gen_bool(0.5) { "eq" } else { "concat" };
+                // 诱饵：一个永远不会触发的元方法（从池里取，同样是密文）
+                let decoy = if rng.gen_bool(0.5) { "__eq" } else { "__concat" };
                 for (idx, mm) in mms.iter().enumerate() {
                     if idx == 2 {
-                        meta_lines.push(format!("{}[\"__\"..\"{}\"]={};", g_mt, decoy, v_crash));
+                        meta_lines.push(format!(
+                            "{}[{}({})]={};",
+                            g_mt, v_dec, poly_hash(decoy), v_crash
+                        ));
                     }
-                    meta_lines.push(format!("{}[\"__\"..\"{}\"]={};", g_mt, mm, v_crash));
+                    meta_lines.push(format!("{}[{}({})]={};", g_mt, v_dec, poly_hash(mm), v_crash));
                 }
                 check_code = format!(
                     "local {e} = {env}; \
-                     local {t} = type({e}); \
-                     local {flag} = ({t} == 'table'); \
+                     local {tp} = {res}({h_tp}); local {sm} = {res}({h_sm}); local {pc} = {res}({h_pc}); \
+                     local {t} = {tp}({e}); \
+                     local {flag} = ({t} == {tb}); \
                      local {mt} = {{}}; \
                      {meta} \
-                     local {pk} = setmetatable({{}}, {mt}); \
+                     local {pk} = {sm}({{}}, {mt}); \
                      local {j} = 0; \
-                     if not {flag} and {t} ~= 'table' then {bad} else \
+                     if not {flag} and {t} ~= {tb} then {bad} else \
                      {j} = {j} + 1; \
-                     local {ok} = pcall(function() {e}[{dec}({h})] = {pk} end); \
+                     local {ok} = {pc}(function() {e}[{dec}({h})] = {pk} end); \
                      {j} = {j} - 1; \
                      if {j} ~= 0 or {ok} == {j} then {bad} else {good} end \
                      end\n",
                     e = g_e, env = v_env, t = g_t, flag = g_flag, mt = g_mt,
                     meta = meta_lines.join(" "), pk = g_pk, j = g_j, ok = g_ok,
+                    res = v_res, h_tp = poly_hash("type"), h_sm = poly_hash("setmetatable"),
+                    h_pc = poly_hash("pcall"), tp = rand_var(),
+                    sm = rand_var(), pc = rand_var(), tb = format!("{}({})", v_dec, poly_hash("table")),
                     bad = next_bad, good = next_good, dec = v_dec, h = rand_hash
                 );
             }
             8 => {
-                // ── 反美化守卫（anti-beautify）──
-                // 产物整体写在极少的物理行里，所以「同一行上定义的函数」的 linedefined 必然相等，
-                // pcall 捕获的错误消息里的行号、以及当前执行行也必须落在同一行。
-                // 一旦被 beautifier / 格式化工具重排（每个语句一行），这些等式立刻不成立 → next_bad。
-                // 取行号用的是用户给的写法：先 string.find 抓数字，再分别用 sub 与 char+byte 往返两次取值，
-                // 两次不一致就说明行号被动过手脚。
-                // 判据刻意不比较「错误行号 vs linedefined」——两者来源不同（错误消息 vs debug），
-                // 在 Roblox 一类环境里格式可能有差异会误杀；改成比较同源的
-                // 「错误行号 vs 当前执行行 currentline」，两边都在同一 chunk 里，行号口径一致。
-                // 成员一律字符串键（压缩器的成员改名器会改点访问，见 §5.11）；
-                // 任何一步取不到信息都直接放行，绝不误杀（没有 debug 库的环境也能跑）。
-                let (g_f1, g_f2, g_f3, g_q) = (rand_var(), rand_var(), rand_var(), rand_var());
-                let (g_d, g_gi, g_i1, g_i2, g_l1, g_l2) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
-                let (g_ok, g_msg, g_sp, g_ep, g_num) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
-                let (g_u, g_v, g_tn, g_cur, g_cl) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
-                // string 的成员在这个作用域里用到 4 次 => 先 local 出来再用：既省体积
-                // （`{st}.byte` 写四遍比四个短名长），也少四次表索引。
-                let (g_sb, g_sc, g_sf, g_ss) = (rand_var(), rand_var(), rand_var(), rand_var());
-                let (g_tp, g_pc, g_st) = (rand_var(), rand_var(), rand_var());
-                // 类型名（table/number/function/string）也从池里解出来，同样不留明文。
-                let (g_ts_tab, g_ts_num, g_ts_fun, g_ts_str) =
-                    (rand_var(), rand_var(), rand_var(), rand_var());
-                let h_type = poly_hash("type");
-                let h_debug = poly_hash("debug");
-                let h_getinfo = poly_hash("getinfo");
-                let h_tonumber = poly_hash("tonumber");
-                let h_string = poly_hash("string");
-                let h_table = poly_hash("table");
-                let h_number = poly_hash("number");
-                let h_function = poly_hash("function");
-                let h_pcall = poly_hash("pcall");
-                let h_S = poly_hash("S");
-                let h_l = poly_hash("l");
-                let h_ld = poly_hash("linedefined");
-                let h_cur = poly_hash("currentline");
-                let h_pat = poly_hash(":(%d+)[:\r\n ]");
+                // ── 隐式行号校验（反美化） ──
+                // 判据还是「产物整体落在极少的物理行里」这件事，但表层写法刻意不留检查的痕迹：
+                //   * 不用模式串、不用 string.find：自己按字节刮数字，且要求数字**紧跟冒号**
+                //     （否则 /tmp/xxx2.lua 这类路径里的数字会被误当成行号）；字符串与全局名全从池里取；
+                //   * 两路线号（错误消息里的行号、当前执行行）以及同一行上定义的 f2/f3 的
+                //     linedefined，都被折进一个**残差** r：对得上 → r 恰为 0；
+                //     对不上（被拆行）→ r 非 0；任何一步信息取不到（Roblox 之类环境）权重为 0、
+                //     残差仍是 0 —— 天然放行，不需要任何 if 去写「取不到就放过」；
+                //   * 全程没有一句「判断对错」：把 r*r 当表键，在「正常增量」与「异常增量」
+                //     之间取值（r=0 时两个键重合，后写的那条生效），最后只看到一句
+                //     `return 网表[i](k + 那个值)`。
+                let (g_st, g_dbg, g_gi, g_pc, g_tp) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_nm, g_tb, g_fn, g_sg) = (rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_ld, g_cl, g_so, g_lo) = (rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_sb, g_f1, g_f2, g_f3, g_q) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_ok, g_msg, g_num, g_sn) = (rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_i, g_n, g_pv, g_b, g_hit) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_p1, g_p2, g_p3, g_a1, g_a2, g_cv) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_w1, g_w2, g_w3, g_dx, g_dy) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_z, g_t, g_r, g_m) = (rand_var(), rand_var(), rand_var(), rand_var());
+                let k_resid_a = rng.gen_range(3..=97);
+                let k_resid_b = rng.gen_range(3..=97);
+                let decoy_rounds = rng.gen_range(2..=6);
+                let tail = if i == guards_indices.len() - 1 {
+                    format!("return k+{m}[{r}*{r}]", m = g_m, r = g_r)
+                } else {
+                    format!(
+                        "return {net}[{idx}](k+{m}[{r}*{r}])",
+                        net = v_net, idx = i + 1, m = g_m, r = g_r
+                    )
+                };
                 check_code = format!(
                     "local {st}={res}({h_st}); \
+                     local {dbg}={res}({h_dbg}); \
+                     local {gi}={dbg} and {dbg}[{dec}({h_gi})]; \
                      local {pc}={res}({h_pc}); \
-                     local {sb},{sc},{sf},{ss}={st}.byte,{st}.char,{st}.find,{st}.sub; \
                      local {tp}={res}({h_tp}); \
-                     local {d}={res}({h_dbg}); \
-                     local {tb},{nm},{fn},{sg}={dec}({h_tb}),{dec}({h_nm}),{dec}({h_fn}),{dec}({h_sg}); \
+                     local {nm},{tb},{fn},{sg}={dec}({h_nm}),{dec}({h_tb}),{dec}({h_fn}),{dec}({h_sg}); \
+                     local {ld},{cl}={dec}({h_ld}),{dec}({h_cl}); \
+                     local {so},{lo}={dec}({h_S}),{dec}({h_l}); \
+                     local {sb}=({st} and {st}[{dec}({h_bt})]) or function() return 0 end; \
                      local {f1}=function() local {q}=nil; return {q}[1] end; \
                      local {f2}=function() return 1 end; \
                      local {f3}=function() return 2 end; \
-                     if {tp}({d})~={tb} then {good} else \
-                     local {gi}={d}[{dec}({h_gi})]; \
-                     if {tp}({gi})~={fn} then {good} else \
-                     local {tn}={res}({h_tn}); \
-                     if {tp}({tn})~={fn} then {good} else \
-                     local {i1},{i2}={gi}({f2},{dec}({h_s})),{gi}({f3},{dec}({h_s})); \
-                     if {tp}({i1})~={tb} or {tp}({i2})~={tb} then {good} else \
-                     local {l1},{l2}={i1}[{dec}({h_ld})],{i2}[{dec}({h_ld})]; \
-                     if {tp}({l1})~={nm} or {tp}({l2})~={nm} then {good} else \
-                     local {ok},{msg}={pc}({f1}); \
-                     if {tp}({msg})~={sg} then {msg}='' end; \
-                     local {sp},{ep},{num}={sf}({msg},{dec}({h_pat})); \
-                     if not {sp} or not {ep} then {good} else \
-                     local {u}={ss}({msg},{sp}+1,{ep}-1); \
-                     local {v}={sc}({sb}({msg},{sp}+1,{ep}-1)); \
-                     local {cur}={gi}(1,{dec}({h_l})); \
-                     local {clv}={cur} and {cur}[{dec}({h_cl})]; \
-                     if not {u} or not {v} then {good} \
-                     elseif {u}~={v} then {bad} \
-                     elseif ({l1}-{l1})+{l1}~={l2} then {bad} \
-                     elseif {clv}~=nil and {tn}({num})~=nil and {tn}({num})~={clv} then {bad} \
-                     else {good} end end end end end end end\n",
-                    sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, st = g_st, h_st = h_string,
-                    tp = g_tp, res = v_res, h_tp = h_type,
-                    d = g_d, h_dbg = h_debug,
-                    tb = g_ts_tab, nm = g_ts_num, fn = g_ts_fun, sg = g_ts_str,
-                    h_tb = h_table, h_nm = h_number, h_fn = h_function, h_sg = h_string,
-                    dec = v_dec, f1 = g_f1, q = g_q, f2 = g_f2, f3 = g_f3,
-                    good = next_good, bad = next_bad, gi = g_gi, h_gi = h_getinfo,
-                    tn = g_tn, h_tn = h_tonumber, i1 = g_i1, i2 = g_i2, h_s = h_S,
-                    l1 = g_l1, l2 = g_l2, h_ld = h_ld, ok = g_ok, msg = g_msg, pc = g_pc,
-                    h_pc = h_pcall, sp = g_sp, ep = g_ep, num = g_num, h_pat = h_pat,
-                    u = g_u, v = g_v, cur = g_cur, h_l = h_l, clv = g_cl, h_cl = h_cur
+                     local {ok},{msg}=false,''; \
+                     if {pc} then {ok},{msg}={pc}({f1}); end; \
+                     if {tp} and {tp}({msg})~={sg} then {msg}='' end; \
+                     local {num},{sn},{i},{n},{pv}=0,0,0,#{msg},0; \
+                     while {i}<{n} do \
+                         {i}={i}+1; \
+                         local {b}={sb}({msg},{i}); \
+                         local {hit}=0; \
+                         if {b}>47 and {b}<58 then {hit}=1 end; \
+                         if {sn}==0 then \
+                             if {hit}==1 and {pv}==58 then {sn}=1; {num}={b}-48 else {pv}={b} end \
+                         elseif {sn}==1 then \
+                             if {hit}==1 then {num}={num}*10+({b}-48) else {sn}=2 end \
+                         end; \
+                         if {sn}==2 then {i}={n} end; \
+                     end; \
+                     local {p1}={gi} and {gi}({f2},{so}) or nil; \
+                     local {p2}={gi} and {gi}({f3},{so}) or nil; \
+                     local {p3}={gi} and {gi}(1,{lo}) or nil; \
+                     local {a1},{a2}={p1} and {p1}[{ld}],{p2} and {p2}[{ld}]; \
+                     local {cv}={p3} and {p3}[{cl}]; \
+                     local {w1}=({tp} and {tp}({a1})=={nm} and {tp}({a2})=={nm}) and 1 or 0; \
+                     local {w2}=({tp} and {tp}({cv})=={nm}) and 1 or 0; \
+                     local {w3}=({sn}>0) and 1 or 0; \
+                     local {dx}=({a1} or 0)-({a2} or 0); \
+                     local {dy}={num}-({cv} or 0); \
+                     local {z}=0; \
+                     for {t}=1,{rounds} do {z}={z}+({t}%1) end; \
+                     local {r}={w1}*{dx}*{dx}*{ka}+{w2}*{w3}*{dy}*{dy}*{kb}+{z}+(k-k); \
+                     local {m}={{[{r}*{r}]={badv},[0]={goodv}}}; \
+                     {tail}\n",
+                    st = g_st, res = v_res, h_st = poly_hash("string"),
+                    dbg = g_dbg, h_dbg = poly_hash("debug"),
+                    gi = g_gi, dec = v_dec, h_gi = poly_hash("getinfo"),
+                    pc = g_pc, h_pc = poly_hash("pcall"),
+                    tp = g_tp, h_tp = poly_hash("type"),
+                    nm = g_nm, tb = g_tb, fn = g_fn, sg = g_sg,
+                    h_nm = poly_hash("number"), h_tb = poly_hash("table"),
+                    h_fn = poly_hash("function"), h_sg = poly_hash("string"),
+                    ld = g_ld, cl = g_cl, h_ld = poly_hash("linedefined"), h_cl = poly_hash("currentline"),
+                    so = g_so, lo = g_lo, h_S = poly_hash("S"), h_l = poly_hash("l"),
+                    sb = g_sb, h_bt = poly_hash("byte"),
+                    f1 = g_f1, q = g_q, f2 = g_f2, f3 = g_f3,
+                    ok = g_ok, msg = g_msg, num = g_num, sn = g_sn,
+                    i = g_i, n = g_n, pv = g_pv, b = g_b, hit = g_hit,
+                    p1 = g_p1, p2 = g_p2, p3 = g_p3, a1 = g_a1, a2 = g_a2, cv = g_cv,
+                    w1 = g_w1, w2 = g_w2, w3 = g_w3, dx = g_dx, dy = g_dy,
+                    z = g_z, t = g_t, r = g_r, m = g_m,
+                    rounds = decoy_rounds,
+                    ka = format!("0X{:04X}", k_resid_a), kb = format!("0X{:04X}", k_resid_b),
+                    goodv = delta, badv = format!("-{}", delta_bad),
+                    tail = tail
                 );
             }
             _ => {
@@ -486,8 +535,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     let mut trigger = String::new();
     trigger.push_str(&format!("{}={}[0]({});\n", key_var, v_net, initial_token));
     trigger.push_str(&format!(
-        "local {} = setmetatable({{}}, {{ [\"__\"..\"index\"] = function() return {} end }});\n",
-        v_jump, v_crash
+        "local {} = setmetatable({{}}, {{ [{}({})] = function() return {} end }});\n",
+        v_jump, v_dec, poly_hash("__index"), v_crash
     ));
     trigger.push_str(&format!("{}[{}] = function() end;\n", v_jump, current_expected));
     trigger.push_str(&format!("{}[{}]();\n", v_jump, key_var));
@@ -497,6 +546,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         guards: guards_code,
         trigger: minify_lua(&trigger),
         expected_final: current_expected,
+        dec_fn: v_dec,
+        res_fn: v_res,
     }
 }
 
