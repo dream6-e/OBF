@@ -343,6 +343,10 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         };
         
         let mut check_code = String::new();
+        // 扁平链用：去掉前导 `return ` 的表达式形态（放进段里的 `if c then return (EXPR) end`）。
+        // 守卫链的返回值是非 nil 数字，段驱动会原样冒泡，语义与嵌套 if-else 一致。
+        let good_e = next_good.strip_prefix("return ").unwrap_or(&next_good).to_string();
+        let bad_e = next_bad.strip_prefix("return ").unwrap_or(&next_bad).to_string();
         match guard_type {
             0 => {
                 let fnv_pcall = poly_hash("pcall");
@@ -393,27 +397,27 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                     let hash_gethook = poly_hash("gethook");
                     let hash_info = poly_hash("info");
                     // Luau Roblox 自适应：如果没有 sethook，探测 info（Luau特征），符合则放行
-                    check_code = format!(
-                        "local d={}({}); local p={}({}); \
-                         if not (d and p) then {} else \
-                         local sh = d[{}({})]; local gh = d[{}({})]; \
-                         if not (sh and gh) then \
-                             if d[{}({})] then {} else {} end \
-                         else \
-                             local ok, h = p(gh); \
-                             if not ok then {} else \
-                             local c = 0; local ok2 = p(sh, function() c=c+1 end, string.char(99)); \
-                             if not ok2 then {} else \
-                             local function tmp() end; tmp(); p(sh); \
-                             if c < 1 then {} else {} end end end end end\n",
-                        v_res, hash_debug, v_res, hash_pcall,
-                        next_bad,
-                        v_dec, hash_sethook, v_dec, hash_gethook,
-                        v_dec, hash_info, next_good, next_bad,
-                        next_bad,
-                        next_bad,
-                        next_bad, next_good
-                    );
+                // 扁平化：嵌套 if-else 链改成一串「不满足就提前返回」的小检查，
+                // 交给拆分器切开（每段一个闭包；BAD/GOOD 的段返回值由驱动冒泡）。
+                let (g_d, g_p, g_sh, g_gh, g_ok, g_h, g_c, g_ok2, g_tmp) =
+                    (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                check_code = format!(
+                    "local {d}={res}({h_dbg}); local {p}={res}({h_pc}); \
+                     if not ({d} and {p}) then return ({bad}) end; \
+                     local {sh}={d}[{dec}({h_sethook})]; local {gh}={d}[{dec}({h_gethook})]; \
+                     if not ({sh} and {gh}) then if {d}[{dec}({h_info})] then return ({good}) end; return ({bad}); end; \
+                     local {ok},{h}={p}({gh}); \
+                     if not {ok} then return ({bad}) end; \
+                     local {c}=0; local {ok2}={p}({sh}, function() {c}={c}+1 end, string.char(99)); \
+                     if not {ok2} then return ({bad}) end; \
+                     local function {tmp}() end; {tmp}(); {p}({sh}); \
+                     if {c} < 1 then return ({bad}) end; \
+                     return ({good});\n",
+                    d = g_d, p = g_p, sh = g_sh, gh = g_gh, ok = g_ok, h = g_h, c = g_c, ok2 = g_ok2, tmp = g_tmp,
+                    res = v_res, h_dbg = hash_debug, h_pc = hash_pcall,
+                    bad = bad_e, good = good_e,
+                    dec = v_dec, h_sethook = hash_sethook, h_gethook = hash_gethook, h_info = hash_info
+                );
                 } else {
                     check_code = format!("{}\n", next_good);
                 }
@@ -425,28 +429,30 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                     let hash_getinfo = poly_hash("getinfo");
                     let hash_info = poly_hash("info");
                     let hash_C = poly_hash("C");
-                    check_code = format!(
-                        "local d={res}({h_dbg}); local p={res}({h_pc}); local {tp}={res}({h_tp}); \
-                         if not (d and p) then {bad} else \
-                         local gi = d[{dec}({h_gi})]; \
-                         if not gi then \
-                             if d[{dec}({h_info})] then {good} else {bad} end \
-                         else \
-                             local {ok},{inf} = p(gi, p); \
-                             if not {ok} or {tp}({inf})~={tb} then {bad} else \
-                             local w={inf}[{dec}({h_what})]; local h={hp_seed}; \
-                             for idx=1,#w do h=(h*{hp_mult}+string.byte(w,idx)+{hp_add})%4294967296 end; \
-                             if h~={hc} then {bad} else {good} end end end end\n",
-                        res = v_res, h_dbg = hash_debug, h_pc = hash_pcall,
-                        h_tp = poly_hash("type"), bad = next_bad, ok = rand_var(),
-                        dec = v_dec, h_gi = hash_getinfo,
-                        h_info = hash_info, good = next_good,
-                        tp = rand_var(), inf = rand_var(), tb = format!("{}({})", v_dec, poly_hash("table")),
-                        h_what = poly_hash("what"), hc = hash_C,
-                        hp_seed = format!("0X{:X}", hash_params().seed),
-                        hp_mult = format!("0X{:X}", hash_params().mult),
-                        hp_add = format!("0X{:X}", hash_params().add)
-                    );
+                // 扁平化（同守卫 2）：提前返回式小检查，交给拆分器切成多个闭包。
+                let (g_d, g_p, g_tp, g_gi, g_ok, g_inf, g_w, g_h, g_idx) =
+                    (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                check_code = format!(
+                    "local {d}={res}({h_dbg}); local {p}={res}({h_pc}); local {tp}={res}({h_tp}); \
+                     if not ({d} and {p}) then return ({bad}) end; \
+                     local {gi}={d}[{dec}({h_gi})]; \
+                     if not {gi} then if {d}[{dec}({h_info})] then return ({good}) end; return ({bad}); end; \
+                     local {ok},{inf}={p}({gi}, {p}); \
+                     if not {ok} or {tp}({inf})~={tb} then return ({bad}) end; \
+                     local {w}={inf}[{dec}({h_what})]; local {h}={hp_seed}; \
+                     for {idx}=1,#{w} do {h}=({h}*{hp_mult}+string.byte({w},{idx})+{hp_add})%4294967296 end; \
+                     if {h}~={hc} then return ({bad}) end; \
+                     return ({good});\n",
+                    d = g_d, p = g_p, tp = g_tp, gi = g_gi, ok = g_ok, inf = g_inf, w = g_w, h = g_h, idx = g_idx,
+                    res = v_res, h_dbg = hash_debug, h_pc = hash_pcall, h_tp = poly_hash("type"),
+                    bad = bad_e, good = good_e,
+                    dec = v_dec, h_gi = hash_getinfo, h_info = hash_info,
+                    tb = format!("{}({})", v_dec, poly_hash("table")),
+                    h_what = poly_hash("what"), hc = hash_C,
+                    hp_seed = format!("0X{:X}", hash_params().seed),
+                    hp_mult = format!("0X{:X}", hash_params().mult),
+                    hp_add = format!("0X{:X}", hash_params().add)
+                );
                 } else {
                     check_code = format!("{}\n", next_good);
                 }
@@ -454,13 +460,17 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
             4 => {
                 let hash_pcall = poly_hash("pcall");
                 let hash_error = poly_hash("error");
+                // 扁平化：两个小检查各自提前返回。
+                let (g_p, g_e, g_st, g_r) = (rand_var(), rand_var(), rand_var(), rand_var());
                 check_code = format!(
-                    "local p={}({}); local e={}({}); \
-                     if not p or not e then {} else \
-                     local st, r = p(function() e(1) end); \
-                     if st then {} else {} end end\n",
-                    v_res, hash_pcall, v_res, hash_error,
-                    next_bad, next_bad, next_good
+                    "local {p}={res}({h_pc}); local {e}={res}({h_err}); \
+                     if not {p} or not {e} then return ({bad}) end; \
+                     local {st},{r}={p}(function() {e}(1) end); \
+                     if {st} then return ({bad}) end; \
+                     return ({good});\n",
+                    p = g_p, e = g_e, st = g_st, r = g_r,
+                    res = v_res, h_pc = hash_pcall, h_err = hash_error,
+                    bad = bad_e, good = good_e
                 );
             }
             5 => {
@@ -469,26 +479,20 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let hash_dump = poly_hash("dump");
                 let hash_debug = poly_hash("debug");
                 let hash_info = poly_hash("info");
+                // 扁平化（同守卫 2）。
+                let (g_s, g_p, g_d, g_du, g_st) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
                 check_code = format!(
-                    "local s={}({}); local p={}({}); local d={}({}); \
-                     if not (s and p) then {} else \
-                     local du=s[{}({})]; \
-                     if not du then \
-                         if d and d[{}({})] then {} else {} end \
-                     else \
-                         local st = p(du, function() end); \
-                         if not st then \
-                             if d and d[{}({})] then {} else {} end \
-                         else \
-                             {} \
-                         end \
-                     end end\n",
-                     v_res, hash_string, v_res, hash_pcall, v_res, hash_debug,
-                     next_bad,
-                     v_dec, hash_dump,
-                     v_dec, hash_info, next_good, next_bad,
-                     v_dec, hash_info, next_good, next_bad,
-                     next_good
+                    "local {s}={res}({h_str}); local {p}={res}({h_pc}); local {d}={res}({h_dbg}); \
+                     if not ({s} and {p}) then return ({bad}) end; \
+                     local {du}={s}[{dec}({h_dump})]; \
+                     if not {du} then if {d} and {d}[{dec}({h_info})] then return ({good}) end; return ({bad}); end; \
+                     local {st}={p}({du}, function() end); \
+                     if not {st} then if {d} and {d}[{dec}({h_info})] then return ({good}) end; return ({bad}); end; \
+                     return ({good});\n",
+                    s = g_s, p = g_p, d = g_d, du = g_du, st = g_st,
+                    res = v_res, h_str = hash_string, h_pc = hash_pcall, h_dbg = hash_debug,
+                    bad = bad_e, good = good_e,
+                    dec = v_dec, h_dump = hash_dump, h_info = hash_info
                 );
             }
             6 => {
@@ -679,20 +683,38 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
             "{}[{}]=function(k)\n{}end;\n",
             v_net, derived_num(keys[i], &mut rng), guard_core
         );
-        if std::env::var("KRYVEX_DUMP_GUARD").is_ok() {
-            let _ = std::fs::write(format!("process/guard_{}.lua", i), &single_guard_raw);
-        }
         let minified_guard = minify_lua(&single_guard_raw);
         guards_code.push(minified_guard);
     }
 
     // 诱饵条目：形状与守卫一致（照样从池里取值、照样动状态），但不参与链条。
+    // 本轮同样拆成两个乱序闭包（取值+动状态 一段、放行 一段），顺序表驱动。
     for d in 0..2 {
         let kx = keys[n_guards + d];
         let probe = if d == 0 { "table" } else { "number" };
+        let d_y = rand_var();
+        let d_t = rand_var();
+        let d_o = rand_var();
+        let d_j = rand_var();
+        let d_v = rand_var();
+        let mut d_ka = rng.gen_range(0x2000_0000u64..0x7FFF_FFFF);
+        let mut d_kb = rng.gen_range(0x2000_0000u64..0x7FFF_FFFF);
+        // 定义顺序随机：一半概率两段互换挂键
+        let (stage_a, stage_b) = (
+            format!("{}={}({});{}={}*0X3+0X5;", d_y, v_res, poly_hash(probe), v_state, v_state),
+            format!("if {} then return k end; return k;", d_y),
+        );
+        if rng.gen_bool(0.5) {
+            std::mem::swap(&mut d_ka, &mut d_kb);
+        }
         guards_code.push(format!(
-            "{}[{}]=function(k) local y={}({});{}={}*0X3+0X5;if y then return k end return k end;",
-            v_net, derived_num(kx, &mut rng), v_res, poly_hash(probe), v_state, v_state
+            "{net}[{key}]=function(k) local {y}; local {t}={{[{ka}]=function() {sa} end,[{kb}]=function() {sb} end}}; local {o}={{{kas},{kbs}}}; for {j}={one},{two} do local {v}={t}[{o}[{j}]](); if {v}~=nil then return {v} end end end;",
+            net = v_net, key = derived_num(kx, &mut rng),
+            y = d_y, t = d_t, o = d_o, j = d_j, v = d_v,
+            ka = derived_num(d_ka, &mut rng), kb = derived_num(d_kb, &mut rng),
+            kas = derived_num(d_ka, &mut rng), kbs = derived_num(d_kb, &mut rng),
+            sa = stage_a, sb = stage_b,
+            one = derived_num(1, &mut rng), two = derived_num(2, &mut rng)
         ));
     }
     

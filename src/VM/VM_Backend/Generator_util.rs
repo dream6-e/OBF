@@ -1040,6 +1040,12 @@ fn local_decl_names(text: &str) -> Option<Vec<String>> {
     let t = text.trim_start();
     let rest = t.strip_prefix("local")?;
     if !rest.starts_with(|c: char| c.is_whitespace()) { return None; }
+    // `local function f() end` 不是普通声明：整条留在原段里（绝不能把 "function"
+    // 当成名字提升出去）。
+    let rt = rest.trim_start();
+    if rt.starts_with("function") && (rt.len() == 8 || !(rt.as_bytes()[8].is_ascii_alphanumeric() || rt.as_bytes()[8] == b'_')) {
+        return None;
+    }
     let b = rest.as_bytes();
     let mut i = 0usize;
     let mut names = Vec::new();
