@@ -46,6 +46,9 @@ pub struct OpcodeConfig {
     pub handlers: String,
     pub varargs: String,
     pub varargs_len: String,
+    pub vararg_count: String,
+    pub proto_nups: String,
+    pub open_ups: String,
     pub virtual_closures: String,
     pub builtin_reg: String,
 }
@@ -118,6 +121,9 @@ impl<'a> OpcodeBuilder<'a> {
         code = code.replace("{VARARGS_LEN}", &self.cfg.varargs_len);
         code = code.replace("{VC}", &self.cfg.virtual_closures);
         code = code.replace("{BUILTINREG}", &self.cfg.builtin_reg);
+        code = code.replace("{VARARG_COUNT}", &self.cfg.vararg_count);
+        code = code.replace("{PROTO_NUPS}", &self.cfg.proto_nups);
+        code = code.replace("{OPEN_UPS}", &self.cfg.open_ups);
         
         let conditions: Vec<String> = self.opcodes.iter().map(|op| format!("op == {}", op)).collect();
         let condition = conditions.join(" or ");

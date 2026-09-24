@@ -41,17 +41,17 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut call = OpcodeBuilder::new(m[28].clone(), cfg, rng);
     let c_a = call.raw_inst(2); let c_b = call.raw_inst(3); let c_c = call.raw_inst(4);
-    let call_lua = format!("local limit = {}>0 and {}-1 or {{TOP}}-{}; for j={}+limit+1, {{TOP}} do {{STK}}[j]=nil end; local res=zm({{STK}}[{}](unpack({{STK}}, {}+1, {}+limit))); local clean_from={}+( {} > 0 and {} - 1 or res.n ); local clean_to={}>0 and ({}+{}-1) or {{TOP}}; for j=clean_from, clean_to do {{STK}}[j]=nil end; if {}>0 then for j=1, {}-1 do {{STK}}[{}+j-1]=res[j] end else {{TOP}}={}-1; for j=1, res.n do {{STK}}[{}+j-1]=res[j]; {{TOP}}={{TOP}}+1 end end", c_b, c_b, c_a, c_a, c_a, c_a, c_a, c_a, c_c, c_c, c_b, c_a, c_b, c_c, c_c, c_a, c_a, c_a);
+    let call_lua = format!("local limit = {}>0 and {}-1 or {{TOP}}-{}; for j={}+limit+1, {{TOP}} do {{STK}}[j]=nil end; local res=zm({{STK}}[{}](unpack({{STK}}, {}+1, {}+limit))); local clean_from={}+( {} > 0 and {} - 1 or res.{{VARARG_COUNT}} ); local clean_to={}>0 and ({}+{}-1) or {{TOP}}; for j=clean_from, clean_to do {{STK}}[j]=nil end; if {}>0 then for j=1, {}-1 do {{STK}}[{}+j-1]=res[j] end else {{TOP}}={}-1; for j=1, res.{{VARARG_COUNT}} do {{STK}}[{}+j-1]=res[j]; {{TOP}}={{TOP}}+1 end end", c_b, c_b, c_a, c_a, c_a, c_a, c_a, c_a, c_c, c_c, c_b, c_a, c_b, c_c, c_c, c_a, c_a, c_a);
     out.push_str(&call.build(&call_lua));
 
     let mut tailcall = OpcodeBuilder::new(m[29].clone(), cfg, rng);
     let tc_a = tailcall.raw_inst(2); let tc_b = tailcall.raw_inst(3);
-    let tc_lua = format!("if {{STK}}.open_ups then for reg, uv_obj in pairs({{STK}}.open_ups) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.open_ups = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}; local res=zm({{STK}}[{}](unpack({{STK}}, {}+1, {}+limit))); return unpack(res, 1, res.n)", tc_b, tc_b, tc_a, tc_a, tc_a, tc_a);
+    let tc_lua = format!("if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.{{OPEN_UPS}} = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}; local res=zm({{STK}}[{}](unpack({{STK}}, {}+1, {}+limit))); return unpack(res, 1, res.{{VARARG_COUNT}})", tc_b, tc_b, tc_a, tc_a, tc_a, tc_a);
     out.push_str(&tailcall.build(&tc_lua));
 
     let mut ret = OpcodeBuilder::new(m[30].clone(), cfg, rng);
     let r_a = ret.raw_inst(2); let r_b = ret.raw_inst(3);
-    let ret_lua = format!("if {{STK}}.open_ups then for reg, uv_obj in pairs({{STK}}.open_ups) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.open_ups = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}+1; return unpack({{STK}}, {}, {}+limit-1)", r_b, r_b, r_a, r_a, r_a);
+    let ret_lua = format!("if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.{{OPEN_UPS}} = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}+1; return unpack({{STK}}, {}, {}+limit-1)", r_b, r_b, r_a, r_a, r_a);
     out.push_str(&ret.build(&ret_lua));
 
     let mut tforcall = OpcodeBuilder::new(m[47].clone(), cfg, rng);
@@ -82,7 +82,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let jne_a = jmpne.raw_inst(2); let jne_c = jmpne.raw_inst(4); let jne_b = jmpne.raw_inst(3);
     out.push_str(&jmpne.build(&format!("if {{STK}}[{}] ~= {{STK}}[{}] then {{PC}} = {{PC}} + {} end", jne_a, jne_c, jne_b)));
 
-    let close_ups_stmt = "if {STK}.open_ups then for reg, uv_obj in pairs({STK}.open_ups) do uv_obj[1] = {uv_obj[1][uv_obj[2]]}; uv_obj[2] = 1; end; {STK}.open_ups = nil; end; ";
+    let close_ups_stmt = "if {STK}.{OPEN_UPS} then for reg, uv_obj in pairs({STK}.{OPEN_UPS}) do uv_obj[1] = {uv_obj[1][uv_obj[2]]}; uv_obj[2] = 1; end; {STK}.{OPEN_UPS} = nil; end; ";
 
     let mut ret0 = OpcodeBuilder::new(m[85].clone(), cfg, rng);
     out.push_str(&ret0.build(&format!("{}return", close_ups_stmt)));

@@ -721,6 +721,26 @@ impl Generator {
     pub fn build(&self, payload: &[u8]) -> String {
         let mut rng = GenRng::new(self.ctx.seed);
         let var_l = rng.name();
+
+        // 载荷里 Proto 表的字段名、zm(...) 变参表的计数字段名、open_ups 表名，
+        // 全部逐产物随机化。它们原先以明文出现在产物里（n / ld / lld / nups /
+        // numparams / consts / protos / open_ups ...）。压缩器只重命名长度 > 4
+        // 的成员名，短名会一路留到产物里，所以在生成端就先换掉。
+        let pf_n = rng.name();
+        let pf_ld = rng.name();
+        let pf_lld = rng.name();
+        let pf_nups = rng.name();
+        let pf_numparams = rng.name();
+        let pf_is_vararg = rng.name();
+        let pf_maxstack = rng.name();
+        let pf_opcodes = rng.name();
+        let pf_a_arr = rng.name();
+        let pf_b_arr = rng.name();
+        let pf_c_arr = rng.name();
+        let pf_consts = rng.name();
+        let pf_protos = rng.name();
+        let pf_open_ups = rng.name();
+        let pf_vn = rng.name();
         
         let key_seed_var = rng.name();
         let at = AntiTamper::generate_split(true, &key_seed_var);
@@ -896,10 +916,10 @@ impl Generator {
         block_execute_def.push_str(&format!("local function {}(chunk, env, upvals, ...) ", fn_execute));
         block_execute_def.push_str(&format!("local {} = function(...) return {}[{}]('#', ...) end; ", var_get_count, var_s, hex_select_idx));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
-        block_execute_def.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{n={}(...),...}} end; ", var_get_count));
-        block_execute_def.push_str(&format!("local {}, {}, {}, {}, {}, {}, {} = chunk.opcodes, chunk.a_arr, chunk.b_arr, chunk.c_arr, 1, {{}}, 0; ", var_opcodes, var_a_arr, var_b_arr, var_c_arr, var_pc, var_stk, var_top));
-        block_execute_def.push_str(&format!("for _=1,chunk.numparams do {}[_-1] = {}[{}](_,...) end; ", var_stk, var_s, hex_select_idx));
-        block_execute_def.push_str(&format!("local {} = {} - chunk.numparams; local {} = {{{}[{}](chunk.numparams + 1, ...)}}; ", var_varargs_len, var_L, var_varargs, var_s, hex_select_idx));
+        block_execute_def.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{{pf_vn}={}(...),...}} end; ", var_get_count));
+        block_execute_def.push_str(&format!("local {}, {}, {}, {}, {}, {}, {} = chunk.{pf_opcodes}, chunk.{pf_a_arr}, chunk.{pf_b_arr}, chunk.{pf_c_arr}, 1, {{}}, 0; ", var_opcodes, var_a_arr, var_b_arr, var_c_arr, var_pc, var_stk, var_top));
+        block_execute_def.push_str(&format!("for _=1,chunk.{pf_numparams} do {}[_-1] = {}[{}](_,...) end; ", var_stk, var_s, hex_select_idx));
+        block_execute_def.push_str(&format!("local {} = {} - chunk.{pf_numparams}; local {} = {{{}[{}](chunk.{pf_numparams} + 1, ...)}}; ", var_varargs_len, var_L, var_varargs, var_s, hex_select_idx));
         block_execute_def.push_str("while true do ");
         block_execute_def.push_str(&format!("{} = true; ", var_state_flag));
         block_execute_def.push_str(&format!("local op = {}[{}]; ", var_opcodes, var_pc));
@@ -908,7 +928,7 @@ impl Generator {
         block_execute_def.push_str(&format!("local inst_C = {}[{}]; ", var_c_arr, var_pc));
         block_execute_def.push_str(&format!("{} = {} + 1; ", var_pc, var_pc));
         
-        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: "chunk.consts".to_string(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: "upvals".to_string(), env: "env".to_string(), protos: "chunk.protos".to_string(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: var_builtin_reg.clone() };
+        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: format!("chunk.{}", pf_consts), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: "upvals".to_string(), env: "env".to_string(), protos: format!("chunk.{}", pf_protos), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: var_builtin_reg.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone() };
         let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
         
         raw_handlers = raw_handlers.replace(
@@ -1069,24 +1089,24 @@ impl Generator {
                 local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
                 while true do \
                     if {var_state} == {obf_s_init} then \
-                        {fn_c}.n={fn_read_string}(); \
-                        {fn_c}.ld={fn_a5}(); \
-                        {fn_c}.lld={fn_a5}(); \
-                        {fn_c}.nups={fn_read_dec}(); \
-                        {fn_c}.numparams={fn_read_dec}(); \
-                        {fn_c}.is_vararg={fn_read_dec}(); \
-                        {fn_c}.maxstack={fn_read_dec}(); \
+                        {fn_c}.{pf_n}={fn_read_string}(); \
+                        {fn_c}.{pf_ld}={fn_a5}(); \
+                        {fn_c}.{pf_lld}={fn_a5}(); \
+                        {fn_c}.{pf_nups}={fn_read_dec}(); \
+                        {fn_c}.{pf_numparams}={fn_read_dec}(); \
+                        {fn_c}.{pf_is_vararg}={fn_read_dec}(); \
+                        {fn_c}.{pf_maxstack}={fn_read_dec}(); \
                         {var_state} = {obf_s_insts}; \
                     elseif {var_state} == {obf_s_insts} then \
-                        {fn_c}.opcodes={{}}; \
-                        {fn_c}.a_arr={{}}; \
-                        {fn_c}.b_arr={{}}; \
-                        {fn_c}.c_arr={{}}; \
+                        {fn_c}.{pf_opcodes}={{}}; \
+                        {fn_c}.{pf_a_arr}={{}}; \
+                        {fn_c}.{pf_b_arr}={{}}; \
+                        {fn_c}.{pf_c_arr}={{}}; \
                         for _={one_obf},{fn_a5}() do \
-                            {fn_c}.opcodes[_]={fn_a5}(); \
-                            {fn_c}.a_arr[_]={fn_read_dec}(); \
-                            {fn_c}.b_arr[_]={fn_a10}(); \
-                            {fn_c}.c_arr[_]={fn_a10}(); \
+                            {fn_c}.{pf_opcodes}[_]={fn_a5}(); \
+                            {fn_c}.{pf_a_arr}[_]={fn_read_dec}(); \
+                            {fn_c}.{pf_b_arr}[_]={fn_a10}(); \
+                            {fn_c}.{pf_c_arr}[_]={fn_a10}(); \
                         end; \
                         {var_state} = {obf_s_consts}; \
                     elseif {var_state} == {obf_s_consts} then \
@@ -1116,7 +1136,7 @@ impl Generator {
                             {var_cache}[{var_idx_chunk}]=val; \
                             return val \
                         end; \
-                        {fn_c}.consts=setmetatable({{}},mt_consts); \
+                        {fn_c}.{pf_consts}=setmetatable({{}},mt_consts); \
                         for _={one_obf},{fn_a5}() do \
                             {t}={fn_read_dec}(); \
                             if {t}=={one_obf} then \
@@ -1133,9 +1153,9 @@ impl Generator {
                         end; \
                         {var_state} = {obf_s_protos}; \
                     elseif {var_state} == {obf_s_protos} then \
-                        {fn_c}.protos={{}}; \
+                        {fn_c}.{pf_protos}={{}}; \
                         for _={one_obf},{fn_a5}() do \
-                            {fn_c}.protos[_]={fn_dec_chunk}() \
+                            {fn_c}.{pf_protos}[_]={fn_dec_chunk}() \
                         end; \
                         {var_state} = {obf_s_debug}; \
                     elseif {var_state} == {obf_s_debug} then \

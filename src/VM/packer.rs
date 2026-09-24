@@ -310,6 +310,19 @@ impl Packer {
 
         let tamper_val = rng.range(10, 50);
 
+        // 状态表字段名逐产物随机化：这些字段名原先直接以明文出现在产物里
+        // （data / pc / kidx / memo / ...）。压缩器只重命名长度 > 4 的成员名，
+        // 所以短名会原样留下；而 char/byte/floor/concat/... 又因为与库函数同名，
+        // 被压缩器的保护名单挡住。这里在生成端统一换成随机短名。
+        let p_data = rng.name(); let p_pc = rng.name(); let p_insts = rng.name(); let p_tamper = rng.name();
+        let p_handlers = rng.name(); let p_r_flg = rng.name(); let p_r_vals = rng.name(); let p_r_len = rng.name();
+        let p_tail_flg = rng.name(); let p_map = rng.name(); let p_idx = rng.name(); let p_len = rng.name();
+        let p_k = rng.name(); let p_kidx = rng.name(); let p_buf = rng.name(); let p_memo = rng.name();
+        let p_unpack = rng.name(); let p_char = rng.name(); let p_byte = rng.name(); let p_floor = rng.name();
+        let p_insert = rng.name(); let p_concat = rng.name(); let p_remove = rng.name(); let p_reverse = rng.name();
+        let p_bc = rng.name(); let p_res = rng.name(); let p_f = rng.name(); let p_p1 = rng.name();
+        let p_p2 = rng.name(); let p_w = rng.name(); let p_u = rng.name(); let p_ptr = rng.name();
+
         let mut insts_init = Vec::new();
         insts_init.push(format!("s.insts[{}]={{{}}};", pc_state0, op_state0));
         insts_init.push(format!("s.insts[{}]={{{}}};", pc_state1, op_state1));
@@ -607,16 +620,87 @@ end,
                 local env_maker = env_maker_chunk and env_maker_chunk(stage2) or stage2;
                 return env_maker();
             end)({{
-                data = data, pc = {pc_state0}, insts = {{}}, tamper = {tamper_val}, handlers = {{}},
-                r_flg = false, r_vals = {{}}, r_len = 0, tail_flg = false,
-                map = {{}}, idx = 1, len = #data, k = {{}}, kidx = 0, buf = {{}}, memo = {{}},
-                unpack = unpack, char = char, byte = byte, floor = floor, insert = insert, concat = concat, remove = remove, reverse = reverse,
-                bc = 0, res = {{}}, f = 0, p1 = 0, p2 = 0, w = 0, u = 0, ptr = 0
+                {p_data} = data, {p_pc} = {pc_state0}, {p_insts} = {{}}, {p_tamper} = {tamper_val}, {p_handlers} = {{}},
+                {p_r_flg} = false, {p_r_vals} = {{}}, {p_r_len} = 0, {p_tail_flg} = false,
+                {p_map} = {{}}, {p_idx} = 1, {p_len} = #data, {p_k} = {{}}, {p_kidx} = 0, {p_buf} = {{}}, {p_memo} = {{}},
+                {p_unpack} = unpack, {p_char} = char, {p_byte} = byte, {p_floor} = floor, {p_insert} = insert, {p_concat} = concat, {p_remove} = remove, {p_reverse} = reverse,
+                {p_bc} = 0, {p_res} = {{}}, {p_f} = 0, {p_p1} = 0, {p_p2} = 0, {p_w} = 0, {p_u} = 0, {p_ptr} = 0
             }});
         end
     }}):{m_main}({v_data}, unpack or table.unpack, string.char, string.byte, math.floor, table.insert, table.concat, table.remove, string.reverse, string.sub, loadstring or load, string.gmatch);
 end
 ");
+        // 脚本里所有 s.<字段> 的访问统一换成随机名（router / init_insts_loop /
+        // init_handlers_loop 都已嵌进 script，所以这里是最后一处，覆盖全部引用）
+        let script = rename_state_fields(
+            &script,
+            &[
+                ("data", p_data),
+                ("pc", p_pc),
+                ("insts", p_insts),
+                ("tamper", p_tamper),
+                ("handlers", p_handlers),
+                ("r_flg", p_r_flg),
+                ("r_vals", p_r_vals),
+                ("r_len", p_r_len),
+                ("tail_flg", p_tail_flg),
+                ("map", p_map),
+                ("idx", p_idx),
+                ("len", p_len),
+                ("k", p_k),
+                ("kidx", p_kidx),
+                ("buf", p_buf),
+                ("memo", p_memo),
+                ("unpack", p_unpack),
+                ("char", p_char),
+                ("byte", p_byte),
+                ("floor", p_floor),
+                ("insert", p_insert),
+                ("concat", p_concat),
+                ("remove", p_remove),
+                ("reverse", p_reverse),
+                ("bc", p_bc),
+                ("res", p_res),
+                ("f", p_f),
+                ("p1", p_p1),
+                ("p2", p_p2),
+                ("w", p_w),
+                ("u", p_u),
+                ("ptr", p_ptr),
+            ],
+        );
         (script, f_entry)
     }
+}
+
+/// 把脚本里 `s.<旧名>` 形式的状态表字段访问换成随机名。
+/// 只认字面量 `s.` 前缀并做整词匹配：不会误伤 `s.k` / `s.kidx` 这种前缀关系，
+/// 也不会碰 `math.floor`、`table.concat` 这类库访问。
+fn rename_state_fields(script: &str, pairs: &[(&str, String)]) -> String {
+    let src = script.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
+    let mut i = 0usize;
+    while i < src.len() {
+        if src[i] == b's'
+            && i + 1 < src.len()
+            && src[i + 1] == b'.'
+            && (i == 0 || !(src[i - 1] == b'_' || src[i - 1].is_ascii_alphanumeric()))
+        {
+            let start = i + 2;
+            let mut end = start;
+            while end < src.len() && (src[end] == b'_' || src[end].is_ascii_alphanumeric()) {
+                end += 1;
+            }
+            let word = &script[start..end];
+            if let Some((_, new)) = pairs.iter().find(|(old, _)| *old == word) {
+                out.extend_from_slice(b"s.");
+                out.extend_from_slice(new.as_bytes());
+                i = end;
+                continue;
+            }
+        }
+        out.push(src[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| script.to_string())
 }

@@ -1,20 +1,34 @@
 # 混淆产物样本
 
-按 README 的要求，每次更新都上传混淆文件和 MB 压缩后的混淆文件。
+按 README 的要求，每次更新都上传：混淆文件、MB 压缩后的混淆文件、混淆后的“伪装.lua”。
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，67,329 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（加壳 + 二次压缩），43,259 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，69,145 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（加壳 + 二次压缩），43,052 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，104,414 B |
 
-两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
+前两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
+
+产物里 VM 状态表 / 载荷 Proto 的字段名已逐产物随机化（见 `项目交接总结.md` §5.8），不会再出现 `X.data` / `X.kidx` / `X.memo` 这类可读字段名。
 
 自己复现：
 
 ```bash
-cargo run --release -- test/print.lua        # 生成 obfuscated.lua
-cargo run --release -- test/print.lua MB     # 生成 MB 模式产物
+cargo run --release -- test/print.lua                    # 生成 obfuscated.lua
+cargo run --release -- test/print.lua MB                 # 生成 MB 模式产物
+cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua”产物
 ```
+
+第三项是 **Roblox 专用**脚本（用到 `hookfunction` / `isfunctionhooked` / `game` 等
+执行器全局），在标准 Lua 下跑不起来 —— 原文件和产物都会在 `hookfunction` 处报
+`attempt to call ... (a nil value)`。这边只做了能做的检查：
+
+- 混淆器能正常编译它（约 270 ms，103 KB 产物）；
+- 产物过 `luac5.1 -p` 语法检查（普通 / MB 两种模式各 5 个产物，10/10 通过）；
+- 产物里不含明文字段名（`项目交接总结.md` §5.8）。
+
+**实际功能由用户自己在 Roblox 里验证。**
 
 注意产物**不可逐字节复现**：每次运行的种子（`VmContext::seed`、指令布局种子、
 常量池 ChaCha 密钥）都是随机取的，所以每次生成的字节都不同，但行为一致。

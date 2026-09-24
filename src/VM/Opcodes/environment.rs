@@ -63,7 +63,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut close = OpcodeBuilder::new(m[35].clone(), cfg, rng);
     let cl_a = close.raw_inst(2);
     out.push_str(&close.build(&format!(
-        "if {{STK}}.open_ups then for reg, uv_obj in pairs({{STK}}.open_ups) do if reg >= {} then uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; {{STK}}.open_ups[reg] = nil end end end",
+        "if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do if reg >= {} then uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; {{STK}}.{{OPEN_UPS}}[reg] = nil end end end",
         cl_a
     )));
 
@@ -78,7 +78,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let check_str = all_checks.join(" or ");
 
     out.push_str(&closure.build(&format!(
-        "local p = {{PROTOS}}[{}+1]; local uv = {{}}; {{STK}}.open_ups = {{STK}}.open_ups or {{}}; for j = 1, p.nups do local uv_inst = {{INSTS}}[{{PC}}]; {{PC}} = {{PC}} + 1; if {} then local reg = uv_inst[3]; if not {{STK}}.open_ups[reg] then {{STK}}.open_ups[reg] = {{{{STK}}, reg}} end; uv[j] = {{STK}}.open_ups[reg] else uv[j] = {{UPVALS}}[uv_inst[3]+1] end end; {{STK}}[{}] = function(...) return execute(p, getfenv and getfenv(1) or env, uv, ...) end",
+        "local p = {{PROTOS}}[{}+1]; local uv = {{}}; {{STK}}.{{OPEN_UPS}} = {{STK}}.{{OPEN_UPS}} or {{}}; for j = 1, p.{{PROTO_NUPS}} do local uv_inst = {{INSTS}}[{{PC}}]; {{PC}} = {{PC}} + 1; if {} then local reg = uv_inst[3]; if not {{STK}}.{{OPEN_UPS}}[reg] then {{STK}}.{{OPEN_UPS}}[reg] = {{{{STK}}, reg}} end; uv[j] = {{STK}}.{{OPEN_UPS}}[reg] else uv[j] = {{UPVALS}}[uv_inst[3]+1] end end; {{STK}}[{}] = function(...) return execute(p, getfenv and getfenv(1) or env, uv, ...) end",
         cl_b, check_str, cl_a
     )));
 
