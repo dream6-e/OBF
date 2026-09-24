@@ -1,5 +1,7 @@
 use rand::{thread_rng, Rng};
 
+use super::Generator_util::{mix_encrypt, mix_key};
+
 pub struct AntiTamperResult {
     pub setup: String,
     pub guards: Vec<String>,
@@ -47,23 +49,39 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     let v_res = rand_var();
     let v_pool = rand_var();
 
-    let key: u8 = rng.gen_range(10..240);
-
     // 将所有敏感 API 存入基于哈希的加密池
-    let strings = vec![
-        "debug", "pcall", "sethook", "gethook", "getinfo", "C", "string", "dump", "error", "info", "math"
+    // （池里除全局 API 名，还有行号守卫要用的字段名与模式串 —— 见下面的 pool_strings）
+    let strings: Vec<String> = vec![
+        "debug".into(), "pcall".into(), "sethook".into(), "gethook".into(), "getinfo".into(),
+        "C".into(), "string".into(), "dump".into(), "error".into(), "info".into(), "math".into(),
+        "type".into(), "tonumber".into(), "table".into(), "number".into(), "function".into(),
+        // 行号守卫（反美化）用到的字符串，一个都不留在明文里
+        "S".into(), "l".into(), "linedefined".into(), "currentline".into(),
+        ":(%d+)[:\r\n ]".into(),
     ];
+    // 池级密钥（16 位）逐产物随机；所有条目共用一组，解码器只需要带一个常量。
+    // 与探测串同一套混合：密文按位置相关密钥生成，不是单字节 XOR，肉眼算不出来。
+    let (pk0, pk1) = loop {
+        let (a, b) = (rng.gen_range(1..256) as u32, rng.gen_range(1..256) as u32);
+        let clean = strings
+            .iter()
+            .all(|t| mix_encrypt(t.as_bytes(), a, b).iter().all(|&c| c != 0));
+        if clean {
+            break (a, b);
+        }
+    };
+    let pool_key = pk0 * 256 + pk1;
     let mut pool_entries = Vec::new();
     for s in &strings {
         let hash = poly_hash(s);
-        let enc: Vec<String> = s.bytes().map(|b| ((b as u16 + key as u16) % 256).to_string()).collect();
+        let enc: Vec<String> = mix_encrypt(s.as_bytes(), pk0, pk1).iter().map(|c| c.to_string()).collect();
         pool_entries.push(format!("[{}]={{{}}}", hash, enc.join(",")));
     }
-    
+
     // 生成一个随机变量名用于毒药表（Poison Pill）注入
     let rand_str = random_string();
     let rand_hash = poly_hash(&rand_str);
-    let enc: Vec<String> = rand_str.bytes().map(|b| ((b as u16 + key as u16) % 256).to_string()).collect();
+    let enc: Vec<String> = mix_encrypt(rand_str.as_bytes(), pk0, pk1).iter().map(|c| c.to_string()).collect();
     pool_entries.push(format!("[{}]={{{}}}", rand_hash, enc.join(",")));
     
     let pool_data = pool_entries.join(",");
@@ -101,25 +119,42 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     let d_chr = rand_var();
     let d_b = rand_var();
     let d_j = rand_var();
+    let d_k1 = rand_var();
+    let d_k0 = rand_var();
+    let d_a = rand_var();
+    let d_r = rand_var();
+    let d_p = rand_var();
+    let d_w = rand_var();
+    let d_xb = rand_var();
+    let d_yb = rand_var();
     setup.push_str(&format!(
         "local function {dec}(h) \
             local {e} = {pool}[h]; \
             if {e} == nil then return nil end; \
+            local {k1} = {K} % 256; local {k0} = ({K} - {k1}) / 256; \
             local {i}, {n} = 0, #{e}; \
             local {chr}, {out} = string.char, ''; \
             local {j} = {j0}; \
             while {i} < {n} do \
                 {i} = {i} + 1; \
+                local {a} = ({k0} * {i} + {k1}) % 256; \
                 local {b} = {e}[{i}]; \
                 {j} = {j} + 1; \
                 if ({j} + {j}) - {j} > 0 then \
-                    {out} = {out} .. {chr}(({b} - {k} + {j} - {j}) % 256); \
+                    local {r}, {p} = 0, 1; \
+                    for {w} = 1, 8 do local {xb}, {yb} = {a} % 2, {b} % 2; \
+                        if {xb} ~= {yb} then {r} = {r} + {p} end; \
+                        {a} = ({a} - {xb}) / 2; {b} = ({b} - {yb}) / 2; {p} = {p} * 2; \
+                    end; \
+                    {out} = {out} .. {chr}(({r} - {k1}) % 256); \
                 end; \
             end; \
             return {out}; \
         end;\n",
         dec = v_dec, e = d_e, pool = v_pool, i = d_i, n = d_n, chr = d_chr, out = d_out,
-        j = d_j, j0 = rng.gen_range(1..64), b = d_b, k = key as i64
+        j = d_j, j0 = rng.gen_range(1..64), b = d_b, k1 = d_k1, k0 = d_k0,
+        a = d_a, r = d_r, p = d_p, w = d_w, xb = d_xb, yb = d_yb,
+        K = format!("0X{:04X}", pool_key)
     ));
     setup.push_str(&format!(
         "local function {}(h) \
@@ -370,38 +405,70 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let (g_d, g_gi, g_i1, g_i2, g_l1, g_l2) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
                 let (g_ok, g_msg, g_sp, g_ep, g_num) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
                 let (g_u, g_v, g_tn, g_cur, g_cl) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                // string 的成员在这个作用域里用到 4 次 => 先 local 出来再用：既省体积
+                // （`{st}.byte` 写四遍比四个短名长），也少四次表索引。
+                let (g_sb, g_sc, g_sf, g_ss) = (rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_tp, g_pc, g_st) = (rand_var(), rand_var(), rand_var());
+                // 类型名（table/number/function/string）也从池里解出来，同样不留明文。
+                let (g_ts_tab, g_ts_num, g_ts_fun, g_ts_str) =
+                    (rand_var(), rand_var(), rand_var(), rand_var());
+                let h_type = poly_hash("type");
+                let h_debug = poly_hash("debug");
+                let h_getinfo = poly_hash("getinfo");
+                let h_tonumber = poly_hash("tonumber");
+                let h_string = poly_hash("string");
+                let h_table = poly_hash("table");
+                let h_number = poly_hash("number");
+                let h_function = poly_hash("function");
+                let h_pcall = poly_hash("pcall");
+                let h_S = poly_hash("S");
+                let h_l = poly_hash("l");
+                let h_ld = poly_hash("linedefined");
+                let h_cur = poly_hash("currentline");
+                let h_pat = poly_hash(":(%d+)[:\r\n ]");
                 check_code = format!(
-                    "local {f1}=function() local {q}=nil; return {q}[1] end; \
+                    "local {st}={res}({h_st}); \
+                     local {pc}={res}({h_pc}); \
+                     local {sb},{sc},{sf},{ss}={st}.byte,{st}.char,{st}.find,{st}.sub; \
+                     local {tp}={res}({h_tp}); \
+                     local {d}={res}({h_dbg}); \
+                     local {tb},{nm},{fn},{sg}={dec}({h_tb}),{dec}({h_nm}),{dec}({h_fn}),{dec}({h_sg}); \
+                     local {f1}=function() local {q}=nil; return {q}[1] end; \
                      local {f2}=function() return 1 end; \
                      local {f3}=function() return 2 end; \
-                     local {d}=debug; \
-                     if type({d})~='table' then {good} else \
-                     local {gi}={d}['getinfo']; \
-                     if type({gi})~='function' then {good} else \
-                     local {tn}=tonumber; \
-                     if type({tn})~='function' then {good} else \
-                     local {i1},{i2}={gi}({f2},'S'),{gi}({f3},'S'); \
-                     if type({i1})~='table' or type({i2})~='table' then {good} else \
-                     local {l1},{l2}={i1}['linedefined'],{i2}['linedefined']; \
-                     if type({l1})~='number' or type({l2})~='number' then {good} else \
-                     local {ok},{msg}=pcall({f1}); \
-                     if type({msg})~='string' then {msg}='' end; \
-                     local {sp},{ep},{num}=string.find({msg},':(%d+)[:\\r\\n ]'); \
+                     if {tp}({d})~={tb} then {good} else \
+                     local {gi}={d}[{dec}({h_gi})]; \
+                     if {tp}({gi})~={fn} then {good} else \
+                     local {tn}={res}({h_tn}); \
+                     if {tp}({tn})~={fn} then {good} else \
+                     local {i1},{i2}={gi}({f2},{dec}({h_s})),{gi}({f3},{dec}({h_s})); \
+                     if {tp}({i1})~={tb} or {tp}({i2})~={tb} then {good} else \
+                     local {l1},{l2}={i1}[{dec}({h_ld})],{i2}[{dec}({h_ld})]; \
+                     if {tp}({l1})~={nm} or {tp}({l2})~={nm} then {good} else \
+                     local {ok},{msg}={pc}({f1}); \
+                     if {tp}({msg})~={sg} then {msg}='' end; \
+                     local {sp},{ep},{num}={sf}({msg},{dec}({h_pat})); \
                      if not {sp} or not {ep} then {good} else \
-                     local {u}=string.sub({msg},{sp}+1,{ep}-1); \
-                     local {v}=string.char(string.byte({msg},{sp}+1,{ep}-1)); \
-                     local {cur}={gi}(1,'l'); \
-                     local {cl}={cur} and {cur}['currentline']; \
+                     local {u}={ss}({msg},{sp}+1,{ep}-1); \
+                     local {v}={sc}({sb}({msg},{sp}+1,{ep}-1)); \
+                     local {cur}={gi}(1,{dec}({h_l})); \
+                     local {clv}={cur} and {cur}[{dec}({h_cl})]; \
                      if not {u} or not {v} then {good} \
                      elseif {u}~={v} then {bad} \
                      elseif ({l1}-{l1})+{l1}~={l2} then {bad} \
-                     elseif {cl}~=nil and {tn}({num})~=nil and {tn}({num})~={cl} then {bad} \
+                     elseif {clv}~=nil and {tn}({num})~=nil and {tn}({num})~={clv} then {bad} \
                      else {good} end end end end end end end\n",
-                    f1 = g_f1, f2 = g_f2, f3 = g_f3, q = g_q, d = g_d, gi = g_gi,
-                    i1 = g_i1, i2 = g_i2, l1 = g_l1, l2 = g_l2,
-                    ok = g_ok, msg = g_msg, sp = g_sp, ep = g_ep, num = g_num,
-                    u = g_u, v = g_v, tn = g_tn, cur = g_cur, cl = g_cl,
-                    good = next_good, bad = next_bad
+                    sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, st = g_st, h_st = h_string,
+                    tp = g_tp, res = v_res, h_tp = h_type,
+                    d = g_d, h_dbg = h_debug,
+                    tb = g_ts_tab, nm = g_ts_num, fn = g_ts_fun, sg = g_ts_str,
+                    h_tb = h_table, h_nm = h_number, h_fn = h_function, h_sg = h_string,
+                    dec = v_dec, f1 = g_f1, q = g_q, f2 = g_f2, f3 = g_f3,
+                    good = next_good, bad = next_bad, gi = g_gi, h_gi = h_getinfo,
+                    tn = g_tn, h_tn = h_tonumber, i1 = g_i1, i2 = g_i2, h_s = h_S,
+                    l1 = g_l1, l2 = g_l2, h_ld = h_ld, ok = g_ok, msg = g_msg, pc = g_pc,
+                    h_pc = h_pcall, sp = g_sp, ep = g_ep, num = g_num, h_pat = h_pat,
+                    u = g_u, v = g_v, cur = g_cur, h_l = h_l, clv = g_cl, h_cl = h_cur
                 );
             }
             _ => {

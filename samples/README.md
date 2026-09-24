@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，105,037 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），50,658 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，139,104 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，104,568 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），52,306 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，138,796 B |
 
 前两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
 
@@ -21,6 +21,9 @@
 解码器外层（m_main/m_init_map）也已打乱并可反美化（行号校验守卫，§5.14）——产物被拆行格式化后会失效。
 MB 模式改用了新的自解压外壳（DP/LZ + base85，§5.15）：同一输入下比上一代管线小 9%、
 启动（解压 + 加载）快 31%。
+探测串与守卫池改用「位置相关」的两字节密钥混合（§5.16）：单字节 XOR 可以拿两次调用
+比对反推密钥，现在同一明文字符在不同位置、不同串上的密文都不同；行号守卫里的字符串
+（`getinfo`/`linedefined`/`currentline`/模式串/类型名）全部走池，产物里没有明文。
 
 自己复现：
 

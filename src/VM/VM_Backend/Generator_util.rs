@@ -798,32 +798,38 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
     ];
     let mut names: Vec<String> = Vec::with_capacity(PLAIN.len());
     let mut lits: Vec<String> = Vec::with_capacity(PLAIN.len());
-    let mut ks: Vec<u8> = Vec::with_capacity(PLAIN.len());
+    let mut ks: Vec<u32> = Vec::with_capacity(PLAIN.len());
     for p in PLAIN.iter() {
-        let k = xor_key(p, rng);
+        let (k0, k1) = mix_key(p, rng);
         names.push(rng.name());
-        lits.push(xor_lit(p, k));
-        ks.push(k);
+        lits.push(mix_lit(p, k0, k1));
+        ks.push(k0 * 256 + k1);
     }
 
     // ── 解密器：纯算术 XOR，不用任何位库 ──
     let v_dx = rng.name();
     let (v_s, v_k) = (rng.name(), rng.name());
     let (v_o, v_i, v_n) = (rng.name(), rng.name(), rng.name());
-    let (v_a, v_b, v_r, v_p, v_w) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let (v_k1, v_k0) = (rng.name(), rng.name());
+    let (v_a, v_b) = (rng.name(), rng.name());
+    let (v_r, v_p, v_w) = (rng.name(), rng.name(), rng.name());
     let (v_xb, v_yb) = (rng.name(), rng.name());
+    // 密文按**位置相关**的密钥解：先按 (k0 * i + k1) % 256 取该位置的密钥异或，
+    // 再减 k1。单字节 XOR 的破绽是「密文 − 明文」到处都一样，肉眼比对两次调用就能
+    // 反推密钥；密钥随下标走以后，同一个明文字符在不同位置、不同串上的密文都不一样。
     let dx_def = format!(
-        "local function {dx}({s},{k}) local {o},{i}='',0; local {n}=#{s}; \
-         while {i}<{n} do {i}={i}+1; local {a},{b}={k},string.byte({s},{i}); \
+        "local function {dx}({s},{K}) local {o},{i}='',0; local {n}=#{s}; \
+         local {k1}={K}%256; local {k0}=({K}-{k1})/256; \
+         while {i}<{n} do {i}={i}+1; local {a}=({k0}*{i}+{k1})%256; local {b}=string.byte({s},{i}); \
          local {r},{p}=0,1; for {w}=1,8 do local {xb},{yb}={a}%2,{b}%2; \
          if {xb}~={yb} then {r}={r}+{p} end; {a}=({a}-{xb})/2; {b}=({b}-{yb})/2; {p}={p}*2; end; \
-         {o}={o}..string.char({r}); end; return {o}; end;",
-        dx = v_dx, s = v_s, k = v_k, o = v_o, i = v_i, n = v_n,
-        a = v_a, b = v_b, r = v_r, p = v_p, w = v_w, xb = v_xb, yb = v_yb
+         {o}={o}..string.char(({r}-{k1})%256); end; return {o}; end;",
+        dx = v_dx, s = v_s, K = v_k, o = v_o, i = v_i, n = v_n,
+        k1 = v_k1, k0 = v_k0, a = v_a, b = v_b, r = v_r, p = v_p, w = v_w, xb = v_xb, yb = v_yb
     );
     let mut keys_lua = String::new();
     for i in 0..PLAIN.len() {
-        keys_lua.push_str(&format!("local {}={}({},0X{:02X});", names[i], v_dx, lits[i], ks[i]));
+        keys_lua.push_str(&format!("local {}={}({},0X{:04X});", names[i], v_dx, lits[i], ks[i]));
     }
 
     let v_d = rng.name();
@@ -883,22 +889,42 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
 
 /// 把明文按密钥异或后写成 Lua 的 `\ddd` 十进制转义字符串字面量。
 /// 全三位定宽，所以后面跟数字也不会被读成别的转义。
-fn xor_lit(plain: &str, key: u8) -> String {
+/// 字符串加密（探测串与守卫池共用同一套）：
+/// ```text
+/// c[i] = ((p[i] + k1) % 256) XOR ((k0 * i + k1) % 256)      i 从 1 开始计
+/// ```
+/// 解密反过来两步走：先按该位置的密钥异或，再减 k1。
+/// 这里刻意不用 ChaCha 之类：只有两个字节的密钥，但密钥**随下标变化**，
+/// 于是「密文 − 明文」不再是一个常量，拿两条调用比对也看不出规律。
+pub fn mix_encrypt(plain: &[u8], k0: u32, k1: u32) -> Vec<u8> {
+    plain
+        .iter()
+        .enumerate()
+        .map(|(idx, &b)| {
+            let i = (idx + 1) as u32;
+            (((((b as u32) + k1) % 256) ^ ((k0 * i + k1) % 256)) & 0xFF) as u8
+        })
+        .collect()
+}
+
+/// 把加密结果写成 Lua 的定宽八进制转义字面量（`\ddd` 三位，解码端不用猜宽度）。
+pub fn mix_lit(plain: &str, k0: u32, k1: u32) -> String {
     let mut out = String::from("\"");
-    for b in plain.bytes() {
-        out.push_str(&format!("\\{:03}", b ^ key));
+    for c in mix_encrypt(plain.as_bytes(), k0, k1) {
+        out.push_str(&format!("\\{:03}", c));
     }
     out.push('"');
     out
 }
 
-/// 取一个随机单字节密钥，且**不落在明文出现过的字节里** ——
-/// 这样异或结果不会出现 `\000`（Lua 字符串能装 NUL，但没必要给
-/// 压缩器的 lexer 找麻烦）。
-fn xor_key(plain: &str, rng: &mut GenRng) -> u8 {
-    let bytes: Vec<u8> = plain.bytes().collect();
+/// 取一组 16 位密钥（k0 恒非 0，否则退化成单字节密钥），
+/// 并保证密文里不出现 `\000`：Lua 装得下 NUL，但没必要给词法器找麻烦。
+pub fn mix_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
     loop {
-        let k = rng.range(1, 256) as u8;
-        if !bytes.contains(&k) { return k; }
+        let k0 = rng.range(1, 256) as u32;
+        let k1 = rng.range(1, 256) as u32;
+        if mix_encrypt(plain.as_bytes(), k0, k1).iter().all(|&c| c != 0) {
+            return (k0, k1);
+        }
     }
 }
