@@ -46,12 +46,12 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut tailcall = OpcodeBuilder::new(m[29].clone(), cfg, rng);
     let tc_a = tailcall.raw_inst(2); let tc_b = tailcall.raw_inst(3);
-    let tc_lua = format!("if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.{{OPEN_UPS}} = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}; local res=zm({{STK}}[{}](unpack({{STK}}, {}+1, {}+limit))); return unpack(res, 1, res.{{VARARG_COUNT}})", tc_b, tc_b, tc_a, tc_a, tc_a, tc_a);
+    let tc_lua = format!("if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.{{OPEN_UPS}} = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}; local res=zm({{STK}}[{}](unpack({{STK}}, {}+1, {}+limit))); {{STOREBACK}} return {{RET2}}(res, 1, res.{{VARARG_COUNT}})", tc_b, tc_b, tc_a, tc_a, tc_a, tc_a);
     out.push_str(&tailcall.build(&tc_lua));
 
     let mut ret = OpcodeBuilder::new(m[30].clone(), cfg, rng);
     let r_a = ret.raw_inst(2); let r_b = ret.raw_inst(3);
-    let ret_lua = format!("if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.{{OPEN_UPS}} = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}+1; return unpack({{STK}}, {}, {}+limit-1)", r_b, r_b, r_a, r_a, r_a);
+    let ret_lua = format!("if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; end; {{STK}}.{{OPEN_UPS}} = nil; end; local limit = {}>0 and {}-1 or {{TOP}}-{}+1; {{STOREBACK}} return {{RET2}}({{STK}}, {}, {}+limit-1)", r_b, r_b, r_a, r_a, r_a);
     out.push_str(&ret.build(&ret_lua));
 
     let mut tforcall = OpcodeBuilder::new(m[47].clone(), cfg, rng);
@@ -85,15 +85,15 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let close_ups_stmt = "if {STK}.{OPEN_UPS} then for reg, uv_obj in pairs({STK}.{OPEN_UPS}) do uv_obj[1] = {uv_obj[1][uv_obj[2]]}; uv_obj[2] = 1; end; {STK}.{OPEN_UPS} = nil; end; ";
 
     let mut ret0 = OpcodeBuilder::new(m[85].clone(), cfg, rng);
-    out.push_str(&ret0.build(&format!("{}return", close_ups_stmt)));
+    out.push_str(&ret0.build(&format!("{}{{STOREBACK}} return {{RET0}}()", close_ups_stmt)));
 
     let mut ret1 = OpcodeBuilder::new(m[86].clone(), cfg, rng);
     let r1_a = ret1.raw_inst(2);
-    out.push_str(&ret1.build(&format!("{}return {{STK}}[{}]", close_ups_stmt, r1_a)));
+    out.push_str(&ret1.build(&format!("{}{{STOREBACK}} return {{RET1}}({{STK}}[{}])", close_ups_stmt, r1_a)));
 
     let mut ret2 = OpcodeBuilder::new(m[87].clone(), cfg, rng);
     let r2_a = ret2.raw_inst(2);
-    out.push_str(&ret2.build(&format!("{}return {{STK}}[{}], {{STK}}[{}+1]", close_ups_stmt, r2_a, r2_a)));
+    out.push_str(&ret2.build(&format!("{}{{STOREBACK}} return {{RET2}}({{STK}}, {}, {}+1)", close_ups_stmt, r2_a, r2_a)));
 
     out
 }
