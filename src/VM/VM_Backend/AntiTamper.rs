@@ -88,14 +88,38 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     v_crash, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, fn_crash_rec
 ));
     setup.push_str(&format!("local {} = {{{}}};\n", v_pool, pool_data));
+    // 池解码器的「打乱线性逻辑 / 数据流」版本：
+    //   ① 循环写成 while + 自增下标（数字 for 太规整）；下标先取出来再自己加；
+    //   ② 解密算式写成 `(b - key + j - j) % 256`：j 是影子计数，前后抵消，
+    //      但读起来像在参与运算；常量 key 与 256 也被埋进这条链里；
+    //   ③ 拼接外面套一个恒真的判断（`(j+j)-j > 0` 即 j>0），打断线性阅读；
+    //   ④ 全部局部变量逐产物随机名。纯冷路径（只在守卫/池查表时走），不吃性能。
+    let d_e = rand_var();
+    let d_i = rand_var();
+    let d_n = rand_var();
+    let d_out = rand_var();
+    let d_chr = rand_var();
+    let d_b = rand_var();
+    let d_j = rand_var();
     setup.push_str(&format!(
-        "local function {}(h) \
-             local la,lk=false,string.char;local e = {}[h]; if not e then return la or nil end; \
-             local sr=la or lk;local s = ''; \
-             for i=1, #e do s = s .. sr((e[i] + 256 - {}) % 256) end; \
-             return not la and s; \
-         end;\n",
-         v_dec, v_pool, key
+        "local function {dec}(h) \
+            local {e} = {pool}[h]; \
+            if {e} == nil then return nil end; \
+            local {i}, {n} = 0, #{e}; \
+            local {chr}, {out} = string.char, ''; \
+            local {j} = {j0}; \
+            while {i} < {n} do \
+                {i} = {i} + 1; \
+                local {b} = {e}[{i}]; \
+                {j} = {j} + 1; \
+                if ({j} + {j}) - {j} > 0 then \
+                    {out} = {out} .. {chr}(({b} - {k} + {j} - {j}) % 256); \
+                end; \
+            end; \
+            return {out}; \
+        end;\n",
+        dec = v_dec, e = d_e, pool = v_pool, i = d_i, n = d_n, chr = d_chr, out = d_out,
+        j = d_j, j0 = rng.gen_range(1..64), b = d_b, k = key as i64
     ));
     setup.push_str(&format!(
         "local function {}(h) \
@@ -279,18 +303,55 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 );
             }
             7 => {
+                // 守卫的原形（用户点名要打乱的那段）：
+                //   local eK = Vm
+                //   if type(eK) ~= 'table' then return ep - 254
+                //   else local gF = setmetatable({}, {__tostring=Qt, __index=Qt, __newindex=Qt, __call=Qt})
+                //        pcall(function() eK[x(2890034435)] = gF end)
+                //        return ep + 45 end
+                // 现在：线性逻辑与数据流都打乱 ——
+                //   ① 类型判定拆成 影子变量 + 一个恒真的复合条件，不再是一句 if type(...)；
+                //   ② 元方法按随机顺序逐条挂，中间还插一条永远不会触发的诱饵（__eq / __concat）；
+                //   ③ 用一个影子计数器 j 把「写毒表」前后串起来，末尾拿 j 与 pcall 的结果
+                //      做一个恒假判断收尾（读起来像在判错，实际永远走 next_good）；
+                //   ④ 表名、键名、标志位全部逐产物随机名。
+                let g_e = rand_var();
+                let g_t = rand_var();
+                let g_flag = rand_var();
+                let g_mt = rand_var();
+                let g_pk = rand_var();
+                let g_j = rand_var();
+                let g_ok = rand_var();
+                let mut meta_lines: Vec<String> = Vec::new();
+                let mut mms: Vec<&str> = vec!["tostring", "index", "newindex", "call"];
+                for i in (1..mms.len()).rev() {
+                    let j = rng.gen_range(0..=i);
+                    mms.swap(i, j);
+                }
+                let decoy = if rng.gen_bool(0.5) { "eq" } else { "concat" };
+                for (idx, mm) in mms.iter().enumerate() {
+                    if idx == 2 {
+                        meta_lines.push(format!("{}[\"__\"..\"{}\"]={};", g_mt, decoy, v_crash));
+                    }
+                    meta_lines.push(format!("{}[\"__\"..\"{}\"]={};", g_mt, mm, v_crash));
+                }
                 check_code = format!(
-                    "local e={}; \
-                     if type(e)~='table' then {} else \
-                     local p=setmetatable({{}}, {{ \
-                        [\"__\"..\"tostring\"]={}, \
-                        [\"__\"..\"index\"]={}, \
-                        [\"__\"..\"newindex\"]={}, \
-                        [\"__\"..\"call\"]={} \
-                     }}); \
-                     pcall(function() e[{}({})]=p end); \
-                     {} end\n",
-                    v_env, next_bad, v_crash, v_crash, v_crash, v_crash, v_dec, rand_hash, next_good
+                    "local {e} = {env}; \
+                     local {t} = type({e}); \
+                     local {flag} = ({t} == 'table'); \
+                     local {mt} = {{}}; \
+                     {meta} \
+                     local {pk} = setmetatable({{}}, {mt}); \
+                     local {j} = 0; \
+                     if not {flag} and {t} ~= 'table' then {bad} else \
+                     {j} = {j} + 1; \
+                     local {ok} = pcall(function() {e}[{dec}({h})] = {pk} end); \
+                     {j} = {j} - 1; \
+                     if {j} ~= 0 or {ok} == {j} then {bad} else {good} end \
+                     end\n",
+                    e = g_e, env = v_env, t = g_t, flag = g_flag, mt = g_mt,
+                    meta = meta_lines.join(" "), pk = g_pk, j = g_j, ok = g_ok,
+                    bad = next_bad, good = next_good, dec = v_dec, h = rand_hash
                 );
             }
             _ => {

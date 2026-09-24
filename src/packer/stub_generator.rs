@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 use super::utils::NamePool;
+use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, GenRng};
 
 pub struct StubGenerator;
 
@@ -20,6 +21,9 @@ impl StubGenerator {
         let m_main = pool.get();
 
         let f_load = pool.get();
+        let f_isnat = pool.get();
+        let f_getls = pool.get();
+        let v_pload = pool.get();
         let f_pcall = pool.get();
         let f_char = pool.get();
         let f_byte = pool.get();
@@ -275,7 +279,8 @@ impl StubGenerator {
 
         format!("
 return (function(...)
-    local {f_load}=function(c) local f;if not(f) then return (loadstring or load)(c) else return {{}} end;end
+    {probe}
+    local {f_load}=function(c) local f;if not(f) then return ({v_pload} or loadstring or load)(c) else return {{}} end;end
     local {f_pcall}=function(r) local c,v=3,type;if v(c)==\"string\" then return error(r) else return pcall(r) end;end
     local {f_char}=function(...) return string.char(...) end
     local {f_byte} = function(...) local k,g=3.0,0x0;local ui=k+g;if ui < k-g then return math.floor(...) elseif ui==k-g then return string.byte(...) end;end
@@ -341,7 +346,7 @@ return (function(...)
     return {v_entry}([=[{payload}]=], ...)
 end)(...)
 ",
-        f_load=f_load, f_pcall=f_pcall, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
+        f_load=f_load, f_pcall=f_pcall, probe=loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut GenRng::new(seed as u64)), v_pload=v_pload, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
         v_entry=v_entry, v_data=v_data, v_q=v_q, m_bxor=m_bxor, v_s=v_s, v_a=v_a, v_b=v_b, m_bxor_body=m_bxor_body, m_next=m_next,
         m_next_body=m_next_body, m_init_map=m_init_map, m_init_map_body=m_init_map_body, m_init_insts=m_init_insts,
         m_init_insts_body=m_init_insts_body, m_init_handlers=m_init_handlers, m_init_handlers_body=m_init_handlers_body,

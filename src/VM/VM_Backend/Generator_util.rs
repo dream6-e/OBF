@@ -759,3 +759,72 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
     }
     out
 }
+
+/// 生成「只认原生 C 函数」的 loadstring 探测代码（防执行器/沙盒把 loadstring
+/// 换成 Lua 钩子）。三个标识符由调用方从各自的命名池里取：
+/// `nat` = isNative、`getf` = 取用函数、`pl` = 最终使用的 loadstring 变量。
+///
+/// 语义：按 `loadstring` → `getrenv()['loadstring']` → `getrenv()['load']` → `load`
+/// 的顺序找**原生**的那一个；一个原生都没有时退回第一个可用的函数
+/// （保证产物在完全没有原生候选的环境里还能跑；要改成「找不到就失败」，
+/// 把最后那句 `return alt` 换成 `return nil` 即可）。
+///
+/// 线性逻辑/数据流同样打乱：定位到原生候选后用改下标的方式跳出循环
+/// （而不是 return），末尾再用影子变量返回。
+///
+/// 注意：这段代码会进 VM 文本、过一遍压缩器的**成员改名器**，所以
+/// `debug.getinfo` / `info.what` / `info.source` 一律写成 `['getinfo']` /
+/// `['what']` / `['source']` 这种字符串键 —— 改名器只改 `.名字`/`:名字`，
+/// 字符串键不动；写成点访问会被改成随机名，探测就会永远走兜底分支、形同虚设。
+pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -> String {
+    let v_d = rng.name();
+    let v_gi = rng.name();
+    let v_list = rng.name();
+    let v_alt = rng.name();
+    let v_i = rng.name();
+    let v_n = rng.name();
+    let v_f = rng.name();
+    let v_t = rng.name();
+    let v_g = rng.name();
+    let v_ok = rng.name();
+    let v_inf = rng.name();
+    let v_gg = rng.name();
+    let v_ge = rng.name();
+    let v_env2 = rng.name();
+    format!(
+        "local function {nat}({f}) \
+            local {d} = debug; \
+            if type({d}) ~= 'table' then return true end; \
+            local {gi} = {d}['getinfo']; \
+            if type({gi}) ~= 'function' then return true end; \
+            local {ok}, {inf} = pcall({gi}, {f}, 'S'); \
+            if not {ok} or type({inf}) ~= 'table' then return true end; \
+            return {inf}['what'] == 'C' and {inf}['source'] == '=[C]'; \
+        end; \
+        local function {getf}() \
+            local {g} = (getfenv and getfenv()) or _G; \
+            local {gg} = {g}['getgenv']; \
+            if type({gg}) == 'function' then {g} = {gg}() or {g}; end; \
+            local {ge} = {g}['getrenv']; \
+            local {env} = {g}; \
+            if type({ge}) == 'function' then {env} = {ge}() or {g}; end; \
+            local {list} = {{ loadstring, {env}['loadstring'], {env}['load'], load }}; \
+            local {alt}, {i} = nil, 0; \
+            local {n} = #{list}; \
+            while {i} < {n} do \
+                {i} = {i} + 1; \
+                local {f} = {list}[{i}]; \
+                local {t} = type({f}); \
+                if {t} == 'function' then \
+                    if {nat}({f}) and {alt} == nil then {alt} = {f}; {i} = {n}; end; \
+                    if {alt} == nil then {alt} = {f}; end; \
+                end; \
+            end; \
+            return {alt}; \
+        end; \
+        local {pl} = {getf}();\n",
+        nat = nat, getf = getf, pl = pl, d = v_d, gi = v_gi, list = v_list, alt = v_alt,
+        i = v_i, n = v_n, f = v_f, t = v_t, g = v_g, ok = v_ok, inf = v_inf,
+        gg = v_gg, ge = v_ge, env = v_env2
+    )
+}

@@ -272,6 +272,11 @@ impl Packer {
     fn build_decoder(keys: &[u8], alphabet: &str, rng: &mut GenRng) -> (String, String) {
         let f_entry = rng.name();
         let v_data = rng.name();
+        // 只用原生 loadstring：执行器/沙盒常把 loadstring 换成 Lua 钩子，
+        // 这里在调用前探测一次，优先挑原生（C）实现，见 loadstring_probe_lua。
+        let f_isnat = rng.name();
+        let f_getls = rng.name();
+        let v_pload = rng.name();
 
         let m_bxor = rng.name();
         let m_next = rng.name();
@@ -492,8 +497,10 @@ impl Packer {
         
         let combined_alpha_expr = parts_exprs.join(",");
 
+        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, rng);
         let script = format!("
 local function {f_entry}({v_data})
+    {probe}
     return ({{
         {m_bxor} = function(q, s, a, b, ra, rb, p, c, rra, rrb, k_bxor)
             k_bxor = a * 256 + b;
@@ -627,7 +634,7 @@ end,
                 {p_bc} = 0, {p_res} = {{}}, {p_f} = 0, {p_p1} = 0, {p_p2} = 0, {p_w} = 0, {p_u} = 0, {p_ptr} = 0
             }});
         end
-    }}):{m_main}({v_data}, unpack or table.unpack, string.char, string.byte, math.floor, table.insert, table.concat, table.remove, string.reverse, string.sub, loadstring or load, string.gmatch);
+    }}):{m_main}({v_data}, unpack or table.unpack, string.char, string.byte, math.floor, table.insert, table.concat, table.remove, string.reverse, string.sub, {v_pload}, string.gmatch);
 end
 ");
         // 脚本里所有 s.<字段> 的访问统一换成随机名（router / init_insts_loop /
