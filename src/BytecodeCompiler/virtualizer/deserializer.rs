@@ -246,7 +246,8 @@ impl Deserializer {
     }
 
     pub fn decode_file(&mut self) -> Chunk {
-        let header = self.read_bytes(16);
+        // 头部 24 字节：16 字节固定头 + 8 字节指令布局种子
+        let header = self.read_bytes(24);
         if &header[0..7] != b"\x1bKRYVEX" {
             panic!("Invalid Lua Header");
         }
@@ -265,7 +266,8 @@ impl Deserializer {
         if self.read_u8() != b'\n' {
             panic!("Missing Header Newline Divider");
         }
-        let seed = crate::compiler::instructions::get_global_seed();
+        // 种子随产物走，不再用硬编码的全局值
+        let seed = u64::from_le_bytes(header[16..24].try_into().expect("header 长度已校验为 24"));
         let layout = InstructionLayout::from_seed(seed);
         self.layout = Some(layout);
         crate::compiler::instructions::ACTIVE_LAYOUT.with(|layout_cell| {

@@ -54,6 +54,9 @@ impl DumpState {
         self.dump_byte(SIZEOF_INSTRUCTION);
         self.dump_byte(SIZEOF_LUA_NUMBER);
         self.dump_byte(INTEGRAL_FLAG);
+        // 偏移 16..24：本产物使用的指令布局种子（小端 u64）。
+        // 反序列化端读它来重建 InstructionLayout，见 deserializer.rs 的 decode_file。
+        self.dump_size(crate::compiler::instructions::get_global_seed());
     }
 
     fn dump_code(&mut self, proto: &Proto) {

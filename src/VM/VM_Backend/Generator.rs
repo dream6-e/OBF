@@ -715,7 +715,13 @@ impl Generator {
         let (mut k1, mut k2, mut k3, mut k4) = ((rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8);
         combined_payload.push(k1); combined_payload.push(k2); combined_payload.push(k3); combined_payload.push(k4);
         
-        for b in pool_bytes.iter_mut() {
+        combined_payload.extend(pool_bytes); combined_payload.extend(rewritten_chunks);
+
+        // 对 4 字节密钥之后的**全部内容**做同一道滚动字节变换 —— 常量池和指令流
+        // 共用一条连续的 keystream。指令流此前是明文追加的，固定 10 字节一条，
+        // 剥掉外层 base86 之后可以直接切片还原；现在和池一样被覆盖。
+        // Lua 侧的 chunk 读取器相应改成走 fn_read_dec（见 block_dec_readers）。
+        for b in combined_payload[4..].iter_mut() {
             let orig = *b;
             *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(0x42);
             k1 = k1.wrapping_add(orig).rotate_left(1).wrapping_add(0x1B);
@@ -723,7 +729,6 @@ impl Generator {
             k3 = k3 ^ k1.wrapping_sub(k4);
             k4 = k4.wrapping_add(k2).rotate_left(3);
         }
-        combined_payload.extend(pool_bytes); combined_payload.extend(rewritten_chunks);
         
         let key_kryvex = String::from("x1"); let p_out: Vec<String> = (0..6).map(|_| rng.name()).collect();
         let var_s = rng.name(); let fn_N_ = rng.name(); let var_fU = rng.name(); let var_L = rng.name(); let var_get_count = rng.name();
@@ -927,7 +932,7 @@ impl Generator {
         
         let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=='function' and 0 or {}); local mt_vc={{}}; mt_vc[\"__\"..\"mode\"]='k'; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3);
         let block_dec_helpers = format!("local function {}(a, b) local r, p, c = 0, 1, 0; while a > 0 or b > 0 do local ra, rb = a % 2, b % 2; if ra ~= rb then c = c + p end; a, b, p = math_floor(a / 2), math_floor(b / 2), p * 2 end; return c end; local function {}(x, n) if n == 0 then return x end return ((x * (2^(8-n))) % 256) + math_floor(x / (2^n)) end; local function {}() local enc = {}(); local dec = (enc - 66 + 256) % 256; dec = {}(dec, k4); dec = {}(dec, k3 % 8); dec = (dec + k2) % 256; dec = {}(dec, k1); local orig = dec; k1 = (k1 + orig) % 256; k1 = ((k1 * 2) % 256) + math_floor(k1 / 128); k1 = (k1 + 27) % 256; k2 = (k2 * 3 + enc) % 256; k2 = ((k2 * 64) % 256) + math_floor(k2 / 4); k3 = {}(k3, (k1 - k4 + 256) % 256); k4 = (k4 + k2) % 256; k4 = ((k4 * 8) % 256) + math_floor(k4 / 32); return orig end; ", fn_bxor, fn_b_rotr, fn_read_dec, fn_a3, fn_bxor, fn_b_rotr, fn_bxor, fn_bxor);
-        let block_dec_readers = format!("local function {}() local {}={{}}; for i=1,4 do {}[i]={}() end; return {}[1]+({}[2]*256)+({}[3]*65536)+({}[4]*16777216) end; local function {}() local {}={{}}; for i=1,4 do {}[i]={}() end; return {}[1]+({}[2]*{})+({}[3]*{})+({}[4]*{}) end; local function {}() local {}={}(); if {}=={} then return '' end; local {}={{}}; for _={},{} do {}[_]=string_char({}()) end; return table_concat({}) end; local function {}() local {}={}(); if {}>=2^31 then return {}-2^32 else return {} end end; ", fn_u32_dec, var__a, var__a, fn_read_dec, var__a, var__a, var__a, var__a, fn_a5, var__a, var__a, fn_a3, var__a, var__a, rng.obfuscate_num(256i64, 1, &keys), var__a, rng.obfuscate_num(65536i64, 1, &keys), var__a, rng.obfuscate_num(16777216i64, 1, &keys), fn_read_string, l, fn_a5, l, rng.obfuscate_num(0i64, 1, &keys), s_t, rng.obfuscate_num(1i64, 1, &keys), l, s_t, fn_a3, s_t, fn_a10, v, fn_a5, v, v, v);
+        let block_dec_readers = format!("local function {}() local {}={{}}; for i=1,4 do {}[i]={}() end; return {}[1]+({}[2]*256)+({}[3]*65536)+({}[4]*16777216) end; local function {}() local {}={{}}; for i=1,4 do {}[i]={}() end; return {}[1]+({}[2]*{})+({}[3]*{})+({}[4]*{}) end; local function {}() local {}={}(); if {}=={} then return '' end; local {}={{}}; for _={},{} do {}[_]=string_char({}()) end; return table_concat({}) end; local function {}() local {}={}(); if {}>=2^31 then return {}-2^32 else return {} end end; ", fn_u32_dec, var__a, var__a, fn_read_dec, var__a, var__a, var__a, var__a, fn_a5, var__a, var__a, fn_read_dec, var__a, var__a, rng.obfuscate_num(256i64, 1, &keys), var__a, rng.obfuscate_num(65536i64, 1, &keys), var__a, rng.obfuscate_num(16777216i64, 1, &keys), fn_read_string, l, fn_a5, l, rng.obfuscate_num(0i64, 1, &keys), s_t, rng.obfuscate_num(1i64, 1, &keys), l, s_t, fn_read_dec, s_t, fn_a10, v, fn_a5, v, v, v);
         
         let mut f64_parts = vec![format!("({}[7]%16)*2^48", var__b), format!("({}[6]*2^40)", var__b), format!("({}[5]*2^32)", var__b), format!("({}[4]*2^24)", var__b), format!("({}[3]*2^16)", var__b), format!("({}[2]*2^8)", var__b), format!("{}[1]", var__b)];
         rng.shuffle(&mut f64_parts);
@@ -976,10 +981,10 @@ impl Generator {
                         {fn_c}.n={fn_read_string}(); \
                         {fn_c}.ld={fn_a5}(); \
                         {fn_c}.lld={fn_a5}(); \
-                        {fn_c}.nups={fn_a3}(); \
-                        {fn_c}.numparams={fn_a3}(); \
-                        {fn_c}.is_vararg={fn_a3}(); \
-                        {fn_c}.maxstack={fn_a3}(); \
+                        {fn_c}.nups={fn_read_dec}(); \
+                        {fn_c}.numparams={fn_read_dec}(); \
+                        {fn_c}.is_vararg={fn_read_dec}(); \
+                        {fn_c}.maxstack={fn_read_dec}(); \
                         {var_state} = {obf_s_insts}; \
                     elseif {var_state} == {obf_s_insts} then \
                         {fn_c}.opcodes={{}}; \
@@ -988,7 +993,7 @@ impl Generator {
                         {fn_c}.c_arr={{}}; \
                         for _={one_obf},{fn_a5}() do \
                             {fn_c}.opcodes[_]={fn_a5}(); \
-                            {fn_c}.a_arr[_]={fn_a3}(); \
+                            {fn_c}.a_arr[_]={fn_read_dec}(); \
                             {fn_c}.b_arr[_]={fn_a10}(); \
                             {fn_c}.c_arr[_]={fn_a10}(); \
                         end; \
@@ -1022,9 +1027,9 @@ impl Generator {
                         end; \
                         {fn_c}.consts=setmetatable({{}},mt_consts); \
                         for _={one_obf},{fn_a5}() do \
-                            {t}={fn_a3}(); \
+                            {t}={fn_read_dec}(); \
                             if {t}=={one_obf} then \
-                                {var_enc_c}[_]={{1,{fn_a3}()~={zero_obf}}} \
+                                {var_enc_c}[_]={{1,{fn_read_dec}()~={zero_obf}}} \
                             elseif {t}=={two_obf} then \
                                 local raw_idx={fn_a5}(); \
                                 local idx=raw_idx+1; \
@@ -1070,7 +1075,7 @@ impl Generator {
             obf_s_ret = obf_s_ret,
             fn_read_string = fn_read_string,
             fn_a5 = fn_a5,
-            fn_a3 = fn_a3,
+            fn_read_dec = fn_read_dec,
             one_obf = rng.obfuscate_num(1i64, 1, &keys),
             fn_a10 = fn_a10,
             var_enc_c = var_enc_c,

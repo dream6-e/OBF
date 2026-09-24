@@ -3,8 +3,38 @@ use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
 use std::cell::Cell;
 
+/// 指令布局的默认种子。
+///
+/// 保留历史值，使得没有显式设置种子的调用方（单元测试、库的直接使用者）
+/// 得到与旧版本逐位相同的指令编码 —— `cargo test` 的 83 项断言依赖这一点。
+pub const DEFAULT_LAYOUT_SEED: u64 = 264765718;
+
+thread_local! {
+    static LAYOUT_SEED: Cell<u64> = Cell::new(DEFAULT_LAYOUT_SEED);
+}
+
+/// 当前线程生效的指令布局种子。
 pub fn get_global_seed() -> u64 {
-    264765718
+    LAYOUT_SEED.with(|c| c.get())
+}
+
+/// 设置当前线程的指令布局种子，并立即重建 `ACTIVE_LAYOUT`。
+///
+/// 每个混淆产物在编译前调用一次（见 `main.rs`），这样指令字段布局、`xor_key`
+/// 和 90 个操作码的排列就是**逐产物唯一**的，而不是所有产物共用一张表。
+/// 种子会随容器头部写出，反序列化端据此恢复同一套布局。
+pub fn set_global_seed(seed: u64) {
+    LAYOUT_SEED.with(|c| c.set(seed));
+    ACTIVE_LAYOUT.with(|c| c.set(InstructionLayout::from_seed(seed)));
+}
+
+/// 为本线程挑一个全新的随机布局种子并立即生效，返回该种子。
+///
+/// 每个混淆产物在 `codegen::compile` 之前调用一次即可，无需调用方自己引入 `rand`。
+pub fn randomize_global_seed() -> u64 {
+    let seed = rand::rng().random::<u64>();
+    set_global_seed(seed);
+    seed
 }
 
 #[derive(Clone, Copy, Debug)]

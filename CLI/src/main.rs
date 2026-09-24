@@ -17,6 +17,7 @@ mod three_d;
 use three_d::Coin3D;
 
 use kryvex_ob::compiler::codegen;
+use kryvex_ob::compiler::instructions;
 use kryvex_ob::compiler::dump;
 use kryvex_ob::BytecodeCompiler::virtualizer::deserializer::Deserializer;
 use kryvex_ob::VM::VM_Backend::Context::VmContext;
@@ -231,6 +232,9 @@ fn main() {
                 return;
             }
         };
+
+        // 指令布局逐产物随机化（种子会写进容器头部，反序列化端据此恢复）
+        instructions::randomize_global_seed();
 
         match codegen::compile(source_code.as_bytes(), &format!("@{}", target_file_name)) {
             Ok(proto) => {
