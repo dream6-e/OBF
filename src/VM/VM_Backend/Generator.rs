@@ -565,8 +565,11 @@ impl Generator {
         let sc_mode = at.st.call("__mode", md0, md1);
         let (mk0, mk1) = crate::VM::VM_Backend::Generator_util::stream_key("k", &mut rng);
         let sc_k = at.st.call("k", mk0, mk1);
-        let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3,
-            fn_lit = sc_fn_hdr, mode_lit = sc_mode, k_lit = sc_k);
+        let block_dec_header = crate::VM::VM_Backend::Generator_flow::build_header(
+            &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
+            var_chk.as_str(), var_idx.as_str(), var_junk.as_str(), var_b.as_str(), var_tamper.as_str(),
+            var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
+            sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str());
         // ── 解码链（第 6 项：解密逻辑打乱）──
         // 冷路径一次性函数，放心打乱形态。
         let (v_bx_a, v_bx_b, v_bx_r, v_bx_w, v_bx_g, v_bx_s) =
@@ -598,121 +601,15 @@ impl Generator {
              {rd_scatter} ",
             bx = fn_bxor, a = v_bx_a, b = v_bx_b, r = v_bx_r, w = v_bx_w, g = v_bx_g, s = v_bx_s,
             rt = fn_b_rotr, x = v_rt_x, n = v_rt_n, d = v_rt_d, t = v_rt_t,
-            rd_scatter = {
-                // ──⑥ 滚动读取器打散
-                // 真实顺序只在键名/调度表
-                // 循环壳与假出口逐产物随机 —— 静态读产物看不出解密链
-                // 铁律：k1 吃解后字节、k2 吃原始字节、k34 最后跑。
-                // 键用随机整数（不引入新名字——未声明的标识符在 Lua 里是全局 nil
-                // aE[名字]=… 直接 table index is nil）
-                let mut ikeys: Vec<u32> = Vec::new();
-                while ikeys.len() < 7 {
-                    let k = rng.range(1, 100) as u32;
-                    if !ikeys.contains(&k) { ikeys.push(k); }
-                }
-                let (d1, d2, d3, d4) = (ikeys[0], ikeys[1], ikeys[2], ikeys[3]);
-                let (u1, u2, u34) = (ikeys[4], ikeys[5], ikeys[6]);
-                let inv_add_v = 256 - sc_add as i32;
-                let mut defs = vec![
-                    format!("{}[{}]=function(e) return (e+{})%256 end; ", v_rd_c4, d1, inv_add_v),
-                    format!("{}[{}]=function(e) return {}(e,k4) end; ", v_rd_c4, d2, fn_bxor),
-                    format!("{}[{}]=function(e) return {}(e,k3%8) end; ", v_rd_c4, d3, fn_b_rotr),
-                    format!("{}[{}]=function(e) return {}((e+k2)%256,k1) end; ", v_rd_c4, d4, fn_bxor),
-                    format!("{}[{}]=function(e) k1=(k1+e)%256; k1=((k1*{})%256)+((k1-(k1%{}))/{}); k1=(k1+{})%256 end; ",
-                        v_rd_c4, u1, 1u32 << sc_rot_in, 1u32 << (8 - sc_rot_in), 1u32 << (8 - sc_rot_in), sc_add_k1),
-                    format!("{}[{}]=function(e) k2=(k2*{}+e)%256; k2=((k2*{})%256)+((k2-(k2%{}))/{}); end; ",
-                        v_rd_c4, u2, sc_mul_k2, 1u32 << (8 - sc_rot_k2), 1u32 << sc_rot_k2, 1u32 << sc_rot_k2),
-                    format!("{}[{}]=function() k3={}(k3,(k1-k4+256)%256); k4=(k4+k2)%256; k4=((k4*{})%256)+((k4-(k4%{}))/{}); end; ",
-                        v_rd_c4, u34, fn_bxor, 1u32 << sc_rot_k4, 1u32 << (8 - sc_rot_k4), 1u32 << (8 - sc_rot_k4)),
-                ];
-                rng.shuffle(&mut defs);
-                let (fupd, farg, supd, sarg) = if rng.range(0, 2) == 0 {
-                    (u1.clone(), v_rd_c1.clone(), u2.clone(), v_rd_e.clone())
-                } else {
-                    (u2.clone(), v_rd_e.clone(), u1.clone(), v_rd_c1.clone())
-                };
-                let (s0, sl) = [(0i32, 1i32), (5, 6), (17, 18), (-3, -2)][rng.range(0, 4)];
-                let big = rng.range(9, 99);
-                let mut lua = format!("local {}={{}}", v_rd_c4);
-                for d in &defs { lua.push_str(d); }
-                // 调度表：键序即执行序 —— 键是随机名，静态看不出对应哪步
-                lua.push_str(&format!("local {}={{{},{},{},{}}}; ", v_rd_c5, d1, d2, d3, d4));
-                let chain = format!(
-                    "local {e}={raw} local {j}=1 while {j}<=4 do {e}={st}[{seq}[{j}]]({e}) {j}={j}+1 end {o}={e} ",
-                    e = v_rd_c1, raw = v_rd_e, j = v_rd_c2, st = v_rd_c4, seq = v_rd_c5, o = v_rd_o
-                );
-                let upds = format!(
-                    "{st}[{fu}]({fa}) {st}[{su}]({sa}) {st}[{u34}]() ",
-                    st = v_rd_c4, fu = fupd, fa = farg, su = supd, sa = sarg, u34 = u34
-                );
-                let (open, close, inc) = match rng.range(0, 3) {
-                    0 => (
-                        format!("local {g}={s0} while {g}<{sl} do ", g = v_rd_c3, s0 = s0, sl = sl),
-                        "end; ".to_string(),
-                        format!("{g}={g}+1; ", g = v_rd_c3),
-                    ),
-                    1 => (
-                        format!("local {g}={s0} repeat ", g = v_rd_c3, s0 = s0),
-                        format!("until {g}>={sl} ", g = v_rd_c3, sl = sl),
-                        format!("{g}={g}+1; ", g = v_rd_c3),
-                    ),
-                    _ => (
-                        format!("for {g}={s0},{s1} do ", g = v_rd_c3, s0 = s0, s1 = s0),
-                        "end; ".to_string(),
-                        String::new(),
-                    ),
-                };
-                let fake = if inc.is_empty() { String::new() } else {
-                    format!("if {g}>{big} then {g}={sl} end; ", g = v_rd_c3, big = big, sl = sl)
-                };
-                lua.push_str(&format!(
-                    "local function {rd}() local {o}=0; {open}local {raw}={a3}() {chain}{upds}{fake}{inc}{close}return {o} end; ",
-                    rd = fn_read_dec, o = v_rd_o, open = open, raw = v_rd_e, a3 = fn_a3,
-                    chain = chain, upds = upds, fake = fake, inc = inc, close = close
-                ));
-                lua
-            }
+rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
+                &mut rng, fn_bxor.as_str(), fn_b_rotr.as_str(), fn_read_dec.as_str(), fn_a3.as_str(),
+                &v_bx_a, &v_bx_b, &v_bx_r, &v_bx_w, &v_bx_g, &v_bx_s,
+                &v_rt_x, &v_rt_n, &v_rt_d, &v_rt_g, &v_rt_t,
+                &v_rd_o, &v_rd_g, &v_rd_e, &v_rd_c1, &v_rd_c2, &v_rd_c3, &v_rd_c4, &v_rd_c5,
+                sc_add, sc_rot_in, sc_add_k1, sc_mul_k2, sc_rot_k2, sc_rot_k4)
         );
-        // 形态1~5共享件：K表=魔数派生源；PJ=恒空谓词表
         let (kt_name, pj_name) = (rng.name(), rng.name());
-        let kv: [i64; 9] = loop {
-            let mut kv = [0i64; 9];
-            for i in 0..9 { kv[i] = rng.range(1 << 20, (1 << 24) - 1) as i64; }
-            let g = |i: usize, j: usize, add: bool| -> i64 {
-                if add { kv[i] + kv[j] } else if kv[i] >= kv[j] { kv[i] - kv[j] } else { kv[j] - kv[i] }
-            };
-            let mut vs = vec![
-                g(0, 1, false), g(2, 3, true), g(4, 5, false), g(6, 7, true),
-                g(8, 2, true), g(7, 4, false), g(5, 3, true),
-                g(2, 5, true), g(3, 6, true), g(1, 5, true), g(0, 6, true), g(7, 2, true),
-            ];
-            vs.sort(); vs.dedup();
-            if vs.len() == 12 { break kv; }
-        };
-        let kspell: Vec<String> = (0..9)
-            .map(|i| if rng.range(0, 2) == 0 { format!("0X{:X}", kv[i]) } else { format!("{}", kv[i]) })
-            .collect();
-        fn kval(kv: &[i64; 9], i: usize, j: usize, add: bool) -> i64 {
-            if add { kv[i] + kv[j] } else if kv[i] >= kv[j] { kv[i] - kv[j] } else { kv[j] - kv[i] }
-        }
-        fn kexpr(kt: &str, kv: &[i64; 9], i: usize, j: usize, add: bool) -> String {
-            if add { format!("{0}[{1}]+{0}[{2}]", kt, i + 1, j + 1) }
-            else if kv[i] >= kv[j] { format!("{0}[{1}]-{0}[{2}]", kt, i + 1, j + 1) }
-            else { format!("{0}[{2}]-{0}[{1}]", kt, i + 1, j + 1) }
-        }
-        let (m_a, e_a) = (kval(&kv, 0, 1, false), kexpr(&kt_name, &kv, 0, 1, false));
-        let (m_b, e_b) = (kval(&kv, 2, 3, true), kexpr(&kt_name, &kv, 2, 3, true));
-        let (m_c, e_c) = (kval(&kv, 4, 5, false), kexpr(&kt_name, &kv, 4, 5, false));
-        let (m_d, e_d) = (kval(&kv, 6, 7, true), kexpr(&kt_name, &kv, 6, 7, true));
-        let (h_ka, e_ka) = (kval(&kv, 8, 2, true), kexpr(&kt_name, &kv, 8, 2, true));
-        let (h_kb, e_kb) = (kval(&kv, 7, 4, false), kexpr(&kt_name, &kv, 7, 4, false));
-        let (h_kc, e_kc) = (kval(&kv, 5, 3, true), kexpr(&kt_name, &kv, 5, 3, true));
-        // HH 码同走 K 派生
-        let (hh_ret, eh_ret) = (kval(&kv, 2, 5, true), kexpr(&kt_name, &kv, 2, 5, true));
-        let (hh_nil, eh_nil) = (kval(&kv, 3, 6, true), kexpr(&kt_name, &kv, 3, 6, true));
-        let (hh_next, eh_next) = (kval(&kv, 1, 5, true), kexpr(&kt_name, &kv, 1, 5, true));
-        let (hh_val, eh_val) = (kval(&kv, 0, 6, true), kexpr(&kt_name, &kv, 0, 6, true));
-        let (hh_fail, eh_fail) = (kval(&kv, 7, 2, true), kexpr(&kt_name, &kv, 7, 2, true));
+        let kc = crate::VM::VM_Backend::Generator_flow::build_k(&mut rng, kt_name.as_str());
         let (v_u32_t, v_u32_n, v_u32_i, v_u32_v) = (rng.name(), rng.name(), rng.name(), rng.name());
         let (v_a5_t, v_a5_n, v_a5_i) = (rng.name(), rng.name(), rng.name());
         let (v_rs_l, v_rs_t, v_rs_i) = (rng.name(), rng.name(), rng.name());
@@ -723,186 +620,10 @@ impl Generator {
         // 权重换 2^8/2^16/2^24 与自减零初值、零长度短路、有符号转换改形
         let block_dec_readers = format!(
             "{u32_family} ",
-            u32_family = {
-                // u32 读取族打散；铁律
-                fn combine_u32(b: [&str; 4], rng: &mut GenRng) -> String {
-                    match rng.range(0, 3) {
-                        0 => {
-                            // 霍纳（高字节在前进）：(((b4*W+b3)*W+b2)*W+b1)
-                            let w = if rng.range(0, 2) == 0 { "256" } else { "2^8" };
-                            format!("((({x}*{w}+{y})*{w}+{z})*{w}+{r})", x = b[3], y = b[2], z = b[1], r = b[0], w = w)
-                        }
-                        1 => {
-                            // 双 u16 段拼：lo=b1+b2*W、hi=b3+b4*W，段权 W16
-                            let w1 = if rng.range(0, 2) == 0 { "256" } else { "2^8" };
-                            let w2 = if rng.range(0, 2) == 0 { "65536" } else { "2^16" };
-                            let lo = format!("({}+{}*{})", b[0], b[1], w1);
-                            let hi = format!("({}+{}*{})", b[2], b[3], w1);
-                            if rng.range(0, 2) == 0 { format!("{}+{}*{}", lo, hi, w2) } else { format!("{}*{}+{}", hi, w2, lo) }
-                        }
-                        _ => {
-                            // 乱序加权和：权重拼写独立、项序洗牌、累加起点换随机零种子
-                            let w8 = if rng.range(0, 2) == 0 { "256" } else { "2^8" };
-                            let w16 = if rng.range(0, 2) == 0 { "65536" } else { "2^16" };
-                            let w24 = ["16777216", "2^24", "2^16*256"][rng.range(0, 3)];
-                            let mut terms = vec![
-                                b[0].to_string(),
-                                format!("{}*{}", b[1], w8),
-                                format!("{}*{}", b[2], w16),
-                                format!("{}*{}", b[3], w24),
-                            ];
-                            rng.shuffle(&mut terms);
-                            let seed = match rng.range(0, 3) {
-                                0 => "0".to_string(),
-                                1 => format!("({}-{})", b[1], b[1]),
-                                _ => format!("({}*0)", b[3]),
-                            };
-                            if rng.range(0, 2) == 0 { format!("{}+({})", seed, terms.join("+")) }
-                            else { format!("({})+{}", terms.join("+"), seed) }
-                        }
-                    }
-                }
-                let mut family = String::new();
-                // K/PJ 表先行（形态②⑤的派生源/探针源，读取族与常量池共用）
-                family.push_str(&format!(
-                    "local {kt}={{{k0},{k1},{k2},{k3},{k4},{k5},{k6},{k7},{k8}}}; local {pj}={{}}; ",
-                    kt = kt_name, pj = pj_name,
-                    k0 = kspell[0], k1 = kspell[1], k2 = kspell[2], k3 = kspell[3], k4 = kspell[4],
-                    k5 = kspell[5], k6 = kspell[6], k7 = kspell[7], k8 = kspell[8]));
-                for (fname, is_u32) in [(fn_u32_dec.as_str(), true), (fn_a5.as_str(), false)] {
-                    let comb_bytes: [String; 4];
-                    let reversed: bool = rng.range(0, 2) == 1;
-                    let head: String;      // 声明段（不含 function 头）
-                    let collect: String;   // 收集段（空 = B 变体，读取在声明里完成）
-                    match rng.range(0, 3) {
-                        0 => {
-                            // 收集 A：表 + while 正向
-                            head = format!("local {t},{n},{i}={{}},4,0; ",
-                                t = v_u32_t, n = v_u32_n, i = v_u32_i);
-                            collect = format!("while {i}<{n} do {i}={i}+1; {t}[{i}]={rd}() end; ",
-                                t = v_u32_t, n = v_u32_n, i = v_u32_i, rd = fn_read_dec);
-                            comb_bytes = [
-                                format!("{}[1]", v_u32_t), format!("{}[2]", v_u32_t),
-                                format!("{}[3]", v_u32_t), format!("{}[4]", v_u32_t),
-                            ];
-                        }
-                        1 => {
-                            // 收集B：逐局部；方向随机（反向时倒写、逗号不少）
-                            let q: Vec<String> = (0..4).map(|_| rng.name()).collect();
-                            if !reversed {
-                                head = format!(
-                                    "local {a}={rd}() local {b}={rd}() local {c}={rd}() local {d}={rd}() ",
-                                    a = q[0], b = q[1], c = q[2], d = q[3], rd = fn_read_dec
-                                );
-                            } else {
-                                head = format!(
-                                    "local {d},{c},{b},{a}={rd}(),{rd}(),{rd}(),{rd}() ",
-                                    a = q[0], b = q[1], c = q[2], d = q[3], rd = fn_read_dec
-                                );
-                            }
-                            // 多赋值左名字收右值：反向声明时字节归属跟着镜像
-                            if !reversed {
-                                comb_bytes = [q[0].clone(), q[1].clone(), q[2].clone(), q[3].clone()];
-                            } else {
-                                comb_bytes = [q[3].clone(), q[2].clone(), q[1].clone(), q[0].clone()];
-                            }
-                            collect = String::new();
-                        }
-                        _ => {
-                            // 收集 C：表 + repeat until（换壳）
-                            let (t, i) = (rng.name(), rng.name());
-                            head = format!("local {t}={{}} local {i}=0 ", t = t, i = i);
-                            collect = format!("repeat {i}={i}+1 {t}[{i}]={rd}() until {i}>=4 ",
-                                t = t, i = i, rd = fn_read_dec);
-                            comb_bytes = [
-                                format!("{}[1]", t), format!("{}[2]", t),
-                                format!("{}[3]", t), format!("{}[4]", t),
-                            ];
-                        }
-                    }
-                    let comb = combine_u32(
-                        [&comb_bytes[0], &comb_bytes[1], &comb_bytes[2], &comb_bytes[3]], &mut rng
-                    );
-                    // 形态③⑤：状态梯子（elseif+嵌套 else if 混用），双否定探针臂=诱饵
-                    let sv = rng.name();
-                    let (lit_a, lit_b, lit_c) = (e_a.as_str(), e_b.as_str(), e_c.as_str());
-                    let pk1 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    let (pkA, numA) = (format!("0X{:X}", rng.range(0x10000, 0xFFFFF)), rng.range(100000, 9999999));
-                    if collect.is_empty() {
-                        // B 变体：收集在声明段完成，第一态直接拼装返回
-                        family.push_str(&format!(
-                            "local function {f}() {head}local {sv}={e_a}; while true do \
-                             if {sv}=={lit_a} then if {pj}[{pkA}]=={numA} then else return {comb} end; \
-                             elseif not(not {pj}[{pk1}]) then {sv}={e_c}; \
-                             else if {sv}=={lit_b} then return ({b0}-{b0}) end; {sv}={e_d}; end; end end; ",
-                            f = fname, head = head, sv = sv, e_a = e_a, lit_a = lit_a, comb = comb,
-                            pj = pj_name, pk1 = pk1, pkA = pkA, numA = numA, e_c = e_c, lit_b = lit_b, b0 = comb_bytes[0],
-                            e_d = e_d));
-                    } else {
-                        // A/C 变体：收集、拼装拆成两个真实状态
-                        family.push_str(&format!(
-                            "local function {f}() {head}local {sv}={e_a}; while true do \
-                             if {sv}=={lit_a} then {collect}{sv}={e_b}; \
-                             elseif not(not {pj}[{pk1}]) then {sv}={e_c}; \
-                             else if {sv}=={lit_b} then if {pj}[{pkA}]=={numA} then else return {comb} end end; {sv}={e_d}; end; end end; ",
-                            f = fname, head = head, sv = sv, e_a = e_a, lit_a = lit_a,
-                            collect = collect, e_b = e_b, pj = pj_name, pk1 = pk1, pkA = pkA, numA = numA,
-                            e_c = e_c, lit_b = lit_b, comb = comb, e_d = e_d));
-                    }
-                }
-                // read_string 四态梯子
-                {
-                    let (t, i, j) = (rng.name(), rng.name(), rng.name());
-                    let shell = if rng.range(0, 2) == 0 {
-                        format!("local {i}=0; while {i}<{l} do {i}={i}+1; {t}[{i}]=string_char({rd}()) end", i = i, l = v_rs_l, t = t, rd = fn_read_dec)
-                    } else {
-                        format!("for {j}=1,{l} do {t}[{j}]=string_char({rd}()) end", j = j, l = v_rs_l, t = t, rd = fn_read_dec)
-                    };
-                    let sv = rng.name();
-                    let (lit_a, lit_b, lit_c) = (e_a.as_str(), e_b.as_str(), e_c.as_str());
-                    let pk2 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    let pk3 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    let wk1 = format!("0X{:X}", rng.range(0x51, 0xFFFFF));
-                    family.push_str(&format!(
-                        "local function {rs}() local {l},{tb}=0,{{}}; local {sv}={e_a}; while true do \
-                         if {sv}=={lit_a} then {l}={a5}(); {sv}={e_b}; \
-                         elseif {sv}=={lit_b} then if {l}~={zero} then else return '' end; {sv}={e_c}; \
-                         elseif not(not {pj}[{pk2}]) then {sv}={e_d}; {pj}[{pk3}]={l}; \
-                         else if {sv}=={lit_c} then {shell}; while {wk1} do return table_concat({tb}) end end; {sv}={e_a}; end; end end; ",
-                        rs = fn_read_string, l = v_rs_l, tb = t, sv = sv, e_a = e_a,
-                        lit_a = lit_a, a5 = fn_a5, e_b = e_b, lit_b = lit_b,
-                        zero = rng.obfuscate_num(0i64, 1, &keys), e_c = e_c,
-                        pj = pj_name, pk2 = pk2, e_d = e_d, pk3 = pk3,
-                        lit_c = lit_c, shell = shell, wk1 = wk1));
-                }
-                // a10（i32 符号还原）
-                {
-                    let hexp = ["2^31", "2^30*2", "2147483648", "2^16*2^15"][rng.range(0, 4)];
-                    let cond = match rng.range(0, 3) {
-                        0 => format!("{v}>=2*{h}-{h}", v = v_u32_v, h = v_a10_h),
-                        1 => format!("not({v}<{h})", v = v_u32_v, h = v_a10_h),
-                        _ => format!("{v}-{h}>=0", v = v_u32_v, h = v_a10_h),
-                    };
-                    let ret = match rng.range(0, 3) {
-                        0 => format!("{v}-{h}-{h}", v = v_u32_v, h = v_a10_h),
-                        1 => format!("{v}-({h}+{h})", v = v_u32_v, h = v_a10_h),
-                        _ => format!("{v}-2*{h}", v = v_u32_v, h = v_a10_h),
-                    };
-                    let sv = rng.name();
-                    let (lit_c, lit_d) = (e_c.as_str(), e_d.as_str());
-                    let pk4 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    family.push_str(&format!(
-                        "local function {a10}() local {v},{h}=0,0; local {sv}={e_c}; while true do \
-                         if {sv}=={lit_c} then {v}={a5}(); if not(not {pj}[{pk4}]) then {h}=0X0; else {h}={hexp}; end; {sv}={e_d}; \
-                         elseif {sv}=={lit_d} then if not {pj}[{pk4}] then if {cond} then return {ret} end end; return {v}; \
-                         else {sv}={e_c}; end; end end; ",
-                        a10 = fn_a10, v = v_u32_v, h = v_a10_h, sv = sv, e_c = e_c,
-                        lit_c = lit_c, a5 = fn_a5, hexp = hexp, e_d = e_d,
-                        lit_d = lit_d, pj = pj_name, pk4 = pk4, cond = cond, ret = ret
-                    ));
-                }
-                family
-            }
+u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
+                &mut rng, &keys, &kc, kt_name.as_str(), pj_name.as_str(),
+                fn_u32_dec.as_str(), fn_a5.as_str(), fn_read_string.as_str(), fn_read_dec.as_str(), fn_a10.as_str(),
+                &v_u32_t, &v_u32_n, &v_u32_i, &v_u32_v, &v_rs_l, &v_a10_v, &v_a10_h)
         );
         
         let mut f64_parts = vec![format!("({}[7]%16)*2^48", var__b), format!("({}[6]*2^40)", var__b), format!("({}[5]*2^32)", var__b), format!("({}[4]*2^24)", var__b), format!("({}[3]*2^16)", var__b), format!("({}[2]*2^8)", var__b), format!("{}[1]", var__b)];
@@ -914,33 +635,17 @@ impl Generator {
         // 指数位用 (v8%128)*8*2 + (v7-v7%16)/16（等价于 (v8%128)*16+floor(v7/16)）
         // 分支顺序也换（互斥）。2^(-1074)/2^(exp-1075) 是浮点语义，
         // 绝不能改成 1/2^1074 这类写法（会下溢成 0），所以原样保留。
-        let block_dec_numbers = format!(
-            "local function {fn_dec_num}(v_enc, pool_idx) local {ks}={fn_chacha_stream}(pool_idx,{kind_num},8); \
-             local {vb}, {i}, {g} = {{}}, 0, 0; \
-             while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {xt}[v_enc[{i}]][{ks}[{i}]] end; \
-             local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
-             local {v_exp} = ({vb}[8] % 128) * 8 * 2 + (({vb}[7] - ({vb}[7] % 16)) / 16); \
-             local {v_mant} = {f64parts}; \
-             if {v_exp} == 2047 then return {v_mant} == 0 and {v_sign} * (1/0) or (0/0) \
-             elseif {v_exp} == 0 then return {v_sign} * {v_mant} * (2^(-1074)) \
-             else return {v_sign} * ({v_mant} + 2^52) * (2^({v_exp} - 1075)) end end; ",
-            fn_dec_num = fn_dec_num, fn_chacha_stream = fn_chacha_stream, kind_num = kind_num_obf,
-            vb = var__b, xt = xor_tbl_var,
-            v_sign = v_sign, v_exp = v_exp, v_mant = v_mant, f64parts = f64_parts.join("+"),
-            ks = v_num_ks, i = v_num_i, g = v_num_g
-        );
+        let block_dec_numbers = crate::VM::VM_Backend::Generator_flow::build_decnum(
+            fn_dec_num.as_str(), fn_chacha_stream.as_str(), kind_num_obf.as_str(), var__b.as_str(),
+            xor_tbl_var.as_str(), v_sign.as_str(), v_exp.as_str(), v_mant.as_str(), f64_parts.join("+"),
+            v_num_ks.as_str(), v_num_i.as_str(), v_num_g.as_str());
 
         let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
         // 原形态：for j=1,len + 表下标拼接。现在
-        let block_dec_strings = format!(
-            "local function {fn_dec_str}({e},{p}) local {n}=#{e}; local {ks}={fn_chacha_stream}({p},{kind_str},{n}); \
-             local {s}, {i}, {g} = {{}}, 0, 0; \
-             while {i} < {n} do {i} = {i} + 1; {s}[{i}] = string_char({xt}[{fn_s_byte}({e},{i})][{ks}[{i}]]) end; \
-             return table_concat({s}) end; ",
-            fn_dec_str = fn_dec_str, fn_chacha_stream = fn_chacha_stream, kind_str = kind_str_obf, xt = xor_tbl_var,
-            fn_s_byte = fn_s_byte, e = rng.name(), p = rng.name(), n = rng.name(),
-            ks = v_str_ks, s = v_str_s, i = v_str_i, g = v_str_g
-        );
+        let block_dec_strings = crate::VM::VM_Backend::Generator_flow::build_decstr(
+            &mut rng, fn_dec_str.as_str(), fn_chacha_stream.as_str(), kind_str_obf.as_str(),
+            xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
+            v_str_i.as_str(), v_str_g.as_str());
 
         let (v_pl_i, v_pl_c, v_pl_n, v_pl_s, v_pl_k, v_pl_v) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
@@ -993,12 +698,16 @@ impl Generator {
         // 注意：体内的**读流顺序**一个字都不能动 —— 那些字节是按顺序读进来的
         let (v_ch_g, v_ch_out, v_ch_i, v_ch_n) = (rng.name(), rng.name(), rng.name(), rng.name());
 
+        // ⑧ 常数提供者：连常数 1 都要过一次形参重名函数
+        let cpp = rng.name();
+        let cpq = rng.name();
         let body_init = format!(
-            "{st}={nxt}; {c}.{pf_n}={rs}(); {c}.{pf_ld}={a5}(); {c}.{pf_lld}={a5}(); {c}.{pf_nups}={rd}(); \
-             {c}.{pf_numparams}={rd}(); {c}.{pf_is_vararg}={rd}(); {c}.{pf_maxstack}={rd}(); if {i} > {i} then {i} = {i} - 1 end; ",
+            "local function {cpp}({cpq},{cpq}) {cpq}=0X1; return {cpq} end; {st}={nxt}; {c}.{pf_n}={rs}(); {c}.{pf_ld}={a5}(); {c}.{pf_lld}={a5}(); {c}.{pf_nups}={rd}(); \
+             {c}.{pf_numparams}={rd}(); {c}.{pf_is_vararg}={rd}(); {c}.{pf_maxstack}={rd}(); if {i} > {cpp}({cpq},{cpq}) then {i} = {i} - {cpp}({cpq},{cpq}) end; ",
             st = var_state, nxt = obf_s_insts, c = fn_c, rs = fn_read_string, a5 = fn_a5, rd = fn_read_dec,
             pf_n = pf_n, pf_ld = pf_ld, pf_lld = pf_lld, pf_nups = pf_nups,
-            pf_numparams = pf_numparams, pf_is_vararg = pf_is_vararg, pf_maxstack = pf_maxstack, i = v_ch_i
+            pf_numparams = pf_numparams, pf_is_vararg = pf_is_vararg, pf_maxstack = pf_maxstack, i = v_ch_i,
+            cpp = cpp, cpq = cpq
         );
         let body_insts = format!(
             "{st}={nxt}; {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
@@ -1015,116 +724,18 @@ impl Generator {
         let body_consts = format!(
             "{st}={nxt}; {bc_scatter} ",
             st = var_state, nxt = obf_s_protos,
-            bc_scatter = {
-                // ── ⑥ 常量池查表打散
-                // 读入侧/访问侧各一张调度表，键 = 混淆数字展开式（运行期才是 1/2/3）
-                // 注册洗牌；挂永不命中诱饵键
-                // 缓存检查拆成独立前哨闭包。缓存值只可能是 string/number/false
-                // 用 ~=nil 判命中无歧义。
-                let mt_name = rng.name();
-                let dsp_name = rng.name();
-                // 形态①②：__index 三handler+驱动换相
-                let hh_name = rng.name();
-                let (hh_cur, hh_c, hh_a2, hh_aux) = (rng.name(), rng.name(), rng.name(), rng.name());
-                let hh_codes: Vec<i64> = {
-                    let mut cs = Vec::new();
-                    while cs.len() < 5 {
-                        let m = rng.range(1 << 20, (1 << 24) - 1) as i64;
-                        if !cs.contains(&m) { cs.push(m); }
-                    }
-                    cs
-                };
-                let (hh_ret, hh_nil, hh_next, hh_val, hh_fail) =
-                    (hh_codes[0], hh_codes[1], hh_codes[2], hh_codes[3], hh_codes[4]);
-                let (x_ret1, x_nil1, x_next1, x_val1, x_fail1) =
-                    (eh_ret.as_str(), eh_nil.as_str(), eh_next.as_str(), eh_val.as_str(), eh_fail.as_str());
-                let x_ka = e_ka.as_str();
-                let pk6 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                let (pkB, numB) = (format!("0X{:X}", rng.range(0x10000, 0xFFFFF)), rng.range(100000, 9999999));
-                let (pkC, numC) = (format!("0X{:X}", rng.range(0x10000, 0xFFFFF)), rng.range(100000, 9999999));
-                let (wk2, wk3, wk4) = (format!("0X{:X}", rng.range(0x51, 0xFFFFF)), format!("0X{:X}", rng.range(0x51, 0xFFFFF)), format!("0X{:X}", rng.range(0x51, 0xFFFFF)));
-                let ld_name = rng.name();
-                let memo_name = rng.name();
-                let h_name = rng.name();
-                let _got_name = rng.name();
-                let val_name = rng.name();
-                let one = rng.obfuscate_num(1i64, 1, &keys);
-                let two = rng.obfuscate_num(2i64, 1, &keys);
-                let three = rng.obfuscate_num(3i64, 1, &keys);
-                let zero = rng.obfuscate_num(0i64, 1, &keys);
-                let decoy_ld = rng.range(60, 250);
-                let decoy_dsp = rng.range(60, 250);
-                // 访问侧：tag → 解码闭包（定义顺序洗牌）
-                let mut dsp_defs = vec![
-                    format!("{d}[{t3}]=function(ev) return {fds}(ev[2],ev[3]) end; ",
-                        d = dsp_name, t3 = three, fds = fn_dec_str),
-                    format!("{d}[{t2}]=function(ev) return {fdn}(ev[2],ev[3]) end; ",
-                        d = dsp_name, t2 = two, fdn = fn_dec_num),
-                    format!("{d}[{t1}]=function(ev) return ev[2] end; ", d = dsp_name, t1 = one),
-                    format!("{d}[{dd}]=function(ev) return nil end; ", d = dsp_name, dd = decoy_dsp),
-                ];
-                rng.shuffle(&mut dsp_defs);
-                // 读入侧：tag → 装载闭包（定义顺序洗牌）
-                let mut ld_defs = vec![
-                    format!("{l}[{t3}]=function(pos) local ri={a5}() {ec}[pos]={{3,{gs}[ri+1],ri}} end; ",
-                        l = ld_name, t3 = three, a5 = fn_a5, ec = var_enc_c, gs = global_strings),
-                    format!("{l}[{t2}]=function(pos) local ri={a5}() {ec}[pos]={{2,{gn}[ri+1],ri}} end; ",
-                        l = ld_name, t2 = two, a5 = fn_a5, ec = var_enc_c, gn = global_numbers),
-                    format!("{l}[{t1}]=function(pos) {ec}[pos]={{1,{rd}()~={zero}}} end; ",
-                        l = ld_name, t1 = one, ec = var_enc_c, rd = fn_read_dec, zero = zero),
-                    format!("{l}[{dd}]=function() end; ", l = ld_name, dd = decoy_ld),
-                ];
-                rng.shuffle(&mut ld_defs);
-                let mut lua = format!(
-                    "local {ec}={{}}; local {ca}={{}}; local {dsp}={{}}; local {ld}={{}}; ",
-                    ec = var_enc_c, ca = var_cache, dsp = dsp_name, ld = ld_name);
-                for x in &dsp_defs { lua.push_str(x); }
-                // 缓存前哨：命中（值非 nil）直接短路
-                lua.push_str(&format!(
-                    "local {memo}=function({ix}) local cd={ca}[{ix}] if cd~=nil then return cd end end; ",
-                    memo = memo_name, ix = var_idx_chunk, ca = var_cache));
-                lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
-                lua.push_str(&format!(
-                    "local {hh}={{}}; \
-                     {hh}[{e_ka}]=function({ix},{aux}) if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
-                       local g={memo}({ix}) if g~=nil then if {pj}[{pkB}]=={numB} then else return {x_ret1},g end end while {wk2} do return {x_next1} end end; \
-                     {hh}[{e_kb}]=function({ix}) local {ev}={ec}[{ix}] if not {ev} then return {x_nil1} end \
-                       local {h}={dsp}[{ev}[1]] if not {h} then return {x_nil1} end return {x_val1},{h}({ev}) end; \
-                     {hh}[{e_kc}]=function({ix},{aux}) {ca}[{ix}]={aux} while {wk3} do return {x_ret1},{aux} end end; ",
-                    hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
-                    ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
-                    x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
-                    x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
-                    ev = var_e, h = h_name, dsp = dsp_name, x_nil1 = x_nil1,
-                    x_val1 = x_val1, ca = var_cache, pj = pj_name, pkB = pkB, numB = numB, wk2 = wk2, wk3 = wk3));
-                lua.push_str(&format!(
-                    "{mt}[{idx}]=function({tb},{ix}) local {cur}={x_ka}; local {aux}; \
-                     while true do local {c},{a2}={hh}[{cur}]({ix},{aux}); \
-                       if {c}=={x_ret1} then return {a2} end; \
-                       if {c}=={x_fail1} then return {a2} end; \
-                       if {c}=={x_nil1} then while {wk4} do return nil end end; \
-                       if {c}=={x_next1} then {cur}={e_kb}; else {cur}={e_kc}; {aux}={a2} end; \
-                     end end; ",
-                    mt = mt_name, idx = sc_index2, tb = var_tbl, ix = var_idx_chunk,
-                    cur = hh_cur, x_ka = x_ka, aux = hh_aux, c = hh_c, a2 = hh_a2,
-                    hh = hh_name, x_fail1 = x_fail1, e_kb = e_kb, e_kc = e_kc, wk4 = wk4));
-                lua.push_str(&format!(
-                    "{c}.{pf}=setmetatable({{}},{mt}); ",
-                    c = fn_c, pf = pf_consts, mt = mt_name));
-                for x in &ld_defs { lua.push_str(x); }
-                lua.push_str(&format!(
-                    "local {i}=0; local {n}={a5}(); if not(not {pj}[{pk6}]) then {i}={n}; else \
-                     while {i}<{n} do {i}={i}+1; local {t}={rd}(); \
-                     local {h}={ld}[{t}]; if {h} then if {pj}[{pkC}]=={numC} then else {h}({i}) end end end end; ",
-                    i = v_ch_i, n = v_ch_n, a5 = fn_a5, pj = pj_name, pk6 = pk6,
-                    t = t, rd = fn_read_dec, h = h_name, ld = ld_name, pkC = pkC, numC = numC));
-                lua
-            }
+bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
+                &mut rng, &keys, &kc, pj_name.as_str(),
+                sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
+                var_tbl.as_str(), var_e.as_str(), fn_dec_str.as_str(), fn_dec_num.as_str(),
+                fn_a5.as_str(), fn_read_dec.as_str(), var_enc_c.as_str(), var_cache.as_str(),
+                global_strings.as_str(), global_numbers.as_str(), fn_c.as_str(), pf_consts.as_str(),
+                &v_ch_i, &v_ch_n, &t)
         );
         let pkx1 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
         let body_protos = format!(
             "{st}={nxt}; {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
-             if not {pj}[{pkx1}] then while {i} < {n} do {i} = {i} + 1; {c}.{pf_protos}[{i}]={dc}() end else {i}={n}; {n}=0X0; end; ",
+             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; {c}.{pf_protos}[{i}]={dc}() end else {i}={n}; {n}=0X0; end; ",
             st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
             dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1
         );
@@ -1134,7 +745,7 @@ impl Generator {
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; ",
             st = var_state, nxt = obf_s_ret, a5 = fn_a5, rs = fn_read_string, i = v_ch_i, n = v_ch_n
         );
-        let body_ret = format!("if not(not {pj}[{pkx1}]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; ",
+        let body_ret = format!("if not(not {pj}[({pkx1})]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; ",
             out = v_ch_out, c = fn_c, g = v_ch_g, pj = pj_name, pkx1 = pkx1);
 
         let mut ch_pairs: Vec<(String, String)> = vec![

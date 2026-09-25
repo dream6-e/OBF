@@ -521,7 +521,7 @@ impl Parser {
                     self.consume(",")?;
                     let limit = self.parse_expr_bp(0)?;
                     let mut step = None;
-                    if self.peek().map(|tok| tok.text.as_str()) == Some("") {
+                    if self.peek().map(|tok| tok.text.as_str()) == Some(",") {
                         self.advance();
                         step = Some(Box::new(self.parse_expr_bp(0)?));
                     }

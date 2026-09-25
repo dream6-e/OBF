@@ -425,13 +425,7 @@ impl Packer {
                     }
                     format!("s.char({})", char_args)
                 }
-                _ => {
-                    let mut escaped = String::new();
-                    for b in part_bytes {
-                        escaped.push_str(&format!("\\{:03}", b));
-                    }
-                    format!("\"{}\"", escaped)
-                }
+                _ => format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(part_bytes))
             };
             key_parts_exprs.push(expr);
         }
@@ -484,13 +478,7 @@ impl Packer {
                     }
                     format!("s.char({})", char_args)
                 }
-                _ => {
-                    let mut escaped = String::new();
-                    for c in part_chars {
-                        escaped.push_str(&format!("\\{:03}", *c as u8));
-                    }
-                    format!("\"{}\"", escaped)
-                }
+                _ => format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(&part_chars.iter().map(|&c| c as u8).collect::<Vec<u8>>()))
             };
             parts_exprs.push(expr);
         }

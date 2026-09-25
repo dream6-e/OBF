@@ -963,13 +963,25 @@ pub fn mix_encrypt(plain: &[u8], k0: u32, k1: u32) -> Vec<u8> {
 }
 
 /// 把加密结果写成 Lua 的定宽八进制转义字面量（`\ddd` 三位，解码端不用猜宽度）。
-pub fn mix_lit(plain: &str, k0: u32, k1: u32) -> String {
-    let mut out = String::from("\"");
-    for c in mix_encrypt(plain.as_bytes(), k0, k1) {
-        out.push_str(&format!("\\{:03}", c));
+/// 形态⑫：字符串混合转义打碎——可打印安全字符随机原样/\\ddd 混拼，
+/// 其余一律 \\ddd（恒 3 位定宽，后跟数字字符不粘连）。
+pub fn lua_mixed(bytes: &[u8]) -> String {
+    use rand::Rng;
+    let mut r = rand::thread_rng();
+    let mut out = String::new();
+    for &c in bytes {
+        let printable = (0x20..0x7F).contains(&c) && c != b'"' && c != b'\\';
+        if printable && r.gen_range(0..2) == 0 {
+            out.push(c as char);
+        } else {
+            out.push_str(&format!("\\{:03}", c));
+        }
     }
-    out.push('"');
     out
+}
+
+pub fn mix_lit(plain: &str, k0: u32, k1: u32) -> String {
+    format!("\"{}\"", lua_mixed(&mix_encrypt(plain.as_bytes(), k0, k1)))
 }
 
 /// 取一组 16 位密钥（k0 恒非 0，否则退化成单字节密钥），

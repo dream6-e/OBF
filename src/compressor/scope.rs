@@ -48,6 +48,19 @@ impl ScopeResolver {
         id
     }
 
+    /// 形态⑧：形参重名遮蔽——同名参数复用同一 VarId，改名后仍为 `function(X,X)`。
+    /// 仅参数走此入口：同函数内名字解析本就指向末参，共享 id 语义等价；
+    /// 局部变量不能复用（闭包按位置捕获首个绑定的语义会被破坏）。
+    pub fn declare_param(&mut self, name: &str) -> VarId {
+        if let Some(cur) = self.scopes.last() {
+            if let Some(&id) = cur.get(name) {
+                self.record_usage(id);
+                return id;
+            }
+        }
+        self.declare_local(name)
+    }
+
     pub fn resolve_var(&self, name: &str) -> Option<VarId> {
         for scope in self.scopes.iter().rev() {
             if let Some(&id) = scope.get(name) {
@@ -166,7 +179,7 @@ impl Stmt {
             Stmt::Function { path: _, method: _, params, is_vararg: _, block } => {
                 r.enter_scope();
                 for p in params {
-                    p.id = r.declare_local(&p.name);
+                    p.id = r.declare_param(&p.name);
                 }
                 block.resolve_no_scope_bracket(r);
                 r.exit_scope();
@@ -175,7 +188,7 @@ impl Stmt {
                 var.id = r.declare_local(&var.name);
                 r.enter_scope();
                 for p in params {
-                    p.id = r.declare_local(&p.name);
+                    p.id = r.declare_param(&p.name);
                 }
                 block.resolve_no_scope_bracket(r);
                 r.exit_scope();
@@ -199,7 +212,7 @@ impl Expr {
             Expr::FuncDef(params, _, block) => {
                 r.enter_scope();
                 for p in params {
-                    p.id = r.declare_local(&p.name);
+                    p.id = r.declare_param(&p.name);
                 }
                 block.resolve_no_scope_bracket(r);
                 r.exit_scope();
