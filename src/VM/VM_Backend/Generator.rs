@@ -833,16 +833,44 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // 从解释器位置前缀取行号（gmatch 取最后一个 :N:，防 chunkname 内含 :N: 干扰），
         // 行号≠期望值时触发同型索引错误自然崩溃——文案为解释器原生，无 error()、无自造报错。
         // 已知边界：最后一个采样点之后的拆行不在守卫范围内。
+        // ⑳.2 守卫伪装化：不再提取行号（gmatch/tonumber/行号变量全删）——
+        // 形态是「自检函数 + pcall 验证 + 错误消息内容断言」：探针每构建从
+        // 索引/调用/算术/连接四族随机取型；期望行以 ":"..(r1-r2)..":" 针式内嵌
+        // 于 find（消息里找不到该前缀才触发同型自然错误）；定义式/内联两形态随机
         let line_guard = |rng: &mut GenRng| -> String {
-            let (v_ok, v_er, v_ln, v_n0, v_n1, v_x, v_z) =
-                (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-            format!(
-                "local {vok},{ver}=pcall(function() local {vn0}; return {vn0}.{vn1} end); local {vln}; \
-                 if not {vok} then for {vx} in tostring({ver}):gmatch(\":(%d+):\") do {vln}=tonumber({vx}) end end; \
-                 if {vln}~=0X2+0X{r:X}-0X{r:X} then local {vz}; {vz}.{vn1}=1 end; ",
-                vok = v_ok, ver = v_er, vn0 = v_n0, vn1 = v_n1, vln = v_ln, vx = v_x, vz = v_z,
-                r = rng.range(0x10, 0xFFFF)
-            )
+            let probe_expr = |rng: &mut GenRng, k: usize| -> String {
+                let v = rng.name();
+                match k {
+                    0 => format!("local {v}; return {v}.{f}", v = v, f = rng.name()),
+                    1 => format!("local {v}; return {v}()", v = v),
+                    2 => format!("local {v}; return {v}+0X1", v = v),
+                    _ => format!("local {v}; return {v}..\"\"", v = v),
+                }
+            };
+            let probe_stmt = |rng: &mut GenRng, k: usize| -> String {
+                let v = rng.name();
+                match k {
+                    0 => format!("local {v}; {v}.{f}=1", v = v, f = rng.name()),
+                    1 => format!("local {v}; {v}()", v = v),
+                    2 => format!("local {v}; {v}={v}+0X1", v = v),
+                    _ => format!("local {v}; {v}={v}..\"\"", v = v),
+                }
+            };
+            let k1 = rng.range(0, 4);
+            let k2 = rng.range(0, 4);
+            let pe = probe_expr(rng, k1);
+            let ps = probe_stmt(rng, k2);
+            let (fa, fb) = (rng.name(), rng.name());
+            let d = rng.range(0x1000, 0xFFFF);
+            let needle = format!("\":\"..(0X{:X}-0X{:X})..\":\"", d + 2, d);
+            if rng.range(0, 2) == 0 {
+                format!("local {fa},{fb}=pcall(function() {pe} end); if not {fa} and type({fb})==\"string\" and not {fb}:find({needle}) then {ps} end; ",
+                    fa = fa, fb = fb, pe = pe, ps = ps, needle = needle)
+            } else {
+                let ff = rng.name();
+                format!("local function {ff}() {pe} end; local {fa},{fb}=pcall({ff}); if not {fa} and type({fb})==\"string\" and not {fb}:find({needle}) then {ps} end; ",
+                    ff = ff, fa = fa, fb = fb, pe = pe, ps = ps, needle = needle)
+            }
         };
         let mut ch_pairs: Vec<(String, String)> = vec![
             (obf_s_init.clone(), body_init),
