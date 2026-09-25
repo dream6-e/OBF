@@ -948,8 +948,10 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
 
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
-        out.push_str(&line_guard(&mut rng));
         out.push_str(&header_block);
+        // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
+        // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
+        out.push_str(&line_guard(&mut rng));
         // ④ 槽位键的运行期推导块必须在所有用键代码之前；
         // finish_setup 把状态链种子/陷阱门等收尾语句并进 setup（在全部注册后调用）
         out.push_str(&sk_setup);
