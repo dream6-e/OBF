@@ -10,7 +10,7 @@ use super::AntiTamper;
 
 // 底层工具层已拆到 Generator_util.rs（原文件 69 KB 太大）。
 // GenRng 继续从这里 re-export，保持 crate 内既有的引用路径不变。
-pub use super::Generator_util::{ControlFlowBuilder, CipherKeys, GenRng};
+pub use super::Generator_util::{CipherKeys, GenRng};
 use super::Generator_util::{
     build_opcode_tree, chacha8_xor, rename_ident, rewrite_chunk, scan_setglobal_targets,
     scan_used_opcodes, uses_ident, write_string, PayloadReader,
@@ -354,7 +354,6 @@ impl Generator {
         ];
         let mut defs: Vec<String> = Vec::new();
         let mut tree_entries: Vec<(u32, String)> = Vec::new();
-        let mut cold_flags: Vec<bool> = Vec::new();
         // 热块内联时要用的状态名 → 槽位号（驱动里声明成局部变量）
         let mut hot_locals: Vec<(String, String)> = Vec::new();
         for (ops, code, name, st) in blocks.iter() {
@@ -404,7 +403,6 @@ impl Generator {
                 );
                 for &op in ops.iter() {
                     tree_entries.push((op, leaf.clone()));
-                    cold_flags.push(true);
                 }
             } else {
                 // 热块完全内联：pc/top/栈 都是 execute 的局部变量，和基线一样快。
@@ -417,84 +415,12 @@ impl Generator {
                 }
                 for &op in ops.iter() {
                     tree_entries.push((op, body.clone()));
-                    cold_flags.push(false);
                 }
             }
         }
         // ③ 随机代码块分配：注册顺序打乱，分发树按**状态号**（随机大整数）路由
         rng.shuffle(&mut defs);
-        // 排序时把 cold 标记一起带着走（两者原本一一对应）
-        {
-            let mut paired: Vec<(u32, String, bool)> = tree_entries.drain(..)
-                .zip(cold_flags.drain(..)).map(|((o, c), f)| (o, c, f)).collect();
-            paired.sort_by_key(|e| e.0);
-            for (o, c, f) in paired { tree_entries.push((o, c)); cold_flags.push(f); }
-        }
-        // ── 本轮：Luraph 风格「逻辑拆分」—— 把分发器拆成 2~3 个 function ──
-        // 一个 execute 里塞着一整棵按 op 值二分的大树，是最像「一个函数干完所有事」的地方。
-        // 现在按 op 值把条目切成三段：**热条目最多的那段留在循环里内联**（热路径完全不提速
-        // 代价），另外两段各自塞进一个只建一次的闭包，循环里只剩 `if op<=… then … elseif …`。
-        // 闭包在 execute 作用域里创建，pc/top/表 等都是同一个 upvalue，语义与内联无关差异；
-        // 被外置的条目本来就要走一次 `V:方法()`，多一层调用对冷路径可忽略。
-        let mut dispatch_defs = String::new();
-        let mut dispatch_code = String::new();
-        if !tree_entries.is_empty() {
-            let n = tree_entries.len();
-            let _hot_total = cold_flags.iter().filter(|f| !**f).count();
-            let mut best: Option<(usize, usize, usize, usize)> = None; // (a, b, inline_seg, hot_ext)
-            for _ in 0..28 {
-                let a = rng.range(n / 5, (n / 2).max(n / 5 + 1));
-                let b = rng.range(a + 1, (n * 5 / 6).max(a + 2).min(n));
-                if b <= a || b >= n { continue; }
-                let segs = [(0usize, a), (a, b), (b, n)];
-                let mut hot_ext = 0usize;
-                let mut best_seg = 0usize;
-                let mut best_hot = 0usize;
-                for (si, (s0, s1)) in segs.iter().enumerate() {
-                    let hh = cold_flags[*s0..*s1].iter().filter(|f| !**f).count();
-                    if hh > best_hot { best_hot = hh; best_seg = si; }
-                }
-                for (si, (s0, s1)) in segs.iter().enumerate() {
-                    if si == best_seg { continue; }
-                    hot_ext += cold_flags[*s0..*s1].iter().filter(|f| !**f).count();
-                }
-                if segs[best_seg].1 - segs[best_seg].0 < n / 4 { continue; }
-                let better = match best {
-                    None => true,
-                    Some((_, _, _, old_hot)) => hot_ext < old_hot,
-                };
-                if better { best = Some((a, b, best_seg, hot_ext)); }
-            }
-            if let Some((a, b, inline_seg, _)) = best {
-                let segs = [(0usize, a), (a, b), (b, n)];
-                let mut calls: Vec<String> = Vec::new();
-                for (si, (s0, s1)) in segs.iter().enumerate() {
-                    if *s1 <= *s0 { calls.push(String::new()); continue; }
-                    if si == inline_seg {
-                        calls.push(build_opcode_tree(&tree_entries, *s0, s1 - 1, "op", &keys, &mut rng));
-                    } else {
-                        let f = rng.name();
-                        dispatch_defs.push_str(&format!(
-                            "local {}=function(op,inst_A,inst_B,inst_C) {} end;",
-                            f, build_opcode_tree(&tree_entries, *s0, s1 - 1, "op", &keys, &mut rng)
-                        ));
-                        calls.push(format!("{}(op,inst_A,inst_B,inst_C)", f));
-                    }
-                }
-                let hi0 = tree_entries[segs[0].1 - 1].0 as i64;
-                let hi1 = tree_entries[segs[1].1 - 1].0 as i64;
-                // 排查开关：KRYVEX_JUNCTION=plain 用普通比较（绕开 opaque predicate）
-                let plain = std::env::var("KRYVEX_JUNCTION").map(|v| v == "plain").unwrap_or(false);
-                let c0 = if plain { ControlFlowBuilder::format_num(hi0, &mut rng) } else { ControlFlowBuilder::generate_opaque_predicate(hi0, "op", "<=", &keys, &mut rng) };
-                let c1 = if plain { ControlFlowBuilder::format_num(hi1, &mut rng) } else { ControlFlowBuilder::generate_opaque_predicate(hi1, "op", "<=", &keys, &mut rng) };
-                let j0 = if plain { format!("op<={}", c0) } else { c0 };
-                let j1 = if plain { format!("op<={}", c1) } else { c1 };
-                dispatch_code.push_str(&format!(
-                    "if {} then {} elseif {} then {} else {} end ",
-                    j0, calls[0], j1, calls[1], calls[2]
-                ));
-            }
-        }
+        tree_entries.sort_by_key(|e| e.0);
 
         // 这几个哨兵常量在**每次 VM 调用**和**每次 return** 时都要重新求值（下面的
         // execute 前导 + 三个返回钩子 + 返回分派）。按用户要求，一律走 obfuscate_num
@@ -546,16 +472,6 @@ impl Generator {
         // pc/top 是**循环外**的局部变量：热块直接改它们（与基线同速），
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
         block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, &k_pc, var_vm, &k_top));
-        // rk1/rk2 = RK 操作数暂存、r1/r2/r3 = 冷块方法调用的返回槽。
-        // 必须在循环**外**声明：拆出去的分发闭包捕获的与循环内检查 `if r1 then`
-        // 读到的必须是同一个局部绑定，否则 RETURN 冷叶的 r1=true 会写进
-        // 全局、循环内永远读不到 → 函数不返回，pc 走出指令流。
-        block_execute_def.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
-        // 拆出去的分发闭包建在这里：pc/top/表都已经是局部变量（闭包捕获同一份 upvalue），
-        // 而且整个 execute 只建一次（不是每指令重建）。
-        if !dispatch_defs.is_empty() {
-            block_execute_def.push_str(&dispatch_defs);
-        }
 
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）：保持一个可运行的空循环
@@ -571,14 +487,8 @@ impl Generator {
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
             block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
 
-            // rk1/rk2/r1/r2/r3 改为循环外声明一次：拆出去的分发闭包要捕获它们
-            // （RETURN 冷叶写 r1 → 循环尾 `if r1 then` 读 —— 必须是同一个绑定；
-            //   r1=true 后当轮立即 return，不存在读到陈旧值的问题）。
-            if dispatch_code.is_empty() {
-                block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, "op", &keys, &mut rng));
-            } else {
-                block_execute_def.push_str(&dispatch_code);
-            }
+            block_execute_def.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
+            block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, "op", &keys, &mut rng));
             block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, &k_mode, var_md, obf1, var_vm, &k_retv, var_md, obf2, var_vm, &k_retv, var_vm, &k_retf, var_vm, &k_rett));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
