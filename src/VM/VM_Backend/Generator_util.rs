@@ -51,6 +51,19 @@ pub(super) fn chacha8_xor(key: &[u32; 8], nonce: [u32; 3], data: &[u8]) -> Vec<u
     data.iter().zip(ks.iter()).map(|(b, k)| b ^ k).collect()
 }
 
+/// ⑰ 常量按原型分组内联加密：每组独立 key/salt/nonce 布局/kind。
+/// 密文块直接写进各原型的常量节——产物里不再存在整张中央密文表，
+/// 恢复一组参数也只能解「用了这一组的那些原型」的常量。
+pub(super) const CONST_GROUPS: usize = 4;
+
+pub(super) struct EncCtx {
+    pub keys: Vec<[u32; 8]>,
+    pub salts: Vec<u32>,
+    pub layouts: Vec<[usize; 3]>,
+    pub kstr: Vec<u32>,
+    pub knum: Vec<u32>,
+}
+
 pub struct CipherKeys {
     pub grp1: u64,
     pub grp2: u64,
@@ -449,7 +462,7 @@ pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSe
     for _ in 0..upv_count { r.read_string(); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mut Vec<Vec<u8>>, numbers: &mut Vec<u64>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, rng: &mut StdRng) {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng) {
     write_string(w, r.read_string());
     w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec()); w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
@@ -609,32 +622,49 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mu
         i += 1;
     }
 
+    // ⑰ 组字节先行（组=本原型的参数组下标），然后逐条内联密文：
+    // 字符串=tag+长度前缀密文；数字=tag+8B 密文。nonce 的池下标改用
+    // **节内槽位号**（与 Lua 侧 pos-1 一致）；同值复用同一 (blob,li)。
+    w.push(group as u8);
     w.extend_from_slice(&const_count.to_le_bytes());
+    let mut slot: u32 = 0;
+    let mut seen: std::collections::HashMap<Vec<u8>, (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
     for (idx, (c_type, bytes)) in local_consts.iter().enumerate() {
         if omit_const.contains(&idx) {
             w.push(0);
+            slot += 1;
             continue;
         }
-        w.push(*c_type);
         match c_type {
-            0 => {}
-            1 => w.push(bytes[0]),
-            2 => {
-                let n = u64::from_le_bytes(bytes.as_slice().try_into().unwrap());
-                let pos = numbers.iter().position(|&x| x == n).unwrap_or_else(|| { numbers.push(n); numbers.len() - 1 });
-                w.extend_from_slice(&(pos as u32).to_le_bytes());
-            }
-            3 => {
-                let pos = strings.iter().position(|x| x == bytes).unwrap_or_else(|| { strings.push(bytes.clone()); strings.len() - 1 });
-                w.extend_from_slice(&(pos as u32).to_le_bytes());
+            0 => { w.push(0); }
+            1 => { w.push(1); w.push(bytes[0]); }
+            2 | 3 => {
+                let entry = match seen.get(bytes) {
+                    Some(e) => e.clone(),
+                    None => {
+                        let li = slot;
+                        let kind = if *c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
+                        let src = [enc.salts[group], li, kind];
+                        let nonce = [src[enc.layouts[group][0]], src[enc.layouts[group][1]], src[enc.layouts[group][2]]];
+                        let blob = chacha8_xor(&enc.keys[group], nonce, bytes);
+                        seen.insert(bytes.clone(), (*c_type, blob.clone(), li));
+                        (*c_type, blob, li)
+                    }
+                };
+                w.push(*c_type);
+                if *c_type == 2 { w.extend_from_slice(&entry.1); } else { write_string(w, &entry.1); }
             }
             _ => panic!(),
         }
+        slot += 1;
     }
 
     let p_count = r.read_u32();
     w.extend_from_slice(&p_count.to_le_bytes());
-    for _ in 0..p_count { rewrite_chunk(r, w, strings, numbers, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, rng); }
+    for _ in 0..p_count {
+        let g2 = rng.random_range(0..CONST_GROUPS);
+        rewrite_chunk(r, w, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng);
+    }
     let l_count = r.read_u32();
     w.extend_from_slice(&l_count.to_le_bytes());
     r.read_bytes((l_count * 4) as usize);

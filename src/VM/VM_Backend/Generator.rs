@@ -98,10 +98,28 @@ impl Generator {
             }
         }
 
-        let mut strings = Vec::new(); let mut numbers = Vec::new(); let mut rewritten_chunks = Vec::new();
+        let mut rewritten_chunks = Vec::new();
         let mut reader = PayloadReader { data: payload, pos: 0 };
         let mut rewrite_rng = StdRng::seed_from_u64(self.ctx.seed + 1);
         let mut fused_used: HashSet<usize> = HashSet::new();
+        // ⑰ 常量按原型分组内联加密：每组独立 key/salt/nonce 布局/kind；
+        // 密文直接写进各原型常量节，中央 gs/gn 密文表废除
+        const CG: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
+        let mut chacha_keys: Vec<[u32; 8]> = Vec::with_capacity(CG);
+        for _ in 0..CG { let mut row = [0u32; 8]; for v in row.iter_mut() { *v = rng.next(); } chacha_keys.push(row); }
+        let mut chacha_salts: Vec<u32> = Vec::with_capacity(CG);
+        for _ in 0..CG { chacha_salts.push(rng.next()); }
+        let mut nonce_layouts: Vec<[usize; 3]> = Vec::with_capacity(CG);
+        for _ in 0..CG {
+            let mut ly = [0usize, 1, 2];
+            for j in (1..3).rev() { let k = rng.range(0, j + 1); ly.swap(j, k); }
+            nonce_layouts.push(ly);
+        }
+        let mut kstr: Vec<u32> = Vec::with_capacity(CG);
+        let mut knum: Vec<u32> = Vec::with_capacity(CG);
+        for _ in 0..CG { kstr.push(rng.next()); knum.push(rng.next()); }
+        let enc = crate::VM::VM_Backend::Generator_util::EncCtx { keys: chacha_keys.clone(), salts: chacha_salts.clone(), layouts: nonce_layouts.clone(), kstr, knum };
+        let root_group = rng.range(0, CG);
         // ⑮ 指令格式改版：线上 op 字段不再是 8 万段别名，而是逐别名随机 32 位魔数；
         // 派发树在魔数空间二分（阈值=魔数），与操作类别的数值区间彻底解耦
         let mut op_magic: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
@@ -117,50 +135,14 @@ impl Generator {
                 op_magic.insert(v, m);
             }
         }
-        rewrite_chunk(&mut reader, &mut rewritten_chunks, &mut strings, &mut numbers, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &mut rewrite_rng);
+        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng);
 
-        let mut builtin_pool_indices: Vec<usize> = Vec::with_capacity(Opcodes::builtins::BUILTIN_NAMES.len());
-        for name in Opcodes::builtins::BUILTIN_NAMES.iter() {
-            let nb = name.as_bytes().to_vec();
-            let pos = strings.iter().position(|x| x == &nb).unwrap_or_else(|| { strings.push(nb); strings.len() - 1 });
-            builtin_pool_indices.push(pos);
-        }
-
-        // ⑯ 常量池参数组化：CG 组独立 key/salt/nonce 布局（+各组 sigma 下标排列见发射段）
-        // ——单组 key 泄露只暴露 1/CG 常量，且各组 nonce 三元排布互不相同
-        const CG: usize = 4;
-        let mut chacha_keys: [[u32; 8]; CG] = [[0u32; 8]; CG];
-        for row in chacha_keys.iter_mut() { for v in row.iter_mut() { *v = rng.next(); } }
-        let mut chacha_salts: [u32; CG] = [0u32; CG];
-        for v in chacha_salts.iter_mut() { *v = rng.next(); }
-        let mut nonce_layouts: [[usize; 3]; CG] = [[0, 1, 2]; CG];
-        for ly in nonce_layouts.iter_mut() {
-            for j in (1..3).rev() { let k = rng.range(0, j + 1); ly.swap(j, k); }
-        }
-        let nonce_of = |g: usize, idx: u32, kind: u32| -> [u32; 3] {
-            let src = [chacha_salts[g], idx, kind];
-            [src[nonce_layouts[g][0]], src[nonce_layouts[g][1]], src[nonce_layouts[g][2]]]
-        };
-
-        let mut pool_bytes = Vec::new();
-        pool_bytes.extend_from_slice(&(strings.len() as u32).to_le_bytes());
-        for (idx, s) in strings.iter().enumerate() {
-            let g = idx % CG;
-            let enc_s = chacha8_xor(&chacha_keys[g], nonce_of(g, idx as u32, 0), s);
-            write_string(&mut pool_bytes, &enc_s);
-        }
-        pool_bytes.extend_from_slice(&(numbers.len() as u32).to_le_bytes());
-        for (idx, n) in numbers.iter().enumerate() {
-            let g = idx % CG;
-            let enc_n_bytes = chacha8_xor(&chacha_keys[g], nonce_of(g, idx as u32, 1), &n.to_le_bytes());
-            pool_bytes.extend_from_slice(&enc_n_bytes);
-        }
-        
+        // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
         let (mut k1, mut k2, mut k3, mut k4) = ((rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8);
         combined_payload.push(k1); combined_payload.push(k2); combined_payload.push(k3); combined_payload.push(k4);
         
-        combined_payload.extend(pool_bytes); combined_payload.extend(rewritten_chunks);
+        combined_payload.extend(rewritten_chunks);
 
         // 对 4 字节密钥之后的**全部内容**做同一道滚动字节变换 —— 常量池和指令流
         // 共用一条连续的 keystream。指令流此前是明文追加的，固定 10 字节一条
@@ -568,17 +550,13 @@ impl Generator {
 
         let block_decoder_script = decoder_script.replace("\n", " ");
         
-        let var_idx = rng.name(); let var_b = rng.name(); let var_tamper = rng.name(); let fn_s_byte = rng.name(); let fn_s_sub = rng.name(); let var_raw_p = rng.name(); let var_chk = rng.name(); let var_p = rng.name(); let var_a2 = rng.name(); let fn_a3 = rng.name(); let x = rng.name(); let var__a = rng.name(); let var__b = rng.name(); let fn_read_dec = rng.name(); let fn_bxor = rng.name(); let fn_b_rotr = rng.name(); let fn_a5 = rng.name(); let fn_read_string = rng.name(); let fn_a10 = rng.name(); let fn_dec_num = rng.name(); let fn_dec_str = rng.name(); let global_strings = rng.name(); let global_numbers = rng.name(); let fn_decode_chunk = rng.name(); let fn_u32_dec = rng.name(); let l = rng.name(); let s_t = rng.name(); let v = rng.name(); let v_sign = rng.name(); let v_exp = rng.name(); let v_mant = rng.name(); let t = rng.name(); let fn_c = rng.name();
+        let var_idx = rng.name(); let var_b = rng.name(); let var_tamper = rng.name(); let fn_s_byte = rng.name(); let fn_s_sub = rng.name(); let var_raw_p = rng.name(); let var_chk = rng.name(); let var_p = rng.name(); let var_a2 = rng.name(); let fn_a3 = rng.name(); let x = rng.name(); let var__a = rng.name(); let var__b = rng.name(); let fn_read_dec = rng.name(); let fn_bxor = rng.name(); let fn_b_rotr = rng.name(); let fn_a5 = rng.name(); let fn_read_string = rng.name(); let fn_a10 = rng.name(); let fn_decode_chunk = rng.name(); let fn_u32_dec = rng.name(); let l = rng.name(); let s_t = rng.name(); let v = rng.name(); let v_sign = rng.name(); let v_exp = rng.name(); let v_mant = rng.name(); let t = rng.name(); let fn_c = rng.name();
         let var_boot_env = rng.name(); let var_bname = rng.name();
 
         let fn_qr = rng.name();
         let fn_xor32 = rng.name();
         let fn_rotl32 = rng.name();
-        let fn_chacha_block = rng.name();
-        let fn_chacha_stream = rng.name();
         let xor_tbl_var = rng.name();
-        let kind_str_obf = rng.obfuscate_num(0i64, 1, &keys);
-        let kind_num_obf = rng.obfuscate_num(1i64, 1, &keys);
 
         // ChaCha 的 4 个 sigma 常量（"expand 32-byte k"）不以字面量出现在产物里；
         // ⑯ 每组独立派生：sigma_i=(d_i+K_g[idx_i])%2^32，idx 是每组自己的 [1..8] 洗牌排列
@@ -601,44 +579,73 @@ impl Generator {
             "local function {qr}(s,a,b,c,d) s[a]=(s[a]+s[b])%4294967296; s[d]={xor32}(s[d],s[a]); s[d]={rotl32}(s[d],16); s[c]=(s[c]+s[d])%4294967296; s[b]={xor32}(s[b],s[c]); s[b]={rotl32}(s[b],12); s[a]=(s[a]+s[b])%4294967296; s[d]={xor32}(s[d],s[a]); s[d]={rotl32}(s[d],8); s[c]=(s[c]+s[d])%4294967296; s[b]={xor32}(s[b],s[c]); s[b]={rotl32}(s[b],7) end; ",
             qr = fn_qr, xor32 = fn_xor32, rotl32 = fn_rotl32
         ));
-        // ⑯ 每组：独立 K 表 + salt + sigma 排列 + cblock/cstream；nonce 布局取 nonce_layouts[g]
-        let mut stream_names: [String; CG] = std::array::from_fn(|_| String::new());
+        // ⑰ 每组一个自包含簇：K/salt/sigma 排列/cblock/cstream + 专属 dec_str/dec_num
+        // （无统一路由入口——四个簇打散插到产物不同位置，各原型按组直连本簇解码器）
+        let mut clusters: Vec<String> = Vec::with_capacity(CG);
+        let mut ds_names: [String; CG] = std::array::from_fn(|_| String::new());
+        let mut dn_names: [String; CG] = std::array::from_fn(|_| String::new());
         for g in 0..CG {
+            let mut cl = String::new();
             let kname = rng.name();
             let slname = rng.name();
             let sname = rng.name();
-            let cbname = if g == 0 { fn_chacha_block.clone() } else { rng.name() };
-            let key_lua = (0..8).map(|i| rng.obfuscate_num(chacha_keys[g][i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
-            let salt_lua = rng.obfuscate_num(chacha_salts[g] as i64, 1, &keys);
+            let cbname = rng.name();
+            let key_lua = (0..8).map(|i| rng.obfuscate_num(enc.keys[g][i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
+            let salt_lua = rng.obfuscate_num(enc.salts[g] as i64, 1, &keys);
             let mut idxs: Vec<usize> = vec![1, 2, 3, 4, 5, 6, 7, 8];
             for j in (1..idxs.len()).rev() { let k = rng.range(0, j + 1); idxs.swap(j, k); }
             let sig_idx = [idxs[0], idxs[1], idxs[2], idxs[3]];
             let sigma_lua = (0..4)
                 .map(|i| {
-                    let d = sigma[i].wrapping_sub(chacha_keys[g][sig_idx[i] - 1]);
+                    let d = sigma[i].wrapping_sub(enc.keys[g][sig_idx[i] - 1]);
                     format!("(({}+K[{}])%4294967296)", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i])
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            block_chacha_setup.push_str(&format!(
+            cl.push_str(&format!(
                 "local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
                 kn = kname, key_lua = key_lua, sl = slname, salt_lua = salt_lua));
-            block_chacha_setup.push_str(&format!(
+            cl.push_str(&format!(
                 "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
                 cb = cbname, kn = kname, qr = fn_qr, sig = sigma_lua));
             let mut args: [String; 3] = std::array::from_fn(|_| String::new());
             for j in 0..3 {
-                args[j] = match nonce_layouts[g][j] { 0 => slname.clone(), 1 => "pool_idx".to_string(), _ => "kind".to_string() };
+                args[j] = match enc.layouts[g][j] { 0 => slname.clone(), 1 => "pool_idx".to_string(), _ => "kind".to_string() };
             }
-            block_chacha_setup.push_str(&format!(
+            cl.push_str(&format!(
                 "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({a0},{a1},{a2},ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
                 sm = sname, cb = cbname, a0 = args[0], a1 = args[1], a2 = args[2]));
-            stream_names[g] = sname;
+            // 组专属解码器：kind 常量内嵌（每组不同随机值），下标参数=节内槽位号
+            let (vb, vs, ve, vm) = (rng.name(), rng.name(), rng.name(), rng.name());
+            let mut f64_parts = vec![format!("({vb}[7]%16)*2^48", vb = vb), format!("({vb}[6]*2^40)", vb = vb), format!("({vb}[5]*2^32)", vb = vb), format!("({vb}[4]*2^24)", vb = vb), format!("({vb}[3]*2^16)", vb = vb), format!("({vb}[2]*2^8)", vb = vb), format!("{vb}[1]", vb = vb)];
+            rng.shuffle(&mut f64_parts);
+            let (v_num_i, v_num_g, v_num_ks) = (rng.name(), rng.name(), rng.name());
+            let dname = rng.name();
+            cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decnum(
+                dname.as_str(), sname.as_str(), rng.obfuscate_num(enc.knum[g] as i64, 1, &keys).as_str(), vb.as_str(),
+                xor_tbl_var.as_str(), vs.as_str(), ve.as_str(), vm.as_str(), f64_parts.join("+"),
+                v_num_ks.as_str(), v_num_i.as_str(), v_num_g.as_str()));
+            dn_names[g] = dname;
+            let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
+            let sname_d = rng.name();
+            let kstr_lit = rng.obfuscate_num(enc.kstr[g] as i64, 1, &keys);
+            cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
+                &mut rng, sname_d.as_str(), sname.as_str(), kstr_lit.as_str(),
+                xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
+                v_str_i.as_str(), v_str_g.as_str()));
+            ds_names[g] = sname_d;
+            clusters.push(cl);
         }
-        // 统一入口（dec 函数接口不变）：池下标模 CG 路由到参数组
-        block_chacha_setup.push_str(&format!(
-            "local function {cstream}(pool_idx,kind,n) local gg=pool_idx%{cg}; if gg==0 then return {s0}(pool_idx,kind,n) elseif gg==1 then return {s1}(pool_idx,kind,n) elseif gg==2 then return {s2}(pool_idx,kind,n) else return {s3}(pool_idx,kind,n) end; end; ",
-            cstream = fn_chacha_stream, cg = CG, s0 = stream_names[0], s1 = stream_names[1], s2 = stream_names[2], s3 = stream_names[3]));
+        // 簇落位洗牌：1 个进 chacha_setup 尾部，其余 3 个作为独立 parts 插在
+        // chacha_setup 之后、decode_chunk 之前（词法作用域先行，落位随机）
+        let mut cluster_order: Vec<usize> = (0..CG).collect();
+        rng.shuffle(&mut cluster_order);
+        block_chacha_setup.push_str(&clusters[cluster_order[0]]);
+        let cluster_parts: Vec<String> = vec![
+            clusters[cluster_order[1]].clone(),
+            clusters[cluster_order[2]].clone(),
+            clusters[cluster_order[3]].clone(),
+        ];
         
         let (fh0, fh1) = crate::VM::VM_Backend::Generator_util::stream_key("function", &mut rng);
         let sc_fn_hdr = at.st.call("function", fh0, fh1);
@@ -707,61 +714,10 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
                 &v_u32_t, &v_u32_n, &v_u32_i, &v_u32_v, &v_rs_l, &v_a10_v, &v_a10_h)
         );
         
-        let mut f64_parts = vec![format!("({}[7]%16)*2^48", var__b), format!("({}[6]*2^40)", var__b), format!("({}[5]*2^32)", var__b), format!("({}[4]*2^24)", var__b), format!("({}[3]*2^16)", var__b), format!("({}[2]*2^8)", var__b), format!("{}[1]", var__b)];
-        rng.shuffle(&mut f64_parts);
+        // ⑰ 旧统一 dec_num/dec_str 已由四组簇内专属解码器取代。
 
-        let (v_num_i, v_num_g, v_num_ks) = (rng.name(), rng.name(), rng.name());
-        // 原形态：for+「v[8]>=128 and -1 or 1」+floor 取指数，一眼 IEEE754。
-        // 现在：while + 显式下标；符号位改成 1-2*((v8-v8%128)/128)；
-        // 指数位用 (v8%128)*8*2 + (v7-v7%16)/16（等价于 (v8%128)*16+floor(v7/16)）
-        // 分支顺序也换（互斥）。2^(-1074)/2^(exp-1075) 是浮点语义，
-        // 绝不能改成 1/2^1074 这类写法（会下溢成 0），所以原样保留。
-        let block_dec_numbers = crate::VM::VM_Backend::Generator_flow::build_decnum(
-            fn_dec_num.as_str(), fn_chacha_stream.as_str(), kind_num_obf.as_str(), var__b.as_str(),
-            xor_tbl_var.as_str(), v_sign.as_str(), v_exp.as_str(), v_mant.as_str(), f64_parts.join("+"),
-            v_num_ks.as_str(), v_num_i.as_str(), v_num_g.as_str());
-
-        let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
-        // 原形态：for j=1,len + 表下标拼接。现在
-        let block_dec_strings = crate::VM::VM_Backend::Generator_flow::build_decstr(
-            &mut rng, fn_dec_str.as_str(), fn_chacha_stream.as_str(), kind_str_obf.as_str(),
-            xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
-            v_str_i.as_str(), v_str_g.as_str());
-
-        let (v_pl_i, v_pl_c, v_pl_n, v_pl_s, v_pl_k, v_pl_v) =
-            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-        // 池初始化原本是两个干净的 for 循环（`for i=1,n do ... end`），现在都换成
-        // while + 显式自增下标 + 独立局部计数，长度/个数也不再和循环变量同名
-        // ⑦ 循环壳随机轮换：while / repeat until 逐循环抽签（壳串先独立拼好再注入）
-        let mk_shell = |rng: &mut GenRng, a: &str, b: String| -> (String, String) {
-            if rng.range(0, 2) == 0 {
-                (format!("while {x} < {y} do {x} = {x} + 1; ", x = a, y = b), "end; ".to_string())
-            } else {
-                (format!("repeat if {x} >= {y} then break end; {x} = {x} + 1; ", x = a, y = b), "until false; ".to_string())
-            }
-        };
-        let (o1, c1) = mk_shell(&mut rng, v_pl_i.as_str(), v_pl_c.clone());
-        let (o2, c2) = mk_shell(&mut rng, v_pl_k.as_str(), v_pl_n.clone());
-        let block_pools_init_strings = format!(
-            "local {gs}={{}}; local {i}=0; local {c}={u32d}(); \
-             {o1}local {n}={u32d}(); local {s}={{}}; local {k}=0; \
-             {o2}{s}[{k}]=string_char({rd}()) {c2} \
-             {gs}[{i}]=table_concat({s}); {c1} ",
-            gs = global_strings, u32d = fn_u32_dec, rd = fn_read_dec,
-            i = v_pl_i, c = v_pl_c, n = v_pl_n, s = v_pl_s, k = v_pl_k,
-            o1 = o1, c1 = c1, o2 = o2, c2 = c2
-        );
-        let (o1, c1) = mk_shell(&mut rng, v_pl_i.as_str(), v_pl_c.clone());
-        let (o2, c2) = mk_shell(&mut rng, v_pl_k.as_str(), "8".to_string());
-        let block_pools_init_numbers = format!(
-            "local {gn}={{}}; local {i}=0; local {c}={u32d}(); \
-             {o1}local {v}={{}}; local {k}=0; \
-             {o2}{v}[{k}]={rd}() {c2} {gn}[{i}]={v}; {c1} ",
-            gn = global_numbers, u32d = fn_u32_dec, rd = fn_read_dec,
-            i = v_pl_i, c = v_pl_c, v = v_pl_v, k = v_pl_k,
-            o1 = o1, c1 = c1, o2 = o2, c2 = c2
-        );
-
+// ⑰ 中央字符串/数值池初始化块废除（池不存在了）。⑦ 的 while/repeat
+        // 抽签壳保留在 body_ret/body_debug；池壳随池一起退役。
         let var_enc_c = rng.name();
         let var_tbl = rng.name();
         let var_idx_chunk = rng.name();
@@ -827,9 +783,9 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
 bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
-                var_tbl.as_str(), var_e.as_str(), fn_dec_str.as_str(), fn_dec_num.as_str(),
+                var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(),
                 fn_a5.as_str(), fn_read_dec.as_str(), var_enc_c.as_str(), var_cache.as_str(),
-                global_strings.as_str(), global_numbers.as_str(), fn_c.as_str(), pf_consts.as_str(),
+                fn_c.as_str(), pf_consts.as_str(),
                 &v_ch_i, &v_ch_n, &t)
         );
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
@@ -896,10 +852,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             block_dec_helpers,
             block_dec_readers,
             block_chacha_setup,
-            block_dec_numbers,
-            block_dec_strings,
-            block_pools_init_strings,
-            block_pools_init_numbers,
+            cluster_parts[0].clone(),
+            cluster_parts[1].clone(),
+            cluster_parts[2].clone(),
             block_dec_chunk,
         ];
 
@@ -931,16 +886,53 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&format!("local main_chunk={}(); ", fn_decode_chunk));
         out.push_str(&at.trigger);
         out.push_str(&format!(" {} = {{}}; local {} = (getfenv and getfenv() or _ENV or _G); local {}; ", var_builtin_reg, var_boot_env, var_bname));
-        for (i, name) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
-            let slot = builtin_slot_perm[i];
-            let raw_idx = builtin_pool_indices[i];
-            let lua_idx = raw_idx + 1;
+        // ⑰ 内建名专用簇：独立 key/salt/kind，密文以混合转义字面量内嵌，
+        // 与四组常量簇完全分离——导出任何常量簇参数都拿不到内建名
+        {
+            let bkey: [u32; 8] = std::array::from_fn(|_| rng.next());
+            let bsalt: u32 = rng.next();
+            let bkind: u32 = rng.next();
+            let mut boot_lits: Vec<String> = Vec::with_capacity(Opcodes::builtins::BUILTIN_NAMES.len());
+            for (i, name) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
+                let blob = crate::VM::VM_Backend::Generator_util::chacha8_xor(&bkey, [bsalt, i as u32, bkind], name.as_bytes());
+                boot_lits.push(format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(&blob)));
+            }
+            let (bk, bs, bcb, bsm, bdec, bpt) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+            let key_lua = (0..8).map(|i| rng.obfuscate_num(bkey[i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
+            let salt_lua = rng.obfuscate_num(bsalt as i64, 1, &keys);
+            let mut idxs: Vec<usize> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+            for j in (1..idxs.len()).rev() { let k = rng.range(0, j + 1); idxs.swap(j, k); }
+            let sig_idx = [idxs[0], idxs[1], idxs[2], idxs[3]];
+            let sigma_lua = (0..4)
+                .map(|i| {
+                    let d = sigma[i].wrapping_sub(bkey[sig_idx[i] - 1]);
+                    format!("(({}+K[{}])%4294967296)", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i])
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             out.push_str(&format!(
-                "{bname}={fn_dec_str}({gs}[{lidx}],{ridx}); {reg}[{slot}]={benv}[{bname}]; if {reg}[{slot}]==nil and getgenv then {reg}[{slot}]=getgenv()[{bname}] end; ",
-                bname = var_bname, fn_dec_str = fn_dec_str, gs = global_strings,
-                lidx = lua_idx, ridx = raw_idx, reg = var_builtin_reg, slot = slot + 1, benv = var_boot_env
-            ));
-            let _ = name;
+                "local {bp}={{{lits}}}; local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
+                bp = bpt, lits = boot_lits.join(","), kn = bk, key_lua = key_lua, sl = bs, salt_lua = salt_lua));
+            out.push_str(&format!(
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
+                cb = bcb, kn = bk, qr = fn_qr, sig = sigma_lua));
+            out.push_str(&format!(
+                "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({sl},pool_idx,kind,ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
+                sm = bsm, cb = bcb, sl = bs));
+            let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
+            let bkind_lit = rng.obfuscate_num(bkind as i64, 1, &keys);
+            out.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
+                &mut rng, bdec.as_str(), bsm.as_str(), bkind_lit.as_str(),
+                xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
+                v_str_i.as_str(), v_str_g.as_str()));
+            for (i, _) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
+                let slot = builtin_slot_perm[i];
+                out.push_str(&format!(
+                    "{bname}={bdec}({bp}[{lidx}],{ridx}); {reg}[{slot}]={benv}[{bname}]; if {reg}[{slot}]==nil and getgenv then {reg}[{slot}]=getgenv()[{bname}] end; ",
+                    bname = var_bname, bdec = bdec, bp = bpt, lidx = i + 1, ridx = i,
+                    reg = var_builtin_reg, slot = slot + 1, benv = var_boot_env
+                ));
+            }
         }
         let fu = rng.name();
         

@@ -393,9 +393,9 @@ pub fn build_readers(
 pub fn build_consts(
     rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, pj_name: &str, fn_bxor: &str,
     sc_index2: &str, sc_kobf: &str, var_state_flag: &str, var_idx_chunk: &str,
-    var_tbl: &str, var_e: &str, fn_dec_str: &str, fn_dec_num: &str,
+    var_tbl: &str, var_e: &str, ds: &[String; 4], dn: &[String; 4], fn_read_string: &str,
     fn_a5: &str, fn_read_dec: &str, var_enc_c: &str, var_cache: &str,
-    global_strings: &str, global_numbers: &str, fn_c: &str, pf_consts: &str,
+    fn_c: &str, pf_consts: &str,
     v_ch_i: &str, v_ch_n: &str, t: &str,
 ) -> String {
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
@@ -444,21 +444,32 @@ pub fn build_consts(
                 let decoy_ld = rng.range(60, 250);
                 let decoy_dsp = rng.range(60, 250);
                 // 访问侧：tag → 解码闭包（定义顺序洗牌）
+                // ⑰ 组→解码器绑定：先读组字节（载荷节首），从四个散置簇闭包中
+                // 直连本组的 dec_str/dec_num——无统一路由入口
+                let gname = rng.name();
+                let fds = rng.name();
+                let fdn = rng.name();
+                let sel_s = format!("({g}==0 and {a} or {g}==1 and {b} or {g}==2 and {c} or {d4})",
+                    g = gname, a = ds[0], b = ds[1], c = ds[2], d4 = ds[3]);
+                let sel_n = format!("({g}==0 and {a} or {g}==1 and {b} or {g}==2 and {c} or {d4})",
+                    g = gname, a = dn[0], b = dn[1], c = dn[2], d4 = dn[3]);
                 let mut dsp_defs = vec![
                     format!("{d}[{t3}]=function({ddd},ev) return {fds}(ev[(0X2)],ev[(0X3)]) end; ",
-                        d = dsp_name, t3 = three, fds = fn_dec_str, ddd = ddd),
+                        d = dsp_name, t3 = three, fds = fds, ddd = ddd),
                     format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)]) end; ",
-                        d = dsp_name, t2 = two, fdn = fn_dec_num, ddd = ddd),
+                        d = dsp_name, t2 = two, fdn = fdn, ddd = ddd),
                     format!("{d}[{t1}]=function({ddd},ev) return ev[(0X2)] end; ", d = dsp_name, t1 = one, ddd = ddd),
                     format!("{d}[{dd}]=function(ev) return nil end; ", d = dsp_name, dd = decoy_dsp),
                 ];
                 rng.shuffle(&mut dsp_defs);
                 // 读入侧：tag → 装载闭包（定义顺序洗牌）
+                let bn = rng.name();
+                let bj = rng.name();
                 let mut ld_defs = vec![
-                    format!("{l}[{t3}]=function({ddl},pos) local ri={a5}() {ec}[(pos)]={{3,{gs}[(ri+0X1)],ri}} end; ",
-                        l = ld_name, t3 = three, a5 = fn_a5, ec = var_enc_c, gs = global_strings, ddl = ddl),
-                    format!("{l}[{t2}]=function({ddl},pos) local ri={a5}() {ec}[(pos)]={{2,{gn}[(ri+0X1)],ri}} end; ",
-                        l = ld_name, t2 = two, a5 = fn_a5, ec = var_enc_c, gn = global_numbers, ddl = ddl),
+                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() {ec}[(pos)]={{3,bl,pos-1}} end; ",
+                        l = ld_name, t3 = three, rs = fn_read_string, ec = var_enc_c, ddl = ddl),
+                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{2,{bn},pos-1}} end; ",
+                        l = ld_name, t2 = two, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl),
                     format!("{l}[{t1}]=function({ddl},pos) {ec}[(pos)]={{1,{rd}()~={zero}}} end; ",
                         l = ld_name, t1 = one, ec = var_enc_c, rd = fn_read_dec, zero = zero, ddl = ddl),
                     format!("{l}[{dd}]=function() end; ", l = ld_name, dd = decoy_ld),
@@ -470,6 +481,9 @@ pub fn build_consts(
                     ec = var_enc_c, ca = var_cache, dsp = dsp_name, ld = ld_name,
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
                     w2_ = w2v, w20 = wk2, w3_ = w3v, w30 = wk3, w4_ = w4v, w40 = wk4);
+                lua.push_str(&format!(
+                    "local {g}={rd}(); local {fds},{fdn}={ss},{sn}; ",
+                    g = gname, rd = fn_read_dec, fds = fds, fdn = fdn, ss = sel_s, sn = sel_n));
                 for x in &dsp_defs { lua.push_str(x); }
                 // 缓存前哨：命中（值非 nil）直接短路
                 lua.push_str(&format!(
