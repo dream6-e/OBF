@@ -390,28 +390,37 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 );
             }
             8 => {
-                // ── 反美化守卫（anti-beautify）──
-                // 产物整体写在极少的物理行里，所以「同一行上定义的函数」的 linedefined 必然相等，
-                // pcall 捕获的错误消息里的行号、以及当前执行行也必须落在同一行。
-                // 一旦被 beautifier / 格式化工具重排（每个语句一行），这些等式立刻不成立 → next_bad。
-                // 取行号用的是用户给的写法：先 string.find 抓数字，再分别用 sub 与 char+byte 往返两次取值，
-                // 两次不一致就说明行号被动过手脚。
-                // 判据刻意不比较「错误行号 vs linedefined」——两者来源不同（错误消息 vs debug），
-                // 在 Roblox 一类环境里格式可能有差异会误杀；改成比较同源的
-                // 「错误行号 vs 当前执行行 currentline」，两边都在同一 chunk 里，行号口径一致。
-                // 成员一律字符串键（压缩器的成员改名器会改点访问，见 §5.11）；
-                // 任何一步取不到信息都直接放行，绝不误杀（没有 debug 库的环境也能跑）。
+                // ── 反美化守卫（anti-beautify）：三段管线版 ──
+                // 判定分支与判定顺序跟旧的单段 if/elseif 链**逐条相同**：
+                //   u/v 双路读数不一致 → bad；(l1-l1)+l1~=l2（f2/f3 的 linedefined）→ bad；
+                //   报错行 tonumber 后 ~= 当前行 → bad；任何一步信息取不到 → good（fail-open）。
+                // 改变的只是形态：「能力采样 → 测量 → 判定」拆成三个闭包，键乱序注册、
+                // 逻辑序由顺序表驱动，数据全走闭包 upvalue —— 读起来不再是行号校验梯子。
+                // 字符串照旧全走池（同一个池、同一批哈希），明文零新增。
                 let (g_f1, g_f2, g_f3, g_q) = (rand_var(), rand_var(), rand_var(), rand_var());
-                let (g_d, g_gi, g_i1, g_i2, g_l1, g_l2) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_d, g_gi, g_tn) = (rand_var(), rand_var(), rand_var());
+                let (g_i1, g_i2, g_l1, g_l2) = (rand_var(), rand_var(), rand_var(), rand_var());
                 let (g_ok, g_msg, g_sp, g_ep, g_num) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
-                let (g_u, g_v, g_tn, g_cur, g_cl) = (rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
-                // string 的成员在这个作用域里用到 4 次 => 先 local 出来再用：既省体积
-                // （`{st}.byte` 写四遍比四个短名长），也少四次表索引。
+                let (g_u, g_v, g_cur, g_clv) = (rand_var(), rand_var(), rand_var(), rand_var());
+                // string 的成员在这个作用域里用到 4 次 => 先 local 出来再用。
                 let (g_sb, g_sc, g_sf, g_ss) = (rand_var(), rand_var(), rand_var(), rand_var());
                 let (g_tp, g_pc, g_st) = (rand_var(), rand_var(), rand_var());
-                // 类型名（table/number/function/string）也从池里解出来，同样不留明文。
                 let (g_ts_tab, g_ts_num, g_ts_fun, g_ts_str) =
                     (rand_var(), rand_var(), rand_var(), rand_var());
+                let (g_pt, g_po, g_pj, g_pr) = (rand_var(), rand_var(), rand_var(), rand_var());
+                // 管线键（互异）+ 逻辑序表；注册时键与体配对洗牌，执行按 {po} 的逻辑序走。
+                let (mut k_a, mut k_b, mut k_c) = (
+                    rng.gen_range(0x1000..0xFFFF),
+                    rng.gen_range(0x1000..0xFFFF),
+                    rng.gen_range(0x1000..0xFFFF),
+                );
+                while k_b == k_a { k_b = rng.gen_range(0x1000..0xFFFF); }
+                while k_c == k_a || k_c == k_b { k_c = rng.gen_range(0x1000..0xFFFF); }
+                let (ka, kb, kc) = (
+                    format!("0X{:X}", k_a),
+                    format!("0X{:X}", k_b),
+                    format!("0X{:X}", k_c),
+                );
                 let h_type = poly_hash("type");
                 let h_debug = poly_hash("debug");
                 let h_getinfo = poly_hash("getinfo");
@@ -426,49 +435,57 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let h_ld = poly_hash("linedefined");
                 let h_cur = poly_hash("currentline");
                 let h_pat = poly_hash(":(%d+)[:\r\n ]");
-                check_code = format!(
-                    "local {st}={res}({h_st}); \
-                     local {pc}={res}({h_pc}); \
-                     local {sb},{sc},{sf},{ss}={st}.byte,{st}.char,{st}.find,{st}.sub; \
-                     local {tp}={res}({h_tp}); \
-                     local {d}={res}({h_dbg}); \
-                     local {tb},{nm},{fn},{sg}={dec}({h_tb}),{dec}({h_nm}),{dec}({h_fn}),{dec}({h_sg}); \
-                     local {f1}=function() local {q}=nil; return {q}[1] end; \
-                     local {f2}=function() return 1 end; \
-                     local {f3}=function() return 2 end; \
-                     if {tp}({d})~={tb} then {good} else \
-                     local {gi}={d}[{dec}({h_gi})]; \
-                     if {tp}({gi})~={fn} then {good} else \
-                     local {tn}={res}({h_tn}); \
-                     if {tp}({tn})~={fn} then {good} else \
-                     local {i1},{i2}={gi}({f2},{dec}({h_s})),{gi}({f3},{dec}({h_s})); \
-                     if {tp}({i1})~={tb} or {tp}({i2})~={tb} then {good} else \
-                     local {l1},{l2}={i1}[{dec}({h_ld})],{i2}[{dec}({h_ld})]; \
-                     if {tp}({l1})~={nm} or {tp}({l2})~={nm} then {good} else \
-                     local {ok},{msg}={pc}({f1}); \
-                     if {tp}({msg})~={sg} then {msg}='' end; \
-                     local {sp},{ep},{num}={sf}({msg},{dec}({h_pat})); \
-                     if not {sp} or not {ep} then {good} else \
-                     local {u}={ss}({msg},{sp}+1,{ep}-1); \
-                     local {v}={sc}({sb}({msg},{sp}+1,{ep}-1)); \
-                     local {cur}={gi}(1,{dec}({h_l})); \
-                     local {clv}={cur} and {cur}[{dec}({h_cl})]; \
-                     if not {u} or not {v} then {good} \
-                     elseif {u}~={v} then {bad} \
-                     elseif ({l1}-{l1})+{l1}~={l2} then {bad} \
-                     elseif {clv}~=nil and {tn}({num})~=nil and {tn}({num})~={clv} then {bad} \
-                     else {good} end end end end end end end\n",
-                    sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, st = g_st, h_st = h_string,
-                    tp = g_tp, res = v_res, h_tp = h_type,
-                    d = g_d, h_dbg = h_debug,
+                // ① 能力采样：解出 string/type/debug/pcall/tonumber 与类型名；逐项 fail-open。
+                let phase_a = format!(
+                    "{st}={res}({h_st}); {pc}={res}({h_pc}); {sb},{sc},{sf},{ss}={st}.byte,{st}.char,{st}.find,{st}.sub; {tp}={res}({h_tp}); {d}={res}({h_dbg}); {tb},{nm},{fn},{sg}={dec}({h_tb}),{dec}({h_nm}),{dec}({h_fn}),{dec}({h_sg}); if {tp}({d})~={tb} then {good} end; {gi}={d}[{dec}({h_gi})]; if {tp}({gi})~={fn} then {good} end; {tn}={res}({h_tn}); if {tp}({tn})~={fn} then {good} end; ",
+                    st = g_st, res = v_res, h_st = h_string, pc = g_pc, h_pc = h_pcall,
+                    sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, tp = g_tp, h_tp = h_type,
+                    d = g_d, h_dbg = h_debug, dec = v_dec,
                     tb = g_ts_tab, nm = g_ts_num, fn = g_ts_fun, sg = g_ts_str,
                     h_tb = h_table, h_nm = h_number, h_fn = h_function, h_sg = h_string,
-                    dec = v_dec, f1 = g_f1, q = g_q, f2 = g_f2, f3 = g_f3,
-                    good = next_good, bad = next_bad, gi = g_gi, h_gi = h_getinfo,
-                    tn = g_tn, h_tn = h_tonumber, i1 = g_i1, i2 = g_i2, h_s = h_S,
-                    l1 = g_l1, l2 = g_l2, h_ld = h_ld, ok = g_ok, msg = g_msg, pc = g_pc,
-                    h_pc = h_pcall, sp = g_sp, ep = g_ep, num = g_num, h_pat = h_pat,
-                    u = g_u, v = g_v, cur = g_cur, h_l = h_l, clv = g_cl, h_cl = h_cur
+                    good = next_good, gi = g_gi, h_gi = h_getinfo, tn = g_tn, h_tn = h_tonumber
+                );
+                // ② 测量：f2/f3 的 linedefined、f1 的报错行号（两种读法）、当前执行行。
+                let phase_b = format!(
+                    "{i1},{i2}={gi}({f2},{dec}({h_s})),{gi}({f3},{dec}({h_s})); if {tp}({i1})~={tb} or {tp}({i2})~={tb} then {good} end; {l1},{l2}={i1}[{dec}({h_ld})],{i2}[{dec}({h_ld})]; if {tp}({l1})~={nm} or {tp}({l2})~={nm} then {good} end; local {ok},{msg}={pc}({f1}); if {tp}({msg})~={sg} then {msg}=''  end; {sp},{ep},{num}={sf}({msg},{dec}({h_pat})); if not {sp} or not {ep} then {good} end; {u}={ss}({msg},{sp}+1,{ep}-1); {v}={sc}({sb}({msg},{sp}+1,{ep}-1)); local {cur}={gi}(1,{dec}({h_l})); {clv}={cur} and {cur}[{dec}({h_cl})]; ",
+                    i1 = g_i1, i2 = g_i2, gi = g_gi, f2 = g_f2, f3 = g_f3, dec = v_dec,
+                    h_s = h_S, tp = g_tp, tb = g_ts_tab, good = next_good,
+                    l1 = g_l1, l2 = g_l2, h_ld = h_ld, nm = g_ts_num,
+                    ok = g_ok, msg = g_msg, pc = g_pc, f1 = g_f1, sg = g_ts_str,
+                    sp = g_sp, ep = g_ep, num = g_num, sf = g_sf, h_pat = h_pat,
+                    u = g_u, ss = g_ss, v = g_v, sc = g_sc, sb = g_sb,
+                    cur = g_cur, h_l = h_l, clv = g_clv, h_cl = h_cur
+                );
+                // ③ 判定：与旧链相同的四个分支，最后一个 {good} 收口（链继续/终止）。
+                let phase_c = format!(
+                    "if not {u} or not {v} then {good} end; if {u}~={v} then {bad} end; if ({l1}-{l1})+{l1}~={l2} then {bad} end; if {clv}~=nil and {tn}({num})~=nil and {tn}({num})~={clv} then {bad} end; {good}",
+                    u = g_u, v = g_v, good = next_good, bad = next_bad,
+                    l1 = g_l1, l2 = g_l2, clv = g_clv, tn = g_tn, num = g_num
+                );
+                // 注册乱序：键与体配对后洗牌；执行顺序由 {po}（逻辑序）决定。
+                let mut reg: Vec<(String, String)> = vec![
+                    (ka.clone(), phase_a),
+                    (kb.clone(), phase_b),
+                    (kc.clone(), phase_c),
+                ];
+                for iri in (1..reg.len()).rev() {
+                    let jri = rng.gen_range(0..=iri);
+                    reg.swap(iri, jri);
+                }
+                let reg_s = reg
+                    .iter()
+                    .map(|(kk, bb)| format!("[{}]=function() {} end", kk, bb))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                check_code = format!(
+                    "local {sb},{sc},{sf},{ss},{tp},{d},{tb},{nm},{fn},{sg},{gi},{tn},{i1},{i2},{l1},{l2},{sp},{ep},{num},{u},{v},{clv}; local {f1}=function() local {q}=nil; return {q}[1] end; local {f2}=function() return 1 end; local {f3}=function() return 2 end; local {pt}={{{reg_s}}}; local {po}={{{ka},{kb},{kc}}}; for {pj}=1,0X3 do local {pr}={pt}[{po}[{pj}]](); if {pr}~=nil then return {pr} end end; {good}\n",
+                    sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, tp = g_tp, d = g_d,
+                    tb = g_ts_tab, nm = g_ts_num, fn = g_ts_fun, sg = g_ts_str,
+                    gi = g_gi, tn = g_tn, i1 = g_i1, i2 = g_i2, l1 = g_l1, l2 = g_l2,
+                    sp = g_sp, ep = g_ep, num = g_num, u = g_u, v = g_v, clv = g_clv,
+                    f1 = g_f1, q = g_q, f2 = g_f2, f3 = g_f3,
+                    pt = g_pt, reg_s = reg_s, po = g_po, ka = ka, kb = kb, kc = kc,
+                    pj = g_pj, pr = g_pr, good = next_good
                 );
             }
             _ => {
