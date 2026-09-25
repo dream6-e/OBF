@@ -102,7 +102,22 @@ impl Generator {
         let mut reader = PayloadReader { data: payload, pos: 0 };
         let mut rewrite_rng = StdRng::seed_from_u64(self.ctx.seed + 1);
         let mut fused_used: HashSet<usize> = HashSet::new();
-        rewrite_chunk(&mut reader, &mut rewritten_chunks, &mut strings, &mut numbers, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &mut rewrite_rng);
+        // ⑮ 指令格式改版：线上 op 字段不再是 8 万段别名，而是逐别名随机 32 位魔数；
+        // 派发树在魔数空间二分（阈值=魔数），与操作类别的数值区间彻底解耦
+        let mut op_magic: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        {
+            let mut keys_v: Vec<u32> = Vec::new();
+            for lst in transpile_map.iter().chain(mapped_opcodes.iter()).chain(fused_opcodes.iter()) { keys_v.extend(lst.iter().copied()); }
+            for v in 0..=95u32 { keys_v.push(v); }
+            let bob = crate::VM::Opcodes::builtins::BUILTIN_OP_BASE as u32;
+            for v in bob..bob + 256u32 { keys_v.push(v); }
+            for v in keys_v {
+                if op_magic.contains_key(&v) { continue; }
+                let m = loop { let x = rng.range(0x0100_0000, 0x7FFF_0000) as u32; if !op_magic.values().any(|&y| y == x) { break x; } };
+                op_magic.insert(v, m);
+            }
+        }
+        rewrite_chunk(&mut reader, &mut rewritten_chunks, &mut strings, &mut numbers, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &mut rewrite_rng);
 
         let mut builtin_pool_indices: Vec<usize> = Vec::with_capacity(Opcodes::builtins::BUILTIN_NAMES.len());
         for name in Opcodes::builtins::BUILTIN_NAMES.iter() {
@@ -111,18 +126,33 @@ impl Generator {
             builtin_pool_indices.push(pos);
         }
 
-        let chacha_key: [u32; 8] = std::array::from_fn(|_| rng.next());
-        let chacha_salt: u32 = rng.next();
+        // ⑯ 常量池参数组化：CG 组独立 key/salt/nonce 布局（+各组 sigma 下标排列见发射段）
+        // ——单组 key 泄露只暴露 1/CG 常量，且各组 nonce 三元排布互不相同
+        const CG: usize = 4;
+        let mut chacha_keys: [[u32; 8]; CG] = [[0u32; 8]; CG];
+        for row in chacha_keys.iter_mut() { for v in row.iter_mut() { *v = rng.next(); } }
+        let mut chacha_salts: [u32; CG] = [0u32; CG];
+        for v in chacha_salts.iter_mut() { *v = rng.next(); }
+        let mut nonce_layouts: [[usize; 3]; CG] = [[0, 1, 2]; CG];
+        for ly in nonce_layouts.iter_mut() {
+            for j in (1..3).rev() { let k = rng.range(0, j + 1); ly.swap(j, k); }
+        }
+        let nonce_of = |g: usize, idx: u32, kind: u32| -> [u32; 3] {
+            let src = [chacha_salts[g], idx, kind];
+            [src[nonce_layouts[g][0]], src[nonce_layouts[g][1]], src[nonce_layouts[g][2]]]
+        };
 
         let mut pool_bytes = Vec::new();
         pool_bytes.extend_from_slice(&(strings.len() as u32).to_le_bytes());
         for (idx, s) in strings.iter().enumerate() {
-            let enc_s = chacha8_xor(&chacha_key, chacha_salt, idx as u32, 0, s);
+            let g = idx % CG;
+            let enc_s = chacha8_xor(&chacha_keys[g], nonce_of(g, idx as u32, 0), s);
             write_string(&mut pool_bytes, &enc_s);
         }
         pool_bytes.extend_from_slice(&(numbers.len() as u32).to_le_bytes());
         for (idx, n) in numbers.iter().enumerate() {
-            let enc_n_bytes = chacha8_xor(&chacha_key, chacha_salt, idx as u32, 1, &n.to_le_bytes());
+            let g = idx % CG;
+            let enc_n_bytes = chacha8_xor(&chacha_keys[g], nonce_of(g, idx as u32, 1), &n.to_le_bytes());
             pool_bytes.extend_from_slice(&enc_n_bytes);
         }
         
@@ -245,6 +275,7 @@ impl Generator {
         
         let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: var_builtin_reg.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
         let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
+
         
         raw_handlers = raw_handlers.replace(
             &format!("{}[{}][1]", var_insts, var_pc),
@@ -280,6 +311,42 @@ impl Generator {
             .replace("{RET0}", &format!("self:{}", fn_ret0))
             .replace("{RET1}", &format!("self:{}", fn_ret1))
             .replace("{RET2}", &format!("self:{}", fn_ret2));
+
+        // ⑮ 派发条件换魔数：模板条件是 `elseif op == 别名 then/or`，
+        // 把别名 token 整体换成魔数——下游 parsed/tree 全部拿到魔数
+        for (alias, mag) in op_magic.iter() {
+            raw_handlers = raw_handlers.replace(&format!("op == {} or", alias), &format!("op == {} or", mag));
+        }
+        for (alias, mag) in op_magic.iter() {
+            raw_handlers = raw_handlers.replace(&format!("op == {} then", alias), &format!("op == {} then", mag));
+        }
+        // CLOSURE 模板体内还有一层伪指令 op 值比较（uv_inst[1] == 别名），同批换魔数
+        // （带 " or"/" then" 尾边界——个位数 fallback key 否则会前缀污染长数字）
+        for (alias, mag) in op_magic.iter() {
+            raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} or", alias), &format!("uv_inst[1] == {} or", mag));
+            raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} then", alias), &format!("uv_inst[1] == {} then", mag));
+        }
+        // ⑮ 三处中程读下一条指令的模板（SETLIST/VARARG/CLOSURE 伪指令）同步解码：
+        // 裸 A 读=存值-魔数；复合 inst 的 B/C 按魔数奇偶还原。先改裸读、后改复合体。
+        for (alias, mag) in op_magic.iter() {
+            raw_handlers = raw_handlers.replace(&format!("op == {} or", alias), &format!("op == {} or", mag));
+            raw_handlers = raw_handlers.replace(&format!("op == {} then", alias), &format!("op == {} then", mag));
+        }
+        {
+            let site1 = format!("then c = {}[{}];", var_a_arr, var_pc);
+            let site1_new = format!("then c = ({}[{}]-{}[{}]);", var_a_arr, var_pc, var_opcodes, var_pc);
+            raw_handlers = raw_handlers.replace(&site1, &site1_new);
+            let site3 = format!("[{}[{}] + 1]", var_a_arr, var_pc);
+            let site3_new = format!("[({}[{}]-{}[{}]) + 1]", var_a_arr, var_pc, var_opcodes, var_pc);
+            raw_handlers = raw_handlers.replace(&site3, &site3_new);
+            let comp_old = format!("({{ {}[{}], {}[{}], {}[{}], {}[{}] }})", var_opcodes, var_pc, var_a_arr, var_pc, var_b_arr, var_pc, var_c_arr, var_pc);
+            let comp_new = format!("({{ {}[{}], {}[{}]-{}[{}], {}[{}]%2~=0 and {}[{}] or {}[{}], {}[{}]%2~=0 and {}[{}] or {}[{}] }})",
+                var_opcodes, var_pc,
+                var_a_arr, var_pc, var_opcodes, var_pc,
+                var_opcodes, var_pc, var_c_arr, var_pc, var_b_arr, var_pc,
+                var_opcodes, var_pc, var_b_arr, var_pc, var_c_arr, var_pc);
+            raw_handlers = raw_handlers.replace(&comp_old, &comp_new);
+        }
 
         if raw_handlers.trim_start().starts_with("if op") { raw_handlers = raw_handlers.replacen("if op", "elseif op", 1); }
 
@@ -484,9 +551,11 @@ impl Generator {
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "true"));
 
             block_execute_def.push_str(&format!("local op={}[{}];", var_opcodes, var_pc));
-            block_execute_def.push_str(&format!("local inst_A={}[{}];", var_a_arr, var_pc));
+            // ⑮ 指令解码：A=存值-魔数；魔数奇偶决定 (B,C) 交换还原
+            block_execute_def.push_str(&format!("local inst_A={}[{}]-op;", var_a_arr, var_pc));
             block_execute_def.push_str(&format!("local inst_B={}[{}];", var_b_arr, var_pc));
             block_execute_def.push_str(&format!("local inst_C={}[{}];", var_c_arr, var_pc));
+            block_execute_def.push_str("if op%2~=0 then inst_B,inst_C=inst_C,inst_B end; ");
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
             block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
 
@@ -508,26 +577,12 @@ impl Generator {
         let fn_chacha_block = rng.name();
         let fn_chacha_stream = rng.name();
         let xor_tbl_var = rng.name();
-        let chacha_key_var = rng.name();
-        let chacha_salt_var = rng.name();
         let kind_str_obf = rng.obfuscate_num(0i64, 1, &keys);
         let kind_num_obf = rng.obfuscate_num(1i64, 1, &keys);
-        let chacha_key_lua = (0..8).map(|i| rng.obfuscate_num(chacha_key[i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
-        let chacha_salt_lua = rng.obfuscate_num(chacha_salt as i64, 1, &keys);
 
-        // ChaCha 的 4 个 sigma 常量（"expand 32-byte k"）不再以字面量出现在产物里
-        // 改成逐产物派生：sigma_i = (d_i + K[idx_i]) mod 2^32，其中
-        // d_i = sigma_i - K[idx_i]（wrapping_sub），K 就是下面那份随机 key 的 Lua 表
-        // idx 打乱(3,7,2,6)：恢复式与 K 排列不对应，静态看不出原值。
+        // ChaCha 的 4 个 sigma 常量（"expand 32-byte k"）不以字面量出现在产物里；
+        // ⑯ 每组独立派生：sigma_i=(d_i+K_g[idx_i])%2^32，idx 是每组自己的 [1..8] 洗牌排列
         let sigma: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
-        let sig_idx: [usize; 4] = [3, 7, 2, 6];
-        let sigma_lua = (0..4)
-            .map(|i| {
-                let d = sigma[i].wrapping_sub(chacha_key[sig_idx[i] - 1]);
-                format!("(({}+K[{}])%4294967296)", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i])
-            })
-            .collect::<Vec<_>>()
-            .join(",");
 
         let mut block_chacha_setup = String::new();
         block_chacha_setup.push_str(&format!(
@@ -546,18 +601,44 @@ impl Generator {
             "local function {qr}(s,a,b,c,d) s[a]=(s[a]+s[b])%4294967296; s[d]={xor32}(s[d],s[a]); s[d]={rotl32}(s[d],16); s[c]=(s[c]+s[d])%4294967296; s[b]={xor32}(s[b],s[c]); s[b]={rotl32}(s[b],12); s[a]=(s[a]+s[b])%4294967296; s[d]={xor32}(s[d],s[a]); s[d]={rotl32}(s[d],8); s[c]=(s[c]+s[d])%4294967296; s[b]={xor32}(s[b],s[c]); s[b]={rotl32}(s[b],7) end; ",
             qr = fn_qr, xor32 = fn_xor32, rotl32 = fn_rotl32
         ));
+        // ⑯ 每组：独立 K 表 + salt + sigma 排列 + cblock/cstream；nonce 布局取 nonce_layouts[g]
+        let mut stream_names: [String; CG] = std::array::from_fn(|_| String::new());
+        for g in 0..CG {
+            let kname = rng.name();
+            let slname = rng.name();
+            let sname = rng.name();
+            let cbname = if g == 0 { fn_chacha_block.clone() } else { rng.name() };
+            let key_lua = (0..8).map(|i| rng.obfuscate_num(chacha_keys[g][i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
+            let salt_lua = rng.obfuscate_num(chacha_salts[g] as i64, 1, &keys);
+            let mut idxs: Vec<usize> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+            for j in (1..idxs.len()).rev() { let k = rng.range(0, j + 1); idxs.swap(j, k); }
+            let sig_idx = [idxs[0], idxs[1], idxs[2], idxs[3]];
+            let sigma_lua = (0..4)
+                .map(|i| {
+                    let d = sigma[i].wrapping_sub(chacha_keys[g][sig_idx[i] - 1]);
+                    format!("(({}+K[{}])%4294967296)", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i])
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            block_chacha_setup.push_str(&format!(
+                "local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
+                kn = kname, key_lua = key_lua, sl = slname, salt_lua = salt_lua));
+            block_chacha_setup.push_str(&format!(
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
+                cb = cbname, kn = kname, qr = fn_qr, sig = sigma_lua));
+            let mut args: [String; 3] = std::array::from_fn(|_| String::new());
+            for j in 0..3 {
+                args[j] = match nonce_layouts[g][j] { 0 => slname.clone(), 1 => "pool_idx".to_string(), _ => "kind".to_string() };
+            }
+            block_chacha_setup.push_str(&format!(
+                "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({a0},{a1},{a2},ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
+                sm = sname, cb = cbname, a0 = args[0], a1 = args[1], a2 = args[2]));
+            stream_names[g] = sname;
+        }
+        // 统一入口（dec 函数接口不变）：池下标模 CG 路由到参数组
         block_chacha_setup.push_str(&format!(
-            "local {ckey}={{{key_lua}}}; local {csalt}={salt_lua}; ",
-            ckey = chacha_key_var, key_lua = chacha_key_lua, csalt = chacha_salt_var, salt_lua = chacha_salt_lua
-        ));
-        block_chacha_setup.push_str(&format!(
-            "local function {cblock}(n1,n2,n3,ctr) local K={ckey}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
-            cblock = fn_chacha_block, ckey = chacha_key_var, qr = fn_qr, sig = sigma_lua
-        ));
-        block_chacha_setup.push_str(&format!(
-            "local function {cstream}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cblock}({csalt},pool_idx,kind,ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
-            cstream = fn_chacha_stream, cblock = fn_chacha_block, csalt = chacha_salt_var
-        ));
+            "local function {cstream}(pool_idx,kind,n) local gg=pool_idx%{cg}; if gg==0 then return {s0}(pool_idx,kind,n) elseif gg==1 then return {s1}(pool_idx,kind,n) elseif gg==2 then return {s2}(pool_idx,kind,n) else return {s3}(pool_idx,kind,n) end; end; ",
+            cstream = fn_chacha_stream, cg = CG, s0 = stream_names[0], s1 = stream_names[1], s2 = stream_names[2], s3 = stream_names[3]));
         
         let (fh0, fh1) = crate::VM::VM_Backend::Generator_util::stream_key("function", &mut rng);
         let sc_fn_hdr = at.st.call("function", fh0, fh1);
@@ -730,9 +811,9 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
         let body_insts = format!(
             "{st}={nxt}; {tree9} {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
              local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; \
-             {c}.{pf_opcodes}[{i}]={a5}(); {c}.{pf_a_arr}[{i}]={rd}(); {c}.{pf_b_arr}[{i}]={a10}(); {c}.{pf_c_arr}[{i}]={a10}(); end; ",
+             {c}.{pf_opcodes}[{i}]={a5}(); {c}.{pf_a_arr}[{i}]={a10}(); {c}.{pf_b_arr}[{i}]={a10}(); {c}.{pf_c_arr}[{i}]={a10}(); end; ",
             tree9 = it9(&mut rng, var_state.as_str()),
-            st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, rd = fn_read_dec, a10 = fn_a10,
+            st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
             i = v_ch_i, n = v_ch_n
         );

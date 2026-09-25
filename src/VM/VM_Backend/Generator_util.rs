@@ -46,8 +46,7 @@ fn chacha8_keystream(key: &[u32; 8], nonce: [u32; 3], n_bytes: usize) -> Vec<u8>
     out
 }
 
-pub(super) fn chacha8_xor(key: &[u32; 8], salt: u32, pool_idx: u32, kind: u32, data: &[u8]) -> Vec<u8> {
-    let nonce = [salt, pool_idx, kind];
+pub(super) fn chacha8_xor(key: &[u32; 8], nonce: [u32; 3], data: &[u8]) -> Vec<u8> {
     let ks = chacha8_keystream(key, nonce, data.len());
     data.iter().zip(ks.iter()).map(|(b, k)| b ^ k).collect()
 }
@@ -450,7 +449,7 @@ pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSe
     for _ in 0..upv_count { r.read_string(); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mut Vec<Vec<u8>>, numbers: &mut Vec<u64>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], rng: &mut StdRng) {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mut Vec<Vec<u8>>, numbers: &mut Vec<u64>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, rng: &mut StdRng) {
     write_string(w, r.read_string());
     w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec()); w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
@@ -571,10 +570,14 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mu
                         let fused_vals = fused_map.get(slot_perm[slot]).map(|v| v.as_slice()).unwrap_or(&[]);
                         if !fused_vals.is_empty() {
                             let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
-                            w.extend_from_slice(&selected_op.to_le_bytes());
-                            w.push(a);
-                            w.extend_from_slice(&0u32.to_le_bytes());
-                            w.extend_from_slice(&b1.to_le_bytes()); // 常量下标搬进 C
+                            // ⑮ 线格式：op=魔数、A=(a+魔数) u32、(B,C) 按魔数奇偶预交换
+                            let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
+                            let a_enc = (a as u32).wrapping_add(mag);
+                            let (fb, fc) = if mag % 2 == 1 { (b1, 0u32) } else { (0u32, b1) };
+                            w.extend_from_slice(&mag.to_le_bytes());
+                            w.extend_from_slice(&a_enc.to_le_bytes());
+                            w.extend_from_slice(&fb.to_le_bytes());
+                            w.extend_from_slice(&fc.to_le_bytes()); // 常量下标搬进 C
                             fused_used.insert(slot_perm[slot]);
                             fused_count += 1;
                             i += 1; // i+1 / i+2 照常写出，成为永不执行的死槽
@@ -590,14 +593,19 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mu
                 let op_index = crate::VM::Opcodes::builtins::BUILTIN_OP_BASE + slot_perm[*slot];
                 let mapped_vals = builtin_map.get(op_index).map(|v| v.as_slice()).unwrap_or(&[]);
                 let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op_index as u32 };
-                w.extend_from_slice(&selected_op.to_le_bytes()); w.push(a); w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
+                let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
+                let a_enc = (a as u32).wrapping_add(mag);
+                w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
                 i += 1;
                 continue;
             }
         }
         let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
         let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 };
-        w.extend_from_slice(&selected_op.to_le_bytes()); w.push(a); w.extend_from_slice(&b.to_le_bytes()); w.extend_from_slice(&c.to_le_bytes());
+        let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
+        let a_enc = (a as u32).wrapping_add(mag);
+        let (fb, fc) = if mag % 2 == 1 { (c, b) } else { (b, c) };
+        w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
         i += 1;
     }
 
@@ -626,7 +634,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, strings: &mu
 
     let p_count = r.read_u32();
     w.extend_from_slice(&p_count.to_le_bytes());
-    for _ in 0..p_count { rewrite_chunk(r, w, strings, numbers, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, rng); }
+    for _ in 0..p_count { rewrite_chunk(r, w, strings, numbers, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, rng); }
     let l_count = r.read_u32();
     w.extend_from_slice(&l_count.to_le_bytes());
     r.read_bytes((l_count * 4) as usize);
