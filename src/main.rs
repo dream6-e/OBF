@@ -80,6 +80,15 @@ fn main() {
         source_code = loop_source;
     }
 
+    // --rob：编译成字节码前，把 Roblox 执行器环境检测（samples/Check.lua）原样
+    // 插到源码顶部——include_str! 逐字嵌入不改动一个字节，检测随源码一起进
+    // 字节码被混淆；非执行器环境（无 getgenv 等）会在检测段 error(0,0) 死循环。
+    let source_code = if args.contains(&"--rob".to_string()) {
+        format!("{}\n{}", include_str!("../samples/Check.lua"), source_code)
+    } else {
+        source_code
+    };
+
     // 指令布局逐产物随机化（种子会写进容器头部，反序列化端据此恢复）
     instructions::randomize_global_seed();
 
