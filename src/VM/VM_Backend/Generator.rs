@@ -828,6 +828,22 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         let body_ret = format!("while true do if not(not {pj}[({pkx1})]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; local {r14}=nil; if {r14} then return nil end; break; end; ",
             out = v_ch_out, c = fn_c, g = v_ch_g, pj = pj_name, pkx1 = pkx1, r14 = r14);
 
+        // ⑳ 行完整性守卫（用户 2026-09-25 指示，推翻早前"放弃行数守卫/反美化 fail-open"）：
+        // 产物只许 1 行注释 + 1 行整体逻辑；采样点用 pcall 触发真实索引错误，
+        // 从解释器位置前缀取行号（gmatch 取最后一个 :N:，防 chunkname 内含 :N: 干扰），
+        // 行号≠期望值时触发同型索引错误自然崩溃——文案为解释器原生，无 error()、无自造报错。
+        // 已知边界：最后一个采样点之后的拆行不在守卫范围内。
+        let line_guard = |rng: &mut GenRng| -> String {
+            let (v_ok, v_er, v_ln, v_n0, v_n1, v_x, v_z) =
+                (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+            format!(
+                "local {vok},{ver}=pcall(function() local {vn0}; return {vn0}.{vn1} end); local {vln}; \
+                 if not {vok} then for {vx} in tostring({ver}):gmatch(\":(%d+):\") do {vln}=tonumber({vx}) end end; \
+                 if {vln}~=0X2+0X{r:X}-0X{r:X} then local {vz}; {vz}.{vn1}=1 end; ",
+                vok = v_ok, ver = v_er, vn0 = v_n0, vn1 = v_n1, vln = v_ln, vx = v_x, vz = v_z,
+                r = rng.range(0x10, 0xFFFF)
+            )
+        };
         let mut ch_pairs: Vec<(String, String)> = vec![
             (obf_s_init.clone(), body_init),
             (obf_s_insts.clone(), body_insts),
@@ -871,6 +887,12 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             block_dec_chunk,
         ];
 
+        {
+            let lg20 = line_guard(&mut rng);
+            let gap20 = rng.range(0, parts.len() + 1);
+            parts.insert(gap20, lg20);
+        }
+
         let mut shuffled_guards = at.guards.clone();
         rng.shuffle(&mut shuffled_guards);
 
@@ -881,6 +903,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
 
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
+        out.push_str(&line_guard(&mut rng));
         out.push_str(&header_block);
         // ④ 槽位键的运行期推导块必须在所有用键代码之前；
         // finish_setup 把状态链种子/陷阱门等收尾语句并进 setup（在全部注册后调用）
@@ -896,6 +919,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             out.push_str(" ");
         }
 
+        out.push_str(&line_guard(&mut rng));
         out.push_str(&format!("local main_chunk={}(); ", fn_decode_chunk));
         out.push_str(&at.trigger);
         out.push_str(&format!(" {} = {{}}; local {} = (getfenv and getfenv() or _ENV or _G); local {}; ", var_builtin_reg, var_boot_env, var_bname));

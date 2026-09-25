@@ -236,7 +236,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
          v_res, v_dec, v_env
     ));
     setup.push_str(&format!(
-    "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if z(te)~=v then c(b,n) else g(1) end;break;end;end;rt(typeof,raknet,error,print,_VERSION);\n"
+    "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if te~=nil then if z(te)~=v then c(b,n) else g(1) end end;break;end;end;rt(typeof,raknet,error,print,_VERSION);\n"
 ));
     setup.push_str(&format!("local {}={{}};\n", v_net));
     // 网表的陷阱门：任何取不到的键（有人删掉/改掉某块的键，或自己构造下标试探）

@@ -152,7 +152,8 @@ fn main() {
             let final_code = if args.contains(&"MB".to_string()) {
                 // MB：新外壳自带解压器（DP/LZ + base85），不需要再过源码级压缩器；
                 // 外壳里的负载已经是压缩态，再解析一遍只会白花时间。
-                packer::pack_lua(&processed_vm)
+                // ⑳ MB：载荷头部补同一注释行，使解压后 VM 逻辑与默认模式同为第 2 行（行守卫期望一致）
+                packer::pack_lua(&format!("--Kryvex v2.2\n{}", processed_vm))
             } else {
                 format!(
     "--Kryvex v2.2,by 1%@\n{}",
