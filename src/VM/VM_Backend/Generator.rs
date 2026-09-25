@@ -837,40 +837,57 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // 形态是「自检函数 + pcall 验证 + 错误消息内容断言」：探针每构建从
         // 索引/调用/算术/连接四族随机取型；期望行以 ":"..(r1-r2)..":" 针式内嵌
         // 于 find（消息里找不到该前缀才触发同型自然错误）；定义式/内联两形态随机
+        // ⑳.3 守卫去线性化：逻辑拆进挂表的多个 function、全部以 : 方法调用
+        // 驱动，数据流折进参数树（t:dz(t:cx(e))），定义顺序洗牌+诱饵方法埋伏；
+        // 链路：驱动→m1(pcall 自派发)→m2(探针错误族随机)→m3(find 针式)→
+        // m4(触发族随机：h and 容纳值 or nil 折叠，nil 时自然崩溃)
         let line_guard = |rng: &mut GenRng| -> String {
-            let probe_expr = |rng: &mut GenRng, k: usize| -> String {
+            let tbl = rng.name();
+            let probe_body = |rng: &mut GenRng| -> String {
                 let v = rng.name();
-                match k {
-                    0 => format!("local {v}; return {v}.{f}", v = v, f = rng.name()),
-                    1 => format!("local {v}; return {v}()", v = v),
-                    2 => format!("local {v}; return {v}+0X1", v = v),
-                    _ => format!("local {v}; return {v}..\"\"", v = v),
+                match rng.range(0, 4) {
+                    0 => format!("local {v};return {v}.{f}", v = v, f = rng.name()),
+                    1 => format!("local {v};return {v}()", v = v),
+                    2 => format!("local {v};return {v}+0X1", v = v),
+                    _ => format!("local {v};return {v}..\"\"", v = v),
                 }
             };
-            let probe_stmt = |rng: &mut GenRng, k: usize| -> String {
-                let v = rng.name();
-                match k {
-                    0 => format!("local {v}; {v}.{f}=1", v = v, f = rng.name()),
-                    1 => format!("local {v}; {v}()", v = v),
-                    2 => format!("local {v}; {v}={v}+0X1", v = v),
-                    _ => format!("local {v}; {v}={v}..\"\"", v = v),
+            let trig_stmt = |rng: &mut GenRng, u: &str| -> (String, String) {
+                match rng.range(0, 3) {
+                    0 => (format!("{u}.{f}=0X1", u = u, f = rng.name()), "{}".to_string()),
+                    1 => (format!("{u}()", u = u), "function()end".to_string()),
+                    _ => (format!("{u}={u}..\"\"", u = u), "\"\"".to_string()),
                 }
             };
-            let k1 = rng.range(0, 4);
-            let k2 = rng.range(0, 4);
-            let pe = probe_expr(rng, k1);
-            let ps = probe_stmt(rng, k2);
-            let (fa, fb) = (rng.name(), rng.name());
+            let (m_drv, m_pcall, m_probe, m_chk, m_hit) =
+                (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+            let (p_err, p_hit, p_u, p_self) = (rng.name(), rng.name(), rng.name(), rng.name());
             let d = rng.range(0x1000, 0xFFFF);
             let needle = format!("\":\"..(0X{:X}-0X{:X})..\":\"", d + 2, d);
-            if rng.range(0, 2) == 0 {
-                format!("local {fa},{fb}=pcall(function() {pe} end); if not {fa} and type({fb})==\"string\" and not {fb}:find({needle}) then {ps} end; ",
-                    fa = fa, fb = fb, pe = pe, ps = ps, needle = needle)
-            } else {
-                let ff = rng.name();
-                format!("local function {ff}() {pe} end; local {fa},{fb}=pcall({ff}); if not {fa} and type({fb})==\"string\" and not {fb}:find({needle}) then {ps} end; ",
-                    ff = ff, fa = fa, fb = fb, pe = pe, ps = ps, needle = needle)
+            let pb = probe_body(rng);
+            let (ts, tolerant) = trig_stmt(rng, &p_u);
+            let mut ms = vec![
+                format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",
+                    t = tbl, drv = m_drv, s = p_self, o = rng.name(), e = p_err,
+                    pc = m_pcall, ht = m_hit, ck = m_chk),
+                format!("{t}.{pc}=function({s})return pcall({s}.{pb},{s})end; ",
+                    t = tbl, pc = m_pcall, s = p_self, pb = m_probe),
+                format!("{t}.{pb}=function({s}){body} end; ",
+                    t = tbl, pb = m_probe, s = p_self, body = pb),
+                format!("{t}.{ck}=function({s},{e})return type({e})==\"string\"and {e}:find({nd})end; ",
+                    t = tbl, ck = m_chk, s = p_self, e = p_err, nd = needle),
+                format!("{t}.{ht}=function({s},{h})local {u}={h} and {tol} or nil; {ts} end; ",
+                    t = tbl, ht = m_hit, s = p_self, h = p_hit, u = p_u, tol = tolerant, ts = ts),
+                format!("{t}.{d1}=function({s},{q})return {q} end; ",
+                    t = tbl, d1 = rng.name(), s = p_self, q = rng.name()),
+            ];
+            if rng.range(0, 2) == 1 {
+                ms.push(format!("{t}.{d2}=function({s},{q})return {q} end; ",
+                    t = tbl, d2 = rng.name(), s = p_self, q = rng.name()));
             }
+            rng.shuffle(&mut ms);
+            format!("local {t}={{}} {ms} {t}:{drv}() ",
+                t = tbl, ms = ms.concat(), drv = m_drv)
         };
         let mut ch_pairs: Vec<(String, String)> = vec![
             (obf_s_init.clone(), body_init),
