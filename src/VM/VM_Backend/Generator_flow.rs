@@ -11,6 +11,14 @@ pub struct KConsts {
     pub eh_val: String, pub eh_fail: String,
 }
 
+/// 形态⑩：常数=自写位运算闭包派生链——bx(bx(a,b),c) = a^b^c = val，深括号两层
+pub fn deep10(rng: &mut GenRng, bx: &str, val: i64) -> String {
+    let a = rng.range64(0x1000, 0xFFFFF);
+    let b = rng.range64(0x1000, 0xFFFFF);
+    let c = val ^ a ^ b;
+    format!("{bx}({bx}({a},{b}),{c})")
+}
+
 fn kval(kv: &[i64; 9], i: usize, j: usize, add: bool) -> i64 {
     if add { kv[i] + kv[j] } else if kv[i] >= kv[j] { kv[i] - kv[j] } else { kv[j] - kv[i] }
 }
@@ -173,13 +181,18 @@ pub fn build_scatter(
 /// 读取族（u32/a5/rS/a10）状态梯子：形态③④⑤ + ⑥ for 区间跳转 + ⑬ 包裹索引
 #[allow(clippy::too_many_arguments)]
 pub fn build_readers(
-    mut rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, kt_name: &str, pj_name: &str,
+    mut rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, kt_name: &str, pj_name: &str, fn_bxor: &str,
     fn_u32_dec: &str, fn_a5: &str, fn_read_string: &str, fn_read_dec: &str, fn_a10: &str,
     v_u32_t: &str, v_u32_n: &str, v_u32_i: &str, v_u32_v: &str,
     v_rs_l: &str, v_a10_v: &str, v_a10_h: &str,
 ) -> String {
     let (e_a, e_b, e_c, e_d) = (k.e_a.as_str(), k.e_b.as_str(), k.e_c.as_str(), k.e_d.as_str());
     let kspell = &k.kspell;                // u32 读取族打散；铁律
+    // ⑩ 派生值提升为加载期 local（热路径零开销）
+    let numA = { let v = rng.range(100000, 9999999) as i64; deep10(rng, fn_bxor, v) };
+    let wk1 = { let v = rng.range(0x51, 0xFFFFF) as i64; deep10(rng, fn_bxor, v) };
+    let nAv = rng.name();
+    let w1v = rng.name();
                 fn combine_u32(b: [&str; 4], rng: &mut GenRng) -> String {
                     match rng.range(0, 3) {
                         0 => {
@@ -218,6 +231,9 @@ pub fn build_readers(
                     }
                 }
                 let mut family = String::new();
+                // ⑩ 派生值提升为加载期 local（真实发射点；此前误注入被遮蔽的外层变量）
+                family.push_str(&format!("local {nA_}={nA0}; local {w1_}={w10}; ",
+                    nA_ = nAv, nA0 = numA, w1_ = w1v, w10 = wk1));
                 // K/PJ 表先行（形态②⑤的派生源/探针源，读取族与常量池共用）
                 family.push_str(&format!(
                     "local {kt}={{{k0},{k1},{k2},{k3},{k4},{k5},{k6},{k7},{k8}}}; local {pj}={{}}; ",
@@ -296,7 +312,7 @@ pub fn build_readers(
                     let sv = rng.name();
                     let (lit_a, lit_b, lit_c) = (e_a, e_b, e_c);
                     let pk1 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    let (pkA, numA) = (format!("0X{:X}", rng.range(0x10000, 0xFFFFF)), rng.range(100000, 9999999));
+                    let pkA = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
                     if collect.is_empty() {
                         // B 变体：收集在声明段完成，第一态直接拼装返回
                         family.push_str(&format!(
@@ -331,18 +347,17 @@ pub fn build_readers(
                     let (lit_a, lit_b, lit_c) = (e_a, e_b, e_c);
                     let pk2 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
                     let pk3 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    let wk1 = format!("0X{:X}", rng.range(0x51, 0xFFFFF));
                     family.push_str(&format!(
                         "local function {rs}() local {l},{tb}=0,{{}}; local {sv}={e_a}; while true do \
                          if {sv}=={lit_a} then {l}={a5}(); {sv}={e_b}; \
                          elseif {sv}=={lit_b} then if {l}~={zero} then else return '' end; {sv}={e_c}; \
                          elseif not(not {pj}[({pk2})]) then {sv}={e_d}; {pj}[({pk3})]={l}; \
-                         else if {sv}=={lit_c} then {shell}; while {wk1} do return table_concat({tb}) end end; {sv}={e_a}; end; end end; ",
+                         else if {sv}=={lit_c} then {shell}; while {w1v} do return table_concat({tb}) end end; {sv}={e_a}; end; end end; ",
                         rs = fn_read_string, l = v_rs_l, tb = t, sv = sv, e_a = e_a,
                         lit_a = lit_a, a5 = fn_a5, e_b = e_b, lit_b = lit_b,
                         zero = rng.obfuscate_num(0i64, 1, &keys), e_c = e_c,
                         pj = pj_name, pk2 = pk2, e_d = e_d, pk3 = pk3,
-                        lit_c = lit_c, shell = shell, wk1 = wk1));
+                        lit_c = lit_c, shell = shell, w1v = w1v));
                 }
                 // a10（i32 符号还原）
                 {
@@ -376,7 +391,7 @@ pub fn build_readers(
 /// 常量池查表协议：HH 三 handler 返回码状态机（形态①②）+ ④⑤ 探针反转臂
 #[allow(clippy::too_many_arguments)]
 pub fn build_consts(
-    rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, pj_name: &str,
+    rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, pj_name: &str, fn_bxor: &str,
     sc_index2: &str, sc_kobf: &str, var_state_flag: &str, var_idx_chunk: &str,
     var_tbl: &str, var_e: &str, fn_dec_str: &str, fn_dec_num: &str,
     fn_a5: &str, fn_read_dec: &str, var_enc_c: &str, var_cache: &str,
@@ -409,9 +424,13 @@ pub fn build_consts(
                     (eh_ret, eh_nil, eh_next, eh_val, eh_fail);
                 let x_ka = e_ka;
                 let pk6 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                let (pkB, numB) = (format!("0X{:X}", rng.range(0x10000, 0xFFFFF)), rng.range(100000, 9999999));
-                let (pkC, numC) = (format!("0X{:X}", rng.range(0x10000, 0xFFFFF)), rng.range(100000, 9999999));
-                let (wk2, wk3, wk4) = (format!("0X{:X}", rng.range(0x51, 0xFFFFF)), format!("0X{:X}", rng.range(0x51, 0xFFFFF)), format!("0X{:X}", rng.range(0x51, 0xFFFFF)));
+                let pkB = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
+                let numB = { let v = rng.range(100000, 9999999) as i64; deep10(rng, fn_bxor, v) };
+                let pkC = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
+                let numC = { let v = rng.range(100000, 9999999) as i64; deep10(rng, fn_bxor, v) };
+                let wk2 = { let v = rng.range(0x51, 0xFFFFF) as i64; deep10(rng, fn_bxor, v) };
+                let wk3 = { let v = rng.range(0x51, 0xFFFFF) as i64; deep10(rng, fn_bxor, v) };
+                let wk4 = { let v = rng.range(0x51, 0xFFFFF) as i64; deep10(rng, fn_bxor, v) };
                 let ld_name = rng.name();
                 let memo_name = rng.name();
                 let h_name = rng.name();
@@ -445,9 +464,12 @@ pub fn build_consts(
                     format!("{l}[{dd}]=function() end; ", l = ld_name, dd = decoy_ld),
                 ];
                 rng.shuffle(&mut ld_defs);
+                let (nBv, nCv, w2v, w3v, w4v) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
                 let mut lua = format!(
-                    "local {ec}={{}}; local {ca}={{}}; local {dsp}={{}}; local {ld}={{}}; ",
-                    ec = var_enc_c, ca = var_cache, dsp = dsp_name, ld = ld_name);
+                    "local {ec},{ca},{dsp},{ld}={{}},{{}},{{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; ",
+                    ec = var_enc_c, ca = var_cache, dsp = dsp_name, ld = ld_name,
+                    nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
+                    w2_ = w2v, w20 = wk2, w3_ = w3v, w30 = wk3, w4_ = w4v, w40 = wk4);
                 for x in &dsp_defs { lua.push_str(x); }
                 // 缓存前哨：命中（值非 nil）直接短路
                 lua.push_str(&format!(
@@ -457,29 +479,29 @@ pub fn build_consts(
                 lua.push_str(&format!(
                     "local {hh}={{}}; \
                      {hh}[{e_ka}]=function({ix},{ix}) if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
-                       local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={numB} then else return {x_ret1},g end end while {wk2} do return {x_next1} end end; \
+                       local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
                      {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if not {ev} then return {x_nil1} end \
                        local {h}={dsp}[({ev}[(0X1)])] if not {h} then return {x_nil1} end return {x_val1},{h}(0X1,{ev}) end; \
-                     {hh}[{e_kc}]=function({ix},{aux}) {ca}[({ix})]={aux} while {wk3} do return {x_ret1},{aux} end end; ",
+                     {hh}[{e_kc}]=function({ix},{aux}) {ca}[({ix})]={aux} while {w3v} do return {x_ret1},{aux} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
                     ev = var_e, h = h_name, dsp = dsp_name, x_nil1 = x_nil1,
-                    x_val1 = x_val1, ca = var_cache, pj = pj_name, pkB = pkB, numB = numB, wk2 = wk2, wk3 = wk3));
+                    x_val1 = x_val1, ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v));
                 lua.push_str(&format!(
                     "{mt}[{idx}]=function({tb},{ix}) local {cur}={x_ka}; local {aux}; \
                      while true do local {a2x}; if {cur}=={e_kc} then {a2x}={aux} else {a2x}={ix} end; local {c},{a2}={hh}[{cur}]({ix},{a2x}); \
                        if {c}=={x_ret1} then return {a2} end; \
                        if {c}=={x_fail1} then return {a2} end; \
-                       if {c}=={x_nil1} then while {wk4} do return nil end end; \
+                       if {c}=={x_nil1} then while {w4v} do return nil end end; \
                        if {c}=={x_next1} then {cur}={e_kb}; else {cur}={e_kc}; {aux}={a2} end; \
                      end end; ",
                     mt = mt_name, idx = sc_index2, tb = var_tbl, ix = var_idx_chunk,
                     cur = hh_cur, x_ka = x_ka, aux = hh_aux, c = hh_c, a2 = hh_a2,
-                    hh = hh_name, x_fail1 = x_fail1, e_kb = e_kb, e_kc = e_kc, wk4 = wk4, a2x = rng.name()));
+                    hh = hh_name, x_fail1 = x_fail1, e_kb = e_kb, e_kc = e_kc, w4v = w4v, a2x = rng.name()));
                 lua.push_str(&format!(
-                    "{c}.{pf}=setmetatable({{}},{mt}); ",
+                    "{c}.{pf}=setmetatable({{}},{mt}); {mt}=nil; {mt}=nil; ",
                     c = fn_c, pf = pf_consts, mt = mt_name));
                 for x in &ld_defs { lua.push_str(x); }
                 lua.push_str(&format!(

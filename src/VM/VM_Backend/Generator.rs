@@ -621,7 +621,7 @@ rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
         let block_dec_readers = format!(
             "{u32_family} ",
 u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
-                &mut rng, &keys, &kc, kt_name.as_str(), pj_name.as_str(),
+                &mut rng, &keys, &kc, kt_name.as_str(), pj_name.as_str(), fn_bxor.as_str(),
                 fn_u32_dec.as_str(), fn_a5.as_str(), fn_read_string.as_str(), fn_read_dec.as_str(), fn_a10.as_str(),
                 &v_u32_t, &v_u32_n, &v_u32_i, &v_u32_v, &v_rs_l, &v_a10_v, &v_a10_h)
         );
@@ -651,20 +651,34 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         // 池初始化原本是两个干净的 for 循环（`for i=1,n do ... end`），现在都换成
         // while + 显式自增下标 + 独立局部计数，长度/个数也不再和循环变量同名
+        // ⑦ 循环壳随机轮换：while / repeat until 逐循环抽签（壳串先独立拼好再注入）
+        let mk_shell = |rng: &mut GenRng, a: &str, b: String| -> (String, String) {
+            if rng.range(0, 2) == 0 {
+                (format!("while {x} < {y} do {x} = {x} + 1; ", x = a, y = b), "end; ".to_string())
+            } else {
+                (format!("repeat if {x} >= {y} then break end; {x} = {x} + 1; ", x = a, y = b), "until false; ".to_string())
+            }
+        };
+        let (o1, c1) = mk_shell(&mut rng, v_pl_i.as_str(), v_pl_c.clone());
+        let (o2, c2) = mk_shell(&mut rng, v_pl_k.as_str(), v_pl_n.clone());
         let block_pools_init_strings = format!(
             "local {gs}={{}}; local {i}=0; local {c}={u32d}(); \
-             while {i} < {c} do {i} = {i} + 1; local {n}={u32d}(); local {s}={{}}; local {k}=0; \
-             while {k} < {n} do {k} = {k} + 1; {s}[{k}]=string_char({rd}()) end; \
-             {gs}[{i}]=table_concat({s}); end; ",
+             {o1}local {n}={u32d}(); local {s}={{}}; local {k}=0; \
+             {o2}{s}[{k}]=string_char({rd}()) {c2} \
+             {gs}[{i}]=table_concat({s}); {c1} ",
             gs = global_strings, u32d = fn_u32_dec, rd = fn_read_dec,
-            i = v_pl_i, c = v_pl_c, n = v_pl_n, s = v_pl_s, k = v_pl_k
+            i = v_pl_i, c = v_pl_c, n = v_pl_n, s = v_pl_s, k = v_pl_k,
+            o1 = o1, c1 = c1, o2 = o2, c2 = c2
         );
+        let (o1, c1) = mk_shell(&mut rng, v_pl_i.as_str(), v_pl_c.clone());
+        let (o2, c2) = mk_shell(&mut rng, v_pl_k.as_str(), "8".to_string());
         let block_pools_init_numbers = format!(
             "local {gn}={{}}; local {i}=0; local {c}={u32d}(); \
-             while {i} < {c} do {i} = {i} + 1; local {v}={{}}; local {k}=0; \
-             while {k} < 8 do {k} = {k} + 1; {v}[{k}]={rd}() end; {gn}[{i}]={v}; end; ",
+             {o1}local {v}={{}}; local {k}=0; \
+             {o2}{v}[{k}]={rd}() {c2} {gn}[{i}]={v}; {c1} ",
             gn = global_numbers, u32d = fn_u32_dec, rd = fn_read_dec,
-            i = v_pl_i, c = v_pl_c, v = v_pl_v, k = v_pl_k
+            i = v_pl_i, c = v_pl_c, v = v_pl_v, k = v_pl_k,
+            o1 = o1, c1 = c1, o2 = o2, c2 = c2
         );
 
         let var_enc_c = rng.name();
@@ -709,10 +723,15 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             pf_numparams = pf_numparams, pf_is_vararg = pf_is_vararg, pf_maxstack = pf_maxstack, i = v_ch_i,
             cpp = cpp, cpq = cpq
         );
+        // ⑨ 区间二分树诱饵：not(x<=k) 双重否定嵌套（恒空转，美化后深度剧增）
+        let it9 = |rng: &mut GenRng, st: &str| format!(
+            "if not({st}<=0X{:X}) then if not({st}<=0X{:X}) then else end else end; ",
+            rng.range(0x1000, 0xFFFF), rng.range(0x10000, 0xFFFFF));
         let body_insts = format!(
-            "{st}={nxt}; {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
+            "{st}={nxt}; {tree9} {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
              local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; \
              {c}.{pf_opcodes}[{i}]={a5}(); {c}.{pf_a_arr}[{i}]={rd}(); {c}.{pf_b_arr}[{i}]={a10}(); {c}.{pf_c_arr}[{i}]={a10}(); end; ",
+            tree9 = it9(&mut rng, var_state.as_str()),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, rd = fn_read_dec, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
             i = v_ch_i, n = v_ch_n
@@ -725,28 +744,39 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             "{st}={nxt}; {bc_scatter} ",
             st = var_state, nxt = obf_s_protos,
 bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
-                &mut rng, &keys, &kc, pj_name.as_str(),
+                &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), fn_dec_str.as_str(), fn_dec_num.as_str(),
                 fn_a5.as_str(), fn_read_dec.as_str(), var_enc_c.as_str(), var_cache.as_str(),
                 global_strings.as_str(), global_numbers.as_str(), fn_c.as_str(), pf_consts.as_str(),
                 &v_ch_i, &v_ch_n, &t)
         );
-        let pkx1 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
+        let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         let body_protos = format!(
-            "{st}={nxt}; {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
+            "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
              if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; {c}.{pf_protos}[{i}]={dc}() end else {i}={n}; {n}=0X0; end; ",
             st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
-            dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1
+            dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1,
+            tree9 = it9(&mut rng, var_state.as_str())
         );
+        // ⑭ 九元联合 nil 声明 + ⑦ repeat…until false 换皮 + ⑨ 区间树
+        let d14: Vec<String> = (0..9).map(|_| rng.name()).collect();
         let body_debug = format!(
-            "{st}={nxt}; local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {a5}() end; \
+            "{st}={nxt}; {tree9} repeat \
+             local {d0},{d1},{d2},{d3},{d4},{d5},{d6},{d7},{d8}=nil,nil,nil,nil,nil,nil,nil,nil,nil; \
+             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {a5}() end; \
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}(); {a5}(); {a5}() end; \
-             {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; ",
-            st = var_state, nxt = obf_s_ret, a5 = fn_a5, rs = fn_read_string, i = v_ch_i, n = v_ch_n
+             {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; break; until false; ",
+            st = var_state, nxt = obf_s_ret, a5 = fn_a5, rs = fn_read_string, i = v_ch_i, n = v_ch_n,
+            d0 = d14[0], d1 = d14[1], d2 = d14[2], d3 = d14[3], d4 = d14[4],
+            d5 = d14[5], d6 = d14[6], d7 = d14[7], d8 = d14[8],
+            tree9 = it9(&mut rng, var_state.as_str())
         );
-        let body_ret = format!("if not(not {pj}[({pkx1})]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; ",
-            out = v_ch_out, c = fn_c, g = v_ch_g, pj = pj_name, pkx1 = pkx1);
+        // ⑦ while true 壳 + ⑭ return nil 兜底（ret 态跑完显式出）
+        // ⑦ while true 壳 + ⑭ return nil 兜底（藏在恒假守卫内，真死代码）
+        let r14 = rng.name();
+        let body_ret = format!("while true do if not(not {pj}[({pkx1})]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; local {r14}=nil; if {r14} then return nil end; break; end; ",
+            out = v_ch_out, c = fn_c, g = v_ch_g, pj = pj_name, pkx1 = pkx1, r14 = r14);
 
         let mut ch_pairs: Vec<(String, String)> = vec![
             (obf_s_init.clone(), body_init),
