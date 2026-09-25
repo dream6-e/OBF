@@ -500,7 +500,7 @@ pub fn build_consts(
                     "local {hh}={{}}; \
                      {hh}[{e_ka}]=function({ix},{ix}) if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
-                     {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if not {ev} then return {x_nil1} end \
+                     {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if type({ev})~='table' then return {x_nil1} end \
                        local {h}={dsp}[({ev}[(0X1)])] if not {h} then {ec}[({ix})]=nil return {x_nil1} end local {vv}={h}(0X1,{ev}) {ec}[({ix})]=nil return {x_val1},{vv} end; \
                      {hh}[{e_kc}]=function({ix},{aux}) {ca}[({ix})]={aux} while {w3v} do return {x_ret1},{aux} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,

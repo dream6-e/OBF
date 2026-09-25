@@ -522,6 +522,9 @@ impl Generator {
         let arrs = format!("{}, {}, {}, {}", var_opcodes, var_a_arr, var_b_arr, var_c_arr);
         block_execute_def.push_str(&format!("local {};{}={}[{}],{}[{}],{}[{}],{}[{}];", arrs, arrs, var_vm, k_ops, var_vm, k_aa, var_vm, k_bb, var_vm, k_cc));
         // pc/top 是**循环外**的局部变量
+        // ㉑ 保守版明文窗口变量：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
+        let (np21, md21, th21, tw21) = (rng.name(), rng.name(), rng.name(), rng.name());
+        let step21 = rng.range(0x8000, 0x40000);
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
         block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, k_pc, var_vm, k_top));
 
@@ -544,6 +547,12 @@ impl Generator {
             block_execute_def.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
             block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, "op", &keys, &mut rng));
             block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
+            // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
+            // 活跃闭包持有明文引用不受影响；未来 CLOSURE 经 type(p)=='function' 重解
+            block_execute_def.push_str(&format!(
+                "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; for {j}=1,#{md} do if type({md}[{j}])=='table' then {md}[{j}]={th}[{j}] end end end; ",
+                flg = var_state_flag, pc = var_pc, tw = tw21, sx = step21,
+                j = rng.name(), md = md21, th = th21));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
         }
@@ -796,7 +805,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         let (ln18, p18, s1a, b1a, sv18, svf18, rr18) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let body_protos = format!(
-            "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
+            "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); {md18}={c}.{pf_protos}; {np18}={n}; \
              if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; local {ln}={u32d}(); \
                local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; for _=0X1,{ln} do {rd}() end; \
                {c}.{pf_protos}[{i}]=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
@@ -804,7 +813,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                  {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end end else {i}={n}; {n}=0X0; end; ",
             st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
             dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1,
-            u32d = fn_u32_dec,
+            u32d = fn_u32_dec, md18 = md21, np18 = np21,
             a2 = var_a2, flg = var_state_flag, rd = fn_read_dec,
             ln = ln18, p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18, rr = rr18,
             tree9 = it9(&mut rng, var_state.as_str())
@@ -949,6 +958,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
         out.push_str(&header_block);
+        // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
+        // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
+        out.push_str(&format!("local {np},{md},{th},{tw}=0,{{}},{{}},0X0; ", np = np21, md = md21, th = th21, tw = tw21));
         // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
         // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
         out.push_str(&line_guard(&mut rng));
@@ -1036,6 +1048,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 bk = bk, bs = bs, bcb = bcb, bsm = bsm, bdec = bdec, bpt = bpt,
                 h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5, h6 = h6));
         }
+        // ㉑ thunk 快照：密文 thunk 常驻，明文可随时写回回收
+        out.push_str(&format!("for {j}=1,{np} do {th}[{j}]={md}[{j}] end; ",
+            j = rng.name(), np = np21, th = th21, md = md21));
         let fu = rng.name();
         
         out.push_str(" ");
