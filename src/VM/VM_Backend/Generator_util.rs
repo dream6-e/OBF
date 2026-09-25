@@ -711,74 +711,17 @@ impl GenRng {
                 extra.push(v);
             }
         }
-        // ── 本轮：把「LCG 灌表 + 解绑」这段直下的逻辑拆成 2~4 个乱序闭包 ──
-        // 旧形态 `local x=…;local T={};for i=1,N do x=(x*A)%M;T[i]=x end` 一眼就是
-        // 「密钥派生循环」。现在：常量写**派生算式**（产物里没有 A/M/seed 的字面量）、
-        // 迭代区间随机切成 1~2 段（序列状态经闭包 upvalue 携带）、闭包按随机键挂表 +
-        // 顺序表驱动（与守卫拆分同一套成语，参数逐产物随机）。
-        let x_name = self.name();
-        let arr_name = self.name();
+        let (x_name, arr_name, i_name) = (self.name(), self.name(), self.name());
         let names: Vec<String> = (0..count).map(|_| self.name()).collect();
-        let mut name_pool: Vec<String> = (0..24).map(|_| self.name()).collect();
-
-        // 常量派生：(A-B) / (A+B) / (A*2[+1]) —— 求值恰为 v，但字面量不是 v
-        let dconst = |rng: &mut Self, v: u64| -> String {
-            match rng.range(0, 3) {
-                0 => {
-                    let b = rng.range64(1, 0xF_FFFF);
-                    format!("(0X{:X}-0X{:X})", v as i64 + b, b)
-                }
-                1 if v > 3 => {
-                    let b = rng.range64(1, ((v - 1) as i64).min(0xFFFF));
-                    format!("(0X{:X}+0X{:X})", v as i64 - b, b)
-                }
-                _ => {
-                    if v % 2 == 0 { format!("(0X{:X}*0X2)", v / 2) } else { format!("(0X{:X}*0X2+0X1)", v / 2) }
-                }
-            }
-        };
-        let mut stages: Vec<String> = Vec::new();
-        let mut hoist: Vec<String> = vec![x_name.clone(), arr_name.clone()];
-        hoist.extend(names.iter().cloned());
-        // ① 初始化
-        stages.push(format!("{}={};{}={{}};", x_name, dconst(self, seed), arr_name));
-        // ② 迭代：长序列随机切成两段（状态经 upvalue 接力），段内计数器/自增拼写随机
-        let chunks: Vec<(usize, usize)> = if last > 12 && self.range(0, 2) == 0 {
-            let cut = self.range(1, last);
-            vec![(0usize, cut), (cut, last)]
-        } else {
-            vec![(0usize, last)]
-        };
-        let a_expr = dconst(self, a);
-        let m_expr = dconst(self, m);
-        for (lo, hi) in chunks {
-            let i_name = self.name();
-            let incr = if self.range(0, 2) == 0 {
-                "1".to_string()
-            } else {
-                let b = self.range64(0x10, 0xFFFF);
-                format!("(0X{:X}-0X{:X})", b + 1, b)
-            };
-            let head = if lo == 0 {
-                format!("local {i}=0;", i = i_name)
-            } else {
-                format!("local {i}={lo};", i = i_name, lo = lo)
-            };
-            stages.push(format!(
-                "{head}while {i}<{hi} do {i}={i}+{incr};{x}=({x}*{a})%{m};{arr}[{i}]={x} end;",
-                i = i_name, hi = hi, incr = incr, x = x_name, a = a_expr, m = m_expr, arr = arr_name
-            ));
-        }
-        // ③ 解绑
-        let picks = kept.iter().map(|(i, _)| format!("{}[{}]", arr_name, i))
-            .chain(extra.iter().map(|v| format!("0X{:X}", v)))
-            .collect::<Vec<_>>().join(",");
-        stages.push(format!("{}={};", names.join(","), picks));
-
-        let plan = StagePlan { hoist, stages };
-        let mut nm = || name_pool.pop().unwrap_or_else(|| "kzFallbackNm".to_string());
-        let mut numfn = |v: i64| dconst(&mut GenRng::new(0), v.max(0) as u64);
-        let setup = emit_stage_struct(&plan, &mut nm, &mut numfn);
+        let setup = format!(
+            "local {x}=0X{seed:X};local {arr}={{}};for {i}=1,{last} do {x}=({x}*0X{a:X})%0X{m:X};{arr}[{i}]={x} end;local {bindings}={picks};",
+            x = x_name, arr = arr_name, i = i_name, last = last,
+            seed = seed, a = a, m = m,
+            bindings = names.join(","),
+            picks = kept.iter().map(|(i, _)| format!("{}[{}]", arr_name, i))
+                .chain(extra.iter().map(|v| format!("0X{:X}", v)))
+                .collect::<Vec<_>>().join(",")
+        );
         (names, setup)
     }
 

@@ -947,49 +947,15 @@ impl Generator {
         out.push_str(&format!("local main_chunk={}(); ", fn_decode_chunk));
         out.push_str(&at.trigger);
         out.push_str(&format!(" {} = {{}}; local {} = (getfenv and getfenv() or _ENV or _G); local {}; ", var_builtin_reg, var_boot_env, var_bname));
-        // ── 本轮：把「解密名字 → 取全局（getgenv 兜底）」的直线取值器拆成两个闭包 ──
-        // 旧形态每条注册行都是同一段拼写（×69 次同形重复本身就是指纹，getgenv 也跟着
-        // 出现 69 次）。现在：一个闭包负责「解名字 + 直取 _ENV」，另一个负责「getgenv
-        // 兜底」（名字经黑板 upvalue 传递）；两个闭包挂随机键，69 条注册行从几种等价
-        // 拼写里随机取 —— getgenv 全程只出现一次。
-        let acc_tbl = rng.name();
-        let acc_bb = rng.name();
-        let acc_ii = rng.name();
-        let acc_k1 = rng.range(0x1000_0000, 0x7FFF_FFFF) as i64;
-        let acc_k2 = rng.range(0x1000_0000, 0x7FFF_FFFF) as i64;
-        let acc_k1s = rng.format_num(acc_k1);
-        let acc_k2s = rng.format_num(acc_k2);
-        let mut acc_block = format!("local {bb};local {t}={{}};", bb = acc_bb, t = acc_tbl);
-        acc_block.push_str(&format!(
-            "{t}[{k1}]=function({ii}) {bb}={dec}({gs}[{ii}+1],{ii}); return {env}[{bb}]; end;",
-            t = acc_tbl, k1 = acc_k1s, ii = acc_ii, bb = acc_bb,
-            dec = fn_dec_str, gs = global_strings, env = var_boot_env
-        ));
-        acc_block.push_str(&format!(
-            "{t}[{k2}]=function() if getgenv then return getgenv()[{bb}] end end; ",
-            t = acc_tbl, k2 = acc_k2s, bb = acc_bb
-        ));
-        out.push_str(&acc_block);
         for (i, name) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
             let slot = builtin_slot_perm[i];
             let raw_idx = builtin_pool_indices[i];
             let lua_idx = raw_idx + 1;
-            let call_a = format!("{}[{}]({})", acc_tbl, acc_k1s, raw_idx);
-            let call_b = format!("{}[{}]()", acc_tbl, acc_k2s);
-            let line = match rng.range(0, 4) {
-                0 => format!("{reg}[{slot}]={ca} or {cb}; ", reg = var_builtin_reg, slot = slot + 1, ca = call_a, cb = call_b),
-                1 => {
-                    let tv = rng.name();
-                    format!("local {tv}={ca};if {tv}==nil then {tv}={cb} end;{reg}[{slot}]={tv}; ", tv = tv, ca = call_a, cb = call_b, reg = var_builtin_reg, slot = slot + 1)
-                }
-                2 => format!("{reg}[{slot}]={ca};if {reg}[{slot}]==nil then {reg}[{slot}]={cb} end; ", reg = var_builtin_reg, slot = slot + 1, ca = call_a, cb = call_b),
-                _ => format!(
-                    "{bname}={fn_dec_str}({gs}[{lidx}],{ridx}); {reg}[{slot}]={benv}[{bname}]; if {reg}[{slot}]==nil and getgenv then {reg}[{slot}]=getgenv()[{bname}] end; ",
-                    bname = var_bname, fn_dec_str = fn_dec_str, gs = global_strings,
-                    lidx = lua_idx, ridx = raw_idx, reg = var_builtin_reg, slot = slot + 1, benv = var_boot_env
-                ),
-            };
-            out.push_str(&line);
+            out.push_str(&format!(
+                "{bname}={fn_dec_str}({gs}[{lidx}],{ridx}); {reg}[{slot}]={benv}[{bname}]; if {reg}[{slot}]==nil and getgenv then {reg}[{slot}]=getgenv()[{bname}] end; ",
+                bname = var_bname, fn_dec_str = fn_dec_str, gs = global_strings,
+                lidx = lua_idx, ridx = raw_idx, reg = var_builtin_reg, slot = slot + 1, benv = var_boot_env
+            ));
             let _ = name;
         }
         let fu = rng.name();
