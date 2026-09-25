@@ -783,37 +783,7 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
 /// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
 /// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
 /// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
-/// djb2（mod 2^32）—— 池键的哈希。Rust 侧与 Lua 侧必须完全一致：
-/// Lua 里算的是 `h=(h*33+byte)%4294967296`，起手 5381。
-pub fn poly_hash(s: &str) -> u32 {
-    let mut h: u64 = 5381;
-    for b in s.bytes() {
-        h = (h * 33 + b as u64) % 4294967296;
-    }
-    h as u32
-}
-
-pub fn loadstring_probe_lua(
-    nat: &str,
-    getf: &str,
-    pl: &str,
-    rng: &mut GenRng,
-    pool: Option<(&str, &str)>,
-) -> String {
-    // 有池时：字符串 / 全局名一律从池里取（`dec(哈希)` / `res(哈希)`），产物里不留明文。
-    // 没有池时（上一代 MB 外壳的 stub，已不参与产物生成）退回字面量写法。
-    let sref = |name: &str| -> String {
-        match pool {
-            Some((dec, _)) => format!("{}({})", dec, poly_hash(name)),
-            None => format!("'{}'", name),
-        }
-    };
-    let gref = |name: &str| -> String {
-        match pool {
-            Some((_, res)) => format!("{}({})", res, poly_hash(name)),
-            None => name.to_string(),
-        }
-    };
+pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -> String {
     // ── 要隐藏的字符串：顺序与下面 format! 里的 k1…k9 一一对应 ──
     const PLAIN: [&str; 9] = [
         "getinfo",    // info 表的键
@@ -876,33 +846,31 @@ pub fn loadstring_probe_lua(
     let v_gg = rng.name();
     let v_ge = rng.name();
     let v_env2 = rng.name();
-    let v_gfe = rng.name();
     let body = format!(
         "local function {nat}({f}) \
-            local {d} = {gref_dbg}; \
-            if {tp}({d}) ~= {tb} then return true end; \
+            local {d} = debug; \
+            if type({d}) ~= 'table' then return true end; \
             local {gi} = {d}[{k1}]; \
-            if {tp}({gi}) ~= {fn} then return true end; \
-            local {ok}, {inf} = {pc}({gi}, {f}, {so}); \
-            if not {ok} or {tp}({inf}) ~= {tb} then return true end; \
+            if type({gi}) ~= 'function' then return true end; \
+            local {ok}, {inf} = pcall({gi}, {f}, 'S'); \
+            if not {ok} or type({inf}) ~= 'table' then return true end; \
             return {inf}[{k2}] == {k3} and {inf}[{k4}] == {k5}; \
         end; \
         local function {getf}() \
-            local {gfe} = {gref_getfenv}; \
-            local {g} = ({gfe} and {gfe}()) or {gref_g}; \
+            local {g} = (getfenv and getfenv()) or _G; \
             local {gg} = {g}[{k6}]; \
-            if {tp}({gg}) == {fn} then {g} = {gg}() or {g}; end; \
+            if type({gg}) == 'function' then {g} = {gg}() or {g}; end; \
             local {ge} = {g}[{k7}]; \
             local {env} = {g}; \
-            if {tp}({ge}) == {fn} then {env} = {ge}() or {g}; end; \
-            local {list} = {{ {env}[{k8}], {env}[{k9}] }}; \
+            if type({ge}) == 'function' then {env} = {ge}() or {g}; end; \
+            local {list} = {{ loadstring, {env}[{k8}], {env}[{k9}], load }}; \
             local {alt}, {i} = nil, 0; \
             local {n} = #{list}; \
             while {i} < {n} do \
                 {i} = {i} + 1; \
                 local {f} = {list}[{i}]; \
-                local {t} = {tp}({f}); \
-                if {t} == {fn} then \
+                local {t} = type({f}); \
+                if {t} == 'function' then \
                     if {nat}({f}) and {alt} == nil then {alt} = {f}; {i} = {n}; end; \
                     if {alt} == nil then {alt} = {f}; end; \
                 end; \
@@ -912,10 +880,7 @@ pub fn loadstring_probe_lua(
         local {pl} = {getf}();\n",
         nat = nat, getf = getf, pl = pl, d = v_d, gi = v_gi, list = v_list, alt = v_alt,
         i = v_i, n = v_n, f = v_f, t = v_t, g = v_g, ok = v_ok, inf = v_inf,
-        gg = v_gg, ge = v_ge, env = v_env2, gfe = v_gfe,
-        tp = gref("type"), tb = sref("table"), fn = sref("function"), so = sref("S"),
-        pc = gref("pcall"), gref_dbg = gref("debug"), gref_getfenv = gref("getfenv"),
-        gref_g = gref("_G"),
+        gg = v_gg, ge = v_ge, env = v_env2,
         k1 = names[0], k2 = names[1], k3 = names[2], k4 = names[3], k5 = names[4],
         k6 = names[5], k7 = names[6], k8 = names[7], k9 = names[8]
     );

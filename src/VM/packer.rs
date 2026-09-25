@@ -48,13 +48,7 @@ enum Step {
 pub struct Packer;
 
 impl Packer {
-    /// `pool` = AntiTamper 的（池解码器名, 池取全局名），用来让探测代码里的字符串
-    /// 也从池里取，产物里不留明文。
-    pub fn pack(
-        input: &[u8],
-        vm_rng: &mut GenRng,
-        pool: (&str, &str),
-    ) -> (String, String, String) {
+    pub fn pack(input: &[u8], vm_rng: &mut GenRng) -> (String, String, String) {
         let seed = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u32)
@@ -77,7 +71,7 @@ impl Packer {
 
         let lua_payload = format!("{}~{}", b86_sb, b86_main);
         
-        let (decoder_script, entry_func) = Self::build_decoder(&keys, &alpha_str, vm_rng, pool);
+        let (decoder_script, entry_func) = Self::build_decoder(&keys, &alpha_str, vm_rng);
         (lua_payload, decoder_script, entry_func)
     }
 
@@ -275,12 +269,7 @@ impl Packer {
         encoded
     }
 
-    fn build_decoder(
-        keys: &[u8],
-        alphabet: &str,
-        rng: &mut GenRng,
-        pool: (&str, &str),
-    ) -> (String, String) {
+    fn build_decoder(keys: &[u8], alphabet: &str, rng: &mut GenRng) -> (String, String) {
         let f_entry = rng.name();
         let v_data = rng.name();
         // 只用原生 loadstring：执行器/沙盒常把 loadstring 换成 Lua 钩子，
@@ -508,7 +497,7 @@ impl Packer {
         
         let combined_alpha_expr = parts_exprs.join(",");
 
-        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, rng, Some(pool));
+        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, rng);
         // ── 第 2 项：这层解码器也不再是「初始化 → 拆分 → 解码 → 执行」的清晰骨架 ──
         // 状态表构造里 32 个键值对彼此独立，顺序打乱；stage2 里 16 条初始化赋值同样打乱
         // （data/len 那一对有先后依赖，单独保持原序）；gmatch 的 for-in 拆成显式迭代器 + 影子守卫。
