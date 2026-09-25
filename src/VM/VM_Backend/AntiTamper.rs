@@ -1,12 +1,15 @@
 use rand::{thread_rng, Rng};
 
-use super::Generator_util::{mix_encrypt, mix_key};
+use super::Generator_util::{mix_encrypt, mix_key, stream_call, stream_dec_lua};
 
 pub struct AntiTamperResult {
     pub setup: String,
     pub guards: Vec<String>,
     pub trigger: String,
     pub expected_final: i64,
+    /// 流加密解码器的函数名（在 setup 里定义、chunk 顶层作用域）。
+    /// Generator 的解头/方法原型/body_consts 与守卫同作用域，直接复用这一只。
+    pub sc_fn: String,
 }
 
 fn rand_var() -> String {
@@ -21,6 +24,19 @@ fn random_string() -> String {
     let len = rng.gen_range(8..=16);
     let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
     (0..len).map(|_| chars[rng.gen_range(0..chars.len())]).collect()
+}
+
+/// 流加密密钥对（thread_rng 版，逻辑与 Generator_util::mix_key 一致）：
+/// k0 恒非 0，且保证密文里不出现 \000。
+fn sc_key(plain: &str) -> (u32, u32) {
+    let mut r = thread_rng();
+    loop {
+        let k0 = r.gen_range(1..256u32);
+        let k1 = r.gen_range(1..256u32);
+        if mix_encrypt(plain.as_bytes(), k0, k1).iter().all(|&c| c != 0) {
+            return (k0, k1);
+        }
+    }
 }
 
 fn poly_hash(s: &str) -> u32 {
@@ -89,7 +105,12 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     let mut setup = String::new();
     // 使用 getgenv() 完美适配 Roblox 执行器全局环境
     setup.push_str(&format!("local {} = getgenv and getgenv() or getfenv and getfenv() or _ENV or _G or {{}};\n", v_env));
-    
+
+    // 自定义流加密解码器（独立于池）：守卫体与 Generator 的解头/方法原型共用这一只。
+    // 定义放 setup 最前（chunk 顶层作用域），后面所有部件都能看到。
+    let sc_fn = rand_var();
+    setup.push_str(&stream_dec_lua(&sc_fn));
+
     // 递归爆栈用的两个隐藏名：函数名 + 参数名，逐产物随机
     let fn_crash_rec = rand_var();
     let v_crash_arg = rand_var();
@@ -98,12 +119,16 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     // 产物里看不到 `pcall(f)` 这种一眼可辨的图案。
     setup.push_str(&format!(
     "local function {}() \
-        local j,s,k,v=_ENV,false;local t={{}};local p=type;if not k then v=s end;if p(t)~=\"table\" then p=j end;repeat p={{}} until v; \
+        local j,s,k,v=_ENV,false;local t={{}};local p=type;if not k then v=s end;if p(t)~={crash_tab} then p=j end;repeat p={{}} until v; \
          local function {}({}) {}({},{}); {}({},{}) end \
          {}(pcall); \
      local function we(x) return not x end;local gd if we(gd) then while we(s) do end;end \
      end;\n",
-    v_crash, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, fn_crash_rec
+    v_crash, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, fn_crash_rec,
+    crash_tab = {
+        let (a, b) = sc_key("table");
+        stream_call(&sc_fn, "table", a, b)
+    }
 ));
     setup.push_str(&format!("local {} = {{{}}};\n", v_pool, pool_data));
     // 池解码器的「打乱线性逻辑 / 数据流」版本：
@@ -200,30 +225,39 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let fnv_pcall = poly_hash("pcall");
                 let fnv_string = poly_hash("string");
                 let fnv_math = poly_hash("math");
+                let (k0n, k1n) = sc_key("nil");
+                let sc_nil = stream_call(&sc_fn, "nil", k0n, k1n);
                 // 用哈希组精确取值校验，避免受 pairs 迭代 __index 失效的影响
                 check_code = format!(
                     "local sc_val = 0; \
                      local chk = {{{}, {}, {}}}; \
                      for idx = 1, 3 do \
-                         if type({}(chk[idx])) ~= 'nil' then sc_val = sc_val + 1 end \
+                         if type({}(chk[idx])) ~= {nil_lit} then sc_val = sc_val + 1 end \
                      end; \
                      if sc_val ~= 3 then {} else {} end\n",
-                    fnv_pcall, fnv_string, fnv_math, v_res, next_bad, next_good
+                    fnv_pcall, fnv_string, fnv_math, v_res, next_bad, next_good, nil_lit = sc_nil
                 );
             }
             1 => {
                 let hash_pcall = poly_hash("pcall");
+                // 元方法名整串加密（连 __ 前缀一起），键表挂的就是运行期解出来的名字。
+                let mut mm_calls: Vec<String> = Vec::new();
+                for mm in ["__add", "__sub", "__mul", "__call"] {
+                    let (a, b) = sc_key(mm);
+                    mm_calls.push(stream_call(&sc_fn, mm, a, b));
+                }
                 check_code = format!(
                     "local z = setmetatable({{}}, {{ \
-                        [\"__\"..\"add\"]=function(a)return a end, \
-                        [\"__\"..\"sub\"]=function(a)return a end, \
-                        [\"__\"..\"mul\"]=function(a)return a end, \
-                        [\"__\"..\"call\"]=function(...)return ... end \
+                        [{m0}]=function(a)return a end, \
+                        [{m1}]=function(a)return a end, \
+                        [{m2}]=function(a)return a end, \
+                        [{m3}]=function(...)return ... end \
                      }}); \
                      local p={}({}); if not p then {} else \
                      local st,r=p(function() local x=z+z-z*z; local y=z(z); return x==z and y==z end); \
                      if not st or not r then {} else {} end end\n",
-                    v_res, hash_pcall, next_bad, next_bad, next_good
+                    v_res, hash_pcall, next_bad, next_bad, next_good,
+                    m0 = mm_calls[0], m1 = mm_calls[1], m2 = mm_calls[2], m3 = mm_calls[3]
                 );
             }
             2 => {
@@ -266,6 +300,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                     let hash_getinfo = poly_hash("getinfo");
                     let hash_info = poly_hash("info");
                     let hash_C = poly_hash("C");
+                    let (t0, t1) = sc_key("table");
+                    let sc_tab = stream_call(&sc_fn, "table", t0, t1);
                     check_code = format!(
                         "local d={}({}); local p={}({}); \
                          if not (d and p) then {} else \
@@ -274,7 +310,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                              if d[{}({})] then {} else {} end \
                          else \
                              local ok, inf = p(gi, p); \
-                             if not ok or type(inf)~='table' then {} else \
+                             if not ok or type(inf)~={tab_lit} then {} else \
                              local w=inf.what; local h=5381; \
                              for idx=1,#w do h=(h*33+string.byte(w,idx))%4294967296 end; \
                              if h~={} then {} else {} end end end end\n",
@@ -283,7 +319,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                         v_dec, hash_getinfo,
                         v_dec, hash_info, next_good, next_bad,
                         next_bad,
-                        hash_C, next_bad, next_good
+                        hash_C, next_bad, next_good,
+                        tab_lit = sc_tab
                     );
                 } else {
                     check_code = format!("{}\n", next_good);
@@ -354,6 +391,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 let g_t = rand_var();
                 let g_flag = rand_var();
                 let g_mt = rand_var();
+                let (t70, t71) = sc_key("table");
+                let sc_tab = stream_call(&sc_fn, "table", t70, t71);
                 let g_pk = rand_var();
                 let g_j = rand_var();
                 let g_ok = rand_var();
@@ -364,21 +403,26 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                     mms.swap(i, j);
                 }
                 let decoy = if rng.gen_bool(0.5) { "eq" } else { "concat" };
+                // 元方法名整串（含 __ 前缀）流加密；诱饵条目同样处理。
+                let mm_call = |mm: &str| -> String {
+                    let (a, b) = sc_key(mm);
+                    stream_call(&sc_fn, mm, a, b)
+                };
                 for (idx, mm) in mms.iter().enumerate() {
                     if idx == 2 {
-                        meta_lines.push(format!("{}[\"__\"..\"{}\"]={};", g_mt, decoy, v_crash));
+                        meta_lines.push(format!("{}[{}]={};", g_mt, mm_call(decoy), v_crash));
                     }
-                    meta_lines.push(format!("{}[\"__\"..\"{}\"]={};", g_mt, mm, v_crash));
+                    meta_lines.push(format!("{}[{}]={};", g_mt, mm_call(mm), v_crash));
                 }
                 check_code = format!(
                     "local {e} = {env}; \
                      local {t} = type({e}); \
-                     local {flag} = ({t} == 'table'); \
+                     local {flag} = ({t} == {tab_lit}); \
                      local {mt} = {{}}; \
                      {meta} \
                      local {pk} = setmetatable({{}}, {mt}); \
                      local {j} = 0; \
-                     if not {flag} and {t} ~= 'table' then {bad} else \
+                     if not {flag} and {t} ~= {tab_lit} then {bad} else \
                      {j} = {j} + 1; \
                      local {ok} = pcall(function() {e}[{dec}({h})] = {pk} end); \
                      {j} = {j} - 1; \
@@ -386,7 +430,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                      end\n",
                     e = g_e, env = v_env, t = g_t, flag = g_flag, mt = g_mt,
                     meta = meta_lines.join(" "), pk = g_pk, j = g_j, ok = g_ok,
-                    bad = next_bad, good = next_good, dec = v_dec, h = rand_hash
+                    bad = next_bad, good = next_good, dec = v_dec, h = rand_hash,
+                    tab_lit = sc_tab
                 );
             }
             8 => {
@@ -503,8 +548,13 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     let mut trigger = String::new();
     trigger.push_str(&format!("{}={}[0]({});\n", key_var, v_net, initial_token));
     trigger.push_str(&format!(
-        "local {} = setmetatable({{}}, {{ [\"__\"..\"index\"] = function() return {} end }});\n",
-        v_jump, v_crash
+        "local {} = setmetatable({{}}, {{ [{}] = function() return {} end }});\n",
+        v_jump,
+        {
+            let (a, b) = sc_key("__index");
+            stream_call(&sc_fn, "__index", a, b)
+        },
+        v_crash
     ));
     trigger.push_str(&format!("{}[{}] = function() end;\n", v_jump, current_expected));
     trigger.push_str(&format!("{}[{}]();\n", v_jump, key_var));
@@ -514,6 +564,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         guards: guards_code,
         trigger: minify_lua(&trigger),
         expected_final: current_expected,
+        sc_fn,
     }
 }
 

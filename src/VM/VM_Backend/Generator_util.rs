@@ -783,7 +783,7 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
 /// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
 /// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
 /// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
-pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -> String {
+pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, sc: &str, rng: &mut GenRng) -> String {
     // ── 要隐藏的字符串：顺序与下面 format! 里的 k1…k9 一一对应 ──
     const PLAIN: [&str; 9] = [
         "getinfo",    // info 表的键
@@ -832,6 +832,11 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
         keys_lua.push_str(&format!("local {}={}({},0X{:04X});", names[i], v_dx, lits[i], ks[i]));
     }
 
+    // 类型名与 getinfo 选项：自定义流加密就地还原（不碰全局访问形态——
+    // debug/pcall/loadstring/load 这些裸全局读写保持原样，执行器已验证）。
+    let (sk_s_k0, sk_s_k1) = stream_key("S", rng);
+    let (sk_t_k0, sk_t_k1) = stream_key("table", rng);
+    let (sk_f_k0, sk_f_k1) = stream_key("function", rng);
     let v_d = rng.name();
     let v_gi = rng.name();
     let v_list = rng.name();
@@ -849,20 +854,20 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
     let body = format!(
         "local function {nat}({f}) \
             local {d} = debug; \
-            if type({d}) ~= 'table' then return true end; \
+            if type({d}) ~= {sc_t} then return true end; \
             local {gi} = {d}[{k1}]; \
-            if type({gi}) ~= 'function' then return true end; \
-            local {ok}, {inf} = pcall({gi}, {f}, 'S'); \
-            if not {ok} or type({inf}) ~= 'table' then return true end; \
+            if type({gi}) ~= {sc_f} then return true end; \
+            local {ok}, {inf} = pcall({gi}, {f}, {sc_s}); \
+            if not {ok} or type({inf}) ~= {sc_t} then return true end; \
             return {inf}[{k2}] == {k3} and {inf}[{k4}] == {k5}; \
         end; \
         local function {getf}() \
             local {g} = (getfenv and getfenv()) or _G; \
             local {gg} = {g}[{k6}]; \
-            if type({gg}) == 'function' then {g} = {gg}() or {g}; end; \
+            if type({gg}) == {sc_f} then {g} = {gg}() or {g}; end; \
             local {ge} = {g}[{k7}]; \
             local {env} = {g}; \
-            if type({ge}) == 'function' then {env} = {ge}() or {g}; end; \
+            if type({ge}) == {sc_f} then {env} = {ge}() or {g}; end; \
             local {list} = {{ loadstring, {env}[{k8}], {env}[{k9}], load }}; \
             local {alt}, {i} = nil, 0; \
             local {n} = #{list}; \
@@ -870,7 +875,7 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
                 {i} = {i} + 1; \
                 local {f} = {list}[{i}]; \
                 local {t} = type({f}); \
-                if {t} == 'function' then \
+                if {t} == {sc_f} then \
                     if {nat}({f}) and {alt} == nil then {alt} = {f}; {i} = {n}; end; \
                     if {alt} == nil then {alt} = {f}; end; \
                 end; \
@@ -882,7 +887,10 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -
         i = v_i, n = v_n, f = v_f, t = v_t, g = v_g, ok = v_ok, inf = v_inf,
         gg = v_gg, ge = v_ge, env = v_env2,
         k1 = names[0], k2 = names[1], k3 = names[2], k4 = names[3], k5 = names[4],
-        k6 = names[5], k7 = names[6], k8 = names[7], k9 = names[8]
+        k6 = names[5], k7 = names[6], k8 = names[7], k9 = names[8],
+        sc_s = stream_call(sc, "S", sk_s_k0, sk_s_k1),
+        sc_t = stream_call(sc, "table", sk_t_k0, sk_t_k1),
+        sc_f = stream_call(sc, "function", sk_f_k0, sk_f_k1)
     );
     format!("{dx_def}{keys_lua}{body}")
 }
@@ -927,4 +935,29 @@ pub fn mix_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
             return (k0, k1);
         }
     }
+}
+
+/// ── 自定义流加密（独立于池）──
+/// 用途：把产物里还剩的明文字符串（类型名、元方法名、模式串等）就地加密。
+/// 与池的区别：不建共享表、不做哈希查找，每个调用点自己带一段密文字面量 +
+/// 一个 16 位随机密钥，靠作用域里定义的一只小解码器就地还原。
+/// 密码本体与探测块/池同一族（位置相关双字节混合，纯算术 XOR，不用位库）：
+///   c[i] = ((p[i] + k1) % 256) XOR ((k0*i + k1) % 256)
+/// 「没法一下算出来」靠的是密钥随下标走；也刻意保持简单，不堆轮数。
+/// 解码器的 Lua 源码（与探测块的 dx 同形态——该形态在目标执行器上已验证可用）。
+pub fn stream_dec_lua(fn_name: &str) -> String {
+    format!(
+        "local {f}=function(s,k) local o,i='',0; local n=#s; local k1=k%256; local k0=(k-k1)/256; while i<n do i=i+1; local a=(k0*i+k1)%256; local b=string.byte(s,i); local r,p=0,1; for w=1,8 do local x,y=a%2,b%2; if x~=y then r=r+p end; a=(a-x)/2; b=(b-y)/2; p=p*2 end; o=o..string.char((r-k1)%256) end; return o end; ",
+        f = fn_name
+    )
+}
+
+/// 一个调用点：`DEC("密文", 0XKKKK)`。密文用 mix_lit 的定宽 `\ddd` 形式。
+pub fn stream_call(dec: &str, plain: &str, k0: u32, k1: u32) -> String {
+    format!("{}({},{})", dec, mix_lit(plain, k0, k1), k0 * 256 + k1)
+}
+
+/// 随机取一对可用密钥（复用 mix_key：k0 非 0 且密文无 \000）。
+pub fn stream_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
+    mix_key(plain, rng)
 }

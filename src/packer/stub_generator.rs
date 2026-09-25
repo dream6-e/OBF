@@ -1,6 +1,8 @@
 use std::time::SystemTime;
 use super::utils::NamePool;
-use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, GenRng};
+use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, stream_dec_lua, GenRng};
+
+fn loadstring_probe_lua_sc_def(name: &str) -> String { stream_dec_lua(name) }
 
 pub struct StubGenerator;
 
@@ -277,9 +279,12 @@ impl StubGenerator {
         }
         k_str.push('}');
 
+        let mut sc_rng = GenRng::new(seed as u64 ^ 0x5C9A_3F17);
+        let v_sc = sc_rng.name();
+        let sc_def = loadstring_probe_lua_sc_def(&v_sc);
         format!("
 return (function(...)
-    {probe}
+    {sc_def}{probe}
     local {f_load}=function(c) local f;if not(f) then return ({v_pload} or loadstring or load)(c) else return {{}} end;end
     local {f_pcall}=function(r) local c,v=3,type;if v(c)==\"string\" then return error(r) else return pcall(r) end;end
     local {f_char}=function(...) return string.char(...) end
@@ -346,7 +351,7 @@ return (function(...)
     return {v_entry}([=[{payload}]=], ...)
 end)(...)
 ",
-        f_load=f_load, f_pcall=f_pcall, probe=loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut GenRng::new(seed as u64)), v_pload=v_pload, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
+        f_load=f_load, f_pcall=f_pcall, probe=loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &v_sc, &mut GenRng::new(seed as u64)), v_pload=v_pload, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
         v_entry=v_entry, v_data=v_data, v_q=v_q, m_bxor=m_bxor, v_s=v_s, v_a=v_a, v_b=v_b, m_bxor_body=m_bxor_body, m_next=m_next,
         m_next_body=m_next_body, m_init_map=m_init_map, m_init_map_body=m_init_map_body, m_init_insts=m_init_insts,
         m_init_insts_body=m_init_insts_body, m_init_handlers=m_init_handlers, m_init_handlers_body=m_init_handlers_body,

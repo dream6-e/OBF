@@ -422,11 +422,15 @@ impl Generator {
         // 状态对象每个调用一个，方法通过 __index 原型共享，调用仍是 `V:方法()`。
         let mut block_methods = String::new();
         block_methods.push_str(&format!("local {}; ", fn_execute));
-        block_methods.push_str(&format!("local {} = function(...) return {}[{}]('#', ...) end; ", var_get_count, var_s, hex_select_idx));
+        let (h0, h1) = crate::VM::VM_Backend::Generator_util::stream_key("#", &mut rng);
+        let sc_hash = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "#", h0, h1);
+        block_methods.push_str(&format!("local {} = function(...) return {}[{}]({}, ...) end; ", var_get_count, var_s, hex_select_idx, sc_hash));
         block_methods.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{{}={}(...),...}} end; ", pf_vn, var_get_count));
         block_methods.push_str(&format!("local {}={{}};local {}={{}};", var_methods, var_proto));
         for d in defs.iter() { block_methods.push_str(d); block_methods.push(' '); }
-        block_methods.push_str(&format!("{}[\"__\"..\"index\"]={};", var_proto, var_methods));
+        let (ix0, ix1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
+        let sc_index = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "__index", ix0, ix1);
+        block_methods.push_str(&format!("{}[{}]={};", var_proto, sc_index, var_methods));
 
         block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
@@ -544,7 +548,14 @@ impl Generator {
             cstream = fn_chacha_stream, cblock = fn_chacha_block, csalt = chacha_salt_var
         ));
         
-        let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=='function' and 0 or {}); local mt_vc={{}}; mt_vc[\"__\"..\"mode\"]='k'; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3);
+        let (fh0, fh1) = crate::VM::VM_Backend::Generator_util::stream_key("function", &mut rng);
+        let sc_fn_hdr = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "function", fh0, fh1);
+        let (md0, md1) = crate::VM::VM_Backend::Generator_util::stream_key("__mode", &mut rng);
+        let sc_mode = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "__mode", md0, md1);
+        let (mk0, mk1) = crate::VM::VM_Backend::Generator_util::stream_key("k", &mut rng);
+        let sc_k = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "k", mk0, mk1);
+        let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3,
+            fn_lit = sc_fn_hdr, mode_lit = sc_mode, k_lit = sc_k);
         // ── 解码链（第 6 项：解密逻辑打乱）──
         // 这几个函数只在产物加载时跑一次（冷路径），所以放心打乱形态，不用为性能保留原样。
         let (v_bx_a, v_bx_b, v_bx_r, v_bx_w, v_bx_g, v_bx_s) =
@@ -729,10 +740,14 @@ impl Generator {
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
             i = v_ch_i, n = v_ch_n
         );
+        let (bi0, bi1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
+        let sc_index2 = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "__index", bi0, bi1);
+        let (ko0, ko1) = crate::VM::VM_Backend::Generator_util::stream_key("KryvexObf_", &mut rng);
+        let sc_kobf = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "KryvexObf_", ko0, ko1);
         let body_consts = format!(
             "{st}={nxt}; local {ec}={{}}; local {ca}={{}}; local {mt}={{}}; \
-             {mt}[\"__\"..\"index\"]=function({tb},{ix}) \
-                 if not {flg} then return \"KryvexObf_\"..{ix} end; \
+             {mt}[{idx_lit}]=function({tb},{ix}) \
+                 if not {flg} then return {kobf_lit}..{ix} end; \
                  local cd={ca}[{ix}]; if cd~=nil then return cd end; \
                  local {ev}={ec}[{ix}]; if not {ev} then return nil end; \
                  local val; \
@@ -749,7 +764,8 @@ impl Generator {
             fds = fn_dec_str, fdn = fn_dec_num, one = rng.obfuscate_num(1i64, 1, &keys),
             two = rng.obfuscate_num(2i64, 1, &keys), three = rng.obfuscate_num(3i64, 1, &keys),
             zero = rng.obfuscate_num(0i64, 1, &keys), a5 = fn_a5, rd = fn_read_dec, t = t,
-            gn = global_numbers, gs = global_strings, pf_consts = pf_consts, i = v_ch_i, n = v_ch_n
+            gn = global_numbers, gs = global_strings, pf_consts = pf_consts, i = v_ch_i, n = v_ch_n,
+            idx_lit = sc_index2, kobf_lit = sc_kobf
         );
         let body_protos = format!(
             "{st}={nxt}; {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
