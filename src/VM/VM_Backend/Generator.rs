@@ -200,7 +200,7 @@ impl Generator {
 
         let block_vm_core = Lua_core::build_vm_core().replace("\n", " ");
         
-        let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng);
+        let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng, (&at.dec_fn, &at.res_fn));
         let var_junk = rng.name(); let var_vc = rng.name(); let var_builtin_reg = rng.name();
         let block_packer_vars = format!("local {}, {}, {}; ", var_junk, var_vc, var_builtin_reg);
 
@@ -426,7 +426,7 @@ impl Generator {
         block_methods.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{{}={}(...),...}} end; ", pf_vn, var_get_count));
         block_methods.push_str(&format!("local {}={{}};local {}={{}};", var_methods, var_proto));
         for d in defs.iter() { block_methods.push_str(d); block_methods.push(' '); }
-        block_methods.push_str(&format!("{}[\"__\"..\"index\"]={};", var_proto, var_methods));
+        block_methods.push_str(&format!("{}[{}({})]={};", var_proto, at.dec_fn, crate::VM::VM_Backend::Generator_util::poly_hash("__index"), var_methods));
 
         block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
@@ -544,7 +544,11 @@ impl Generator {
             cstream = fn_chacha_stream, cblock = fn_chacha_block, csalt = chacha_salt_var
         ));
         
-        let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=='function' and 0 or {}); local mt_vc={{}}; mt_vc[\"__\"..\"mode\"]='k'; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3);
+        let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {fn1}={res}({h_tp}); {}={}+({fn1}({})=={fn} and 0 or {}); local mt_vc={{}}; mt_vc[{dec}({h_mode})]={dec}({h_k}); {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3,
+            res = at.res_fn, fn1 = rng.name(), h_tp = crate::VM::VM_Backend::Generator_util::poly_hash("type"),
+            dec = at.dec_fn, h_mode = crate::VM::VM_Backend::Generator_util::poly_hash("__mode"),
+            h_k = crate::VM::VM_Backend::Generator_util::poly_hash("k"),
+            fn = format!("{}({})", at.dec_fn, crate::VM::VM_Backend::Generator_util::poly_hash("function")));
         // ── 解码链（第 6 项：解密逻辑打乱）──
         // 这几个函数只在产物加载时跑一次（冷路径），所以放心打乱形态，不用为性能保留原样。
         let (v_bx_a, v_bx_b, v_bx_r, v_bx_w, v_bx_g, v_bx_s) =
@@ -731,7 +735,7 @@ impl Generator {
         );
         let body_consts = format!(
             "{st}={nxt}; local {ec}={{}}; local {ca}={{}}; local {mt}={{}}; \
-             {mt}[\"__\"..\"index\"]=function({tb},{ix}) \
+             {mt}[{dec}({h_ix})]=function({tb},{ix}) \
                  if not {flg} then return \"KryvexObf_\"..{ix} end; \
                  local cd={ca}[{ix}]; if cd~=nil then return cd end; \
                  local {ev}={ec}[{ix}]; if not {ev} then return nil end; \
@@ -749,7 +753,8 @@ impl Generator {
             fds = fn_dec_str, fdn = fn_dec_num, one = rng.obfuscate_num(1i64, 1, &keys),
             two = rng.obfuscate_num(2i64, 1, &keys), three = rng.obfuscate_num(3i64, 1, &keys),
             zero = rng.obfuscate_num(0i64, 1, &keys), a5 = fn_a5, rd = fn_read_dec, t = t,
-            gn = global_numbers, gs = global_strings, pf_consts = pf_consts, i = v_ch_i, n = v_ch_n
+            gn = global_numbers, gs = global_strings, pf_consts = pf_consts, i = v_ch_i, n = v_ch_n,
+            dec = at.dec_fn, h_ix = crate::VM::VM_Backend::Generator_util::poly_hash("__index")
         );
         let body_protos = format!(
             "{st}={nxt}; {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
