@@ -522,8 +522,8 @@ pub fn build_consts(
                     cur = hh_cur, x_ka = x_ka, aux = hh_aux, c = hh_c, a2 = hh_a2,
                     hh = hh_name, x_fail1 = x_fail1, e_kb = e_kb, e_kc = e_kc, w4v = w4v, a2x = rng.name()));
                 lua.push_str(&format!(
-                    "{c}.{pf}=setmetatable({{}},{mt}); {mt}=nil; {mt}=nil; ",
-                    c = fn_c, pf = pf_consts, mt = mt_name));
+                    "{c}.{pf}=setmetatable({{}},{mt}); {mt}=({{}})[{mtn}]; ",
+                    c = fn_c, pf = pf_consts, mt = mt_name, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
                 for x in &ld_defs { lua.push_str(x); }
                 lua.push_str(&format!(
                     "local {i}=0; local {n}={a5}(); if not(not {pj}[({pk6})]) then {i}={n}; else \

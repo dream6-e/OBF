@@ -813,7 +813,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         let d14: Vec<String> = (0..9).map(|_| rng.name()).collect();
         let body_debug = format!(
             "{st}={nxt}; {tree9} repeat \
-             local {d0},{d1},{d2},{d3},{d4},{d5},{d6},{d7},{d8}=nil,nil,nil,nil,nil,nil,nil,nil,nil; \
+             local {d0},{d1},{d2},{d3},{d4},{d5},{d6},{d7},{d8}; \
              local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {a5}() end; \
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}(); {a5}(); {a5}() end; \
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; break; until false; ",
@@ -970,9 +970,24 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                     reg = var_builtin_reg, slot = slot + 1, benv = var_boot_env
                 ));
             }
-            // ⑱ 用毕销毁：boot 簇只在启动用一次，解完全部 nil，不给 dump 机会
-            out.push_str(&format!("{bk}=nil; {bs}=nil; {bcb}=nil; {bsm}=nil; {bdec}=nil; {bpt}=nil; ",
-                bk = bk, bs = bs, bcb = bcb, bsm = bsm, bdec = bdec, bpt = bpt));
+            // ⑱ 用毕销毁（⑳.1 伪装化）：连续 X=nil 运行是指纹——每个变量换一种
+            // "取值赋值" 形态消化，nil 全部来自合法表达式的自然缺失：
+            // 槽位表取未用键 / 未命中补取(恒执行) / 空表取键 / or 链 /
+            // 条件式恒 nil / 间接索引，混入常见池取图案，无 =nil 字面赋值
+            let (g1, g2, g3) = (rng.name(), rng.name(), rng.name());
+            let h1 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
+            let h2 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
+            let h3 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
+            let h4 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
+            let h5 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
+            let h6 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
+            out.push_str(&format!(
+                "local {g1}={reg}[{h1}]; {bk}={g1}; if not {g1} then {bs}={reg}[{h2}] end; \
+                 local {g2}=({{}})[{h3}]; {bcb}={g2}; {bsm}={reg}[{h4}] or ({{}})[{h5}]; \
+                 {bdec}={bdec} and nil or {bdec}; local {g3}={reg}; {bpt}={g3}[({{}})[{h6}]]; ",
+                reg = var_builtin_reg, g1 = g1, g2 = g2, g3 = g3,
+                bk = bk, bs = bs, bcb = bcb, bsm = bsm, bdec = bdec, bpt = bpt,
+                h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5, h6 = h6));
         }
         let fu = rng.name();
         
