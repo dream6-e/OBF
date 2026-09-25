@@ -671,58 +671,11 @@ impl GenRng {
     }
     /// 取一个互不重复的「槽位号」——数据流打乱用的随机大整数下标。
     /// 状态（pc/stk/top/常量表…）都住在 VM 对象的这些槽里，块的局部名字逐块随机。
-    #[allow(dead_code)]
     pub fn slot(&mut self) -> i64 {
         loop {
             let v = self.range64(0x0200_0000, 0x7FFF_FFFF);
             if !self.slots.contains(&v) { self.slots.push(v); return v; }
         }
-    }
-
-    /// ④ 能动态生成的就动态生成：槽位号以前是逐个写死的十进制大整数，
-    /// 同一个号在产物里出现几百次（`self[837110348]`），等于给逆向标好了路标；
-    /// 而且「同一个大常量反复出现」本身就是可以搜索替换的特征。
-    /// 现在改成**运行期**由一条线性同余序列推出来 —— 产物里不再有任何一个槽位号
-    /// 字面量，每个号只在序列里出现一次，其余位置全是局部名字（还顺带变小）。
-    /// 返回 (名字列表, 初始化语句)。序列取 `x = (x*乘数) % 模`，乘数 < 2^16、
-    /// 模 < 2^31 ⇒ x*乘数 < 2^47，double 里仍是精确整数（Lua/Roblox 行为一致）。
-    pub fn slot_key_block(&mut self, count: usize) -> (Vec<String>, String) {
-        let m = self.range64(0x1000_0000, 0x7000_0000) as u64;
-        let a = (self.range64(3, 0x1_0000) as u64) | 1;
-        let seed = self.range64(1, m as i64 - 1) as u64;
-        let floor = 0x0200_0000u64;
-        let mut kept: Vec<(usize, u64)> = Vec::new();
-        let mut v = seed;
-        let mut idx = 0usize;
-        while kept.len() < count && idx < 200_000 {
-            idx += 1;
-            v = (v.wrapping_mul(a)) % m;
-            if v >= floor && !kept.iter().any(|&(_, x)| x == v) {
-                kept.push((idx, v));
-            }
-        }
-        let last = kept.last().map(|k| k.0).unwrap_or(1);
-        // 兜底：极端情况下序列里凑不满 count 个合规值，就用直接随机的字面量补齐
-        // （仍然保证互不相同），免得出现「名字比取值多」→ 取到 nil 键。
-        let mut extra: Vec<u64> = Vec::new();
-        while kept.len() + extra.len() < count {
-            let v = self.range64(0x0200_0000, 0x7FFF_FFFF) as u64;
-            if !kept.iter().any(|&(_, x)| x == v) && !extra.contains(&v) {
-                extra.push(v);
-            }
-        }
-        let (x_name, arr_name, i_name) = (self.name(), self.name(), self.name());
-        let names: Vec<String> = (0..count).map(|_| self.name()).collect();
-        let setup = format!(
-            "local {x}=0X{seed:X};local {arr}={{}};for {i}=1,{last} do {x}=({x}*0X{a:X})%0X{m:X};{arr}[{i}]={x} end;local {bindings}={picks};",
-            x = x_name, arr = arr_name, i = i_name, last = last,
-            seed = seed, a = a, m = m,
-            bindings = names.join(","),
-            picks = kept.iter().map(|(i, _)| format!("{}[{}]", arr_name, i))
-                .chain(extra.iter().map(|v| format!("0X{:X}", v)))
-                .collect::<Vec<_>>().join(",")
-        );
-        (names, setup)
     }
 
     pub fn shuffle<T>(&mut self, slice: &mut [T]) {
@@ -830,66 +783,7 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
 /// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
 /// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
 /// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
-/// ⑤ 池键哈希的参数：**逐产物随机**。
-///
-/// 以前这里是写死的 djb2（起手 5381、乘 33）—— 这是个一眼可辨的**已知算法指纹**：
-/// 产物里只要出现 `h=5381`，逆向方立刻知道池子按 djb2 建键，可以直接照着重算。
-/// 现在换成同一族的随机实例 `h = (h*乘数 + 字节 + 增量) mod 2^32`：
-/// 乘数 / 增量 / 起手值每个产物都不同，`h*乘数 < 2^48`，double 里是精确整数
-/// （Lua 5.1 / Luau / Roblox 行为一致）。参数经**线程局部**传递，
-/// 免得测试并行跑多个产物时互相串味。
-#[derive(Clone, Copy)]
-pub struct HashParams {
-    pub mult: u32,
-    pub add: u32,
-    pub seed: u32,
-}
-
-thread_local! {
-    static HASH_PARAMS: std::cell::Cell<HashParams> =
-        const { std::cell::Cell::new(HashParams { mult: 33, add: 0, seed: 5381 }) };
-}
-
-pub fn set_hash_params(p: HashParams) {
-    HASH_PARAMS.with(|h| h.set(p));
-}
-
-pub fn hash_params() -> HashParams {
-    HASH_PARAMS.with(|h| h.get())
-}
-
-/// 池键哈希。Rust 侧与 Lua 侧必须完全一致：Lua 里算的是
-/// `h=(h*乘数+byte+增量)%4294967296`，参数见 [`HashParams`]（逐产物随机）。
-pub fn poly_hash(s: &str) -> u32 {
-    let p = hash_params();
-    let mut h: u64 = p.seed as u64;
-    for b in s.bytes() {
-        h = (h * p.mult as u64 + b as u64 + p.add as u64) % 4294967296;
-    }
-    h as u32
-}
-
-pub fn loadstring_probe_lua(
-    nat: &str,
-    getf: &str,
-    pl: &str,
-    rng: &mut GenRng,
-    pool: Option<(&str, &str)>,
-) -> String {
-    // 有池时：字符串 / 全局名一律从池里取（`dec(哈希)` / `res(哈希)`），产物里不留明文。
-    // 没有池时（上一代 MB 外壳的 stub，已不参与产物生成）退回字面量写法。
-    let sref = |name: &str| -> String {
-        match pool {
-            Some((dec, _)) => format!("{}({})", dec, poly_hash(name)),
-            None => format!("'{}'", name),
-        }
-    };
-    let gref = |name: &str| -> String {
-        match pool {
-            Some((_, res)) => format!("{}({})", res, poly_hash(name)),
-            None => name.to_string(),
-        }
-    };
+pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, rng: &mut GenRng) -> String {
     // ── 要隐藏的字符串：顺序与下面 format! 里的 k1…k9 一一对应 ──
     const PLAIN: [&str; 9] = [
         "getinfo",    // info 表的键
@@ -952,33 +846,31 @@ pub fn loadstring_probe_lua(
     let v_gg = rng.name();
     let v_ge = rng.name();
     let v_env2 = rng.name();
-    let v_gfe = rng.name();
     let body = format!(
         "local function {nat}({f}) \
-            local {d} = {gref_dbg}; \
-            if {tp}({d}) ~= {tb} then return true end; \
+            local {d} = debug; \
+            if type({d}) ~= 'table' then return true end; \
             local {gi} = {d}[{k1}]; \
-            if {tp}({gi}) ~= {fn} then return true end; \
-            local {ok}, {inf} = {pc}({gi}, {f}, {so}); \
-            if not {ok} or {tp}({inf}) ~= {tb} then return true end; \
+            if type({gi}) ~= 'function' then return true end; \
+            local {ok}, {inf} = pcall({gi}, {f}, 'S'); \
+            if not {ok} or type({inf}) ~= 'table' then return true end; \
             return {inf}[{k2}] == {k3} and {inf}[{k4}] == {k5}; \
         end; \
         local function {getf}() \
-            local {gfe} = {gref_getfenv}; \
-            local {g} = ({gfe} and {gfe}()) or {gref_g}; \
+            local {g} = (getfenv and getfenv()) or _G; \
             local {gg} = {g}[{k6}]; \
-            if {tp}({gg}) == {fn} then {g} = {gg}() or {g}; end; \
+            if type({gg}) == 'function' then {g} = {gg}() or {g}; end; \
             local {ge} = {g}[{k7}]; \
             local {env} = {g}; \
-            if {tp}({ge}) == {fn} then {env} = {ge}() or {g}; end; \
-            local {list} = {{ {env}[{k8}], {env}[{k9}] }}; \
+            if type({ge}) == 'function' then {env} = {ge}() or {g}; end; \
+            local {list} = {{ loadstring, {env}[{k8}], {env}[{k9}], load }}; \
             local {alt}, {i} = nil, 0; \
             local {n} = #{list}; \
             while {i} < {n} do \
                 {i} = {i} + 1; \
                 local {f} = {list}[{i}]; \
-                local {t} = {tp}({f}); \
-                if {t} == {fn} then \
+                local {t} = type({f}); \
+                if {t} == 'function' then \
                     if {nat}({f}) and {alt} == nil then {alt} = {f}; {i} = {n}; end; \
                     if {alt} == nil then {alt} = {f}; end; \
                 end; \
@@ -988,10 +880,7 @@ pub fn loadstring_probe_lua(
         local {pl} = {getf}();\n",
         nat = nat, getf = getf, pl = pl, d = v_d, gi = v_gi, list = v_list, alt = v_alt,
         i = v_i, n = v_n, f = v_f, t = v_t, g = v_g, ok = v_ok, inf = v_inf,
-        gg = v_gg, ge = v_ge, env = v_env2, gfe = v_gfe,
-        tp = gref("type"), tb = sref("table"), fn = sref("function"), so = sref("S"),
-        pc = gref("pcall"), gref_dbg = gref("debug"), gref_getfenv = gref("getfenv"),
-        gref_g = gref("_G"),
+        gg = v_gg, ge = v_ge, env = v_env2,
         k1 = names[0], k2 = names[1], k3 = names[2], k4 = names[3], k5 = names[4],
         k6 = names[5], k7 = names[6], k8 = names[7], k9 = names[8]
     );
