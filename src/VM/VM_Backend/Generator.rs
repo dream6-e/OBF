@@ -789,11 +789,24 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &v_ch_i, &v_ch_n, &t)
         );
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
+        // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
+        // 滚动密钥流（k1..k4 随消费演化）——跳读须逐字节喂 rd() 推进外层密钥；
+        // 快照取在 len 之后（=子块首字节前的 A2 与滚动密钥），thunk 换入快照解码、
+        // 换出恢复；防篡改旗彼时为 false，同样保存/置位/恢复
+        let (ln18, p18, s1a, b1a, sv18, svf18, rr18) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let body_protos = format!(
             "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); \
-             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; {c}.{pf_protos}[{i}]={dc}() end else {i}={n}; {n}=0X0; end; ",
+             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; local {ln}={u32d}(); \
+               local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; for _=0X1,{ln} do {rd}() end; \
+               {c}.{pf_protos}[{i}]=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
+                 {a2}={p0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
+                 {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end end else {i}={n}; {n}=0X0; end; ",
             st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
             dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1,
+            u32d = fn_u32_dec,
+            a2 = var_a2, flg = var_state_flag, rd = fn_read_dec,
+            ln = ln18, p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18, rr = rr18,
             tree9 = it9(&mut rng, var_state.as_str())
         );
         // ⑭ 九元联合 nil 声明 + ⑦ repeat…until false 换皮 + ⑨ 区间树
@@ -933,6 +946,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                     reg = var_builtin_reg, slot = slot + 1, benv = var_boot_env
                 ));
             }
+            // ⑱ 用毕销毁：boot 簇只在启动用一次，解完全部 nil，不给 dump 机会
+            out.push_str(&format!("{bk}=nil; {bs}=nil; {bcb}=nil; {bsm}=nil; {bdec}=nil; {bpt}=nil; ",
+                bk = bk, bs = bs, bcb = bcb, bsm = bsm, bdec = bdec, bpt = bpt));
         }
         let fu = rng.name();
         

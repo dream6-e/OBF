@@ -477,8 +477,14 @@ pub fn build_consts(
                 rng.shuffle(&mut ld_defs);
                 let (nBv, nCv, w2v, w3v, w4v) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
                 let mut lua = format!(
-                    "local {ec},{ca},{dsp},{ld}={{}},{{}},{{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; ",
-                    ec = var_enc_c, ca = var_cache, dsp = dsp_name, ld = ld_name,
+                    // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
+                    // pairs 遍历直接报错；后备退化为普通表（fail-open）
+                    "local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; \
+                     do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
+                     local {dsp},{ld}={{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; ",
+                    ec = var_enc_c, ecb = rng.name(), ca = var_cache, cab = rng.name(),
+                    m1 = rng.name(), m2 = rng.name(),
+                    dsp = dsp_name, ld = ld_name,
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
                     w2_ = w2v, w20 = wk2, w3_ = w3v, w30 = wk3, w4_ = w4v, w40 = wk4);
                 lua.push_str(&format!(
@@ -495,9 +501,10 @@ pub fn build_consts(
                      {hh}[{e_ka}]=function({ix},{ix}) if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
                      {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if not {ev} then return {x_nil1} end \
-                       local {h}={dsp}[({ev}[(0X1)])] if not {h} then return {x_nil1} end return {x_val1},{h}(0X1,{ev}) end; \
+                       local {h}={dsp}[({ev}[(0X1)])] if not {h} then {ec}[({ix})]=nil return {x_nil1} end local {vv}={h}(0X1,{ev}) {ec}[({ix})]=nil return {x_val1},{vv} end; \
                      {hh}[{e_kc}]=function({ix},{aux}) {ca}[({ix})]={aux} while {w3v} do return {x_ret1},{aux} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
+                    vv = rng.name(),
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,

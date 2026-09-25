@@ -662,8 +662,13 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let p_count = r.read_u32();
     w.extend_from_slice(&p_count.to_le_bytes());
     for _ in 0..p_count {
+        // ⑱ 惰性原型：每个子块加 u32 长度前缀，Lua 侧 body_protos 按长跳过、
+        // CLOSURE 首调才递归解码——整棵原型树不再一次性展开成明文
+        let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        rewrite_chunk(r, w, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng);
+        rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng);
+        w.extend_from_slice(&(child.len() as u32).to_le_bytes());
+        w.extend_from_slice(&child);
     }
     let l_count = r.read_u32();
     w.extend_from_slice(&l_count.to_le_bytes());
