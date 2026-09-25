@@ -661,6 +661,12 @@ fn collect_locals(toks: &[(Kind, String)]) -> Vec<String> {
 }
 
 /// 单行化 + 局部名随机化。字符串与字段名原样保留。
+/// Lua 5.1 全部保留字（finalize 的随机短名必须避开）。
+const KEYWORDS: &[&str] = &[
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
+    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+];
+
 fn finalize(dev: &str, rng: &mut Rng) -> String {
     let toks = tokenize(dev);
     let locals = collect_locals(&toks);
@@ -676,7 +682,9 @@ fn finalize(dev: &str, rng: &mut Rng) -> String {
             continue;
         }
         let mut fresh = rng.name();
-        while used.contains(&fresh) {
+        // 短名（1~3 字符）会撞 Lua 关键字（in/or/if/do/and/end/for/nil/not），
+        // 撞上就是必坏的产物（`local in=0` 语法错）——关键字视同已占用。
+        while KEYWORDS.contains(&fresh.as_str()) || used.contains(&fresh) {
             fresh = rng.name();
         }
         used.insert(fresh.clone());

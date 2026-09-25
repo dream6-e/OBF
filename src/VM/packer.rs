@@ -499,15 +499,16 @@ impl Packer {
 
         // 自定义流加密解码器（packer 脚本独立作用域自备一只）：
         // probe 的类型串、gmatch 模式、"return " 前缀、chunk 名都走它，不留明文。
-        let v_sc = rng.name();
-        let sc_def = crate::VM::VM_Backend::Generator_util::stream_dec_lua(&v_sc);
+        // 流加密键表：packer 脚本独立作用域自备一张（解码器匿名挂表里）。
+        let mut sc_st = crate::VM::VM_Backend::Generator_util::StreamTable::new(rng.name());
         let (sp0, sp1) = crate::VM::VM_Backend::Generator_util::stream_key("[^~]+", rng);
         let (sr0, sr1) = crate::VM::VM_Backend::Generator_util::stream_key("return ", rng);
         let (sk0, sk1) = crate::VM::VM_Backend::Generator_util::stream_key("kryvex", rng);
-        let sc_pat = crate::VM::VM_Backend::Generator_util::stream_call(&v_sc, "[^~]+", sp0, sp1);
-        let sc_ret = crate::VM::VM_Backend::Generator_util::stream_call(&v_sc, "return ", sr0, sr1);
-        let sc_chunk = crate::VM::VM_Backend::Generator_util::stream_call(&v_sc, "kryvex", sk0, sk1);
-        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &v_sc, rng);
+        let sc_pat = sc_st.call("[^~]+", sp0, sp1);
+        let sc_ret = sc_st.call("return ", sr0, sr1);
+        let sc_chunk = sc_st.call("kryvex", sk0, sk1);
+        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut sc_st, rng);
+        let sc_def = sc_st.emit();
         // ── 第 2 项：这层解码器也不再是「初始化 → 拆分 → 解码 → 执行」的清晰骨架 ──
         // 状态表构造里 32 个键值对彼此独立，顺序打乱；stage2 里 16 条初始化赋值同样打乱
         // （data/len 那一对有先后依赖，单独保持原序）；gmatch 的 for-in 拆成显式迭代器 + 影子守卫。

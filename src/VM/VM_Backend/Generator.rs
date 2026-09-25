@@ -47,7 +47,7 @@ impl Generator {
         let pf_vn = rng.name();
         
         let key_seed_var = rng.name();
-        let at = AntiTamper::generate_split(true, &key_seed_var);
+        let mut at = AntiTamper::generate_split(true, &key_seed_var);
         
         let mut used_ops = HashSet::new();
         { let mut scan_reader = PayloadReader { data: payload, pos: 0 }; scan_used_opcodes(&mut scan_reader, &mut used_ops); }
@@ -136,13 +136,21 @@ impl Generator {
         // 共用一条连续的 keystream。指令流此前是明文追加的，固定 10 字节一条，
         // 剥掉外层 base86 之后可以直接切片还原；现在和池一样被覆盖。
         // Lua 侧的 chunk 读取器相应改成走 fn_read_dec（见 block_dec_readers）。
+        // ⑤ 滚动层常数逐产物随机（正向这五个数在 Rust 侧，逆向在 Lua 读取器里，
+        // 两边由下面这组变量同时生成 —— 抓产物的人看到的是另一组数）。
+        let sc_add: u8 = (rng.range(0, 128) * 2 + 1) as u8; // 奇数 1..255
+        let sc_rot_in: u32 = rng.range(1, 8) as u32;
+        let sc_add_k1: u8 = rng.range(1, 8) as u8;
+        let sc_mul_k2: u8 = rng.range(2, 8) as u8;
+        let sc_rot_k2: u32 = rng.range(1, 8) as u32;
+        let sc_rot_k4: u32 = rng.range(1, 8) as u32;
         for b in combined_payload[4..].iter_mut() {
             let orig = *b;
-            *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(0x42);
-            k1 = k1.wrapping_add(orig).rotate_left(1).wrapping_add(0x1B);
-            k2 = k2.wrapping_mul(3).wrapping_add(*b).rotate_right(2);
+            *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(sc_add);
+            k1 = k1.wrapping_add(orig).rotate_left(sc_rot_in).wrapping_add(sc_add_k1);
+            k2 = k2.wrapping_mul(sc_mul_k2).wrapping_add(*b).rotate_right(sc_rot_k2);
             k3 = k3 ^ k1.wrapping_sub(k4);
-            k4 = k4.wrapping_add(k2).rotate_left(3);
+            k4 = k4.wrapping_add(k2).rotate_left(sc_rot_k4);
         }
         
         let key_kryvex = String::from("x1"); let p_out: Vec<String> = (0..6).map(|_| rng.name()).collect();
@@ -313,37 +321,40 @@ impl Generator {
         // ① 方法化 + ② 数据流打乱：块内不再直接引用 execute 的局部变量，
         // 而是按随机槽位号从 VM 对象里取自己的那份状态，出口再写回。
         // 每个块的局部别名逐块新取，同一个逻辑变量跨块看到的不是同一个名字。
-        let k_pc = rng.slot(); let k_stk = rng.slot(); let k_top = rng.slot();
-        let k_ops = rng.slot(); let k_aa = rng.slot(); let k_bb = rng.slot(); let k_cc = rng.slot();
-        let k_consts = rng.slot(); let k_protos = rng.slot();
-        let k_upv = rng.slot(); let k_env = rng.slot();
-        let k_va = rng.slot(); let k_valen = rng.slot();
-        let k_vc = rng.slot(); let k_breg = rng.slot();
-        let k_state = rng.slot(); let k_mode = rng.slot();
-        let k_retv = rng.slot(); let k_retf = rng.slot(); let k_rett = rng.slot();
+        // ④ 槽位号不再写死在产物里：运行期由一段线性同余序列推出来（见
+        // `GenRng::slot_key_block`）。这里拿到的全是**局部名字**，插值进 Lua 源码。
+        let (sk, sk_setup) = rng.slot_key_block(20);
+        let k_pc = sk[0].clone(); let k_stk = sk[1].clone(); let k_top = sk[2].clone();
+        let k_ops = sk[3].clone(); let k_aa = sk[4].clone(); let k_bb = sk[5].clone(); let k_cc = sk[6].clone();
+        let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
+        let k_upv = sk[9].clone(); let k_env = sk[10].clone();
+        let k_va = sk[11].clone(); let k_valen = sk[12].clone();
+        let k_vc = sk[13].clone(); let k_breg = sk[14].clone();
+        let k_state = sk[15].clone(); let k_mode = sk[16].clone();
+        let k_retv = sk[17].clone(); let k_retf = sk[18].clone(); let k_rett = sk[19].clone();
 
         // 表类状态按块取一次（表是引用，不需要写回）；pc/top 是标量，
         // 直接把槽位表达式替换进块体 —— 就地读写，不依赖出口写回
         // （Lua 的 `return` 必须是块的最后一条语句，写回语句没法追加在它后面）。
-        let state_fields: Vec<(String, i64, bool)> = vec![
-            (var_opcodes.clone(), k_ops, false),
-            (var_a_arr.clone(), k_aa, false),
-            (var_b_arr.clone(), k_bb, false),
-            (var_c_arr.clone(), k_cc, false),
-            (var_stk.clone(), k_stk, false),
-            (var_consts.clone(), k_consts, false),
-            (var_protos.clone(), k_protos, false),
-            (var_upvals.clone(), k_upv, false),
-            (var_env.clone(), k_env, false),
-            (var_varargs.clone(), k_va, false),
-            (var_varargs_len.clone(), k_valen, false),
-            (var_vc.clone(), k_vc, false),
-            (var_builtin_reg.clone(), k_breg, false),
+        let state_fields: Vec<(String, String, bool)> = vec![
+            (var_opcodes.clone(), k_ops.clone(), false),
+            (var_a_arr.clone(), k_aa.clone(), false),
+            (var_b_arr.clone(), k_bb.clone(), false),
+            (var_c_arr.clone(), k_cc.clone(), false),
+            (var_stk.clone(), k_stk.clone(), false),
+            (var_consts.clone(), k_consts.clone(), false),
+            (var_protos.clone(), k_protos.clone(), false),
+            (var_upvals.clone(), k_upv.clone(), false),
+            (var_env.clone(), k_env.clone(), false),
+            (var_varargs.clone(), k_va.clone(), false),
+            (var_varargs_len.clone(), k_valen.clone(), false),
+            (var_vc.clone(), k_vc.clone(), false),
+            (var_builtin_reg.clone(), k_breg.clone(), false),
         ];
         let mut defs: Vec<String> = Vec::new();
         let mut tree_entries: Vec<(u32, String)> = Vec::new();
         // 热块内联时要用的状态名 → 槽位号（驱动里声明成局部变量）
-        let mut hot_locals: Vec<(String, i64)> = Vec::new();
+        let mut hot_locals: Vec<(String, String)> = Vec::new();
         for (ops, code, name, st) in blocks.iter() {
             let st_lua = rng.format_num(*st as i64);
             // 预算：热路径（算术/比较/跳转/栈与表存取）保留**内联**，冷路径
@@ -398,7 +409,7 @@ impl Generator {
                 let body = code.replace("{STOREBACK}", "").replace("self:", &format!("{}:", var_vm));
                 for (old, key, _mutable) in state_fields.iter() {
                     if uses_ident(&body, old) && !hot_locals.iter().any(|(n, _)| n == old) {
-                        hot_locals.push((old.clone(), *key));
+                        hot_locals.push((old.clone(), key.clone()));
                     }
                 }
                 for &op in ops.iter() {
@@ -423,13 +434,13 @@ impl Generator {
         let mut block_methods = String::new();
         block_methods.push_str(&format!("local {}; ", fn_execute));
         let (h0, h1) = crate::VM::VM_Backend::Generator_util::stream_key("#", &mut rng);
-        let sc_hash = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "#", h0, h1);
+        let sc_hash = at.st.call("#", h0, h1);
         block_methods.push_str(&format!("local {} = function(...) return {}[{}]({}, ...) end; ", var_get_count, var_s, hex_select_idx, sc_hash));
         block_methods.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{{}={}(...),...}} end; ", pf_vn, var_get_count));
         block_methods.push_str(&format!("local {}={{}};local {}={{}};", var_methods, var_proto));
         for d in defs.iter() { block_methods.push_str(d); block_methods.push(' '); }
         let (ix0, ix1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
-        let sc_index = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "__index", ix0, ix1);
+        let sc_index = at.st.call("__index", ix0, ix1);
         block_methods.push_str(&format!("{}[{}]={};", var_proto, sc_index, var_methods));
 
         block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
@@ -549,11 +560,11 @@ impl Generator {
         ));
         
         let (fh0, fh1) = crate::VM::VM_Backend::Generator_util::stream_key("function", &mut rng);
-        let sc_fn_hdr = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "function", fh0, fh1);
+        let sc_fn_hdr = at.st.call("function", fh0, fh1);
         let (md0, md1) = crate::VM::VM_Backend::Generator_util::stream_key("__mode", &mut rng);
-        let sc_mode = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "__mode", md0, md1);
+        let sc_mode = at.st.call("__mode", md0, md1);
         let (mk0, mk1) = crate::VM::VM_Backend::Generator_util::stream_key("k", &mut rng);
-        let sc_k = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "k", mk0, mk1);
+        let sc_k = at.st.call("k", mk0, mk1);
         let block_dec_header = format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3,
             fn_lit = sc_fn_hdr, mode_lit = sc_mode, k_lit = sc_k);
         // ── 解码链（第 6 项：解密逻辑打乱）──
@@ -587,25 +598,29 @@ impl Generator {
              local function {rd}() local {o},{g}=0,0; \
              while {g}<1 do \
              local {e}={a3}(); \
-             local {c1}=({e}+190)%256; \
+             local {c1}=({e}+{inv_add})%256; \
              local {c2}={bx}({c1},k4); \
              local {c3}={rt}({c2},k3%8); \
              local {c4}=({c3}+k2)%256; \
              local {c5}={bx}({c4},k1); \
              {o}={c5}; \
              k1=(k1+{c5})%256; \
-             k1=((k1*2)%256)+((k1-(k1%128))/128); \
-             k1=(k1-229)%256; \
-             k2=(k2*2+k2+{e})%256; \
-             k2=((k2*64)%256)+((k2-(k2%4))/4); \
+             k1=((k1*{m_in})%256)+((k1-(k1%{d_in}))/{d_in}); \
+             k1=(k1+{upd_k1})%256; \
+             k2=(k2*{mul_k2}+{e})%256; \
+             k2=((k2*{m_k2})%256)+((k2-(k2%{d_k2}))/{d_k2}); \
              k3={bx}(k3,(k1-k4+256)%256); \
              k4=(k4+k2)%256; \
-             k4=((k4*8)%256)+((k4-(k4%32))/32); \
+             k4=((k4*{m_k4})%256)+((k4-(k4%{d_k4}))/{d_k4}); \
              {g}={g}+1; end; return {o} end; ",
             bx = fn_bxor, a = v_bx_a, b = v_bx_b, r = v_bx_r, w = v_bx_w, g = v_bx_g, s = v_bx_s,
             rt = fn_b_rotr, x = v_rt_x, n = v_rt_n, d = v_rt_d, t = v_rt_t,
             rd = fn_read_dec, a3 = fn_a3, o = v_rd_o, e = v_rd_e,
-            c1 = v_rd_c1, c2 = v_rd_c2, c3 = v_rd_c3, c4 = v_rd_c4, c5 = v_rd_c5
+            c1 = v_rd_c1, c2 = v_rd_c2, c3 = v_rd_c3, c4 = v_rd_c4, c5 = v_rd_c5,
+            inv_add = 256 - sc_add as i32, upd_k1 = sc_add_k1,
+            m_in = 1u32 << sc_rot_in, d_in = 1u32 << (8 - sc_rot_in), mul_k2 = sc_mul_k2,
+            m_k2 = 1u32 << (8 - sc_rot_k2), d_k2 = 1u32 << sc_rot_k2,
+            m_k4 = 1u32 << sc_rot_k4, d_k4 = 1u32 << (8 - sc_rot_k4)
         );
         let (v_u32_t, v_u32_n, v_u32_i, v_u32_v) = (rng.name(), rng.name(), rng.name(), rng.name());
         let (v_a5_t, v_a5_n, v_a5_i) = (rng.name(), rng.name(), rng.name());
@@ -741,9 +756,9 @@ impl Generator {
             i = v_ch_i, n = v_ch_n
         );
         let (bi0, bi1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
-        let sc_index2 = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "__index", bi0, bi1);
+        let sc_index2 = at.st.call("__index", bi0, bi1);
         let (ko0, ko1) = crate::VM::VM_Backend::Generator_util::stream_key("KryvexObf_", &mut rng);
-        let sc_kobf = crate::VM::VM_Backend::Generator_util::stream_call(&at.sc_fn, "KryvexObf_", ko0, ko1);
+        let sc_kobf = at.st.call("KryvexObf_", ko0, ko1);
         let body_consts = format!(
             "{st}={nxt}; local {ec}={{}}; local {ca}={{}}; local {mt}={{}}; \
              {mt}[{idx_lit}]=function({tb},{ix}) \
@@ -836,6 +851,10 @@ impl Generator {
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
         out.push_str(&header_block);
+        // ④ 槽位键的运行期推导块必须在所有用键代码之前；
+        // finish_setup 把状态链种子/陷阱门等收尾语句并进 setup（在全部注册后调用）。
+        out.push_str(&sk_setup);
+        at.finish_setup();
         out.push_str(&at.setup);
         out.push_str(&format!(" local {} = 0; ", key_seed_var));
         out.push_str(" ");

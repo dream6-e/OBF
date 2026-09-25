@@ -671,11 +671,58 @@ impl GenRng {
     }
     /// 取一个互不重复的「槽位号」——数据流打乱用的随机大整数下标。
     /// 状态（pc/stk/top/常量表…）都住在 VM 对象的这些槽里，块的局部名字逐块随机。
+    #[allow(dead_code)]
     pub fn slot(&mut self) -> i64 {
         loop {
             let v = self.range64(0x0200_0000, 0x7FFF_FFFF);
             if !self.slots.contains(&v) { self.slots.push(v); return v; }
         }
+    }
+
+    /// ④ 能动态生成的就动态生成：槽位号以前是逐个写死的十进制大整数，
+    /// 同一个号在产物里出现几百次（`self[837110348]`），等于给逆向标好了路标；
+    /// 而且「同一个大常量反复出现」本身就是可以搜索替换的特征。
+    /// 现在改成**运行期**由一条线性同余序列推出来 —— 产物里不再有任何一个槽位号
+    /// 字面量，每个号只在序列里出现一次，其余位置全是局部名字（还顺带变小）。
+    /// 返回 (名字列表, 初始化语句)。序列取 `x = (x*乘数) % 模`，乘数 < 2^16、
+    /// 模 < 2^31 ⇒ x*乘数 < 2^47，double 里仍是精确整数（Lua/Roblox 行为一致）。
+    pub fn slot_key_block(&mut self, count: usize) -> (Vec<String>, String) {
+        let m = self.range64(0x1000_0000, 0x7000_0000) as u64;
+        let a = (self.range64(3, 0x1_0000) as u64) | 1;
+        let seed = self.range64(1, m as i64 - 1) as u64;
+        let floor = 0x0200_0000u64;
+        let mut kept: Vec<(usize, u64)> = Vec::new();
+        let mut v = seed;
+        let mut idx = 0usize;
+        while kept.len() < count && idx < 200_000 {
+            idx += 1;
+            v = (v.wrapping_mul(a)) % m;
+            if v >= floor && !kept.iter().any(|&(_, x)| x == v) {
+                kept.push((idx, v));
+            }
+        }
+        let last = kept.last().map(|k| k.0).unwrap_or(1);
+        // 兜底：极端情况下序列里凑不满 count 个合规值，就用直接随机的字面量补齐
+        // （仍然保证互不相同），免得出现「名字比取值多」→ 取到 nil 键。
+        let mut extra: Vec<u64> = Vec::new();
+        while kept.len() + extra.len() < count {
+            let v = self.range64(0x0200_0000, 0x7FFF_FFFF) as u64;
+            if !kept.iter().any(|&(_, x)| x == v) && !extra.contains(&v) {
+                extra.push(v);
+            }
+        }
+        let (x_name, arr_name, i_name) = (self.name(), self.name(), self.name());
+        let names: Vec<String> = (0..count).map(|_| self.name()).collect();
+        let setup = format!(
+            "local {x}=0X{seed:X};local {arr}={{}};for {i}=1,{last} do {x}=({x}*0X{a:X})%0X{m:X};{arr}[{i}]={x} end;local {bindings}={picks}; ",
+            x = x_name, arr = arr_name, i = i_name, last = last,
+            seed = seed, a = a, m = m,
+            bindings = names.join(","),
+            picks = kept.iter().map(|(i, _)| format!("{}[{}]", arr_name, i))
+                .chain(extra.iter().map(|v| format!("0X{:X}", v)))
+                .collect::<Vec<_>>().join(",")
+        );
+        (names, setup)
     }
 
     pub fn shuffle<T>(&mut self, slice: &mut [T]) {
@@ -783,7 +830,7 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
 /// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
 /// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
 /// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
-pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, sc: &str, rng: &mut GenRng) -> String {
+pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, st: &mut StreamTable, rng: &mut GenRng) -> String {
     // ── 要隐藏的字符串：顺序与下面 format! 里的 k1…k9 一一对应 ──
     const PLAIN: [&str; 9] = [
         "getinfo",    // info 表的键
@@ -888,9 +935,9 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, sc: &str, rng: &mut
         gg = v_gg, ge = v_ge, env = v_env2,
         k1 = names[0], k2 = names[1], k3 = names[2], k4 = names[3], k5 = names[4],
         k6 = names[5], k7 = names[6], k8 = names[7], k9 = names[8],
-        sc_s = stream_call(sc, "S", sk_s_k0, sk_s_k1),
-        sc_t = stream_call(sc, "table", sk_t_k0, sk_t_k1),
-        sc_f = stream_call(sc, "function", sk_f_k0, sk_f_k1)
+        sc_s = st.call("S", sk_s_k0, sk_s_k1),
+        sc_t = st.call("table", sk_t_k0, sk_t_k1),
+        sc_f = st.call("function", sk_f_k0, sk_f_k1)
     );
     format!("{dx_def}{keys_lua}{body}")
 }
@@ -939,25 +986,115 @@ pub fn mix_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
 
 /// ── 自定义流加密（独立于池）──
 /// 用途：把产物里还剩的明文字符串（类型名、元方法名、模式串等）就地加密。
-/// 与池的区别：不建共享表、不做哈希查找，每个调用点自己带一段密文字面量 +
-/// 一个 16 位随机密钥，靠作用域里定义的一只小解码器就地还原。
+/// 与池的区别：不做「明文 → 哈希键」的查找（那是指纹）；这里是
+/// **密文与密钥一起存进一张随机键表**，调用点只出现 `T[dk](T[a],T[b])` ——
+/// 解码器本身匿名挂在表里（`[dk]=function(s,k)…end`），产物里没有解码器的名字。
 /// 密码本体与探测块/池同一族（位置相关双字节混合，纯算术 XOR，不用位库）：
 ///   c[i] = ((p[i] + k1) % 256) XOR ((k0*i + k1) % 256)
 /// 「没法一下算出来」靠的是密钥随下标走；也刻意保持简单，不堆轮数。
-/// 解码器的 Lua 源码（与探测块的 dx 同形态——该形态在目标执行器上已验证可用）。
-pub fn stream_dec_lua(fn_name: &str) -> String {
-    format!(
-        "local {f}=function(s,k) local o,i='',0; local n=#s; local k1=k%256; local k0=(k-k1)/256; while i<n do i=i+1; local a=(k0*i+k1)%256; local b=string.byte(s,i); local r,p=0,1; for w=1,8 do local x,y=a%2,b%2; if x~=y then r=r+p end; a=(a-x)/2; b=(b-y)/2; p=p*2 end; o=o..string.char((r-k1)%256) end; return o end; ",
-        f = fn_name
-    )
+/// 解码器函数体（`function(s,k) … end`，不含 local 前缀——方便匿名挂进表）。
+pub fn stream_dec_body() -> String {
+    "function(s,k) local o,i='',0; local n=#s; local k1=k%256; local k0=(k-k1)/256; while i<n do i=i+1; local a=(k0*i+k1)%256; local b=string.byte(s,i); local r,p=0,1; for w=1,8 do local x,y=a%2,b%2; if x~=y then r=r+p end; a=(a-x)/2; b=(b-y)/2; p=p*2 end; o=o..string.char((r-k1)%256) end; return o end".to_string()
 }
 
-/// 一个调用点：`DEC("密文", 0XKKKK)`。密文用 mix_lit 的定宽 `\ddd` 形式。
-pub fn stream_call(dec: &str, plain: &str, k0: u32, k1: u32) -> String {
-    format!("{}({},{})", dec, mix_lit(plain, k0, k1), k0 * 256 + k1)
+/// ── ⑤ 池键哈希的参数：逐产物随机 ──
+/// 写死的 djb2（起手 5381、乘 33）是一眼可辨的已知算法指纹：产物里出现
+/// `h=5381` 就等于告诉逆向方池子按 djb2 建键。换成同族的随机实例
+/// `h = (h*乘数 + 字节 + 增量) mod 2^32`：乘数取奇数、`h*乘数 < 2^48`，
+/// double 里是精确整数（Lua 5.1 / Luau / Roblox 行为一致）。
+/// 参数经线程局部传递，免得测试并行跑多个产物时互相串味。
+#[derive(Clone, Copy)]
+pub struct HashParams {
+    pub mult: u32,
+    pub add: u32,
+    pub seed: u32,
 }
 
-/// 随机取一对可用密钥（复用 mix_key：k0 非 0 且密文无 \000）。
+thread_local! {
+    static HASH_PARAMS: std::cell::Cell<HashParams> =
+        const { std::cell::Cell::new(HashParams { mult: 33, add: 0, seed: 5381 }) };
+}
+
+pub fn set_hash_params(p: HashParams) {
+    HASH_PARAMS.with(|h| h.set(p));
+}
+
+pub fn hash_params() -> HashParams {
+    HASH_PARAMS.with(|h| h.get())
+}
+
+/// 池键哈希。Rust 侧与 Lua 侧必须完全一致：Lua 里算的是
+/// `h=(h*乘数+byte+增量)%4294967296`，参数见 [`HashParams`]（逐产物随机）。
+pub fn poly_hash(s: &str) -> u32 {
+    let p = hash_params();
+    let mut h: u64 = p.seed as u64;
+    for b in s.bytes() {
+        h = (h * p.mult as u64 + b as u64 + p.add as u64) % 4294967296;
+    }
+    h as u32
+}
+
+/// 随机取一对可用混合密钥（复用 mix_key：k0 非 0 且密文无 \000）。
 pub fn stream_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
     mix_key(plain, rng)
+}
+
+/// 流加密键表：一个作用域一张。`call` 注册（密文条目 + 密钥条目）并返回
+/// `T[dk](T[a],T[b])` 形态的调用表达式；`emit` 渲染整张表
+/// （解码器匿名占一个随机键，条目顺序洗牌）。
+pub struct StreamTable {
+    pub name: String,
+    entries: Vec<(u32, String)>,
+    used: std::collections::HashSet<u32>,
+    dec_key: u32,
+}
+
+impl StreamTable {
+    pub fn new(name: String) -> Self {
+        let mut used = std::collections::HashSet::new();
+        let dec_key = Self::fresh_key(&mut used);
+        StreamTable { name, entries: Vec::new(), used, dec_key }
+    }
+
+    fn fresh_key(used: &mut std::collections::HashSet<u32>) -> u32 {
+        let mut r = rand::thread_rng();
+        loop {
+            let k = r.gen_range(0x1000_0000u64..0x7FFF_FFFF) as u32;
+            if used.insert(k) {
+                return k;
+            }
+        }
+    }
+
+    /// 注册一个调用点：密文与 16 位混合密钥各自占一个随机表键。
+    /// 返回的调用表达式在三种等价拼写里轮换，避免同形连排。
+    pub fn call(&mut self, plain: &str, k0: u32, k1: u32) -> String {
+        let ck = Self::fresh_key(&mut self.used);
+        let kk = Self::fresh_key(&mut self.used);
+        self.entries.push((ck, mix_lit(plain, k0, k1)));
+        self.entries.push((kk, format!("0X{:X}", k0 * 256 + k1)));
+        let t = &self.name;
+        let dk = self.dec_key;
+        match self.entries.len() % 3 {
+            0 => format!("{t}[{dk}]({t}[{ck}],{t}[{kk}])"),
+            1 => format!("({t}[{dk}])({t}[{ck}],{t}[{kk}])"),
+            _ => format!("{t}[{dk}]({t}[{ck}],({t}[{kk}]))"),
+        }
+    }
+
+    /// 渲染整张表：`local T={[dk]=function(s,k)…end,[k]="…",[k]=0X…,…};`
+    /// 条目顺序洗牌——构造器里密文/密钥/解码器混在一起，没有配对关系可看。
+    pub fn emit(&self) -> String {
+        let mut r = rand::thread_rng();
+        let mut items: Vec<String> = Vec::new();
+        items.push(format!("[{}]={}", self.dec_key, stream_dec_body()));
+        for (k, v) in &self.entries {
+            items.push(format!("[{}]={}", k, v));
+        }
+        for i in (1..items.len()).rev() {
+            let j = r.gen_range(0..=i);
+            items.swap(i, j);
+        }
+        format!("local {}={{{}}}; ", self.name, items.join(","))
+    }
 }

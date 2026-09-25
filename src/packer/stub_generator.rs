@@ -1,8 +1,6 @@
 use std::time::SystemTime;
 use super::utils::NamePool;
-use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, stream_dec_lua, GenRng};
-
-fn loadstring_probe_lua_sc_def(name: &str) -> String { stream_dec_lua(name) }
+use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, StreamTable, GenRng};
 
 pub struct StubGenerator;
 
@@ -279,9 +277,11 @@ impl StubGenerator {
         }
         k_str.push('}');
 
-        let mut sc_rng = GenRng::new(seed as u64 ^ 0x5C9A_3F17);
-        let v_sc = sc_rng.name();
-        let sc_def = loadstring_probe_lua_sc_def(&v_sc);
+        // 流键表：先注册（probe 往里写条目），再 emit —— 必须同一张表。
+        let sc_name = pool.get();
+        let mut sc_st = StreamTable::new(sc_name);
+        let probe = loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut sc_st, &mut GenRng::new(seed as u64));
+        let sc_def = sc_st.emit();
         format!("
 return (function(...)
     {sc_def}{probe}
@@ -351,7 +351,7 @@ return (function(...)
     return {v_entry}([=[{payload}]=], ...)
 end)(...)
 ",
-        f_load=f_load, f_pcall=f_pcall, probe=loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &v_sc, &mut GenRng::new(seed as u64)), v_pload=v_pload, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
+        f_load=f_load, f_pcall=f_pcall, v_pload=v_pload, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
         v_entry=v_entry, v_data=v_data, v_q=v_q, m_bxor=m_bxor, v_s=v_s, v_a=v_a, v_b=v_b, m_bxor_body=m_bxor_body, m_next=m_next,
         m_next_body=m_next_body, m_init_map=m_init_map, m_init_map_body=m_init_map_body, m_init_insts=m_init_insts,
         m_init_insts_body=m_init_insts_body, m_init_handlers=m_init_handlers, m_init_handlers_body=m_init_handlers_body,
