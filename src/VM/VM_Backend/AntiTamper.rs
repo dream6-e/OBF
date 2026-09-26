@@ -44,6 +44,31 @@ fn derived_num(val: u64, rng: &mut impl Rng) -> String {
     }
 }
 
+/// ㉒族恒等转移式（三款，目标值恒等）：-r+(r+t) / (r-r)+t / (2r-(r+r))+t
+fn opq_ident<T: Rng>(rng: &mut T, target: u32) -> String {
+    let bound = (0xFFFFFu32).min(0xFFFFFEu32.saturating_sub(target)).max(0x1000);
+    let r: u32 = rng.gen_range(0x1000..bound);
+    match rng.gen_range(0..3) {
+        0 => format!("-0X{:X}+0X{:X}", r, r + target),
+        1 => format!("(0X{:X}-0X{:X})+0X{:X}", r, r, target),
+        _ => format!("((2*0X{:X})-(0X{:X}+0X{:X}))+0X{:X}", r, r, r, target),
+    }
+}
+/// 常量伪装：值恒等的随机算式（内层异或循环的 8/2 等）
+fn opq_const<T: Rng>(rng: &mut T, v: u32) -> String {
+    match rng.gen_range(0..3) {
+        0 => { let a: u32 = rng.gen_range(0..v.max(1)); format!("(0X{:X}+0X{:X})", a, v - a) }
+        1 => { let k: u32 = rng.gen_range(v + 1..v + 0x1000); format!("(0X{:X}-0X{:X})", k, k - v) }
+        _ => format!("0X{:X}", v),
+    }
+}
+fn rand_state<T: Rng>(rng: &mut T, used: &mut Vec<u32>) -> u32 {
+    loop {
+        let v: u32 = 0x10000 + rng.gen_range(0..0xEFF000);
+        if !used.contains(&v) { used.push(v); return v; }
+    }
+}
+
 fn rand_var() -> String {
     let mut rng = thread_rng();
     let len = rng.gen_range(7..=12);
@@ -184,48 +209,84 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     //      但读起来像在参与运算；常量 key 与 256 也被埋进这条链里；
     //   ③ 拼接外面套一个恒真的判断（`(j+j)-j > 0` 即 j>0），打断线性阅读；
     //   ④ 全部局部变量逐产物随机名。纯冷路径（只在守卫/池查表时走），不吃性能。
+    // 池解码器 v2「拆散打乱线性逻辑 / 数据流」：
+    //   ① 循环体拆成五态数值状态机（查长/自增/键流取数/谓词+异或拼装），转移走
+    //      三款恒等式，状态值逐产物随机；线性 while 阅读被彻底打散；
+    //   ② 循环携带数据（下标/累计串/长度/键流系数）全部经暂存表槽流动，
+    //      跨态共享的 a/b/r/p 提升到机器前声明（跨 elseif 块作用域）；
+    //   ③ 键流算式拆分 ((k0*i)%256 与 +k1 两步)、K 的拆解嵌差值恒等式、
+    //      判空改 return 原值（nil）；
+    //   ④ 内层异或 for 的常量（8/2）逐处独立伪装、谓词从恒真族随机取。
+    // 纯冷路径（守卫/池查表时走），不吃性能。
+    let v_dec = rand_var();
+    let d_t = rand_var();
     let d_e = rand_var();
-    let d_i = rand_var();
-    let d_n = rand_var();
-    let d_out = rand_var();
-    let d_chr = rand_var();
-    let d_b = rand_var();
-    let d_j = rand_var();
     let d_k1 = rand_var();
-    let d_k0 = rand_var();
+    let d_j = rand_var();
     let d_a = rand_var();
+    let d_b = rand_var();
     let d_r = rand_var();
     let d_p = rand_var();
     let d_w = rand_var();
     let d_xb = rand_var();
     let d_yb = rand_var();
+    let d_st = rand_var();
+    let d_dl = rand_var();
+    let d_c = rand_var();
+    let mut used_states: Vec<u32> = Vec::new();
+    let s1 = rand_state(&mut rng, &mut used_states);
+    let s2 = rand_state(&mut rng, &mut used_states);
+    let s3 = rand_state(&mut rng, &mut used_states);
+    let s4 = rand_state(&mut rng, &mut used_states);
+    let tr12 = opq_ident(&mut rng, s2);
+    let tr23 = opq_ident(&mut rng, s3);
+    let tr34 = opq_ident(&mut rng, s4);
+    let tr41 = opq_ident(&mut rng, s1);
+    let s_done = rand_state(&mut rng, &mut used_states);
+    let st_init = opq_ident(&mut rng, s1);
+    let e8 = opq_const(&mut rng, 8);
+    let e2a = opq_const(&mut rng, 2);
+    let e2b = opq_const(&mut rng, 2);
+    let e2c = opq_const(&mut rng, 2);
+    let e2d = opq_const(&mut rng, 2);
+    let e2e = opq_const(&mut rng, 2);
+    let opq = match rng.gen_range(0..3) {
+        0 => format!("({j}+{j})-{j}>0", j = d_j),
+        1 => format!("({j}-{j})+{j}>0", j = d_j),
+        _ => format!("{j}*{j}>={j}", j = d_j),
+    };
     setup.push_str(&format!(
         "local function {dec}(h) \
-            local {e} = {pool}[h]; \
-            if {e} == nil then return nil end; \
-            local {k1} = {K} % 256; local {k0} = ({K} - {k1}) / 256; \
-            local {i}, {n} = 0, #{e}; \
-            local {chr}, {out} = string.char, ''; \
-            local {j} = {j0}; \
-            while {i} < {n} do \
-                {i} = {i} + 1; \
-                local {a} = ({k0} * {i} + {k1}) % 256; \
-                local {b} = {e}[{i}]; \
-                {j} = {j} + 1; \
-                if ({j} + {j}) - {j} > 0 then \
-                    local {r}, {p} = 0, 1; \
-                    for {w} = 1, 8 do local {xb}, {yb} = {a} % 2, {b} % 2; \
-                        if {xb} ~= {yb} then {r} = {r} + {p} end; \
-                        {a} = ({a} - {xb}) / 2; {b} = ({b} - {yb}) / 2; {p} = {p} * 2; \
+            local {t}={{i=0X0000,o=''}};local {e}={pool}[h]; \
+            if not {e} then return {e} end; \
+            {t}.n=#{e};local {dl}=0X{dlx:X}; \
+            local {k1}=({K}+{dl}-{dl})%256;{t}.k=({K}-{k1})/256; \
+            local {c}=string.char;local {a},{b},{r},{p},{j}=0X0,0X0,0X0,0X1,{j0}; \
+            local {st}={init}; \
+            while true do \
+                if {st}=={S1} then if {t}.i<{t}.n then {st}={tr12} else {st}={tdone} end \
+                elseif {st}=={S2} then {t}.i={t}.i+0X1;{st}={tr23} \
+                elseif {st}=={S3} then local {t2}=({t}.k*{t}.i)%256;{a}=({t2}+{k1})%256;{b}={e}[{t}.i];{st}={tr34} \
+                elseif {st}=={S4} then {j}={j}+0X1; \
+                    if {opq} then {r}=0X0;{p}=0X1; \
+                        for {w}=1,{E8} do local {xb},{yb}={a}%{E2a},{b}%{E2b}; \
+                            if {xb}~={yb} then {r}={r}+{p} end; \
+                            {a}=({a}-{xb})/{E2c};{b}=({b}-{yb})/{E2d};{p}={p}*{E2e}; \
+                        end; \
+                        {t}.o={t}.o..{c}(({r}-{k1}+0X100)%0X100) \
                     end; \
-                    {out} = {out} .. {chr}(({r} - {k1}) % 256); \
-                end; \
+                    {st}={tr41b} \
+                else break end \
             end; \
-            return {out}; \
+            return {t}.o; \
         end;\n",
-        dec = v_dec, e = d_e, pool = v_pool, i = d_i, n = d_n, chr = d_chr, out = d_out,
-        j = d_j, j0 = rng.gen_range(1..64), b = d_b, k1 = d_k1, k0 = d_k0,
-        a = d_a, r = d_r, p = d_p, w = d_w, xb = d_xb, yb = d_yb,
+        dec = v_dec, t = d_t, t2 = rand_var(), pool = v_pool, e = d_e, k1 = d_k1,
+        j = d_j, j0 = rng.gen_range(1..64), c = d_c, a = d_a, b = d_b, r = d_r,
+        p = d_p, w = d_w, xb = d_xb, yb = d_yb, st = d_st, dl = d_dl,
+        dlx = rng.gen_range(0x1000..0xFFFFFu32),
+        init = st_init, S1 = s1, S2 = s2, S3 = s3, S4 = s4,
+        tr12 = tr12, tr23 = tr23, tr34 = tr34, tr41b = tr41, tdone = s_done,
+        opq = opq, E8 = e8, E2a = e2a, E2b = e2b, E2c = e2c, E2d = e2d, E2e = e2e,
         K = format!("0X{:04X}", pool_key)
     ));
     setup.push_str(&format!(
