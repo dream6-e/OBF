@@ -1,0 +1,92 @@
+{
+  "upstream_url": "https://github.com/KryptIT/luraph-v15-v14.x-deobfuscator",
+  "upstream_commit": "d6158608bb512e919afe4e6485f6146598738274",
+  "patch_sha256": "fc18db9f57be377c0eb7c4c2db57ad7d3db0f5f7d863f275c92b0368713b5d1f",
+  "fixtures": [
+    {
+      "version": "14.7",
+      "path": "Deobfuscator/deobf/v14.7.txt",
+      "sha256": "aaf25cc314cf7b09d3eafcaf821bc1798c794197897f63ca20c2b9182afedc8d",
+      "observed_result": "static-lift"
+    },
+    {
+      "version": "14.8",
+      "path": "Deobfuscator/deobf/v14.8.txt",
+      "sha256": "860bb5d4d6e7dc2b0df63ce999d20619bdefaa178eb1557ce9cea48b5858149e",
+      "observed_result": "static-lift"
+    },
+    {
+      "version": "14.9",
+      "path": "Deobfuscator/deobf/v14.9.txt",
+      "sha256": "d8cfe912228ca57cced5114aa2682b5330e77b9dfe8a5486114ef914471f3944",
+      "observed_result": "static-lift",
+      "capture_snapshot_failures": 2
+    },
+    {
+      "version": "15",
+      "path": "SON.LUA",
+      "sha256": "91c6950ae3f0220abc35fc6a03b267359ff28fba0050baf6523ab5a227016d65",
+      "observed_result": "static-lift"
+    }
+  ],
+  "validation": {
+    "date": "2026-09-27",
+    "regression_tests_passed": 66,
+    "new_register_cleanup_and_server_tests": 15,
+    "patch_source_files": 23,
+    "main_v147": {
+      "path": "Luraph14.7.lua",
+      "git_blob": "878e55fc66d954b1da5d054380969b7c53b1aa5f",
+      "sha256": "6b9eebdc53fc1452e4f68788fd8f55d4c3ff46f04e2abf48e02e3fa6c1703bf5",
+      "observed_result": "incomplete-static-lift",
+      "original_register_cleanup_block_resolved": true,
+      "new_constant_requests_round_1": 60,
+      "unresolved_states": [
+        "0:163",
+        "0:1584",
+        "0:1540"
+      ],
+      "remaining_reason": "numeric for with symbolic bounds",
+      "exit_code": 1,
+      "source_emitted": false,
+      "verified_modes": [
+        "default-server",
+        "DEOB_NO_SERVE=1"
+      ],
+      "report": "reports/main-v147-validation.md"
+    },
+    "diagnostic_source_capture_tests": 3,
+    "main_v148": {
+      "path": "luraph14.8.lua",
+      "commit": "a1fb37bd0e772c22f7e9224a24009ab4e7bd724d",
+      "git_blob": "1398c9bb846777a29f4cdd32ee59d813562d2d9a",
+      "sha256": "d55a76cbe6273d530aa406de045030fcd071e0df903f4943bb97a4f818f774b3",
+      "observed_result": "incomplete-static-lift-with-readable-logic-export",
+      "static_exit_codes": [
+        1,
+        1
+      ],
+      "remaining_state": "0:324",
+      "remaining_reason": "numeric for with symbolic bounds",
+      "trace_operations": 328,
+      "runtime_strings": 376,
+      "concrete_loadstring_bytes": [
+        2444
+      ],
+      "complete_source_emitted": false,
+      "report": "reports/artifacts/main-v148/README.md"
+    }
+  },
+  "packaged_source": {
+    "path": "tools/luraph",
+    "source_files": 101,
+    "source_manifest": "tools/luraph/SOURCE_MANIFEST.json",
+    "validation_report": "integrations/luraph/PACKAGE_VALIDATION.md",
+    "python_syntax_passed": 85,
+    "lua_syntax_passed": 23,
+    "regression_tests_passed": 66,
+    "regression_seconds": 21.753,
+    "offline_setup_verified": true,
+    "repeat_setup_verified": true
+  }
+}

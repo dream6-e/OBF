@@ -1,0 +1,181 @@
+{
+  "date": "2026-09-27",
+  "input": {
+    "path": "luraph14.8.lua",
+    "commit": "a1fb37bd0e772c22f7e9224a24009ab4e7bd724d",
+    "name": "luraph14.8.lua",
+    "sha": "1398c9bb846777a29f4cdd32ee59d813562d2d9a",
+    "size": 164188,
+    "sha256": "d55a76cbe6273d530aa406de045030fcd071e0df903f4943bb97a4f818f774b3"
+  },
+  "upstream_commit": "d6158608bb512e919afe4e6485f6146598738274",
+  "patch_sha256": "fc18db9f57be377c0eb7c4c2db57ad7d3db0f5f7d863f275c92b0368713b5d1f",
+  "static_and_trace_runs": {
+    "static-default": {
+      "command": [
+        "python3",
+        "-B",
+        "/home/user/luraph-v15-v14.x-deobfuscator/Deobfuscator/deobf/cli.py",
+        "/home/user/obf-v148-output/static-default/input.lua",
+        "--engine",
+        "14.8",
+        "--timeout",
+        "40",
+        "--debug",
+        "--raw",
+        "/home/user/obf-v148-output/static-default/runtime.raw.txt",
+        "-o",
+        "/home/user/obf-v148-output/static-default/restored.lua"
+      ],
+      "environment": {},
+      "exit_code": 1,
+      "seconds": 2.81,
+      "output_exists": false,
+      "input_sha256": "d55a76cbe6273d530aa406de045030fcd071e0df903f4943bb97a4f818f774b3",
+      "dump": {
+        "protos": 69,
+        "tables": 1073,
+        "root": null,
+        "snapshot_failures": 2
+      }
+    },
+    "static-fresh": {
+      "command": [
+        "python3",
+        "-B",
+        "/home/user/luraph-v15-v14.x-deobfuscator/Deobfuscator/deobf/cli.py",
+        "/home/user/obf-v148-output/static-fresh/input.lua",
+        "--engine",
+        "14.8",
+        "--timeout",
+        "40",
+        "--debug",
+        "--raw",
+        "/home/user/obf-v148-output/static-fresh/runtime.raw.txt",
+        "-o",
+        "/home/user/obf-v148-output/static-fresh/restored.lua"
+      ],
+      "environment": {
+        "DEOB_NO_SERVE": "1"
+      },
+      "exit_code": 1,
+      "seconds": 2.02,
+      "output_exists": false,
+      "input_sha256": "d55a76cbe6273d530aa406de045030fcd071e0df903f4943bb97a4f818f774b3",
+      "dump": {
+        "protos": 69,
+        "tables": 1073,
+        "root": 35,
+        "snapshot_failures": 2
+      }
+    },
+    "trace": {
+      "command": [
+        "python3",
+        "-B",
+        "/home/user/luraph-v15-v14.x-deobfuscator/Deobfuscator/deobf/deob.py",
+        "/home/user/obf-v148-output/trace/input.lua",
+        "--obfuscator",
+        "generic",
+        "--no-pypy",
+        "--no-devirt",
+        "--no-hooks",
+        "--no-tidy",
+        "--no-fold",
+        "--timeout",
+        "40",
+        "--debug",
+        "--raw",
+        "/home/user/obf-v148-output/trace/runtime.raw.txt",
+        "-o",
+        "/home/user/obf-v148-output/trace/observed.trace.luau"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 0.49,
+      "output_exists": true,
+      "input_sha256": "d55a76cbe6273d530aa406de045030fcd071e0df903f4943bb97a4f818f774b3"
+    },
+    "strings": {
+      "command": [
+        "python3",
+        "-B",
+        "/home/user/luraph-v15-v14.x-deobfuscator/Deobfuscator/deobf/deob.py",
+        "/home/user/obf-v148-output/strings/input.lua",
+        "--obfuscator",
+        "generic",
+        "--no-pypy",
+        "--no-devirt",
+        "--no-hooks",
+        "--no-tidy",
+        "--no-fold",
+        "--cfg",
+        "dump_strings=true",
+        "--timeout",
+        "40",
+        "--debug",
+        "--raw",
+        "/home/user/obf-v148-output/strings/runtime.raw.txt",
+        "-o",
+        "/home/user/obf-v148-output/strings/observed.trace.luau"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 0.49,
+      "output_exists": true,
+      "input_sha256": "d55a76cbe6273d530aa406de045030fcd071e0df903f4943bb97a4f818f774b3"
+    }
+  },
+  "recorded_operations": 328,
+  "baseline_trace_lines": 434,
+  "delivered_trace_lines": 437,
+  "runtime_strings": 376,
+  "captured_concrete_loadstrings": [
+    {
+      "file": "captured-loadstring-01.luau",
+      "bytes": 2444,
+      "sha256": "dd32f2f333ab1c7c3b98e9a7756278570786ae4130da0d043795ef5e6f2e5de4",
+      "classification": "Luraph function/environment wrapper, not remote UI library source"
+    }
+  ],
+  "observer_comparison": "identical rendered traces after excluding elapsed time and observed UIGradient.Rotation values",
+  "actual_payload_network_requests": false,
+  "complete_reconstructed_source": false,
+  "source_coverage_percent": null,
+  "syntax_checks": {
+    "observed.trace.luau": {
+      "exit_code": 0,
+      "stderr": ""
+    },
+    "logic-excerpt.luau": {
+      "exit_code": 0,
+      "stderr": ""
+    },
+    "captured-loadstring-01.luau": {
+      "exit_code": 0,
+      "stderr": ""
+    }
+  },
+  "regression": {
+    "passed": 66,
+    "seconds": 23.979
+  },
+  "omitted_data": "PROTOS JSON metadata lines removed from static-*.readable-raw.txt; no trace operation removed",
+  "artifact_sha256": {
+    "captured-loadstring-01.luau": "dd32f2f333ab1c7c3b98e9a7756278570786ae4130da0d043795ef5e6f2e5de4",
+    "captured-strings.txt": "f9cc531c09e0ec430533d8f62617b0965012f813aa308f41c722ab75c96ff799",
+    "logic-excerpt.luau": "262f1a8360ab09b3c4d344da3875f0c68992e234dee32b79d4ba9d67561f8aed",
+    "observed.trace.luau": "8a2c6d3cf4ccd61dc7948fb8a9e37ea47d74ceea44f10cfb6fc54222ace1c80c"
+  },
+  "cleanup": {
+    "removed_diagnostic_files": [
+      "loadstrings.raw.txt",
+      "runtime.raw.txt",
+      "static-default.log",
+      "static-default.readable-raw.txt",
+      "static-fresh.log",
+      "static-fresh.readable-raw.txt"
+    ],
+    "reason": "Final logic, strings, captured source and validation summaries retained; duplicate runtime/debug logs excluded from publication."
+  }
+}

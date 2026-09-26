@@ -1,0 +1,31 @@
+{
+  "date": "2026-09-27",
+  "input": {
+    "path": "Luraph14.7.lua",
+    "commit": "25ab486f4eb506cd870082984fd2b6963c1d8e31",
+    "git_blob": "878e55fc66d954b1da5d054380969b7c53b1aa5f",
+    "size": 263647,
+    "sha256": "6b9eebdc53fc1452e4f68788fd8f55d4c3ff46f04e2abf48e02e3fa6c1703bf5"
+  },
+  "mode": "generic offline behavior trace; no static lift; no VM hooks",
+  "run_status": "finished",
+  "recorded_statements": 56,
+  "offline_path2d_answers": 11,
+  "trace_command_exit_code": 0,
+  "actual_payload_network_requests": false,
+  "complete_reconstructed_source": false,
+  "syntax_checks": [
+    "observed.trace.luau",
+    "logic-excerpt.luau"
+  ],
+  "artifact_sha256": {
+    "logic-excerpt.luau": "d7dc4fcc9e903d7ddd945a895cb04a046216fe2a1330eba06481e154feb0679e",
+    "observed.trace.luau": "73a07817b8734a4662b9076ce308df02a18cb4c27538841e8f96d0726c3cdc03"
+  },
+  "cleanup": {
+    "removed_diagnostic_files": [
+      "runtime.raw.txt"
+    ],
+    "reason": "Final logic, strings, captured source and validation summaries retained; duplicate runtime/debug logs excluded from publication."
+  }
+}

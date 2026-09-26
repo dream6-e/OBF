@@ -1,0 +1,1677 @@
+diff --git a/Deobfuscator/deobf/cli.py b/Deobfuscator/deobf/cli.py
+index e29f1e5..d30bdc6 100644
+--- a/Deobfuscator/deobf/cli.py
++++ b/Deobfuscator/deobf/cli.py
+@@ -55,11 +55,8 @@ def detect_version(source: str) -> str | None:
+     if m:
+         return m.group(1)
+ 
+-    head = source.lstrip()[:20000]
+-
+-    # Common v14.8 layout seen in protected samples.
+-    if head.startswith("local init = (function(...") and "return({" in head:
+-        return "14.8"
++    # The init wrapper and VM object shape occur in multiple v14 versions.
++    # A headerless input needs an explicit --engine; guessing corrupts output.
+ 
+     # 14.7/14.8/14.9 can all start directly with return({ ... }); without
+     # a banner that shape is intentionally ambiguous, so require --engine.
+@@ -156,9 +153,12 @@ def parser() -> argparse.ArgumentParser:
+     run.add_argument("--budget", type=float, default=30.0, help="emulated script time budget")
+     run.add_argument("--executor", default="roblox", help="executor/environment profile")
+     run.add_argument("--studio", action="store_true", help="use Studio/API cache mode")
++    run.add_argument("--port", type=int, default=34889, help="local Studio bridge port")
++    run.add_argument("--studio-wait", type=int, default=600, help="Studio response timeout")
+     run.add_argument("--input-text", default=None, help="text returned to emulated input calls")
+     run.add_argument("--strings", action="store_true", help="dump recovered strings")
+-    run.add_argument("--raw", action="store_true", help="save raw harness output")
++    run.add_argument("--raw", nargs="?", const=True, metavar="PATH",
++                     help="save raw harness output (default: OUTPUT.raw.txt)")
+     run.add_argument("--no-fold", action="store_true", help="disable trace constant folding")
+     run.add_argument("--keep-harness", action="store_true", default=False,
+                      help="keep generated runtime harness files")
+@@ -231,6 +231,9 @@ def normalize_compat_args(args):
+ 
+ def main(argv=None) -> int:
+     args = parser().parse_args(argv)
++    for option in ("max_runs", "devirt_rounds", "timeout", "budget"):
++        if getattr(args, option) <= 0:
++            sys.exit("[!] --%s must be positive" % option.replace("_", "-"))
+     normalize_compat_args(args)
+     if args.cfg is None:
+         args.cfg = []
+@@ -246,8 +249,8 @@ def main(argv=None) -> int:
+     if chosen == "auto":
+         chosen = detect_version(source)
+         if chosen is None:
+-            eprint("[!] could not determine whether this is Luraph v14.7 or v14.8")
+-            eprint("    retry with --engine 14.7 or --engine 14.8")
++            eprint("[!] could not determine the Luraph v14 version")
++            eprint("    retry with --engine 14.7, 14.8 or 14.9")
+             return 2
+ 
+     args.engine_resolved = chosen
+@@ -261,6 +264,18 @@ def main(argv=None) -> int:
+ 
+     output = Path(args.output).expanduser().resolve() if args.output else inp.with_name("deobfuscated.lua")
+ 
++    if args.raw is True:
++        args.raw = str(output) + ".raw.txt"
++    if args.raw:
++        args.raw = str(Path(args.raw).expanduser().resolve())
++        Path(args.raw).parent.mkdir(parents=True, exist_ok=True)
++    if args.raw and Path(args.raw) in (inp, output):
++        eprint("[!] raw diagnostics must not overwrite the input or result")
++        return 2
++    if output == inp:
++        eprint("[!] output must not overwrite the protected input")
++        return 2
++
+     if args.keep_work or args.debug:
+         workdir = inp.parent / f".{inp.stem}.luraph_v{chosen.replace('.', '_')}_work"
+         workdir.mkdir(parents=True, exist_ok=True)
+@@ -274,7 +289,14 @@ def main(argv=None) -> int:
+ 
+     try:
+         job = Job(args, inp, source, workdir)
+-        result = engine.deobfuscate(job)
++        try:
++            result = engine.deobfuscate(job)
++        except (RuntimeError, OSError, ValueError) as exc:
++            eprint("[!] " + str(exc))
++            if args.debug:
++                import traceback
++                traceback.print_exc()
++            return 1
+         if not result:
+             eprint("[!] engine returned no output path")
+             return 1
+diff --git a/Deobfuscator/deobf/deob.py b/Deobfuscator/deobf/deob.py
+index 8a6749e..10bad07 100644
+--- a/Deobfuscator/deobf/deob.py
++++ b/Deobfuscator/deobf/deob.py
+@@ -106,13 +106,20 @@ def parser():
+     ap.add_argument("--pypy", action="store_true",
+                     help="run under PyPy even for a small script (default: only above %d bytes)" % PYPY_MIN_SIZE)
+     ap.add_argument("--no-pypy", action="store_true", help="never switch to PyPy")
++    ap.add_argument("--trace-fallback", action="store_true",
++                    help="explicitly allow incomplete behavior traces when lifting fails")
+     for p in obfuscators.PLUGINS:
+-        p.add_arguments(ap)
++        # All Luraph engines share the v15 runtime/lifting options.
++        if not p.name.startswith("luraph_v14_"):
++            p.add_arguments(ap)
+     return ap
+ 
+ 
+ def main():
+     args = parser().parse_args()
++    for option in ("max_runs", "devirt_rounds", "timeout", "budget"):
++        if getattr(args, option) <= 0:
++            sys.exit("[!] --%s must be positive" % option.replace("_", "-"))
+     with open(args.input, "rb") as f:
+         source = f.read().decode("latin-1")
+     if args.obfuscator:
+@@ -143,9 +150,26 @@ def main():
+         workdir = tempfile.mkdtemp(prefix="deobf_")
+         trace_path = os.path.join(workdir, tracename)
+         final = args.output or os.path.join(outdir, os.path.basename(args.input))
++    if os.path.realpath(final or trace_path) == os.path.realpath(args.input):
++        if workdir:
++            import shutil
++            shutil.rmtree(workdir, ignore_errors=True)
++        sys.exit("[!] output must not overwrite the protected input")
++    if args.raw and os.path.realpath(args.raw) in {os.path.realpath(args.input),
++                                                os.path.realpath(final or trace_path)}:
++        if workdir:
++            import shutil
++            shutil.rmtree(workdir, ignore_errors=True)
++        sys.exit("[!] raw diagnostics must not overwrite the input or result")
+     os.makedirs(os.path.dirname(os.path.abspath(final or trace_path)), exist_ok=True)
+     try:
+-        result = plugin.deobfuscate(Job(args.input, source, args, trace_path, args.debug, plugin.label))
++        try:
++            result = plugin.deobfuscate(Job(args.input, source, args, trace_path, args.debug, plugin.label))
++        except (RuntimeError, OSError, ValueError) as exc:
++            if args.debug:
++                import traceback
++                traceback.print_exc()
++            sys.exit("[!] " + str(exc))
+         if final:
+             if not result or not os.path.exists(result):
+                 sys.exit("[!] no result")
+diff --git a/Deobfuscator/deobf/envlog.luau b/Deobfuscator/deobf/envlog.luau
+index 888159e..b1097d0 100644
+--- a/Deobfuscator/deobf/envlog.luau
++++ b/Deobfuscator/deobf/envlog.luau
+@@ -32,7 +32,7 @@ local R = {
+ 	newproxy = newproxy, print = print, clock = os.clock,
+ 	unpack = table.unpack, insert = table.insert, concat = table.concat,
+ 	remove = table.remove, fmt = string.format, rep = string.rep,
+-	gsub = string.gsub, match = string.match, byte = string.byte,
++	gsub = string.gsub, gmatch = string.gmatch, match = string.match, byte = string.byte,
+ 	sub = string.sub, find = string.find, sort = table.sort,
+ 	floor = math.floor, huge = math.huge, max = math.max,
+ }
+@@ -1817,7 +1817,7 @@ local SIGNAL_MEMBERS = {
+ }
+ PMT.__index = function(p, k)
+ 	local info = INFO[p]
+-	if CFG.trace or CFG.ptrace then R.print("[index]", info.name or info.hint, k) end
++	if CFG.trace or CFG.ptrace then R.print("[index]", info.name or info.hint, k, "id=" .. info.id) end
+ 	if k == "Parent" and (info.nilParent or info.created) then return info.props.Parent end
+ 	-- unknown objects: a Parent chain ends at workspace -> game -> nil after a
+ 	-- few levels, like a real hierarchy (scripts walk up until workspace/nil)
+@@ -1849,6 +1849,26 @@ PMT.__index = function(p, k)
+ 			if good then return w end
+ 		end
+ 	end
++	-- These are engine-computed values, not ordinary datatype defaults. Without
++	-- a native twin, returning a Vector2 proxy makes X/Y silently become zero
++	-- below, corrupting calculations and often sending fingerprints into loops.
++	-- Do not guess viewport, insets, detached-GUI or layout/rounding semantics.
++	-- Class ancestry prevents matching unrelated objects with the same key.
++	if k == "AbsolutePosition" or k == "AbsoluteSize" or k == "AbsoluteRotation" then
++		local cls, guard = info.className, 0
++		while cls and guard < 32 do
++			guard += 1
++			if cls == "GuiBase2d" then
++				CHAIN.environmentMiss = CHAIN.environmentMiss or R.fmt(
++					"GUI layout unavailable for %s.%s (instance #%d); requires an engine-backed layout value",
++					info.className, k, info.id)
++				ABORT_REASON = "unsupported environment: " .. CHAIN.environmentMiss
++				R.error(ABORT, 0)
++			end
++			local c = API.classes[cls]
++			cls = c and c.super
++		end
++	end
+ 	if info.genv then
+ 		return nil
+ 	end
+@@ -1927,7 +1947,7 @@ PMT.__index = function(p, k)
+ end
+ PMT.__newindex = function(p, k, v)
+ 	local info = INFO[p]
+-	if CFG.ptrace then R.print("[newindex]", info.name or info.hint, k, R.typeof(v)) end
++	if CFG.ptrace then R.print("[newindex]", info.name or info.hint, k, R.typeof(v), "id=" .. info.id) end
+ 	if k == "Parent" and info.destroyed then
+ 		R.error(R.fmt("The Parent property of %s is locked, current parent: NULL, new parent %s",
+ 			instName(p), isP(v) and instName(v) or "NULL"), 0)
+@@ -2078,8 +2098,8 @@ local E = ENV
+ 
+ -- v14.9 can derive an invalid allocation size when one standalone-runtime
+ -- fingerprint differs from Roblox.  Do not fabricate a table/buffer: identify
+--- the currently executing instrumented proto so the Python driver can rerun
+--- with just that fingerprint helper disabled.
++-- the currently executing instrumented proto for diagnostics. The caller may
++-- be the entire bootstrap; attribution alone does not justify skipping it.
+ local function noteAllocTrigger(kind, n)
+ 	if ALLOC_TRIGGER then return end
+ 	local chain = CHAIN.get and CHAIN.get() or ""
+@@ -3594,8 +3614,7 @@ if E.__PA then
+ 		end
+ 		return nested[w]
+ 	end
+-	R.setmetatable(E.__PA, { __newindex = function(t, proto, v)
+-		R.rawset(t, proto, v)
++	local function snapshotProto(proto)
+ 		if R.type(proto) ~= "table" then return end
+ 		local copy = {}
+ 		for key, arr in R.next, proto do
+@@ -3626,6 +3645,20 @@ if E.__PA then
+ 			end
+ 		end
+ 		orig[proto] = copy
++	end
++	CHAIN.snapshotFailures = 0
++	R.setmetatable(E.__PA, { __newindex = function(t, proto, v)
++		-- Publish the live capture independently of the optional pre-execution
++		-- array snapshot. A deeply recursive VM can leave too little stack for
++		-- this observer: its error must not change the protected program's
++		-- pcall result (and thus its environment/decryption fingerprint).
++		R.rawset(t, proto, v)
++		local ok = R.pcall(snapshotProto, proto)
++		if not ok then
++			-- No calls here: the remaining stack may be exhausted. Incomplete
++			-- snapshots are never installed in orig; the live capture survives.
++			CHAIN.snapshotFailures += 1
++		end
+ 	end })
+ 	-- Constants decoded after creation belong to the decoded operands the
+ 	-- restore undoes (the scramble garbled the operands, so which values
+@@ -4212,7 +4245,7 @@ do
+ 					.. R.concat(parts, ",") .. "}}"
+ 			end
+ 		end
+-		return '{"root_callee":' .. R.tostring(CHAIN.seen and CHAIN.seen[CHAIN.rootCallee] == "ok" and CHAIN.rootCallee or "null") .. ',"overrides":[' .. R.concat(overs, ",") .. '],"protos":{' .. R.concat(protos, ",") .. '},"tables":{' .. R.concat(tabs, ",") ..
++		return '{"snapshot_failures":' .. R.tostring(CHAIN.snapshotFailures or 0) .. ',"root_callee":' .. R.tostring(CHAIN.seen and CHAIN.seen[CHAIN.rootCallee] == "ok" and CHAIN.rootCallee or "null") .. ',"overrides":[' .. R.concat(overs, ",") .. '],"protos":{' .. R.concat(protos, ",") .. '},"tables":{' .. R.concat(tabs, ",") ..
+ 			'},"pid_of_table":{' .. R.concat(pidmap, ",") .. "}}"
+ 	end
+ end
+@@ -4642,7 +4675,11 @@ else
+ 		CFG.dump_last = CFG.dump_err or 3000
+ 		E.__OPDUMP()
+ 	end
+-	if ok then
++	-- A target may catch the sentinel and return, or a deferred handler may
++	-- hit the missing capability. Neither makes this simulation complete.
++	if CHAIN.environmentMiss then
++		status = "aborted: unsupported environment: " .. CHAIN.environmentMiss
++	elseif ok then
+ 		status = "finished"
+ 	elseif err == LOOP then
+ 		status = "stopped in an endless loop (truncated)"
+@@ -4699,6 +4736,9 @@ if CFG.devirt then
+ 			R.clock() - fs.t0, fs.bufs or 0))
+ 	end
+ 	if (CHAIN.unscrambled or 0) > 0 then R.print("\0UNSCRAMBLED " .. CHAIN.unscrambled) end
++	if (CHAIN.snapshotFailures or 0) > 0 then
++		R.print("\0SNAPSHOTFAILURES " .. CHAIN.snapshotFailures)
++	end
+ 	R.print("\0PROTOS " .. (ok and js or ("error: " .. R.tostring(js))))
+ end
+ for _, key in R.ipairs(NEWCHUNKS) do
+@@ -4765,7 +4805,10 @@ if CFG.serve then
+ 			R.print(R.fmt("\0FORCE calls=%d decoded=%d in %.1fs, %d buffer patches", fs.calls, fs.got,
+ 				R.clock() - fs.t0, fs.bufs or 0))
+ 		end
+-		R.print("\0PROTOS " .. (ok and js or ("error: " .. R.tostring(js))))
++		if (CHAIN.snapshotFailures or 0) > 0 then
++		R.print("\0SNAPSHOTFAILURES " .. CHAIN.snapshotFailures)
++	end
++	R.print("\0PROTOS " .. (ok and js or ("error: " .. R.tostring(js))))
+ 		R.print("\0ENVLOG-END")
+ 		R.print(SERVE_PAD)
+ 	end
+diff --git a/Deobfuscator/deobf/harness.py b/Deobfuscator/deobf/harness.py
+index e6aa132..208df32 100644
+--- a/Deobfuscator/deobf/harness.py
++++ b/Deobfuscator/deobf/harness.py
+@@ -379,7 +379,7 @@ def trace_text(body):
+     that use random values trace differently every run; a wrong key
+     changes what runs, not just literals)."""
+     body = re.sub(r"\x00CHUNK \S+\n[0-9a-f]*\n", "", body)
+-    body = re.sub(r"\x00(PROTOS|FORCE|P2D|TRIGGER)[^\n]*\n?", "", body)
++    body = re.sub(r"\x00(PROTOS|FORCE|P2D|TRIGGER|SNAPSHOTFAILURES)[^\n]*\n?", "", body)
+     # error positions and tracebacks name the harness file, whose path differs
+     # (run_once drops "<harness>:line: " prefixes; a served harness keeps them)
+     body = re.sub(r"(?<=[ \t])(?=\S)(?:[A-Za-z]:)?[^:\n]*?\.luau:", "harness:", body)
+diff --git a/Deobfuscator/deobf/luasym.py b/Deobfuscator/deobf/luasym.py
+index 1891d3b..500a4d0 100644
+--- a/Deobfuscator/deobf/luasym.py
++++ b/Deobfuscator/deobf/luasym.py
+@@ -679,6 +679,11 @@ class Interp:
+                     pass
+                 i = fix_int(i + c)
+         elif t == "AstStatForIn":
++            # VM front ends may model a proven register-table operation as an
++            # IR effect. Ordinary Lua iteration keeps the original behavior.
++            hook = getattr(self.L, "exec_for_in", None)
++            if hook is not None and hook(st, self, scope):
++                return
+             vals = self.eval_list(st["values"], scope, 3)
+             f, s, ctl = vals
+             n = 0
+diff --git a/Deobfuscator/deobf/obfuscators/__init__.py b/Deobfuscator/deobf/obfuscators/__init__.py
+index 2358cbb..459c2d0 100644
+--- a/Deobfuscator/deobf/obfuscators/__init__.py
++++ b/Deobfuscator/deobf/obfuscators/__init__.py
+@@ -8,11 +8,17 @@ confident; `--obfuscator NAME` forces one.
+ """
+ from obfuscators.base import Obfuscator, Job  # noqa: F401
+ from obfuscators.luraph_v15 import LuraphV15
++from obfuscators.luraph_v14_7 import LuraphV147
++from obfuscators.luraph_v14_8 import LuraphV148
++from obfuscators.luraph_v14_9 import LuraphV149
+ from obfuscators.ironbrew1 import Ironbrew1
+ from obfuscators.generic import Generic
+ 
+ PLUGINS = [
+     LuraphV15(),
++    LuraphV147(),
++    LuraphV148(),
++    LuraphV149(),
+     Ironbrew1(),
+     Generic(),      # fallback: behaviour trace only
+ ]
+diff --git a/Deobfuscator/deobf/obfuscators/base.py b/Deobfuscator/deobf/obfuscators/base.py
+index caa7981..01c9bf0 100644
+--- a/Deobfuscator/deobf/obfuscators/base.py
++++ b/Deobfuscator/deobf/obfuscators/base.py
+@@ -55,8 +55,8 @@ class Job:
+ 
+     def credit_header(self):
+         """First lines of a result file: the credit and the detected obfuscator."""
+-        return ("-- Why do i love gpt 5.6 sol high the reason is below.\n"
+-                "-- dsc.gg/oxyenv \n")
++        return "-- Reconstructed by deob.py (%s)\n\n" % self.obfuscator
++
+ 
+     @property
+     def base(self):
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_7/__init__.py b/Deobfuscator/deobf/obfuscators/luraph_v14_7/__init__.py
+index fec331c..b5f67f0 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_7/__init__.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_7/__init__.py
+@@ -23,12 +23,8 @@ class LuraphV147(Obfuscator):
+             if m.group(1) == "14":
+                 return 0.15
+             return 0.0
+-        # Headerless v14.7 samples commonly start directly with the VM object table.
+-        head = source.lstrip()[:4000]
+-        if head.startswith("return({") and "bit32" in source[:100000]:
+-            return 0.80
+-        if head.startswith("local init = (function(...") and "return({" in source[:20000]:
+-            return 0.38
++        # The headerless VM-object shape is shared by several v14 versions.
++        # Do not select an arbitrary engine on an equal-confidence tie.
+         return 0.0
+ 
+     def add_arguments(self, ap):
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_7/devirt.py b/Deobfuscator/deobf/obfuscators/luraph_v14_7/devirt.py
+index 33ee575..dd11e46 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_7/devirt.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_7/devirt.py
+@@ -31,6 +31,7 @@ if ROOT not in sys.path:
+ 
+ from obfuscators.luraph_v14_7 import vmmap  # noqa: E402
+ import backend  # noqa: E402
++import register_cleanup as RC  # noqa: E402
+ import luasym as S  # noqa: E402
+ from luasym import (LTable, Builtin, LuaFunc, Buf, Unsupported, Expr, Const, Reg, Pseudo, Global,  # noqa: E402
+                     Upval, Index, Bin, Un, IfExp, TempVal, Vararg, ClosureExpr, Multi, TempTail,
+@@ -805,6 +806,7 @@ class ProtoLifter:
+         self.tcount = 0
+         self.proto_arrays = set()
+         self.reg_arrays = set()      # bases of register-resident arrays (see reg_array)
++        self.cleanup_unsafe_slots = False
+         self.children = []
+         self.requests = set()
+         self.jump_regs = set()
+@@ -898,6 +900,27 @@ class ProtoLifter:
+     def is_dispatch(self, node):
+         return self.vm.is_dispatch(node)
+ 
++    def _note_physical_slot(self, slot):
++        # Generated parallel-assignment temporaries occupy a reserved range.
++        # If the VM itself uses that range (or non-integer keys), a scalar
++        # register cleanup cannot safely distinguish storage from temporaries.
++        if type(slot) is not int or slot >= JIT_TMP:
++            self.cleanup_unsafe_slots = True
++
++    def exec_for_in(self, node, interp, scope):
++        matched, cutoff = RC.match_cleanup(node, interp, scope)
++        if not matched:
++            return False
++        # Clear tracked multret/jump/frame aliases through the normal store
++        # path too. The effect below also covers slots not encountered yet.
++        tracked = set(self.packs) | set(self.pack_copies) | set(self.jvals)
++        for r in sorted(r for r in tracked if type(r) is int):
++            if cutoff < r < JIT_TMP:
++                self.emit(Assign(Reg(r), Const(None)))
++                self.jvals.pop(r, None)
++        self.emit(RC.ClearRegistersAbove(cutoff))
++        return True
++
+     def emit(self, st):
+         if isinstance(st, Assign) and isinstance(st.target, Reg):
+             if isinstance(st.value, SymList):
+@@ -1350,6 +1373,7 @@ class ProtoLifter:
+                     raise Unsupported("symbolic register index")
+                 return Index(*arr)
+             k = S.norm_key(key)
++            self._note_physical_slot(k)
+             if isinstance(k, (int, float)) and k < 1 and self.stack_base is not None:
+                 raise Unsupported("read below the stack VM's frame (register %s)" % k)
+             if self.jvals.get(k) is FRAME:
+@@ -1502,6 +1526,7 @@ class ProtoLifter:
+                     raise Unsupported("symbolic register store")
+                 self.emit(Assign(Index(*arr), self.value_of(v)))
+                 return
++            self._note_physical_slot(S.norm_key(key))
+             if isinstance(v, RegFile):
+                 self.jvals[S.norm_key(key)] = FRAME
+                 return
+@@ -1730,6 +1755,9 @@ class ProtoLifter:
+         if isinstance(t, RegFile):
+             if not isinstance(i, int) or not isinstance(j, int):
+                 raise Unsupported("unpack registers with symbolic range")
++            if i <= j:
++                self._note_physical_slot(i)
++                self._note_physical_slot(j)
+             return Multi([FrameArg(n) if self.jvals.get(n) is FRAME else Reg(n) for n in range(i, j + 1)])
+         if isinstance(t, SymList):
+             if i != 1:
+@@ -1785,6 +1813,7 @@ class ProtoLifter:
+ 
+     def elem(self, src, i):
+         if isinstance(src, RegFile):
++            self._note_physical_slot(i)
+             return Reg(i)
+         if isinstance(src, SymList):
+             return self.symlist_get(src, i)
+@@ -1794,6 +1823,7 @@ class ProtoLifter:
+ 
+     def put(self, dst, i, v):
+         if isinstance(dst, RegFile):
++            self._note_physical_slot(i)
+             self.emit(Assign(Reg(i), self.value_of(v) if v is not None else Const(None)))
+         elif isinstance(dst, Expr):
+             self.emit(Assign(Index(dst, Const(i)), self.value_of(v) if v is not None else Const(None)))
+@@ -2103,7 +2133,9 @@ def edge_facts(cond, taken, facts):
+ 
+ 
+ def apply_stmt_facts(st, facts, lf):
+-    if isinstance(st, Assign) and isinstance(st.target, Reg):
++    if isinstance(st, RC.ClearRegistersAbove):
++        RC.clear_facts(st, facts, synthetic_base=JIT_TMP)
++    elif isinstance(st, Assign) and isinstance(st.target, Reg):
+         fv = fact_of(st.value)
+         if fv is None and isinstance(st.value, Reg):
+             fv = facts.get(st.value.n)
+@@ -3309,10 +3341,16 @@ def show_op(prog, key, mode, pc, force_op=None):
+     st = make_stepper(vm, lf)
+     lines = prog.lines
+     for i, ifn, w in st.loops:
+-        c = st.conds[i]
+-        k = c["right"] if c["right"]["type"] == "AstExprConstantNumber" else c["left"]
+-        if S.fix_int(k["value"]) != mode:
+-            continue
++        c = st.conds.get(i)
++        # A single unconditional dispatcher has implicit mode zero. It has
++        # no condition entry; debug inspection must not require a mode branch.
++        if c is None:
++            if ifn is not None or mode != 0:
++                continue
++        else:
++            k = c["right"] if c["right"]["type"] == "AstExprConstantNumber" else c["left"]
++            if S.fix_int(k["value"]) != mode:
++                continue
+         d = [x for x in vmmap.find_dispatchers(prog.root) if x["node"] is w][0]
+         arrs = {}
+         for nm, keys in vm.maker_decls.items():
+@@ -3326,7 +3364,8 @@ def show_op(prog, key, mode, pc, force_op=None):
+         it = S.Interp(lf)
+         _, inner = st._fresh_scopes(None, it)
+         stmt = w["body"]["body"][0]
+-        opv = it.eval(stmt["values"][0]["expr"], inner)
++        fetch = vmmap.unwrap(stmt["values"][0])
++        opv = it.eval(fetch["expr"], inner)
+         op = opv.get(pc) if force_op is None else force_op
+         print("mode %d pc %d: op %s (array %s)" % (mode, pc, op, opname))
+         for nm, v in sorted(arrs.items()):
+@@ -3443,6 +3482,10 @@ class FunctionLifter:
+         me = sys.modules[__name__]
+         apply_frame_calls(order)
+         drop_idle_closes(order, lf.captured_regs)
++        self.stats["register_cleanup_loops"] = self.stats.get("register_cleanup_loops", 0) + RC.lower_cleanups(
++            order, lf.captured_regs, synthetic_base=JIT_TMP,
++            dynamic_arrays=bool(lf.reg_arrays), unsafe_slots=lf.cleanup_unsafe_slots,
++            frame_types=(FrameArg, FrameProxy), box_type=MaybeBox)
+         prefix = REG_PREFIX[depth % len(REG_PREFIX)]
+         lines, self.params, nerr, fallbacks = backend.lower(
+             s0.key(vm.kstack_link), order, me, vm.kstack_link, prefix, upnames,
+@@ -3703,7 +3746,16 @@ def lift_program(source, protos_path, chunk_paths=(), fetch=None):
+         out.append("return vm_root_%s(...)" % payload_pid)
+     # Luraph runtime functions the script calls (SharedFn): stubs up front
+     shared = []
++    unresolved_helpers = 0
++    # Symbolic interpretation can encounter helpers later eliminated by DCE.
++    # Only surviving identifier references need declarations; mentioning a
++    # helper in a comment/string must not turn a clean payload into a stub.
++    from lexer import tokenize
++    used_names = {value for kind, value in tokenize("\n".join(out)) if kind == "name"}
+     for n in sorted(prog.dump.shared.values()):
++        if "luraph_runtime%d" % n not in used_names:
++            continue
++        unresolved_helpers += 1
+         shared += [
+             "-- unresolved Luraph runtime helper; preserved as a safe stub",
+             "local function luraph_runtime%d(...)" % n,
+@@ -3711,6 +3763,7 @@ def lift_program(source, protos_path, chunk_paths=(), fetch=None):
+             "end",
+             "",
+         ]
++    fl.stats["unresolved_helpers"] = unresolved_helpers
+     if shared:
+         at = next((i for i, l in enumerate(out) if l and not l.startswith("--")), len(out))
+         out[at:at] = shared
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_7/driver.py b/Deobfuscator/deobf/obfuscators/luraph_v14_7/driver.py
+index df63fd3..3a550a6 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_7/driver.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_7/driver.py
+@@ -96,7 +96,7 @@ def patch_entries(source, path):
+     return "\n".join(lines)
+ 
+ 
+-def _trace_root_candidates(body):
++def _trace_root_candidates(body, runtime_root=None):
+     """Rank likely payload-root pids from envlog call-chain markers.
+ 
+     Large v14 scripts enter many helper/probe closures before and after the
+@@ -111,6 +111,10 @@ def _trace_root_candidates(body):
+     invs = {}
+     last_seen = {}
+     last_child = {}
++    initial_root = None
++    nested_seen = set()
++    detached_roots = []
++    saw_bootstrap_chain = False
+     pos = 0
+     for line in body.splitlines():
+         m = re.match(r"^\s*--@\d+\s*(.*)$", line)
+@@ -122,6 +126,19 @@ def _trace_root_candidates(body):
+             q = re.match(r"^(\d+):([^,\s]*)", part.strip())
+             if q:
+                 chain.append((int(q.group(1)), q.group(2)))
++        if chain:
++            top = chain[0][0]
++            if initial_root is None:
++                initial_root = top
++            # Tail-calling the payload removes the bootstrap frames. The old
++            # vote considered only chain[1], so a finished bootstrap always
++            # beat the real payload, even when the latter emitted everything.
++            if (saw_bootstrap_chain and top != initial_root
++                    and top not in nested_seen and top not in detached_roots):
++                detached_roots.append(top)
++            if len(chain) >= 2:
++                saw_bootstrap_chain = True
++                nested_seen.update(pid for pid, _ in chain[1:])
+         if len(chain) >= 2:
+             parent, child = chain[0][0], chain[1][0]
+             w = 5 + min(3, len(chain) - 2)
+@@ -147,7 +164,14 @@ def _trace_root_candidates(body):
+         key=lambda p: (scores[p], hits.get(p, 0), last_seen.get(p, 0)),
+         reverse=True,
+     )
+-    return ranked
++    # The runtime remembers a later bootstrap -> payload call. Statement
++    # frequency alone favors a verbose probe over a small payload; do not
++    # overwrite an observed final runtime root for that reason. Tail-called
++    # detached roots still take precedence over a stale bootstrap edge.
++    preferred = list(detached_roots)
++    if runtime_root in scores and runtime_root not in preferred:
++        preferred.append(runtime_root)
++    return preferred + [pid for pid in ranked if pid not in preferred]
+ 
+ 
+ def _trace_root_hint(body):
+@@ -196,9 +220,10 @@ def _json_loads_loose(raw):
+ def _apply_root_hint(protos_json, body):
+     """Apply the strongest runtime payload-root hint to the captured dump.
+ 
+-    v14's in-harness root_callee can be stale on large scripts. The weighted
+-    marker vote is based on the complete rendered run, so let it override that
+-    stale value and keep a short ranked list for diagnostics/fallbacks.
++    Detached tail-call roots override a stale bootstrap edge. Otherwise an
++    observed runtime root takes precedence over statement-frequency voting:
++    a verbose environment probe is not stronger evidence than the payload's
++    final call. Keep the remaining candidates for diagnostics/fallbacks.
+     """
+     ranked = _trace_root_candidates(body)
+     hint = ranked[0] if ranked else None
+@@ -209,6 +234,7 @@ def _apply_root_hint(protos_json, body):
+     except Exception:
+         return protos_json, hint
+     protos = data.get("protos", {})
++    ranked = _trace_root_candidates(body, data.get("root_callee"))
+     ranked = [pid for pid in ranked if str(pid) in protos][:8]
+     if not ranked:
+         return protos_json, hint
+@@ -227,6 +253,15 @@ def _apply_root_hint(protos_json, body):
+     return protos_json, hint
+ 
+ 
++def _hint_served_dump(body, verified_trace):
++    if not verified_trace:
++        return body
++    def replace(match):
++        hinted, _ = _apply_root_hint(match.group(1), verified_trace)
++        return "\x00PROTOS " + hinted + "\n"
++    return re.sub(r"\x00PROTOS ([^\n]*)\n", replace, body, count=1)
++
++
+ def _v14_probe_signature_score(code):
+     """Score the narrow Roblox anti-analysis fingerprint used by Luraph v14.x.
+ 
+@@ -485,7 +520,7 @@ def _set_dump_root(ppath, pid):
+         if str(pid) not in data.get("protos", {}):
+             return False
+         data["root_callee"] = int(pid)
+-        Path(ppath).write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8", newline="\\n")
++        Path(ppath).write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8", newline="\n")
+         return True
+     except Exception:
+         return False
+@@ -502,6 +537,7 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+     requested = set()
+     last_bufs = ""
+     text = None
++    converged = False
+     rounds = args.devirt_rounds
+     # Intermediate rounds only need the constant requests and decrypted
+     # strings, which come from walking each function: they skip the
+@@ -596,7 +632,8 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             print("[*]   %d functions, %d unlifted blocks, %d unstructured jumps, %d new constant requests (%.1fs)"
+                   % (stats["functions"], stats["errors"], stats["fallbacks"], len(new), time.time() - t1),
+                   file=sys.stderr)
+-            if (not new and devirt.same_patches(last_bufs, bufs)) or rnd == rounds:
++            converged = not new and devirt.same_patches(last_bufs, bufs)
++            if converged or rnd == rounds:
+                 break
+             if quick:
+                 print("[*]   the full lift needs more constants: continuing with full lifts", file=sys.stderr)
+@@ -619,7 +656,12 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             print("[!] constant request run gave no protos", file=sys.stderr)
+             break
+         with open(ppath, "w", encoding="utf-8", newline="\n") as f:
+-            f.write(m.group(1))
++            refreshed, _ = _apply_root_hint(m.group(1), body)
++            f.write(refreshed)
++    if text and (not converged or stats.get("errors", 0) or stats.get("fallbacks", 0)
++                 or stats.get("unresolved_helpers", 0) or new):
++        print("[!] refusing incomplete static lift (unresolved blocks/helpers/constants)", file=sys.stderr)
++        return False
+     finished = devirt.finish_text(text or "").strip()
+     # The selected proto may be the v14 Roblox anti-analysis fingerprint.
+     # Strip only the strongly-recognized probe suite; if nothing remains, this
+@@ -781,6 +823,10 @@ def run(job):
+         the recovery result for a one-line script.  Only when no attribution is
+         available do we fall back to the old tiny-trace heuristic.
+         """
++        # A partial/error run cannot be promoted to recovered source merely
++        # because its rendered body happens to contain a few printable calls.
++        if not re.search(r"^-- run status: finished$", body, re.M):
++            return None
+         attributed = _payload_trace_source(body, root_hint)
+         observable = _observable_trace_source(body)
+         if attributed is not None:
+@@ -825,7 +871,9 @@ def run(job):
+ 
+     def write_semantic_candidate(candidate):
+         spath = job.path(".semantic.luau")
+-        job.write(spath, job.credit_header() + candidate)
++        job.write(spath, "-- RESULT: trace-assisted, NOT a complete devirtualization\n"
++                  "-- Only the observed execution is represented; untaken branches are not recovered.\n\n"
++                  + candidate)
+         print("[*] static v14 lift resolved to bootstrap/runtime scaffolding; "
+               "using compact trace-assisted payload reconstruction", file=sys.stderr)
+         return spath
+@@ -888,7 +936,7 @@ def run(job):
+                 lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
+     runner.finish()
+     trace.status_line(body)
+-    semantic = semantic_trace_candidate() if devirt_on else None
++    semantic = semantic_trace_candidate() if devirt_on and getattr(args, "trace_fallback", False) else None
+     if devirt_on and os.path.exists(dpath):
+         # A lift full of calls to nil means the VM was misread.  Prefer a
+         # directly intercepted loadstring body over the behavior trace.
+@@ -905,6 +953,9 @@ def run(job):
+             recovered = write_recovered_loadstring()
+             if recovered is not None:
+                 return recovered
++            if getattr(args, "trace_fallback", False):
++                write_trace()
++                return job.trace_path
+             raise RuntimeError("v14 payload root could not be isolated from Luraph runtime scaffolding")
+ 
+         # A one/few-statement payload must not turn into thousands of lines of
+@@ -976,6 +1027,7 @@ def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
+     args = job.args
+     bridge = runner.bridge
+     server = [None]
++    server_trace = [None]  # provenance: ONLY the verified run of this server
+     synced = [False]    # the long-lived harness made the current dump
+     if not bridge and not os.environ.get("DEOB_NO_SERVE"):
+         server[0] = harness.HarnessServer(runner.luau, patched, cfg, chunks)
+@@ -1005,11 +1057,17 @@ def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
+                       file=sys.stderr)
+                 hs.close()
+                 hs = server[0] = None
++            else:
++                server_trace[0] = first
+         if hs is not None:
+             res = hs.request(c, args.timeout)
+             if res[0] is not None:
+                 synced[0] = True
+-                return res
++                # Constant-only replies contain no --@ call-chain markers.
++                # Their proto IDs belong to this SAME verified live session;
++                # preserve its observed payload selection, not a bootstrap
++                # fallback. Never carry these IDs into a fresh fallback run.
++                return _hint_served_dump(res[0], server_trace[0]), res[1]
+             print("[!] the long-lived harness failed: %s; running the script once per round "
+                   "instead" % res[1][-300:], file=sys.stderr)
+             hs.close()
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_7/vmmap.py b/Deobfuscator/deobf/obfuscators/luraph_v14_7/vmmap.py
+index 7934620..940ec88 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_7/vmmap.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_7/vmmap.py
+@@ -592,7 +592,23 @@ def _outer_captures(info):
+       field - safe field name used in the serialized proto capture
+     """
+     maker = info["maker"]
+-    own = set(_decls_in(maker))
++    # A reference inside a child closure is not a maker upvalue when its
++    # declaration belongs to that child (or another descendant). Capturing it
++    # at the maker site instead performs a GLOBAL read of the same spelling,
++    # polluting the simulated environment and losing lexical identity.
++    own = set()
++
++    def collect_declarations(n):
++        if isinstance(n, dict):
++            if n.get("type") == "AstExprFunction":
++                own.update(_decls_in(n))
++            for value in n.values():
++                collect_declarations(value)
++        elif isinstance(n, list):
++            for value in n:
++                collect_declarations(value)
++
++    collect_declarations(maker)
+     found = {}
+ 
+     def visit(n):
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_8/__init__.py b/Deobfuscator/deobf/obfuscators/luraph_v14_8/__init__.py
+index 728ee34..991fd90 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_8/__init__.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_8/__init__.py
+@@ -23,12 +23,8 @@ class LuraphV148(Obfuscator):
+             if m.group(1) == "14":
+                 return 0.15
+             return 0.0
+-        # Headerless v14.8 samples commonly keep the init wrapper before the VM object.
+-        head = source.lstrip()[:4000]
+-        if head.startswith("local init = (function(...") and "return({" in source[:20000]:
+-            return 0.82
+-        if head.startswith("return({") and "bit32" in source[:100000]:
+-            return 0.42
++        # The headerless VM-object shape is shared by several v14 versions.
++        # Do not select an arbitrary engine on an equal-confidence tie.
+         return 0.0
+ 
+     def add_arguments(self, ap):
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_8/devirt.py b/Deobfuscator/deobf/obfuscators/luraph_v14_8/devirt.py
+index 20d8fba..c8aacac 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_8/devirt.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_8/devirt.py
+@@ -3309,10 +3309,16 @@ def show_op(prog, key, mode, pc, force_op=None):
+     st = make_stepper(vm, lf)
+     lines = prog.lines
+     for i, ifn, w in st.loops:
+-        c = st.conds[i]
+-        k = c["right"] if c["right"]["type"] == "AstExprConstantNumber" else c["left"]
+-        if S.fix_int(k["value"]) != mode:
+-            continue
++        c = st.conds.get(i)
++        # A single unconditional dispatcher has implicit mode zero. It has
++        # no condition entry; debug inspection must not require a mode branch.
++        if c is None:
++            if ifn is not None or mode != 0:
++                continue
++        else:
++            k = c["right"] if c["right"]["type"] == "AstExprConstantNumber" else c["left"]
++            if S.fix_int(k["value"]) != mode:
++                continue
+         d = [x for x in vmmap.find_dispatchers(prog.root) if x["node"] is w][0]
+         arrs = {}
+         for nm, keys in vm.maker_decls.items():
+@@ -3326,7 +3332,8 @@ def show_op(prog, key, mode, pc, force_op=None):
+         it = S.Interp(lf)
+         _, inner = st._fresh_scopes(None, it)
+         stmt = w["body"]["body"][0]
+-        opv = it.eval(stmt["values"][0]["expr"], inner)
++        fetch = vmmap.unwrap(stmt["values"][0])
++        opv = it.eval(fetch["expr"], inner)
+         op = opv.get(pc) if force_op is None else force_op
+         print("mode %d pc %d: op %s (array %s)" % (mode, pc, op, opname))
+         for nm, v in sorted(arrs.items()):
+@@ -3703,7 +3710,16 @@ def lift_program(source, protos_path, chunk_paths=(), fetch=None):
+         out.append("return vm_root_%s(...)" % payload_pid)
+     # Luraph runtime functions the script calls (SharedFn): stubs up front
+     shared = []
++    unresolved_helpers = 0
++    # Symbolic interpretation can encounter helpers later eliminated by DCE.
++    # Only surviving identifier references need declarations; mentioning a
++    # helper in a comment/string must not turn a clean payload into a stub.
++    from lexer import tokenize
++    used_names = {value for kind, value in tokenize("\n".join(out)) if kind == "name"}
+     for n in sorted(prog.dump.shared.values()):
++        if "luraph_runtime%d" % n not in used_names:
++            continue
++        unresolved_helpers += 1
+         shared += [
+             "-- unresolved Luraph runtime helper; preserved as a safe stub",
+             "local function luraph_runtime%d(...)" % n,
+@@ -3711,6 +3727,7 @@ def lift_program(source, protos_path, chunk_paths=(), fetch=None):
+             "end",
+             "",
+         ]
++    fl.stats["unresolved_helpers"] = unresolved_helpers
+     if shared:
+         at = next((i for i, l in enumerate(out) if l and not l.startswith("--")), len(out))
+         out[at:at] = shared
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_8/driver.py b/Deobfuscator/deobf/obfuscators/luraph_v14_8/driver.py
+index d57feca..342e34f 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_8/driver.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_8/driver.py
+@@ -96,7 +96,7 @@ def patch_entries(source, path):
+     return "\n".join(lines)
+ 
+ 
+-def _trace_root_candidates(body):
++def _trace_root_candidates(body, runtime_root=None):
+     """Rank likely payload-root pids from envlog call-chain markers.
+ 
+     Large v14 scripts enter many helper/probe closures before and after the
+@@ -111,6 +111,10 @@ def _trace_root_candidates(body):
+     invs = {}
+     last_seen = {}
+     last_child = {}
++    initial_root = None
++    nested_seen = set()
++    detached_roots = []
++    saw_bootstrap_chain = False
+     pos = 0
+     for line in body.splitlines():
+         m = re.match(r"^\s*--@\d+\s*(.*)$", line)
+@@ -122,6 +126,19 @@ def _trace_root_candidates(body):
+             q = re.match(r"^(\d+):([^,\s]*)", part.strip())
+             if q:
+                 chain.append((int(q.group(1)), q.group(2)))
++        if chain:
++            top = chain[0][0]
++            if initial_root is None:
++                initial_root = top
++            # Tail-calling the payload removes the bootstrap frames. The old
++            # vote considered only chain[1], so a finished bootstrap always
++            # beat the real payload, even when the latter emitted everything.
++            if (saw_bootstrap_chain and top != initial_root
++                    and top not in nested_seen and top not in detached_roots):
++                detached_roots.append(top)
++            if len(chain) >= 2:
++                saw_bootstrap_chain = True
++                nested_seen.update(pid for pid, _ in chain[1:])
+         if len(chain) >= 2:
+             parent, child = chain[0][0], chain[1][0]
+             w = 5 + min(3, len(chain) - 2)
+@@ -147,7 +164,14 @@ def _trace_root_candidates(body):
+         key=lambda p: (scores[p], hits.get(p, 0), last_seen.get(p, 0)),
+         reverse=True,
+     )
+-    return ranked
++    # The runtime remembers a later bootstrap -> payload call. Statement
++    # frequency alone favors a verbose probe over a small payload; do not
++    # overwrite an observed final runtime root for that reason. Tail-called
++    # detached roots still take precedence over a stale bootstrap edge.
++    preferred = list(detached_roots)
++    if runtime_root in scores and runtime_root not in preferred:
++        preferred.append(runtime_root)
++    return preferred + [pid for pid in ranked if pid not in preferred]
+ 
+ 
+ def _trace_root_hint(body):
+@@ -196,9 +220,10 @@ def _json_loads_loose(raw):
+ def _apply_root_hint(protos_json, body):
+     """Apply the strongest runtime payload-root hint to the captured dump.
+ 
+-    v14's in-harness root_callee can be stale on large scripts. The weighted
+-    marker vote is based on the complete rendered run, so let it override that
+-    stale value and keep a short ranked list for diagnostics/fallbacks.
++    Detached tail-call roots override a stale bootstrap edge. Otherwise an
++    observed runtime root takes precedence over statement-frequency voting:
++    a verbose environment probe is not stronger evidence than the payload's
++    final call. Keep the remaining candidates for diagnostics/fallbacks.
+     """
+     ranked = _trace_root_candidates(body)
+     hint = ranked[0] if ranked else None
+@@ -209,6 +234,7 @@ def _apply_root_hint(protos_json, body):
+     except Exception:
+         return protos_json, hint
+     protos = data.get("protos", {})
++    ranked = _trace_root_candidates(body, data.get("root_callee"))
+     ranked = [pid for pid in ranked if str(pid) in protos][:8]
+     if not ranked:
+         return protos_json, hint
+@@ -485,7 +511,7 @@ def _set_dump_root(ppath, pid):
+         if str(pid) not in data.get("protos", {}):
+             return False
+         data["root_callee"] = int(pid)
+-        Path(ppath).write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8", newline="\\n")
++        Path(ppath).write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8", newline="\n")
+         return True
+     except Exception:
+         return False
+@@ -502,6 +528,7 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+     requested = set()
+     last_bufs = ""
+     text = None
++    converged = False
+     rounds = args.devirt_rounds
+     # Intermediate rounds only need the constant requests and decrypted
+     # strings, which come from walking each function: they skip the
+@@ -596,7 +623,8 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             print("[*]   %d functions, %d unlifted blocks, %d unstructured jumps, %d new constant requests (%.1fs)"
+                   % (stats["functions"], stats["errors"], stats["fallbacks"], len(new), time.time() - t1),
+                   file=sys.stderr)
+-            if (not new and devirt.same_patches(last_bufs, bufs)) or rnd == rounds:
++            converged = not new and devirt.same_patches(last_bufs, bufs)
++            if converged or rnd == rounds:
+                 break
+             if quick:
+                 print("[*]   the full lift needs more constants: continuing with full lifts", file=sys.stderr)
+@@ -619,7 +647,12 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             print("[!] constant request run gave no protos", file=sys.stderr)
+             break
+         with open(ppath, "w", encoding="utf-8", newline="\n") as f:
+-            f.write(m.group(1))
++            refreshed, _ = _apply_root_hint(m.group(1), body)
++            f.write(refreshed)
++    if text and (not converged or stats.get("errors", 0) or stats.get("fallbacks", 0)
++                 or stats.get("unresolved_helpers", 0) or new):
++        print("[!] refusing incomplete static lift (unresolved blocks/helpers/constants)", file=sys.stderr)
++        return False
+     finished = devirt.finish_text(text or "").strip()
+     # The selected proto may be the v14 Roblox anti-analysis fingerprint.
+     # Strip only the strongly-recognized probe suite; if nothing remains, this
+@@ -781,6 +814,10 @@ def run(job):
+         the recovery result for a one-line script.  Only when no attribution is
+         available do we fall back to the old tiny-trace heuristic.
+         """
++        # A partial/error run cannot be promoted to recovered source merely
++        # because its rendered body happens to contain a few printable calls.
++        if not re.search(r"^-- run status: finished$", body, re.M):
++            return None
+         attributed = _payload_trace_source(body, root_hint)
+         observable = _observable_trace_source(body)
+         if attributed is not None:
+@@ -825,7 +862,9 @@ def run(job):
+ 
+     def write_semantic_candidate(candidate):
+         spath = job.path(".semantic.luau")
+-        job.write(spath, job.credit_header() + candidate)
++        job.write(spath, "-- RESULT: trace-assisted, NOT a complete devirtualization\n"
++                  "-- Only the observed execution is represented; untaken branches are not recovered.\n\n"
++                  + candidate)
+         print("[*] static v14 lift resolved to bootstrap/runtime scaffolding; "
+               "using compact trace-assisted payload reconstruction", file=sys.stderr)
+         return spath
+@@ -888,7 +927,7 @@ def run(job):
+                 lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
+     runner.finish()
+     trace.status_line(body)
+-    semantic = semantic_trace_candidate() if devirt_on else None
++    semantic = semantic_trace_candidate() if devirt_on and getattr(args, "trace_fallback", False) else None
+     if devirt_on and os.path.exists(dpath):
+         # A lift full of calls to nil means the VM was misread.  Prefer a
+         # directly intercepted loadstring body over the behavior trace.
+@@ -905,6 +944,9 @@ def run(job):
+             recovered = write_recovered_loadstring()
+             if recovered is not None:
+                 return recovered
++            if getattr(args, "trace_fallback", False):
++                write_trace()
++                return job.trace_path
+             raise RuntimeError("v14 payload root could not be isolated from Luraph runtime scaffolding")
+ 
+         # A one/few-statement payload must not turn into thousands of lines of
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_8/vmmap.py b/Deobfuscator/deobf/obfuscators/luraph_v14_8/vmmap.py
+index 297b966..683eccf 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_8/vmmap.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_8/vmmap.py
+@@ -592,7 +592,23 @@ def _outer_captures(info):
+       field - safe field name used in the serialized proto capture
+     """
+     maker = info["maker"]
+-    own = set(_decls_in(maker))
++    # A reference inside a child closure is not a maker upvalue when its
++    # declaration belongs to that child (or another descendant). Capturing it
++    # at the maker site instead performs a GLOBAL read of the same spelling,
++    # polluting the simulated environment and losing lexical identity.
++    own = set()
++
++    def collect_declarations(n):
++        if isinstance(n, dict):
++            if n.get("type") == "AstExprFunction":
++                own.update(_decls_in(n))
++            for value in n.values():
++                collect_declarations(value)
++        elif isinstance(n, list):
++            for value in n:
++                collect_declarations(value)
++
++    collect_declarations(maker)
+     found = {}
+ 
+     def visit(n):
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_9/__init__.py b/Deobfuscator/deobf/obfuscators/luraph_v14_9/__init__.py
+index b0b147e..8705365 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_9/__init__.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_9/__init__.py
+@@ -23,12 +23,8 @@ class LuraphV149(Obfuscator):
+             if m.group(1) == "14":
+                 return 0.15
+             return 0.0
+-        # Headerless v14.9 samples commonly keep the init wrapper before the VM object.
+-        head = source.lstrip()[:4000]
+-        if head.startswith("local init = (function(...") and "return({" in source[:20000]:
+-            return 0.82
+-        if head.startswith("return({") and "bit32" in source[:100000]:
+-            return 0.42
++        # The headerless VM-object shape is shared by several v14 versions.
++        # Do not select an arbitrary engine on an equal-confidence tie.
+         return 0.0
+ 
+     def add_arguments(self, ap):
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_9/devirt.py b/Deobfuscator/deobf/obfuscators/luraph_v14_9/devirt.py
+index a0b3c13..f514ce5 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_9/devirt.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_9/devirt.py
+@@ -3309,10 +3309,16 @@ def show_op(prog, key, mode, pc, force_op=None):
+     st = make_stepper(vm, lf)
+     lines = prog.lines
+     for i, ifn, w in st.loops:
+-        c = st.conds[i]
+-        k = c["right"] if c["right"]["type"] == "AstExprConstantNumber" else c["left"]
+-        if S.fix_int(k["value"]) != mode:
+-            continue
++        c = st.conds.get(i)
++        # A single unconditional dispatcher has implicit mode zero. It has
++        # no condition entry; debug inspection must not require a mode branch.
++        if c is None:
++            if ifn is not None or mode != 0:
++                continue
++        else:
++            k = c["right"] if c["right"]["type"] == "AstExprConstantNumber" else c["left"]
++            if S.fix_int(k["value"]) != mode:
++                continue
+         d = [x for x in vmmap.find_dispatchers(prog.root) if x["node"] is w][0]
+         arrs = {}
+         for nm, keys in vm.maker_decls.items():
+@@ -3326,7 +3332,8 @@ def show_op(prog, key, mode, pc, force_op=None):
+         it = S.Interp(lf)
+         _, inner = st._fresh_scopes(None, it)
+         stmt = w["body"]["body"][0]
+-        opv = it.eval(stmt["values"][0]["expr"], inner)
++        fetch = vmmap.unwrap(stmt["values"][0])
++        opv = it.eval(fetch["expr"], inner)
+         op = opv.get(pc) if force_op is None else force_op
+         print("mode %d pc %d: op %s (array %s)" % (mode, pc, op, opname))
+         for nm, v in sorted(arrs.items()):
+@@ -3703,7 +3710,16 @@ def lift_program(source, protos_path, chunk_paths=(), fetch=None):
+         out.append("return vm_root_%s(...)" % payload_pid)
+     # Luraph runtime functions the script calls (SharedFn): stubs up front
+     shared = []
++    unresolved_helpers = 0
++    # Symbolic interpretation can encounter helpers later eliminated by DCE.
++    # Only surviving identifier references need declarations; mentioning a
++    # helper in a comment/string must not turn a clean payload into a stub.
++    from lexer import tokenize
++    used_names = {value for kind, value in tokenize("\n".join(out)) if kind == "name"}
+     for n in sorted(prog.dump.shared.values()):
++        if "luraph_runtime%d" % n not in used_names:
++            continue
++        unresolved_helpers += 1
+         shared += [
+             "-- unresolved Luraph runtime helper; preserved as a safe stub",
+             "local function luraph_runtime%d(...)" % n,
+@@ -3711,6 +3727,7 @@ def lift_program(source, protos_path, chunk_paths=(), fetch=None):
+             "end",
+             "",
+         ]
++    fl.stats["unresolved_helpers"] = unresolved_helpers
+     if shared:
+         at = next((i for i, l in enumerate(out) if l and not l.startswith("--")), len(out))
+         out[at:at] = shared
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_9/driver.py b/Deobfuscator/deobf/obfuscators/luraph_v14_9/driver.py
+index 43fc160..2676c84 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_9/driver.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_9/driver.py
+@@ -96,7 +96,7 @@ def patch_entries(source, path):
+     return "\n".join(lines)
+ 
+ 
+-def _trace_root_candidates(body):
++def _trace_root_candidates(body, runtime_root=None):
+     """Rank likely payload-root pids from envlog call-chain markers.
+ 
+     Large v14 scripts enter many helper/probe closures before and after the
+@@ -111,6 +111,10 @@ def _trace_root_candidates(body):
+     invs = {}
+     last_seen = {}
+     last_child = {}
++    initial_root = None
++    nested_seen = set()
++    detached_roots = []
++    saw_bootstrap_chain = False
+     pos = 0
+     for line in body.splitlines():
+         m = re.match(r"^\s*--@\d+\s*(.*)$", line)
+@@ -122,6 +126,19 @@ def _trace_root_candidates(body):
+             q = re.match(r"^(\d+):([^,\s]*)", part.strip())
+             if q:
+                 chain.append((int(q.group(1)), q.group(2)))
++        if chain:
++            top = chain[0][0]
++            if initial_root is None:
++                initial_root = top
++            # Tail-calling the payload removes the bootstrap frames. The old
++            # vote considered only chain[1], so a finished bootstrap always
++            # beat the real payload, even when the latter emitted everything.
++            if (saw_bootstrap_chain and top != initial_root
++                    and top not in nested_seen and top not in detached_roots):
++                detached_roots.append(top)
++            if len(chain) >= 2:
++                saw_bootstrap_chain = True
++                nested_seen.update(pid for pid, _ in chain[1:])
+         if len(chain) >= 2:
+             parent, child = chain[0][0], chain[1][0]
+             w = 5 + min(3, len(chain) - 2)
+@@ -147,7 +164,14 @@ def _trace_root_candidates(body):
+         key=lambda p: (scores[p], hits.get(p, 0), last_seen.get(p, 0)),
+         reverse=True,
+     )
+-    return ranked
++    # The runtime remembers a later bootstrap -> payload call. Statement
++    # frequency alone favors a verbose probe over a small payload; do not
++    # overwrite an observed final runtime root for that reason. Tail-called
++    # detached roots still take precedence over a stale bootstrap edge.
++    preferred = list(detached_roots)
++    if runtime_root in scores and runtime_root not in preferred:
++        preferred.append(runtime_root)
++    return preferred + [pid for pid in ranked if pid not in preferred]
+ 
+ 
+ def _trace_root_hint(body):
+@@ -196,9 +220,10 @@ def _json_loads_loose(raw):
+ def _apply_root_hint(protos_json, body):
+     """Apply the strongest runtime payload-root hint to the captured dump.
+ 
+-    v14's in-harness root_callee can be stale on large scripts. The weighted
+-    marker vote is based on the complete rendered run, so let it override that
+-    stale value and keep a short ranked list for diagnostics/fallbacks.
++    Detached tail-call roots override a stale bootstrap edge. Otherwise an
++    observed runtime root takes precedence over statement-frequency voting:
++    a verbose environment probe is not stronger evidence than the payload's
++    final call. Keep the remaining candidates for diagnostics/fallbacks.
+     """
+     ranked = _trace_root_candidates(body)
+     hint = ranked[0] if ranked else None
+@@ -209,6 +234,7 @@ def _apply_root_hint(protos_json, body):
+     except Exception:
+         return protos_json, hint
+     protos = data.get("protos", {})
++    ranked = _trace_root_candidates(body, data.get("root_callee"))
+     ranked = [pid for pid in ranked if str(pid) in protos][:8]
+     if not ranked:
+         return protos_json, hint
+@@ -485,7 +511,7 @@ def _set_dump_root(ppath, pid):
+         if str(pid) not in data.get("protos", {}):
+             return False
+         data["root_callee"] = int(pid)
+-        Path(ppath).write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8", newline="\\n")
++        Path(ppath).write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8", newline="\n")
+         return True
+     except Exception:
+         return False
+@@ -502,6 +528,7 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+     requested = set()
+     last_bufs = ""
+     text = None
++    converged = False
+     rounds = args.devirt_rounds
+     # Intermediate rounds only need the constant requests and decrypted
+     # strings, which come from walking each function: they skip the
+@@ -596,7 +623,8 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             print("[*]   %d functions, %d unlifted blocks, %d unstructured jumps, %d new constant requests (%.1fs)"
+                   % (stats["functions"], stats["errors"], stats["fallbacks"], len(new), time.time() - t1),
+                   file=sys.stderr)
+-            if (not new and devirt.same_patches(last_bufs, bufs)) or rnd == rounds:
++            converged = not new and devirt.same_patches(last_bufs, bufs)
++            if converged or rnd == rounds:
+                 break
+             if quick:
+                 print("[*]   the full lift needs more constants: continuing with full lifts", file=sys.stderr)
+@@ -619,7 +647,12 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             print("[!] constant request run gave no protos", file=sys.stderr)
+             break
+         with open(ppath, "w", encoding="utf-8", newline="\n") as f:
+-            f.write(m.group(1))
++            refreshed, _ = _apply_root_hint(m.group(1), body)
++            f.write(refreshed)
++    if text and (not converged or stats.get("errors", 0) or stats.get("fallbacks", 0)
++                 or stats.get("unresolved_helpers", 0) or new):
++        print("[!] refusing incomplete static lift (unresolved blocks/helpers/constants)", file=sys.stderr)
++        return False
+     finished = devirt.finish_text(text or "").strip()
+     # The selected proto may be the v14 Roblox anti-analysis fingerprint.
+     # Strip only the strongly-recognized probe suite; if nothing remains, this
+@@ -681,8 +714,8 @@ def run(job):
+             cfg["devirt"] = True
+         # v14.9 has one Roblox fingerprint path that can derive an invalid
+         # table.create/buffer.create size in the standalone harness.  Attribute
+-        # the failing allocation to its instrumented helper so we can skip only
+-        # that helper on the next run; do not fabricate replacement allocations.
++        # the failing allocation to its active proto for diagnostics; do not
++        # skip it or fabricate replacement allocations.
+         if not os.environ.get("DEOB_V14_NO_ALLOC_TRAP"):
+             cfg["v14_alloc_trap"] = True
+         if lenient_alloc:
+@@ -762,13 +795,17 @@ def run(job):
+             break
+ 
+         if alloc_trig:
++            # Allocation errors identify the active VM, not necessarily a
++            # disposable fingerprint helper. Skipping this proto can skip the
++            # entire bootstrap/decoder and replace the useful error with nil.
+             kind = alloc_trig.group(2) or "create"
+             size = (alloc_trig.group(3) or "?").strip()
+-            print("[*] v14.9 allocation fingerprint helper #%d hit invalid %s.create(%s); "
+-                  "disabling only that helper and re-running" % (pid, kind, size), file=sys.stderr)
+-        else:
+-            print("[*] anti-tamper trap reached through function #%d; disabling it and re-running" % pid,
+-                  file=sys.stderr)
++            print("[!] invalid %s.create(%s) in proto #%d: keeping the original capture; "
++                  "refusing to skip an unproven fingerprint helper" % (kind, size, pid), file=sys.stderr)
++            break
++
++        print("[*] anti-tamper trap reached through function #%d; disabling it and re-running" % pid,
++              file=sys.stderr)
+         skip.append(pid)
+ 
+     run_text = harness.trace_text(body)     # the run the constant rounds must repeat
+@@ -803,6 +840,10 @@ def run(job):
+         the recovery result for a one-line script.  Only when no attribution is
+         available do we fall back to the old tiny-trace heuristic.
+         """
++        # A partial/error run cannot be promoted to recovered source merely
++        # because its rendered body happens to contain a few printable calls.
++        if not re.search(r"^-- run status: finished$", body, re.M):
++            return None
+         attributed = _payload_trace_source(body, root_hint)
+         observable = _observable_trace_source(body)
+         if attributed is not None:
+@@ -847,7 +888,9 @@ def run(job):
+ 
+     def write_semantic_candidate(candidate):
+         spath = job.path(".semantic.luau")
+-        job.write(spath, job.credit_header() + candidate)
++        job.write(spath, "-- RESULT: trace-assisted, NOT a complete devirtualization\n"
++                  "-- Only the observed execution is represented; untaken branches are not recovered.\n\n"
++                  + candidate)
+         print("[*] static v14 lift resolved to bootstrap/runtime scaffolding; "
+               "using compact trace-assisted payload reconstruction", file=sys.stderr)
+         return spath
+@@ -910,7 +953,7 @@ def run(job):
+                 lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
+     runner.finish()
+     trace.status_line(body)
+-    semantic = semantic_trace_candidate() if devirt_on else None
++    semantic = semantic_trace_candidate() if devirt_on and getattr(args, "trace_fallback", False) else None
+     if devirt_on and os.path.exists(dpath):
+         # A lift full of calls to nil means the VM was misread.  Prefer a
+         # directly intercepted loadstring body over the behavior trace.
+@@ -927,6 +970,9 @@ def run(job):
+             recovered = write_recovered_loadstring()
+             if recovered is not None:
+                 return recovered
++            if getattr(args, "trace_fallback", False):
++                write_trace()
++                return job.trace_path
+             raise RuntimeError("v14 payload root could not be isolated from Luraph runtime scaffolding")
+ 
+         # A one/few-statement payload must not turn into thousands of lines of
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v14_9/vmmap.py b/Deobfuscator/deobf/obfuscators/luraph_v14_9/vmmap.py
+index 8cf51d7..034f2e8 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v14_9/vmmap.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v14_9/vmmap.py
+@@ -592,7 +592,23 @@ def _outer_captures(info):
+       field - safe field name used in the serialized proto capture
+     """
+     maker = info["maker"]
+-    own = set(_decls_in(maker))
++    # A reference inside a child closure is not a maker upvalue when its
++    # declaration belongs to that child (or another descendant). Capturing it
++    # at the maker site instead performs a GLOBAL read of the same spelling,
++    # polluting the simulated environment and losing lexical identity.
++    own = set()
++
++    def collect_declarations(n):
++        if isinstance(n, dict):
++            if n.get("type") == "AstExprFunction":
++                own.update(_decls_in(n))
++            for value in n.values():
++                collect_declarations(value)
++        elif isinstance(n, list):
++            for value in n:
++                collect_declarations(value)
++
++    collect_declarations(maker)
+     found = {}
+ 
+     def visit(n):
+diff --git a/Deobfuscator/deobf/obfuscators/luraph_v15/driver.py b/Deobfuscator/deobf/obfuscators/luraph_v15/driver.py
+index 980edee..2b0c47a 100644
+--- a/Deobfuscator/deobf/obfuscators/luraph_v15/driver.py
++++ b/Deobfuscator/deobf/obfuscators/luraph_v15/driver.py
+@@ -95,6 +95,7 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+     requested = set()
+     last_bufs = ""
+     text = None
++    converged = False
+     rounds = args.devirt_rounds
+     # Intermediate rounds only need the constant requests and decrypted
+     # strings, which come from walking each function: they skip the
+@@ -130,7 +131,8 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             print("[*]   %d functions, %d unlifted blocks, %d unstructured jumps, %d new constant requests (%.1fs)"
+                   % (stats["functions"], stats["errors"], stats["fallbacks"], len(new), time.time() - t1),
+                   file=sys.stderr)
+-            if (not new and devirt.same_patches(last_bufs, bufs)) or rnd == rounds:
++            converged = not new and devirt.same_patches(last_bufs, bufs)
++            if converged or rnd == rounds:
+                 break
+             if quick:
+                 print("[*]   the full lift needs more constants: continuing with full lifts", file=sys.stderr)
+@@ -154,8 +156,12 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+             break
+         with open(ppath, "w", encoding="utf-8", newline="\n") as f:
+             f.write(m.group(1))
+-    header = job.credit_header() 
++    if (not text or not converged or stats.get("errors", 0) or stats.get("fallbacks", 0) or new):
++        print("[!] refusing incomplete v15 static lift", file=sys.stderr)
++        return False
++    header = job.credit_header()
+     job.write(dpath, header + devirt.finish_text(text) + "\n")
++    return True
+ 
+ 
+ def run(job):
+@@ -278,6 +284,11 @@ def run(job):
+     if strings is not None:
+         job.write(job.path(".strings.txt"), strings)
+     dpath = job.path(".devirt.luau")
++    # A debug rerun must not return a stale successful result after a failure.
++    try:
++        os.remove(dpath)
++    except FileNotFoundError:
++        pass
+     if protos_json is not None:
+         ppath = job.path(".protos.json")
+         if protos_json.startswith("error:"):
+@@ -298,16 +309,15 @@ def run(job):
+         nil_calls = lifted.count("(nil)(")
+         if nil_calls < 50 or nil_calls * 100 < lifted.count("\n"):
+             return dpath
+-        print("[!] the devirtualized output is broken (%d calls of nil); writing the behaviour trace "
+-              "instead" % nil_calls, file=sys.stderr)
++        print("[!] the devirtualized output is broken (%d calls of nil)" % nil_calls, file=sys.stderr)
+         if not job.debug:
+             os.remove(dpath)
+-        write_trace()
+-        return job.trace_path
++    if devirt_on and not getattr(args, "trace_fallback", False):
++        raise RuntimeError("v15 devirtualization produced no complete source; "
++                           "use --trace-fallback to explicitly request an incomplete behavior trace")
+     if devirt_on:
+-        print("[!] devirtualization produced no output; writing the behaviour trace instead", file=sys.stderr)
+-        if not os.path.exists(job.trace_path):
+-            write_trace()
++        print("[!] returning behavior trace by explicit --trace-fallback request", file=sys.stderr)
++    write_trace()
+     return job.trace_path
+ 
+ 
+diff --git a/Deobfuscator/deobf/register_cleanup.py b/Deobfuscator/deobf/register_cleanup.py
+new file mode 100644
+index 0000000..6a02aca
+--- /dev/null
++++ b/Deobfuscator/deobf/register_cleanup.py
+@@ -0,0 +1,196 @@
++"""Exact, narrow lowering of VM register-tail deletion (not arbitrary for-in).
++
++The symbolic register file is not a concrete iterable table. Keep the deletion
++as an IR effect until the full instruction graph tells us which physical slots
++can be observed. Do not confuse table.create's capacity with a register bound.
++"""
++import math
++
++import luasym as S
++from ir import IRStmt, Assign, CallStmt, SetList, ForPrep, Close, Ret
++
++
++class ClearRegistersAbove(IRStmt):
++    def __init__(self, cutoff):
++        self.cutoff = cutoff
++
++    def __repr__(self):
++        return "clear VM registers above %r" % self.cutoff
++
++
++def unwrap(n):
++    while isinstance(n, dict) and n.get("type") == "AstExprGroup":
++        n = n["expr"]
++    return n
++
++
++def local_decl(n):
++    n = unwrap(n)
++    return n["local"]["location"] if n and n.get("type") == "AstExprLocal" else None
++
++
++def match_cleanup(st, interp, scope):
++    """Return (matched, cutoff) for `for k in R do if k > N then R[k]=nil end end`.
++
++    Only local, concrete RegFile targets and finite constant cutoffs qualify.
++    No extra loop variables, calls or additional branch effects are erased.
++    Comparing against a symbolic bound remains unsupported by the interpreter.
++    """
++    if st.get("type") != "AstStatForIn" or len(st["values"]) != 1 or len(st["vars"]) != 1:
++        return False, None
++    table_decl = local_decl(st["values"][0])
++    key_decl = st["vars"][0]["location"]
++    if table_decl is None or table_decl == key_decl:
++        return False, None
++    body = st["body"]["body"]
++    if len(body) != 1 or body[0]["type"] != "AstStatIf":
++        return False, None
++    branch = body[0]
++    otherwise = branch.get("elsebody")
++    if otherwise is not None and otherwise.get("type") != "AstStatBlock":
++        return False, None
++    yes = branch["thenbody"]["body"]
++    no = otherwise["body"] if otherwise is not None else []
++    if bool(yes) == bool(no):
++        return False, None  # both arms empty, or extra effects on the other arm
++    deletion_when_true = bool(yes)
++    body = yes if yes else no
++    cond = unwrap(branch["condition"])
++    while cond.get("type") == "AstExprUnary" and cond.get("op") == "Not":
++        deletion_when_true = not deletion_when_true
++        cond = unwrap(cond["expr"])
++    if cond.get("type") != "AstExprBinary":
++        return False, None
++    if local_decl(cond["left"]) == key_decl and cond["op"] == ("CompareGt" if deletion_when_true else "CompareLe"):
++        bound = unwrap(cond["right"])
++    elif local_decl(cond["right"]) == key_decl and cond["op"] == ("CompareLt" if deletion_when_true else "CompareGe"):
++        bound = unwrap(cond["left"])
++    else:
++        return False, None
++    if bound["type"] not in ("AstExprLocal", "AstExprConstantNumber") or local_decl(bound) == key_decl:
++        return False, None
++    if len(body) != 1 or body[0]["type"] != "AstStatAssign":
++        return False, None
++    store = body[0]
++    if len(store["vars"]) != 1 or len(store["values"]) != 1:
++        return False, None
++    target = unwrap(store["vars"][0])
++    if (target["type"] != "AstExprIndexExpr" or local_decl(target["expr"]) != table_decl
++            or local_decl(target["index"]) != key_decl
++            or unwrap(store["values"][0])["type"] != "AstExprConstantNil"):
++        return False, None
++    if not isinstance(interp.eval(st["values"][0], scope), S.RegFile):
++        return False, None
++    cutoff = interp.eval(bound, scope)
++    if type(cutoff) not in (int, float):
++        return False, None
++    try:
++        if not math.isfinite(cutoff):
++            return False, None
++    except OverflowError:
++        return False, None
++    return True, cutoff
++
++
++def clear_facts(effect, facts, *, synthetic_base):
++    # A sparse fact map only promises knowledge of these slots. Unknown slots
++    # stay unknown rather than inventing a bound/allocating an infinite map.
++    for r in list(facts):
++        if type(r) is int and effect.cutoff < r < synthetic_base:
++            facts[r] = ("c", None)
++
++
++def lower_cleanups(order, captured_regs=(), *, synthetic_base, dynamic_arrays=False, unsafe_slots=False,
++                   frame_types=(), box_type=()):
++    """Replace the effect with nil stores to every observable physical slot.
++
++    Inspect the ENTIRE graph, including branch tests, return values and closure
++    captures, so even slots first read after the deletion are cleared. Compiler
++    scratch registers are not VM slots. Reject escaping/dynamic storage: a
++    finite set of scalar registers cannot describe its observable contents.
++    """
++    nodes, seen = [], set()
++    stack = [n for _, n in order]
++    while stack:
++        n = stack.pop()
++        if n is None or id(n) in seen:
++            continue
++        seen.add(id(n))
++        nodes.append(n)
++        stack.extend((n.then, n.els))
++    effects = [s for n in nodes for s in n.stmts if isinstance(s, ClearRegistersAbove)]
++    if not effects:
++        return 0
++    if unsafe_slots:
++        raise S.Unsupported("register cleanup with non-integer or reserved physical slots")
++    if dynamic_arrays:
++        raise S.Unsupported("register cleanup with dynamically indexed register storage")
++    regs = set()
++    seen_values = {}
++
++    def visit(x):
++        if x is None or id(x) in seen_values:
++            return
++        seen_values[id(x)] = x
++        if isinstance(x, S.Reg):
++            if type(x.n) is not int:
++                raise S.Unsupported("register cleanup with non-integer register index")
++            if x.n < synthetic_base:
++                regs.add(x.n)
++        elif isinstance(x, S.RegFile) or (frame_types and isinstance(x, frame_types)):
++            raise S.Unsupported("register cleanup with an escaping register frame")
++        elif box_type and isinstance(x, box_type):
++            visit(S.Reg(x.reg))
++        elif isinstance(x, S.ClosureExpr):
++            # The proto itself is VM data, not IR. Only its captured values are
++            # expressions in this function's register namespace.
++            visit(x.upvals)
++        elif isinstance(x, S.LTable):
++            # Upvalue boxes can contain frames; do not silently overlook them.
++            visit(tuple(x.h.keys()))
++            visit(tuple(x.h.values()))
++        elif isinstance(x, (S.Expr, S.Multi, S.SymList, S.TempTail, S.VarargTail)):
++            for value in vars(x).values():
++                visit(value)
++        elif isinstance(x, (list, tuple)):
++            for value in x:
++                visit(value)
++        elif isinstance(x, dict):
++            for key, value in x.items():
++                visit(key)
++                visit(value)
++
++    for r in captured_regs:
++        visit(S.Reg(r))
++    for n in nodes:
++        visit(n.cond)
++        if isinstance(n.outcome, Ret):
++            visit(n.outcome.values)
++        for s in n.stmts:
++            if isinstance(s, Assign):
++                visit(s.target)
++                visit(s.value)
++            elif isinstance(s, CallStmt):
++                visit(s.fn)
++                visit(s.args)
++            elif isinstance(s, SetList):
++                visit(s.tbl)
++                visit(s.start)
++                visit(s.values)
++            elif isinstance(s, Close):
++                visit(S.Reg(s.reg))
++            elif isinstance(s, ForPrep):
++                raise S.Unsupported("register cleanup with unexpanded loop bookkeeping")
++            elif not isinstance(s, ClearRegistersAbove):
++                raise S.Unsupported("register cleanup with unknown IR effect")
++    # No mutation until the entire graph has passed the safety checks.
++    ordered = sorted(regs)
++    for n in nodes:
++        out = []
++        for s in n.stmts:
++            if isinstance(s, ClearRegistersAbove):
++                out.extend(Assign(S.Reg(r), S.Const(None)) for r in ordered if r > s.cutoff)
++            else:
++                out.append(s)
++        n.stmts = out
++    return len(effects)
+diff --git a/Deobfuscator/deobf/tidy.py b/Deobfuscator/deobf/tidy.py
+index a3ea8df..9f9fe57 100644
+--- a/Deobfuscator/deobf/tidy.py
++++ b/Deobfuscator/deobf/tidy.py
+@@ -204,7 +204,7 @@ def preamble_plan(lines):
+         if re.search(r"\b%s\b" % m.group(1), rest):
+             kept.append(lines[a])
+     removed = sum(b - a for a, b in drop) - len(kept)
+-    note = ["removed at so its gonna be shit osrry!"]
++    note = ["-- Removed recognized Luraph environment probes (%d lines)." % removed]
+     comments = [lines[i] for a, b in drop for i in range(a, b) if lines[i].startswith("-- ")
+                 and not lines[i].startswith("-- [envlog]")]
+     return head, end, comments + note + kept
+@@ -441,7 +441,7 @@ def tidy(text, preamble=True, fold_code=True):
+     stats = {}
+     body = fold.fold(body, stats) if fold_code else fold.strip_markers(body)
+     if stats.get("helpers") or stats.get("loops"):
+-        body = ("-- yeah this is gonna be shit ig")
++        body = "-- Folded repeated trace operations.\n" + body
+     body = unwrap_parens(body)
+     body = hoist_repeats(body)
+     body = trim_params(body)
+diff --git a/Deobfuscator/deobf/traceout.py b/Deobfuscator/deobf/traceout.py
+index 348205d..4525e2e 100644
+--- a/Deobfuscator/deobf/traceout.py
++++ b/Deobfuscator/deobf/traceout.py
+@@ -23,6 +23,10 @@ def take_line(body, name):
+ 
+ def take_strings(body):
+     """(body, the strings section of `dump_strings` or None)."""
++    failures, body = take_line(body, "SNAPSHOTFAILURES")
++    if failures is not None:
++        print("[!] %s capture snapshot(s) could not be taken; live proto capture retained, "
++              "pre-execution snapshot coverage is incomplete" % failures, file=sys.stderr)
+     if "\x00ENVLOG-STRINGS" in body:
+         body, strings = body.split("\x00ENVLOG-STRINGS\n", 1)
+         return body, strings
+@@ -30,11 +34,9 @@ def take_strings(body):
+ 
+ 
+ def header(input_path, notes=()):
+-    h = (
++    h = ("-- RESULT: behavior trace, NOT reconstructed source\n"
+          "-- source: %s\n"
+-         "-- yeah this ran at runtime and its gonna be shit\n"
+-         "-- not gonna be full \n"
+-         % os.path.basename(input_path))
++         "-- Only observed paths are represented.\n" % os.path.basename(input_path))
+     return h + "".join("-- %s\n" % n for n in notes)
+ 
+ 

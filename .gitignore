@@ -1,0 +1,11 @@
+# Deployed tools and rebuild workspace (preserved locally, not uploaded)
+/.tools/
+__pycache__/
+*.py[cod]
+.venv/
+
+# Runtime binaries, generated harness workspaces and transient output
+/tools/luraph/Deobfuscator/deobf/bin/
+**/.*_work/
+/tools/luraph/**/output/
+/artifacts/
