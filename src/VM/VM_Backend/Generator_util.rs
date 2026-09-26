@@ -462,7 +462,7 @@ pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSe
     for _ in 0..upv_count { r.read_string(); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32) {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32) -> Vec<(usize, u32)> {
     // ② 元数据剥离：chunk 名/行号定义与 lines/locals/upvalue 名在 VM 端零消费者
     // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
     // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
@@ -668,14 +668,23 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
 
     let p_count = r.read_u32();
     w.extend_from_slice(&p_count.to_le_bytes());
+    // ⑱.2 尺寸前缀掩码：ln 站点收集（本层 w 内绝对偏移, 层内 1-based 序号），
+    // 子层站点偏移经 child_base 换算合并——根调用者拿到全量先序站点表
+    let mut proto_sites: Vec<(usize, u32)> = Vec::new();
+    let mut pidx18: u32 = 0;
     for _ in 0..p_count {
         // ⑱ 惰性原型：每个子块加 u32 长度前缀，Lua 侧 body_protos 按长跳过、
         // CLOSURE 首调才递归解码——整棵原型树不再一次性展开成明文
+        pidx18 += 1;
         let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2);
+        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2);
+        let ln_off = w.len();
         w.extend_from_slice(&(child.len() as u32).to_le_bytes());
+        let child_base = w.len();
         w.extend_from_slice(&child);
+        proto_sites.push((ln_off, pidx18));
+        for (so, si) in sub_sites { proto_sites.push((so + child_base, si)); }
     }
     // ② 元数据剥离（续）：lines/locals/upvalue 名只消费不落盘
     let l_count = r.read_u32();
@@ -687,6 +696,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let upv_count = r.read_u32();
     w.extend_from_slice(&0u32.to_le_bytes());
     for _ in 0..upv_count { let _ = r.read_string(); }
+    proto_sites
 }
 
 pub struct GenRng { used: HashSet<String>, slots: Vec<i64> }

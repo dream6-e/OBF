@@ -138,7 +138,7 @@ impl Generator {
         // ① B/C 场掩码参数：逐产物随机（掩码=值^(mag^ki)^k，mag 链接逐条变化）
         let bc_kb = rng.next(); let bc_kc = rng.next();
         let bc_ki1 = rng.next(); let bc_ki2 = rng.next();
-        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2);
+        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -159,7 +159,28 @@ impl Generator {
         let sc_mul_k2: u8 = rng.range(2, 8) as u8;
         let sc_rot_k2: u32 = rng.range(1, 8) as u32;
         let sc_rot_k4: u32 = rng.range(1, 8) as u32;
-        for b in combined_payload[4..].iter_mut() {
+        // ⑱.2 尺寸前缀掩码：ln=child_len ^ f(站点密钥状态, 层内序号)。站点=(payload
+        // 偏移(+4 种子), 层内 1-based 序号)；掩码在本循环里在线取站点首字节前的
+        // k1..k4 计算（与 Lua body_protos 读 ln 前快照同一状态），4 字节就地异或后
+        // 再走正常滚动变换——orig 取异或后的值，与 Lua 解出字节一致。
+        let (pm_r0, pm_r1, pm_r2, pm_r3) = (rng.range(1, 8) as u32, rng.range(1, 8) as u32, rng.range(1, 8) as u32, rng.range(1, 8) as u32);
+        let pm_s: [u64; 8] = [rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64];
+        for (off, _) in proto_sites_root.iter_mut() { *off += 4; }
+        proto_sites_root.sort_by_key(|e| e.0);
+        let pm_g = |x: u8, y: u8, r: u32, sv: u8| (x ^ y).rotate_left(r).wrapping_add(sv);
+        let pm_sb = |i: u64, j: usize| -> u8 { (i.wrapping_mul(pm_s[j * 2]).wrapping_add(pm_s[j * 2 + 1]) & 0xFF) as u8 };
+        let mut pm_cur: Option<(usize, [u8; 4])> = None;
+        let mut pm_i = 0usize;
+        for (pos4, b) in combined_payload[4..].iter_mut().enumerate() {
+            let pos = pos4 + 4;
+            if pm_cur.map_or(false, |(sp, _)| pos >= sp + 4) { pm_cur = None; }
+            if pm_i < proto_sites_root.len() && proto_sites_root[pm_i].0 == pos {
+                let idx18 = proto_sites_root[pm_i].1 as u64;
+                let sv = [pm_sb(idx18, 0), pm_sb(idx18, 1), pm_sb(idx18, 2), pm_sb(idx18, 3)];
+                pm_cur = Some((pos, [pm_g(k1, k4, pm_r0, sv[0]), pm_g(k2, k1, pm_r1, sv[1]), pm_g(k3, k2, pm_r2, sv[2]), pm_g(k4, k3, pm_r3, sv[3])]));
+                pm_i += 1;
+            }
+            if let Some((sp, mb)) = pm_cur { if pos < sp + 4 { *b ^= mb[pos - sp]; } }
             let orig = *b;
             *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(sc_add);
             k1 = k1.wrapping_add(orig).rotate_left(sc_rot_in).wrapping_add(sc_add_k1);
@@ -818,9 +839,22 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // 换出恢复；防篡改旗彼时为 false，同样保存/置位/恢复
         let (ln18, p18, s1a, b1a, sv18, svf18, rr18) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        // ⑱.2 读侧掩码还原：ln=u32d() 后与 f(u32d 前快照的 k1..k4, 层内序号) 异或。
+        // 公式与写侧 pm_g/pm_sb 同源：mask 字节=(rotl8(ka^kb)+盐)%256，
+        // rotl8(r)=fn_b_rotr 的 rotr8(8-r)；盐=(i*A+B)%256，A/B 逐产物随机（pm_s）。
+        let (qa18, qb18, qc18, qd18) = (rng.name(), rng.name(), rng.name(), rng.name());
+        let pm_lua = |x: &str, y: &str, r: u32, j: usize| -> String {
+            format!("({rt}({bx}({x},{y}),8-0X{r:X})+({i}*0X{a:X}+0X{b:X})%256)%256",
+                rt = fn_b_rotr, bx = fn_bxor, i = v_ch_i,
+                a = pm_s[j * 2], b = pm_s[j * 2 + 1], r = r)
+        };
+        let m18_0 = pm_lua(&qa18, &qd18, pm_r0, 0);
+        let m18_1 = pm_lua(&qb18, &qa18, pm_r1, 1);
+        let m18_2 = pm_lua(&qc18, &qb18, pm_r2, 2);
+        let m18_3 = pm_lua(&qd18, &qc18, pm_r3, 3);
         let body_protos = format!(
             "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); {md18}={c}.{pf_protos}; {np18}={n}; \
-             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; local {ln}={u32d}(); \
+             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; local {qa},{qb},{qc},{qd}=k1,k2,k3,k4; local {ln}={bx}({u32d}(),{m0}+{m1}*256+{m2}*65536+{m3}*16777216); \
                local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; for _=0X1,{ln} do {rd}() end; \
                {c}.{pf_protos}[{i}]=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
                  {a2}={p0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
@@ -829,6 +863,8 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1,
             u32d = fn_u32_dec, md18 = md21, np18 = np21,
             a2 = var_a2, flg = var_state_flag, rd = fn_read_dec,
+            bx = fn_bxor, qa = qa18, qb = qb18, qc = qc18, qd = qd18,
+            m0 = m18_0, m1 = m18_1, m2 = m18_2, m3 = m18_3,
             ln = ln18, p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18, rr = rr18,
             tree9 = it9(&mut rng, var_state.as_str())
         );
