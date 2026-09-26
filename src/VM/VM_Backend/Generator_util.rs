@@ -569,6 +569,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // 谓词用 xor（32 位域同构，避免 Rust wrapping mod 2^32 与 Lua 直接 %100 不同余）
     let fc_pb = |v: u32| -> bool { (v.rotate_left(fc18.r6b) ^ fc18.p1b) % 100 < fc18.p3b };
     let fc_pc = |v: u32| -> bool { (v.rotate_left(fc18.r6c) ^ fc18.p1c) % 100 < fc18.p3c };
+    // ㉓-A R 链（指令流滚动状态）：roll 初值=0x2545F491^盐；逐记录
+    // r7=rotl7(roll)、roll=(r7^文件魔数)+文件A+(预掩码预交换 b/c 异或和) (mod 2^32)。
+    // 读侧 body_consts 扫描同式重算（数组 b/c 经 dcb 已是明文=fb0/fc0，含死槽/builtin）。
+    // 第 li 槽密钥用「最后一条引用它的指令之后」的 roll（未引用槽用链末值）。
+    let mut roll18: u32 = 0x2545F491 ^ enc.salts[group];
+    let mut roll_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     while i < n_insts {
         let (op, a, b, c) = raw_insts[i];
 
@@ -615,8 +621,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             fused_used.insert(slot_perm[slot]);
                             fused_count += 1;
                             pc18 += 1;
-                            if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
-                            if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
+                            let r718 = roll18.rotate_left(7);
+                            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(b1);
+                            if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
+                            if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
                             i += 1; // i+1 / i+2 照常写出，成为永不执行的死槽
                             continue;
                         }
@@ -634,7 +642,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let a_enc = (a as u32).wrapping_add(mag);
                 w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes());
                 w.extend_from_slice(&((mag ^ ki1) ^ kb).to_le_bytes()); w.extend_from_slice(&((mag ^ ki2) ^ kc).to_le_bytes());
-                pc18 += 1; // builtin 的 B/C 解码后恒为 0，不参与折叠
+                pc18 += 1; // builtin 的 B/C 解码后恒为 0，不参与折叠/引用
+                let r718 = roll18.rotate_left(7);
+                roll18 = (r718 ^ mag).wrapping_add(a_enc); // b/c 贡献 0
                 i += 1;
                 continue;
             }
@@ -647,8 +657,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
         w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
         pc18 += 1;
-        if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
-        if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
+        let r718 = roll18.rotate_left(7);
+        roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+        if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
+        if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
         i += 1;
     }
 
@@ -662,7 +674,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let d_count18: u32 = rng.random_range(0..=1 + (const_count as usize).min(24) as u32);
     w.extend_from_slice(&((const_count + d_count18).to_le_bytes()));
     let mut slot: u32 = 0;
-    let mut seen: std::collections::HashMap<(Vec<u8>, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<(Vec<u8>, u32, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
     for (idx, (c_type, bytes)) in local_consts.iter().enumerate() {
         if omit_const.contains(&idx) {
             w.push(tag_map[0]); // ㉓-B 省略槽 tag 逐 build 随机
@@ -673,18 +685,22 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             0 => { w.push(tag_map[0]); }
             1 => { w.push(tag_map[1]); w.push(bytes[0]); }
             2 | 3 => {
-                // #3 折叠：本槽密钥混入 F_li=Σf(pc)（引用本槽的指令位置和）
+                // #3 折叠 + ㉓-A R 链混入：nonce=[盐^roll^F, r7^(槽*6+kind), 盐^rotl7(r7)]
+                // roll=最后引用本槽指令之后的 R 状态（未引用槽=链末值）——常量解密
+                // 依赖解释（指令流文件值），不依赖槽位号直传
                 let fold = fold_map.get(&slot).copied().unwrap_or(0u32);
-                let entry = match seen.get(&(bytes.clone(), fold)) {
+                let rl18 = roll_map.get(&slot).copied().unwrap_or(roll18);
+                let r7l18 = rl18.rotate_left(7);
+                let kind = if *c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
+                let s118 = enc.salts[group] ^ rl18 ^ fold;
+                let s218 = r7l18 ^ slot.wrapping_mul(6).wrapping_add(kind);
+                let s318 = enc.salts[group] ^ r7l18.rotate_left(7);
+                let entry = match seen.get(&(bytes.clone(), fold, rl18)) {
                     Some(e) => e.clone(),
                     None => {
                         let li = slot;
-                        let kind = if *c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
-                        let src = [enc.salts[group], li, kind];
-                        let mut nonce = [src[enc.layouts[group][0]], src[enc.layouts[group][1]], src[enc.layouts[group][2]]];
-                        nonce[0] ^= fold;
-                        let blob = chacha8_xor(&enc.keys[group], nonce, bytes);
-                        seen.insert((bytes.clone(), fold), (*c_type, blob.clone(), li));
+                        let blob = chacha8_xor(&enc.keys[group], [s118, s218, s318], bytes);
+                        seen.insert((bytes.clone(), fold, rl18), (*c_type, blob.clone(), li));
                         (*c_type, blob, li)
                     }
                 };

@@ -397,9 +397,10 @@ pub fn build_consts(
     fn_a5: &str, fn_read_dec: &str, var_enc_c: &str, var_cache: &str,
     fn_c: &str, pf_consts: &str,
     v_ch_i: &str, v_ch_n: &str, t: &str,
-    pf_opcodes: &str, pf_b_arr: &str, pf_c_arr: &str, fn_rotl: &str,
+    pf_opcodes: &str, pf_a_arr: &str, pf_b_arr: &str, pf_c_arr: &str, fn_rotl: &str,
     fc: &crate::VM::VM_Backend::Generator_util::FoldCtx,
     tag_map: &[u8; 4],
+    salt_names: &[String; 4],
 ) -> String {
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
     let (eh_ret, eh_nil, eh_next, eh_val, eh_fail) =
@@ -458,13 +459,15 @@ pub fn build_consts(
                     g = gname, a = ds[0], b = ds[1], c = ds[2], d4 = ds[3]);
                 let sel_n = format!("({g}==0 and {a} or {g}==1 and {b} or {g}==2 and {c} or {d4})",
                     g = gname, a = dn[0], b = dn[1], c = dn[2], d4 = dn[3]);
-                // #3 折叠：解码键第 3 实参=fold=Ftbl[li]%2^32（body_consts 扫描指令数组算出）
+                // #3 折叠 + ㉓-A：解码键第 3/4 实参 = fold=Ftbl[li]、roll=Rtbl[li]（链末兜底）
                 let ftds = rng.name();
+                let rtds = rng.name(); // ㉓-A Rtbl：li → 最后引用指令后的 R 状态
+                let rfds = rng.name(); // 链末兜底
                 let mut dsp_defs = vec![
-                    format!("{d}[{t3}]=function({ddd},ev) return {fds}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0)%4294967296) end; ",
-                        d = dsp_name, t3 = three, fds = fds, ddd = ddd, ft = ftds),
-                    format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0)%4294967296) end; ",
-                        d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, ft = ftds),
+                    format!("{d}[{t3}]=function({ddd},ev) return {fds}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
+                        d = dsp_name, t3 = three, fds = fds, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
+                    format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
+                        d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
                     format!("{d}[{t1}]=function({ddd},ev) return ev[(0X2)] end; ", d = dsp_name, t1 = one, ddd = ddd),
                     format!("{d}[{dd}]=function(ev) return nil end; ", d = dsp_name, dd = decoy_dsp),
                 ];
@@ -490,10 +493,10 @@ pub fn build_consts(
                 let mut lua = format!(
                     // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
                     // pairs 遍历直接报错；后备退化为普通表（fail-open）
-                    "local {ft}={{}}; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; \
+                    "local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
                      local {dsp},{ld}={{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; ",
-                    ft = ftds,
+                    ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = rng.name(), ca = var_cache, cab = rng.name(),
                     m1 = rng.name(), m2 = rng.name(),
                     dsp = dsp_name, ld = ld_name,
@@ -537,16 +540,22 @@ pub fn build_consts(
                     "{c}.{pf}=setmetatable({{}},{mt}); {mt}=({{}})[{mtn}]; ",
                     c = fn_c, pf = pf_consts, mt = mt_name, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
                 for x in &ld_defs { lua.push_str(x); }
-                // #3 常量密钥混入引用折叠（读侧）：body_insts 已把指令数组（op=文件魔数、
-                // b/c=dcb 解码后明文）填进 c.pf_*，这里一次扫描重算 Ftbl[li]=Σf(pc)。
-                // 谓词/f 与 Rust 写侧 FoldCtx 同式同常数；键=li=r-128（r 为 RK 编码值）。
+                // #3 折叠 + ㉓-A（读侧）：body_insts 已把指令数组（op=文件魔数、
+                // a=文件A、b/c=dcb 解码后明文=预掩码预交换值）填进 c.pf_*。
+                // 同一扫描：R 链重算（roll 初值=0X2545F491^组盐，r7=rotl7(roll)，
+                // roll=(bx(r7,op)+a+bx(b,c))%2^32）+ Ftbl[li]=Σf(pc) + Rtbl[li]=
+                // 最后引用指令后的 roll。谓词与 Rust 写侧 FoldCtx 同式同常数。
                 // 谓词用 xor（32 位域同构）；随机 do..end 壳，静态读不出「哪些 op 参与」。
+                let sal_sel = format!(
+                    "({g}==0X0 and {s0} or {g}==0X1 and {s1} or {g}==0X2 and {s2} or {s3})",
+                    g = gname, s0 = salt_names[0], s1 = salt_names[1], s2 = salt_names[2], s3 = salt_names[3]);
                 lua.push_str(&format!(
-                    "do local {q1}=0X0; local {q2}=#{c}.{pfo}; while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {bv}={c}.{pfb}[{q1}]; local {cv}={c}.{pfc}[{q1}]; local {fp}=({bx}(({q1}*0X{f1:X})%4294967296,0X{f2:X})); if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp} end end end end; ",
-                    q1 = rng.name(), q2 = rng.name(), ob = rng.name(), bv = rng.name(),
+                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {q1}=0X0; local {q2}=#{c}.{pfo}; local {rr}={bx}(0X2545F491,{sal}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={c}.{pfa}[{q1}]; local {bv}={c}.{pfb}[{q1}]; local {cv}={c}.{pfc}[{q1}]; local {fp}=({bx}(({q1}*0X{f1:X})%4294967296,0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%4294967296+{bx}({bv}%4294967296,{cv}%4294967296)%4294967296)%4294967296; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
+                    q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
+                    av = rng.name(), ob = rng.name(), bv = rng.name(),
                     cv = rng.name(), fp = rng.name(), sk = rng.name(),
-                    c = fn_c, pfo = pf_opcodes, pfb = pf_b_arr, pfc = pf_c_arr,
-                    bx = fn_bxor, rot = fn_rotl, ft = ftds,
+                    c = fn_c, pfo = pf_opcodes, pfa = pf_a_arr, pfb = pf_b_arr, pfc = pf_c_arr,
+                    bx = fn_bxor, rot = fn_rotl, ft = ftds, rt = rtds, rf = rfds, sal = sal_sel,
                     f1 = fc.f1, f2 = fc.f2,
                     rb = fc.r6b, pb1 = fc.p1b, pb3 = fc.p3b,
                     rc = fc.r6c, pc1 = fc.p1c, pc3 = fc.p3c));
@@ -578,10 +587,10 @@ pub fn build_header(
 pub fn build_decnum(
     fn_dec_num: &str, fn_chacha_stream: &str, kind_num: &str, vb: &str, xt: &str,
     v_sign: &str, v_exp: &str, v_mant: &str, f64parts: String,
-    v_num_ks: &str, v_num_i: &str, v_num_g: &str, fd: &str,
+    v_num_ks: &str, v_num_i: &str, v_num_g: &str, fd: &str, rl: &str,
 ) -> String {
     format!(
-            "local function {fn_dec_num}(v_enc, pool_idx, {fd}) local {ks}={fn_chacha_stream}(pool_idx,{kind_num},8,{fd}); \
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {ks}={fn_chacha_stream}(pool_idx,{kind_num},8,{fd},{rl}); \
              local {vb}, {i}, {g} = {{}}, 0, 0; \
              while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {xt}[v_enc[{i}]][{ks}[{i}]] end; \
              local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
@@ -598,10 +607,10 @@ pub fn build_decnum(
 #[allow(clippy::too_many_arguments)]
 pub fn build_decstr(
     rng: &mut GenRng, fn_dec_str: &str, fn_chacha_stream: &str, kind_str: &str, xt: &str,
-    fn_s_byte: &str, v_str_ks: &str, v_str_s: &str, v_str_i: &str, v_str_g: &str, fd: &str,
+    fn_s_byte: &str, v_str_ks: &str, v_str_s: &str, v_str_i: &str, v_str_g: &str, fd: &str, rl: &str,
 ) -> String {
     format!(
-            "local function {fn_dec_str}({e},{p},{fd}) local {n}=#{e}; local {ks}={fn_chacha_stream}({p},{kind_str},{n},{fd}); \
+            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {n}=#{e}; local {ks}={fn_chacha_stream}({p},{kind_str},{n},{fd},{rl}); \
              local {s}, {i}, {g} = {{}}, 0, 0; \
              while {i} < {n} do {i} = {i} + 1; {s}[{i}] = string_char({xt}[{fn_s_byte}({e},{i})][{ks}[{i}]]) end; \
              return table_concat({s}) end; ",
