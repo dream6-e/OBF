@@ -256,7 +256,19 @@ impl<'a> OpcodeBuilder<'a> {
         }
         let sm = self.rng.name();
         let hoist_decl = if hoisted.is_empty() { String::new() } else { format!("local {}; ", hoisted.join(",")) };
-        let mut out = format!("{}local {}={}; while true do ", hoist_decl, sm, ident(self.rng, states[0]));
+        // ㉒ 备忘录式不透明谓词（仿 Luraph 14.9：if not O[k] then O[k]=<式> end）——
+        // 目标态数值只在首次执行时算出并存入表槽，之后状态经表槽流动；
+        // 键为逐站点随机值，数据流经表单元格，挫败朴素常量折叠
+        let mm = self.rng.name();
+        let memo_tr = |rng: &mut OpcodesRng, target: u32| -> String {
+            let keyv = 0x1000 + rng.next() % 0xEFF000;
+            let key = num_lit(rng, keyv);
+            format!("if {m}[{k}]==nil then {m}[{k}]={e}; end; {s2}={m}[{k}]; ",
+                m = mm, k = key, e = ident(rng, target), s2 = sm)
+        };
+        let mut out = String::new();
+        out.push_str(&format!("{}local {}={}; local {}={{}}; while true do ",
+            hoist_decl, sm, ident(self.rng, states[0]), mm));
         let mut idx = 0;
         for si in 0..k {
             let mut chunk = String::new();
@@ -266,11 +278,13 @@ impl<'a> OpcodeBuilder<'a> {
                 idx += 1;
             }
             if si == 0 {
-                out.push_str(&format!("if {}=={} then {} {}={}; ",
-                    sm, num_lit(self.rng, states[0]), chunk, sm, ident(self.rng, states[1])));
+                out.push_str(&format!("if {}=={} then {} {}",
+                    sm, num_lit(self.rng, states[0]), chunk,
+                    memo_tr(self.rng, states[1])));
             } else if si + 1 < k {
-                out.push_str(&format!("elseif {}=={} then {} {}={}; ",
-                    sm, num_lit(self.rng, states[si]), chunk, sm, ident(self.rng, states[si + 1])));
+                out.push_str(&format!("elseif {}=={} then {} {}",
+                    sm, num_lit(self.rng, states[si]), chunk,
+                    memo_tr(self.rng, states[si + 1])));
             } else {
                 out.push_str(&format!("elseif {}=={} then {} break; end end ",
                     sm, num_lit(self.rng, states[si]), chunk));
