@@ -46,6 +46,14 @@ fn chacha8_keystream(key: &[u32; 8], nonce: [u32; 3], n_bytes: usize) -> Vec<u8>
     out
 }
 
+/// #3 常量密钥混入引用折叠：逐产物随机参数（谓词/f 函数常数），
+/// Rust 写侧与 Lua body_consts 扫描同式重算 F_li=Σf(pc)
+pub(super) struct FoldCtx {
+    pub r6b: u32, pub p1b: u32, pub p3b: u32,   // B 位引用谓词 pv_b(v)=(rotl32(v,r6b)^p1b)%100<p3b
+    pub r6c: u32, pub p1c: u32, pub p3c: u32,   // C 位引用谓词
+    pub f1: u32, pub f2: u32,                   // f(pc)=(pc*f1)^f2
+}
+
 pub(super) fn chacha8_xor(key: &[u32; 8], nonce: [u32; 3], data: &[u8]) -> Vec<u8> {
     let ks = chacha8_keystream(key, nonce, data.len());
     data.iter().zip(ks.iter()).map(|(b, k)| b ^ k).collect()
@@ -462,7 +470,7 @@ pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSe
     for _ in 0..upv_count { r.read_string(); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32) -> Vec<(usize, u32)> {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx) -> Vec<(usize, u32)> {
     // ② 元数据剥离：chunk 名/行号定义与 lines/locals/upvalue 名在 VM 端零消费者
     // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
     // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
@@ -553,6 +561,14 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let n_insts = raw_insts.len();
     let mut i = 0usize;
     let mut fused_count = 0usize;
+    // #3 折叠扫描状态：pc18=已写出指令数（1-based，与 Lua 数组下标一致）；
+    // fold_map[li] = Σ f(pc)（对判定为引用本常量槽的指令求和）
+    let mut fold_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut pc18: u32 = 0;
+    let fc_f = |pc: u32| -> u32 { pc.wrapping_mul(fc18.f1) ^ fc18.f2 };
+    // 谓词用 xor（32 位域同构，避免 Rust wrapping mod 2^32 与 Lua 直接 %100 不同余）
+    let fc_pb = |v: u32| -> bool { (v.rotate_left(fc18.r6b) ^ fc18.p1b) % 100 < fc18.p3b };
+    let fc_pc = |v: u32| -> bool { (v.rotate_left(fc18.r6c) ^ fc18.p1c) % 100 < fc18.p3c };
     while i < n_insts {
         let (op, a, b, c) = raw_insts[i];
 
@@ -598,6 +614,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             w.extend_from_slice(&fc.to_le_bytes()); // 常量下标搬进 C
                             fused_used.insert(slot_perm[slot]);
                             fused_count += 1;
+                            pc18 += 1;
+                            if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
+                            if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
                             i += 1; // i+1 / i+2 照常写出，成为永不执行的死槽
                             continue;
                         }
@@ -615,6 +634,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let a_enc = (a as u32).wrapping_add(mag);
                 w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes());
                 w.extend_from_slice(&((mag ^ ki1) ^ kb).to_le_bytes()); w.extend_from_slice(&((mag ^ ki2) ^ kc).to_le_bytes());
+                pc18 += 1; // builtin 的 B/C 解码后恒为 0，不参与折叠
                 i += 1;
                 continue;
             }
@@ -626,6 +646,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let (fb0, fc0) = if mag % 2 == 1 { (c, b) } else { (b, c) };
         let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
         w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
+        pc18 += 1;
+        if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
+        if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); }
         i += 1;
     }
 
@@ -635,7 +658,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     w.push(group as u8);
     w.extend_from_slice(&const_count.to_le_bytes());
     let mut slot: u32 = 0;
-    let mut seen: std::collections::HashMap<Vec<u8>, (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<(Vec<u8>, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
     for (idx, (c_type, bytes)) in local_consts.iter().enumerate() {
         if omit_const.contains(&idx) {
             w.push(0);
@@ -646,15 +669,18 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             0 => { w.push(0); }
             1 => { w.push(1); w.push(bytes[0]); }
             2 | 3 => {
-                let entry = match seen.get(bytes) {
+                // #3 折叠：本槽密钥混入 F_li=Σf(pc)（引用本槽的指令位置和）
+                let fold = fold_map.get(&slot).copied().unwrap_or(0u32);
+                let entry = match seen.get(&(bytes.clone(), fold)) {
                     Some(e) => e.clone(),
                     None => {
                         let li = slot;
                         let kind = if *c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
                         let src = [enc.salts[group], li, kind];
-                        let nonce = [src[enc.layouts[group][0]], src[enc.layouts[group][1]], src[enc.layouts[group][2]]];
+                        let mut nonce = [src[enc.layouts[group][0]], src[enc.layouts[group][1]], src[enc.layouts[group][2]]];
+                        nonce[0] ^= fold;
                         let blob = chacha8_xor(&enc.keys[group], nonce, bytes);
-                        seen.insert(bytes.clone(), (*c_type, blob.clone(), li));
+                        seen.insert((bytes.clone(), fold), (*c_type, blob.clone(), li));
                         (*c_type, blob, li)
                     }
                 };
@@ -678,7 +704,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         pidx18 += 1;
         let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2);
+        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18);
         let ln_off = w.len();
         w.extend_from_slice(&(child.len() as u32).to_le_bytes());
         let child_base = w.len();

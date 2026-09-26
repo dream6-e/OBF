@@ -138,7 +138,14 @@ impl Generator {
         // ① B/C 场掩码参数：逐产物随机（掩码=值^(mag^ki)^k，mag 链接逐条变化）
         let bc_kb = rng.next(); let bc_kc = rng.next();
         let bc_ki1 = rng.next(); let bc_ki2 = rng.next();
-        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2);
+        // #3 折叠参数：谓词 pv(v)=(rotl32(v,r)^p1)%100<p3、f(pc)=(pc*f1)^f2 —— 逐产物随机，
+        // Rust 写侧与 Lua body_consts 扫描两侧同式（静态读产物得不出「哪些 op 参与」）
+        let fc18 = crate::VM::VM_Backend::Generator_util::FoldCtx {
+            r6b: rng.range(1, 17) as u32, p1b: rng.next(), p3b: rng.range(30, 70) as u32,
+            r6c: rng.range(1, 17) as u32, p1c: rng.next(), p3c: rng.range(30, 70) as u32,
+            f1: rng.next() | 1, f2: rng.next(),
+        };
+        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -646,26 +653,28 @@ impl Generator {
                 args[j] = match enc.layouts[g][j] { 0 => slname.clone(), 1 => "pool_idx".to_string(), _ => "kind".to_string() };
             }
             cl.push_str(&format!(
-                "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({a0},{a1},{a2},ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
-                sm = sname, cb = cbname, a0 = args[0], a1 = args[1], a2 = args[2]));
+                "local function {sm}(pool_idx,kind,n,fold) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({bx}({a0},fold or 0),{a1},{a2},ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
+                sm = sname, cb = cbname, a0 = args[0], a1 = args[1], a2 = args[2], bx = fn_bxor));
             // 组专属解码器：kind 常量内嵌（每组不同随机值），下标参数=节内槽位号
             let (vb, vs, ve, vm) = (rng.name(), rng.name(), rng.name(), rng.name());
             let mut f64_parts = vec![format!("({vb}[7]%16)*2^48", vb = vb), format!("({vb}[6]*2^40)", vb = vb), format!("({vb}[5]*2^32)", vb = vb), format!("({vb}[4]*2^24)", vb = vb), format!("({vb}[3]*2^16)", vb = vb), format!("({vb}[2]*2^8)", vb = vb), format!("{vb}[1]", vb = vb)];
             rng.shuffle(&mut f64_parts);
             let (v_num_i, v_num_g, v_num_ks) = (rng.name(), rng.name(), rng.name());
             let dname = rng.name();
+            let fd18n = rng.name();
             cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decnum(
                 dname.as_str(), sname.as_str(), rng.obfuscate_num(enc.knum[g] as i64, 1, &keys).as_str(), vb.as_str(),
                 xor_tbl_var.as_str(), vs.as_str(), ve.as_str(), vm.as_str(), f64_parts.join("+"),
-                v_num_ks.as_str(), v_num_i.as_str(), v_num_g.as_str()));
+                v_num_ks.as_str(), v_num_i.as_str(), v_num_g.as_str(), fd18n.as_str()));
             dn_names[g] = dname;
             let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
             let sname_d = rng.name();
+            let fd18s = rng.name();
             let kstr_lit = rng.obfuscate_num(enc.kstr[g] as i64, 1, &keys);
             cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
                 &mut rng, sname_d.as_str(), sname.as_str(), kstr_lit.as_str(),
                 xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
-                v_str_i.as_str(), v_str_g.as_str()));
+                v_str_i.as_str(), v_str_g.as_str(), fd18s.as_str()));
             ds_names[g] = sname_d;
             clusters.push(cl);
         }
@@ -830,7 +839,8 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(),
                 fn_a5.as_str(), fn_read_dec.as_str(), var_enc_c.as_str(), var_cache.as_str(),
                 fn_c.as_str(), pf_consts.as_str(),
-                &v_ch_i, &v_ch_n, &t)
+                &v_ch_i, &v_ch_n, &t,
+                pf_opcodes.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18)
         );
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
@@ -1115,11 +1125,12 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({sl},pool_idx,kind,ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
                 sm = bsm, cb = bcb, sl = bs));
             let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
+            let fd18b = rng.name(); // 哑形参：boot 域 sm 是 3 参，fold 实参多余即弃
             let bkind_lit = rng.obfuscate_num(bkind as i64, 1, &keys);
             out.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
                 &mut rng, bdec.as_str(), bsm.as_str(), bkind_lit.as_str(),
                 xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
-                v_str_i.as_str(), v_str_g.as_str()));
+                v_str_i.as_str(), v_str_g.as_str(), fd18b.as_str()));
             for (i, _) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
                 let slot = builtin_slot_perm[i];
                 out.push_str(&format!(
