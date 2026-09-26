@@ -369,7 +369,16 @@ impl Packer {
         handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p1 = q:{}(s); if not s.p1 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", op_state5, tamper_val, m_next, pc_state6));
         handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p2 = q:{}(s); if not s.p2 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", op_state6, tamper_val, m_next, pc_state7));
         handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.w = q:{}(s); if not s.w then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", op_state7, tamper_val, m_next, pc_state8));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst, iter) s.ptr = #s.res - (s.p1 * 256 + s.p2) + 1; iter = 0; while true do if iter >= s.w + 3 then break end; s.res[#s.res+1] = s.res[s.ptr + iter]; iter = iter + 1; end; s.pc = {}; end;", op_state8, tamper_val, pc_state9));
+        // ⑥ 字节拼装算术化（真源=此文件；stub_generator 为旁支同款已同步）：
+        // s.p1*256+s.p2 的权重 256 改运行期随机恒等式（差一/零和/约简三选一）
+        // 位置权重 256 保值，只伪装拼写
+        let k6: u32 = rng.range(0x1100, 0xFFFFF) as u32;
+        let w256 = match rng.range(0, 3) {
+            0 => format!("s.p1*(0X{:X}-0X{:X})+s.p2", k6, k6 - 0x100),
+            1 => format!("(s.p1*(0X{:X})-s.p1*0X{:X})+s.p2", k6 + 0x100, k6),
+            _ => { let d6 = (k6 >> 8).max(1); format!("((s.p1*0X{:X})/0X{:X})+s.p2", d6 << 8, d6) }
+        };
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst, iter) s.ptr = #s.res - ({}) + 1; iter = 0; while true do if iter >= s.w + 3 then break end; s.res[#s.res+1] = s.res[s.ptr + iter]; iter = iter + 1; end; s.pc = {}; end;", op_state8, tamper_val, w256, pc_state9));
         handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.f = s.floor(s.f / 2); s.bc = s.bc + 1; s.pc = {}; end;", op_state9, tamper_val, pc_state1));
 
         let n_handlers = handlers_init.len();

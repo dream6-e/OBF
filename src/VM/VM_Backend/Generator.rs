@@ -872,9 +872,35 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
             let (p_err, p_hit, p_u, p_self) = (rng.name(), rng.name(), rng.name(), rng.name());
             let d = rng.range(0x1000, 0xFFFF);
-            let needle = format!("\":\"..(0X{:X}-0X{:X})..\":\"", d + 2, d);
+            // ⑧ 针式去冒号字面量：":"..N..":" 是错误消息行号嗅探指纹——
+            // 冒号改 string.char(0X3A)（或差式）运行期构造，数值本身不变
+            let sc = rng.name();
+            let c58 = if rng.range(0, 2) == 0 { "0X3A".to_string() } else { format!("0X{:X}-0X{:X}", 0x1000 + 58, 0x1000) };
+            let needle = format!("{s}({c})..(0X{:X}-0X{:X})..{s}({c})", d + 2, d, s = sc, c = c58);
             let pb = probe_body(rng);
             let (ts, tolerant) = trig_stmt(rng, &p_u);
+            // ⑦ m_hit 去空壳：原来 local u=h and tol or nil; ts 一眼即知是桩。
+            // 先捕获 type(u)，再洗牌插 1~2 句对 ""/function/nil 全安全的填充语，
+            // 触发语句按随机形态收尾（直尾 / if not u 尾）——触发语义不变：
+            // u=nil 时 ts 仍抛同型自然错误
+            let (f1, f2) = (rng.name(), rng.name());
+            let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}=type({u}); ",
+                u = p_u, h = p_hit, tol = tolerant, f1 = f1);
+            let mut hopts = vec![
+                format!("if {u}~={u} then {u}={u} end; ", u = p_u),
+                format!("if {f1}==\"function\"then {u}={u} end; ", f1 = f1, u = p_u),
+                format!("if {f1}==\"string\"and #{u}>0X0 then {u}={u} end; ", f1 = f1, u = p_u),
+                format!("for {f2}=0X1,0X{} do if {u} then break end end; ", rng.range(2, 6), f2 = f2, u = p_u),
+                format!("local {f2}=({u})and 0X1 or 0X0; ", f2 = f2, u = p_u),
+            ];
+            rng.shuffle(&mut hopts);
+            let hn = 1 + rng.range(0, 2);
+            for i in 0..hn { ht_body.push_str(&hopts[i]); }
+            if rng.range(0, 2) == 0 {
+                ht_body.push_str(&ts);
+            } else {
+                ht_body.push_str(&format!("if not {u} then {ts} end; ", u = p_u, ts = ts));
+            }
             let mut ms = vec![
                 format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",
                     t = tbl, drv = m_drv, s = p_self, o = rng.name(), e = p_err,
@@ -883,10 +909,10 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                     t = tbl, pc = m_pcall, s = p_self, pb = m_probe),
                 format!("{t}.{pb}=function({s}){body} end; ",
                     t = tbl, pb = m_probe, s = p_self, body = pb),
-                format!("{t}.{ck}=function({s},{e})return type({e})==\"string\"and {e}:find({nd})end; ",
-                    t = tbl, ck = m_chk, s = p_self, e = p_err, nd = needle),
-                format!("{t}.{ht}=function({s},{h})local {u}={h} and {tol} or nil; {ts} end; ",
-                    t = tbl, ht = m_hit, s = p_self, h = p_hit, u = p_u, tol = tolerant, ts = ts),
+                format!("{t}.{ck}=function({s},{e})local {sc}=string.char;return type({e})==\"string\"and {e}:find({ndl})end; ",
+                    t = tbl, ck = m_chk, s = p_self, e = p_err, sc = sc, ndl = needle),
+                format!("{t}.{ht}=function({s},{h}){hb} end; ",
+                    t = tbl, ht = m_hit, s = p_self, h = p_hit, hb = ht_body),
                 format!("{t}.{d1}=function({s},{q})return {q} end; ",
                     t = tbl, d1 = rng.name(), s = p_self, q = rng.name()),
             ];
@@ -971,7 +997,30 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&at.setup);
         out.push_str(&format!(" local {} = 0; ", key_seed_var));
         out.push_str(" ");
-        out.push_str("local math_floor, string_char, string_sub, string_byte, table_concat = math.floor, string.char, string.sub, string.byte, table.concat; ");
+        // A 解码器前奏打散：五件套不再「库-函数」对齐并列（math.floor,string.char,... 教科书
+        // 解码器开场）。先落随机键库表，五个 local 按洗牌序逐个经表取用，.m/["m"] 访问混用；
+        // 后续模板仍引用同名局部（math_floor/string_char/...），语义不变
+        {
+            let pt = rng.name();
+            let kf = |v: usize| -> String {
+                if v % 2 == 0 { format!("0X{:X}", v) } else { format!("(0X{:X}-7)", v + 7) }
+            };
+            let (km, ks, kt) = (rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF));
+            let mut members = vec![
+                (km, "math_floor", "floor"),
+                (ks, "string_char", "char"),
+                (ks, "string_sub", "sub"),
+                (ks, "string_byte", "byte"),
+                (kt, "table_concat", "concat"),
+            ];
+            rng.shuffle(&mut members);
+            let mut frag = format!("local {}={{[{}]=math,[{}]=string,[{}]=table}}; ", pt, kf(km), kf(ks), kf(kt));
+            for (k, loc, m) in &members {
+                let acc = if rng.range(0, 2) == 0 { format!(".{}", m) } else { format!("[\"{}\"]", m) };
+                frag.push_str(&format!("local {}={}[{}]{}; ", loc, pt, kf(*k), acc));
+            }
+            out.push_str(&frag);
+        }
 
         for part in parts {
             out.push_str(&part);

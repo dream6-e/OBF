@@ -1,3 +1,4 @@
+use rand::Rng;
 use std::time::SystemTime;
 use super::utils::NamePool;
 use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, StreamTable, GenRng};
@@ -150,7 +151,18 @@ impl StubGenerator {
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state5}+{tamper_val}] = function({v_i}) {v_s}.{p_p1}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p1} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state6}; end;", v_s=v_s, p_handlers=p_handlers, op_state5=op_state5, tamper_val=tamper_val, v_i=v_i, p_p1=p_p1, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state6=pc_state6));
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state6}+{tamper_val}] = function({v_i}) {v_s}.{p_p2}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p2} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state7}; end;", v_s=v_s, p_handlers=p_handlers, op_state6=op_state6, tamper_val=tamper_val, v_i=v_i, p_p2=p_p2, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state7=pc_state7));
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state7}+{tamper_val}] = function({v_i}) local {v_len}=0; while true do local {v_lb}={v_q}:{m_next}({v_s}); if not {v_lb} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_len}={v_len}+{v_lb}; if {v_lb}<255 then break end end; {v_s}.{p_w}={v_len}; {v_s}.{p_pc}={pc_state8}; end;", v_s=v_s, p_handlers=p_handlers, op_state7=op_state7, tamper_val=tamper_val, v_i=v_i, v_len=v_len, v_lb=v_lb, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state8=pc_state8));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state8}+{tamper_val}] = function({v_i}, {v_iter}) {v_s}.{p_ptr}=#{v_s}.{p_res}-({v_s}.{p_p1}*256+{v_s}.{p_p2})+1; {v_iter}=0; while true do if {v_iter}>={v_s}.{p_w}+3 then break end; {v_s}.{p_res}[#{v_s}.{p_res}+1]={v_s}.{p_res}[{v_s}.{p_ptr}+{v_iter}]; {v_iter}={v_iter}+1; end; {v_s}.{p_pc}={pc_state9}; end;", v_s=v_s, p_handlers=p_handlers, op_state8=op_state8, tamper_val=tamper_val, v_i=v_i, v_iter=v_iter, p_ptr=p_ptr, p_res=p_res, p_p1=p_p1, p_p2=p_p2, p_w=p_w, p_pc=p_pc, pc_state9=pc_state9));
+        // ⑥ 字节拼装算术化：p1*256+p2 的权重 256 是两字节合一字的反编译锚——
+        // 改成运行期随机恒等算式（差一式/零和式/约简式三选一），语义不变
+        let bp1 = format!("{v_s}.{p_p1}", v_s = v_s, p_p1 = p_p1);
+        let bp2 = format!("{v_s}.{p_p2}", v_s = v_s, p_p2 = p_p2);
+        // 位置权重 256 必须保值，只伪装拼写：差式/零和式/约简式
+        let k6: u32 = rand::rng().random_range(0x1100..0xFFFFF);
+        let w256 = match rand::rng().random_range(0..3) {
+            0 => format!("{}*(0X{:X}-0X{:X})+{}", bp1, k6, k6 - 0x100, bp2),
+            1 => format!("({}*(0X{:X})-{}*0X{:X})+{}", bp1, k6 + 0x100, bp1, k6, bp2),
+            _ => { let d6 = (k6 >> 8).max(1); format!("(({}*0X{:X})/0X{:X})+{}", bp1, d6 << 8, d6, bp2) }
+        };
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state8}+{tamper_val}] = function({v_i}, {v_iter}) {v_s}.{p_ptr}=#{v_s}.{p_res}-({w256})+1; {v_iter}=0; while true do if {v_iter}>={v_s}.{p_w}+3 then break end; {v_s}.{p_res}[#{v_s}.{p_res}+1]={v_s}.{p_res}[{v_s}.{p_ptr}+{v_iter}]; {v_iter}={v_iter}+1; end; {v_s}.{p_pc}={pc_state9}; end;", v_s=v_s, p_handlers=p_handlers, op_state8=op_state8, tamper_val=tamper_val, v_i=v_i, v_iter=v_iter, p_ptr=p_ptr, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state9=pc_state9));
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state9}+{tamper_val}] = function({v_i}) {v_s}.{p_f}={f_floor}({v_s}.{p_f}/2); {v_s}.{p_bc}={v_s}.{p_bc}+1; {v_s}.{p_pc}={pc_state1}; end;", v_s=v_s, p_handlers=p_handlers, op_state9=op_state9, tamper_val=tamper_val, v_i=v_i, p_f=p_f, f_floor=f_floor, p_bc=p_bc, p_pc=p_pc, pc_state1=pc_state1));
 
         let mut handlers_states: Vec<usize> = (1..=handlers_init.len()+1).collect();
