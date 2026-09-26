@@ -397,6 +397,8 @@ pub fn build_consts(
     fn_a5: &str, fn_read_dec: &str, var_enc_c: &str, var_cache: &str,
     fn_c: &str, pf_consts: &str,
     v_ch_i: &str, v_ch_n: &str, t: &str,
+    salt_lits: &[String; 4], tag_lits: &[String; 4],
+    pf_opc: &str, pf_aa: &str, pf_bb: &str, pf_cc: &str,
 ) -> String {
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
     let (eh_ret, eh_nil, eh_next, eh_val, eh_fail) =
@@ -437,9 +439,11 @@ pub fn build_consts(
                 let _got_name = rng.name();
                 let val_name = rng.name();
                 let ddm = rng.name(); let ddd = rng.name(); let ddl = rng.name();
-                let one = rng.obfuscate_num(1i64, 1, &keys);
-                let two = rng.obfuscate_num(2i64, 1, &keys);
-                let three = rng.obfuscate_num(3i64, 1, &keys);
+                let rvv = rng.name();
+                // ㉓ tag 键=逐 build 随机字母表（值表达式包括号保优先级）
+                let t1v = format!("({})", tag_lits[1]);
+                let t2v = format!("({})", tag_lits[2]);
+                let t3v = format!("({})", tag_lits[3]);
                 let zero = rng.obfuscate_num(0i64, 1, &keys);
                 let decoy_ld = rng.range(60, 250);
                 let decoy_dsp = rng.range(60, 250);
@@ -454,11 +458,11 @@ pub fn build_consts(
                 let sel_n = format!("({g}==0 and {a} or {g}==1 and {b} or {g}==2 and {c} or {d4})",
                     g = gname, a = dn[0], b = dn[1], c = dn[2], d4 = dn[3]);
                 let mut dsp_defs = vec![
-                    format!("{d}[{t3}]=function({ddd},ev) return {fds}(ev[(0X2)],ev[(0X3)]) end; ",
-                        d = dsp_name, t3 = three, fds = fds, ddd = ddd),
-                    format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)]) end; ",
-                        d = dsp_name, t2 = two, fdn = fdn, ddd = ddd),
-                    format!("{d}[{t1}]=function({ddd},ev) return ev[(0X2)] end; ", d = dsp_name, t1 = one, ddd = ddd),
+                    format!("{d}[{t3}]=function({ddd},ev) return {fds}(ev[(0X2)],ev[(0X3)],{rv}) end; ",
+                        d = dsp_name, t3 = t3v, fds = fds, ddd = ddd, rv = rvv),
+                    format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],{rv}) end; ",
+                        d = dsp_name, t2 = t2v, fdn = fdn, ddd = ddd, rv = rvv),
+                    format!("{d}[{t1}]=function({ddd},ev) return ev[(0X2)] end; ", d = dsp_name, t1 = t1v, ddd = ddd),
                     format!("{d}[{dd}]=function(ev) return nil end; ", d = dsp_name, dd = decoy_dsp),
                 ];
                 rng.shuffle(&mut dsp_defs);
@@ -466,12 +470,12 @@ pub fn build_consts(
                 let bn = rng.name();
                 let bj = rng.name();
                 let mut ld_defs = vec![
-                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() {ec}[(pos)]={{3,bl,pos-1}} end; ",
-                        l = ld_name, t3 = three, rs = fn_read_string, ec = var_enc_c, ddl = ddl),
-                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{2,{bn},pos-1}} end; ",
-                        l = ld_name, t2 = two, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl),
-                    format!("{l}[{t1}]=function({ddl},pos) {ec}[(pos)]={{1,{rd}()~={zero}}} end; ",
-                        l = ld_name, t1 = one, ec = var_enc_c, rd = fn_read_dec, zero = zero, ddl = ddl),
+                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() {ec}[(pos)]={{{t3v},bl,pos-1}} end; ",
+                        l = ld_name, t3 = t3v, t3v = t3v, rs = fn_read_string, ec = var_enc_c, ddl = ddl),
+                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{{t2v},{bn},pos-1}} end; ",
+                        l = ld_name, t2 = t2v, t2v = t2v, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl),
+                    format!("{l}[{t1}]=function({ddl},pos) {ec}[(pos)]={{{t1v},{rd}()~={zero}}} end; ",
+                        l = ld_name, t1 = t1v, t1v = t1v, ec = var_enc_c, rd = fn_read_dec, zero = zero, ddl = ddl),
                     format!("{l}[{dd}]=function() end; ", l = ld_name, dd = decoy_ld),
                 ];
                 rng.shuffle(&mut ld_defs);
@@ -490,6 +494,21 @@ pub fn build_consts(
                 lua.push_str(&format!(
                     "local {g}={rd}(); local {fds},{fdn}={ss},{sn}; ",
                     g = gname, rd = fn_read_dec, fds = fds, fdn = fdn, ss = sel_s, sn = sel_n));
+                // ㉓ R=指令流滚动值（与 rewrite_chunk 同式；rotl7 余数式）。常量密钥派生自
+                // 全部指令魔数/字段——不解指令流解不出任何字符串（解密依赖解释）
+                lua.push_str(&format!(
+                    "do local {sarr}={{{m0},{m1},{m2},{m3}}}; local {rvv}={bx}(0X2545F491,{sarr}[{g}+1]); \
+                     local {T},{ta},{tbb},{tc}={c}.{po},{c}.{pa},{c}.{pb},{c}.{pc}; \
+                     for {j}=1,#{T} do local {av}={ta}[{j}] if {av}<0 then {av}={av}+4294967296 end \
+                     local {bv}={tbb}[{j}] if {bv}<0 then {bv}={bv}+4294967296 end \
+                     local {cv}={tc}[{j}] if {cv}<0 then {cv}={cv}+4294967296 end \
+                     local {r7}=({rvv}*128)%4294967296+({rvv}-{rvv}%33554432)/33554432 \
+                     {rvv}=({bx}({r7},{T}[{j}])+{av}+{bx}({bv},{cv}))%4294967296 end end; ",
+                    sarr = rng.name(), m0 = salt_lits[0], m1 = salt_lits[1], m2 = salt_lits[2], m3 = salt_lits[3],
+                    rvv = rvv, bx = fn_bxor, g = gname,
+                    T = rng.name(), ta = rng.name(), tbb = rng.name(), tc = rng.name(),
+                    c = fn_c, po = pf_opc, pa = pf_aa, pb = pf_bb, pc = pf_cc,
+                    j = rng.name(), av = rng.name(), bv = rng.name(), cv = rng.name(), r7 = rng.name()));
                 for x in &dsp_defs { lua.push_str(x); }
                 // 缓存前哨：命中（值非 nil）直接短路
                 lua.push_str(&format!(
@@ -542,7 +561,9 @@ pub fn build_header(
     var_vc: &str, var_p: &str, var_a2: &str, entry_func: &str, fn_a3: &str, x: &str,
     fn_lit: &str, mode_lit: &str, k_lit: &str,
 ) -> String {
-    format!("local {}, {} = {}, {}; local {} = ([=[KRYVEX{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3)
+    // ㉓ 去 KRYVEX 明文标记：载荷前缀改逐 build 随机 6 字母（同长不破坏校验和游走）
+    let kmark: String = (0..6).map(|_| (b'a' + rng.range(0, 26) as u8) as char).collect();
+    format!("local {}, {} = {}, {}; local {} = ([=[{km}{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3, km = kmark)
 }
 
 /// 数字解码器（IEEE754 重组）—— 拆出；2^(-1074)/2^(exp-1075) 浮点语义勿动
@@ -550,10 +571,10 @@ pub fn build_header(
 pub fn build_decnum(
     fn_dec_num: &str, fn_chacha_stream: &str, kind_num: &str, vb: &str, xt: &str,
     v_sign: &str, v_exp: &str, v_mant: &str, f64parts: String,
-    v_num_ks: &str, v_num_i: &str, v_num_g: &str,
+    v_num_ks: &str, v_num_i: &str, v_num_g: &str, _fn_bxor: &str,
 ) -> String {
     format!(
-            "local function {fn_dec_num}(v_enc, pool_idx) local {ks}={fn_chacha_stream}(pool_idx,{kind_num},8); \
+            "local function {fn_dec_num}(v_enc, pool_idx, rv) local {ks}={fn_chacha_stream}(rv,pool_idx,{kind_num},8); \
              local {vb}, {i}, {g} = {{}}, 0, 0; \
              while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {xt}[v_enc[{i}]][{ks}[{i}]] end; \
              local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
@@ -571,13 +592,14 @@ pub fn build_decnum(
 pub fn build_decstr(
     rng: &mut GenRng, fn_dec_str: &str, fn_chacha_stream: &str, kind_str: &str, xt: &str,
     fn_s_byte: &str, v_str_ks: &str, v_str_s: &str, v_str_i: &str, v_str_g: &str,
+    _fn_bxor: &str, rvp: &str, rvx: &str,
 ) -> String {
     format!(
-            "local function {fn_dec_str}({e},{p}) local {n}=#{e}; local {ks}={fn_chacha_stream}({p},{kind_str},{n}); \
+            "local function {fn_dec_str}({e},{p}{rvp}) local {n}=#{e}; local {ks}={fn_chacha_stream}({rvx}{p},{kind_str},{n}); \
              local {s}, {i}, {g} = {{}}, 0, 0; \
              while {i} < {n} do {i} = {i} + 1; {s}[{i}] = string_char({xt}[{fn_s_byte}({e},{i})][{ks}[{i}]]) end; \
              return table_concat({s}) end; ",
-            e = rng.name(), p = rng.name(), n = rng.name(),
+            e = rng.name(), p = rng.name(), n = rng.name(), rvp = rvp, rvx = rvx,
             ks = v_str_ks, s = v_str_s, i = v_str_i, g = v_str_g
         )
 }
