@@ -33,6 +33,88 @@ impl OpcodesRng {
     }
 }
 
+/// ㉒ 数值字面量（仿 Luraph）：hex/bin 随机 + 随机下划线分段（0X2__5 / 0B1010_10）
+pub fn num_lit(rng: &mut OpcodesRng, v: u32) -> String {
+    if rng.next_range(0, 2) == 0 {
+        format!("0X{:X}", v)
+    } else {
+        format!("{}", v)
+    }
+}
+
+/// ㉒ 恒等转移式：静态上不可读出目标态（-r+(r+t) / (r-r)+t / ((r+r)-r2) 当 r2=2r）
+pub fn ident(rng: &mut OpcodesRng, target: u32) -> String {
+    // 数值域约束：r 与 r+target 都必须 ≤0xFFFFFE——压缩管线会截断 >24bit 的
+    // 十六进制字面量（0X16F6FC9→0XCF6FC9 级别的损坏），状态链一断机器就死循环
+    let r = rng.next_range(0x1000, (0x7FFFFFusize).min((0xFFFFFE - target) as usize)) as u32;
+    match rng.next_range(0, 3) {
+        0 => format!("-{}+{}", num_lit(rng, r), num_lit(rng, r.wrapping_add(target))),
+        1 => format!("({}-{})+{}", num_lit(rng, r), num_lit(rng, r), num_lit(rng, target)),
+        _ => format!("(({}*{})-({}+{}))+{}", num_lit(rng, 2), num_lit(rng, r), num_lit(rng, r), num_lit(rng, r), num_lit(rng, target)),
+    }
+}
+
+/// ㉒ 顶层语句切分 v2：跟踪括号深度 + **Lua 块深度**（if/for/while/function/
+/// repeat 的 do/then..end 配对）——分号只有在括号与块深度都为 0 时才是语句边界；
+/// 旧版只看括号，把 if..then..end 体里的分号当边界，TFORCALL 嵌套 if 被切碎，
+/// elseif 串接进内层 if，语义全乱（死循环根因）
+pub fn split_top_stmts(lua: &str) -> Vec<String> {
+    let toks: Vec<char> = lua.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let (mut dq, mut sq) = (false, false);
+    let (mut bracket, mut block) = (0i32, 0i32);
+    let mut i = 0;
+    let lc = |cs: &[char], k: usize, w: &str| -> bool {
+        if k + w.len() > cs.len() { return false; }
+        let after_ok = k + w.len() == cs.len() || !cs[k + w.len()].is_ascii_alphanumeric() && cs[k + w.len()] != '_';
+        let before_ok = k == 0 || !cs[k - 1].is_ascii_alphanumeric() && cs[k - 1] != '_';
+        before_ok && after_ok && cs[k..k + w.len()].iter().collect::<String>() == w
+    };
+    while i < toks.len() {
+        let c = toks[i];
+        if dq {
+            cur.push(c);
+            if c == '\\' && i + 1 < toks.len() { cur.push(toks[i + 1]); i += 2; continue; }
+            if c == '"' { dq = false; }
+            i += 1; continue;
+        }
+        if sq {
+            cur.push(c);
+            if c == '\\' && i + 1 < toks.len() { cur.push(toks[i + 1]); i += 2; continue; }
+            if c == '\'' { sq = false; }
+            i += 1; continue;
+        }
+        if c == '"' { dq = true; cur.push(c); i += 1; continue; }
+        if c == '\'' { sq = true; cur.push(c); i += 1; continue; }
+        if c == '(' || c == '[' || c == '{' { bracket += 1; cur.push(c); i += 1; continue; }
+        if c == ')' || c == ']' || c == '}' { bracket -= 1; cur.push(c); i += 1; continue; }
+        if c.is_ascii_alphabetic() || c == '_' {
+            let kw: String = toks[i..].iter().take_while(|x| x.is_ascii_alphanumeric() || **x == '_').collect();
+            match kw.as_str() {
+                "function" | "repeat" | "if" => block += 1,
+                "end" | "until" => block -= 1,
+                "do" => block += 1,
+                _ => {}
+            }
+            cur.push_str(&kw);
+            i += kw.len();
+            continue;
+        }
+        if c == ';' && bracket == 0 && block == 0 {
+            out.push(cur.trim().to_string());
+            cur.clear();
+            i += 1;
+            continue;
+        }
+        cur.push(c);
+        i += 1;
+    }
+    let last = cur.trim().to_string();
+    if !last.is_empty() { out.push(last); }
+    out.into_iter().filter(|x| !x.is_empty()).collect()
+}
+
 pub struct OpcodeConfig {
     pub pc: String,
     pub stk: String,
@@ -107,6 +189,94 @@ impl<'a> OpcodeBuilder<'a> {
 
     pub fn cnst(&self, idx: usize) -> String {
         format!("{}[{}+1]", self.cfg.consts, self.raw_inst(idx))
+    }
+
+    /// ㉒ 数值状态机化（仿 Luraph）：语句切顶层 → 随机分组 3~6 段 →
+    /// while true + if sm==随机态 转移（恒等算式），末段 break；
+    /// 语义严格保序，仅适用无 break/无中途 return 的纯算术 handler
+    pub fn build_staged(&mut self, lua_template: &str) -> String {
+        let stmts = split_top_stmts(lua_template);
+        if stmts.len() < 3 {
+            return self.build(lua_template);
+        }
+        // ㉒ local 提升：stage 是 if..end 块作用域，声明与使用跨段会读到 nil
+        // （TFORCALL 的 local r1..r6 拆段后迭代器协议崩→死循环）。把所有
+        // local 声明提升到机器之前，声明语句改写为赋值（纯声明则删除）
+        let mut hoisted: Vec<String> = Vec::new();
+        let mut stmts2: Vec<String> = Vec::new();
+        for st0 in stmts.iter() {
+            let t = st0.trim();
+            if let Some(rest) = t.strip_prefix("local ") {
+                let rest = rest.trim();
+                if let Some(frest) = rest.strip_prefix("function ") {
+                    if let Some(eq) = frest.find("(") {
+                        let name = frest[..eq].trim().to_string();
+                        hoisted.push(name.clone());
+                        stmts2.push(format!("{} = function{}", name, &frest[eq..]));
+                        continue;
+                    }
+                } else {
+                    let (names_part, init) = match rest.find("=") {
+                        Some(eq) => (rest[..eq].trim(), Some(rest[eq..].trim_start_matches('=').trim())),
+                        None => (rest, None),
+                    };
+                    let names: Vec<String> = names_part.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                    for nm in &names { hoisted.push(nm.clone()); }
+                    match init {
+                        Some(e) if !e.is_empty() => stmts2.push(format!("{} = {}", names_part, e)),
+                        _ => { /* 纯声明：提升即可 */ }
+                    }
+                    continue;
+                }
+            }
+            stmts2.push(t.to_string());
+        }
+        let stmts = stmts2;
+        if stmts.len() < 3 {
+            return self.build(lua_template);
+        }
+        let k = self.rng.next_range(3, 7).min(stmts.len());
+        let mut bounds: Vec<usize> = Vec::new();
+        {
+            let mut remaining = stmts.len();
+            let mut stages = k;
+            while stages > 1 {
+                let max_take = remaining - (stages - 1);
+                let take = self.rng.next_range(1, max_take + 1);
+                bounds.push(take);
+                remaining -= take;
+                stages -= 1;
+            }
+            bounds.push(remaining);
+        }
+        let mut states: Vec<u32> = Vec::new();
+        while states.len() < k {
+            let v = 0x10000 + self.rng.next() % 0xEDFFFF;
+            if !states.contains(&v) { states.push(v); }
+        }
+        let sm = self.rng.name();
+        let hoist_decl = if hoisted.is_empty() { String::new() } else { format!("local {}; ", hoisted.join(",")) };
+        let mut out = format!("{}local {}={}; while true do ", hoist_decl, sm, ident(self.rng, states[0]));
+        let mut idx = 0;
+        for si in 0..k {
+            let mut chunk = String::new();
+            for _ in 0..bounds[si] {
+                chunk.push_str(&stmts[idx]);
+                chunk.push_str("; ");
+                idx += 1;
+            }
+            if si == 0 {
+                out.push_str(&format!("if {}=={} then {} {}={}; ",
+                    sm, num_lit(self.rng, states[0]), chunk, sm, ident(self.rng, states[1])));
+            } else if si + 1 < k {
+                out.push_str(&format!("elseif {}=={} then {} {}={}; ",
+                    sm, num_lit(self.rng, states[si]), chunk, sm, ident(self.rng, states[si + 1])));
+            } else {
+                out.push_str(&format!("elseif {}=={} then {} break; end end ",
+                    sm, num_lit(self.rng, states[si]), chunk));
+            }
+        }
+        self.build(&out)
     }
 
     pub fn build(&mut self, lua_template: &str) -> String {

@@ -3,6 +3,11 @@ use super::{OpcodeBuilder, OpcodeConfig, OpcodesRng};
 pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> String {
     let mut out = String::new();
 
+    // ㉒ 数值状态机选点：只取热块内联三件套（FORPREP/TFORCALL/TFORLOOP）——冷块(CALL/RETURN/TAILCALL/FORLOOP)状态机会被压缩管线丢弃甚至半吃损坏，不选
+    let st_forprep = rng.next_range(0, 10) < 8;
+    let st_tforcall = rng.next_range(0, 10) < 8;
+    let st_tforloop = rng.next_range(0, 10) < 8;
+
     let mut jmp = OpcodeBuilder::new(m[22].clone(), cfg, rng);
     let jmp_c = jmp.raw_inst(3);
     out.push_str(&jmp.build(&format!("{{PC}} = {{PC}} + {}", jmp_c)));
@@ -33,11 +38,11 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut forprep = OpcodeBuilder::new(m[32].clone(), cfg, rng);
     let fp_a = forprep.raw_inst(2); let fp_c = forprep.raw_inst(3);
-    out.push_str(&forprep.build(&format!("{{STK}}[{}+1] = {{STK}}[{}+1] + 0; {{STK}}[{}+2] = {{STK}}[{}+2] + 0; {{STK}}[{}] = {{STK}}[{}] - {{STK}}[{}+2]; {{PC}} = {{PC}} + {}", fp_a, fp_a, fp_a, fp_a, fp_a, fp_a, fp_a, fp_c)));
+    out.push_str(&if st_forprep { forprep.build_staged(&format!("{{STK}}[{}+1] = {{STK}}[{}+1] + 0; {{STK}}[{}+2] = {{STK}}[{}+2] + 0; {{STK}}[{}] = {{STK}}[{}] - {{STK}}[{}+2]; {{PC}} = {{PC}} + {}", fp_a, fp_a, fp_a, fp_a, fp_a, fp_a, fp_a, fp_c)) } else { forprep.build(&format!("{{STK}}[{}+1] = {{STK}}[{}+1] + 0; {{STK}}[{}+2] = {{STK}}[{}+2] + 0; {{STK}}[{}] = {{STK}}[{}] - {{STK}}[{}+2]; {{PC}} = {{PC}} + {}", fp_a, fp_a, fp_a, fp_a, fp_a, fp_a, fp_a, fp_c)) });
 
     let mut tforloop = OpcodeBuilder::new(m[33].clone(), cfg, rng);
     let tfl_a = tforloop.raw_inst(2); let tfl_c = tforloop.raw_inst(4);
-    out.push_str(&tforloop.build(&format!("local r1, r2, r3, r4, r5, r6 = {{STK}}[{}]({{STK}}[{}+1], {{STK}}[{}+2]); {{STK}}[{}+3] = r1; if {} > 1 then {{STK}}[{}+4] = r2; if {} > 2 then {{STK}}[{}+5] = r3; if {} > 3 then {{STK}}[{}+6] = r4; if {} > 4 then {{STK}}[{}+7] = r5; if {} > 5 then {{STK}}[{}+8] = r6 end end end end end; if {{STK}}[{}+3] ~= nil then {{STK}}[{}+2] = {{STK}}[{}+3] else {{PC}} = {{PC}} + 1 end", tfl_a, tfl_a, tfl_a, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_a, tfl_a, tfl_a)));
+    out.push_str(&if st_tforloop { tforloop.build_staged(&format!("local r1, r2, r3, r4, r5, r6 = {{STK}}[{}]({{STK}}[{}+1], {{STK}}[{}+2]); {{STK}}[{}+3] = r1; if {} > 1 then {{STK}}[{}+4] = r2; if {} > 2 then {{STK}}[{}+5] = r3; if {} > 3 then {{STK}}[{}+6] = r4; if {} > 4 then {{STK}}[{}+7] = r5; if {} > 5 then {{STK}}[{}+8] = r6 end end end end end; if {{STK}}[{}+3] ~= nil then {{STK}}[{}+2] = {{STK}}[{}+3] else {{PC}} = {{PC}} + 1 end", tfl_a, tfl_a, tfl_a, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_a, tfl_a, tfl_a)) } else { tforloop.build(&format!("local r1, r2, r3, r4, r5, r6 = {{STK}}[{}]({{STK}}[{}+1], {{STK}}[{}+2]); {{STK}}[{}+3] = r1; if {} > 1 then {{STK}}[{}+4] = r2; if {} > 2 then {{STK}}[{}+5] = r3; if {} > 3 then {{STK}}[{}+6] = r4; if {} > 4 then {{STK}}[{}+7] = r5; if {} > 5 then {{STK}}[{}+8] = r6 end end end end end; if {{STK}}[{}+3] ~= nil then {{STK}}[{}+2] = {{STK}}[{}+3] else {{PC}} = {{PC}} + 1 end", tfl_a, tfl_a, tfl_a, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_c, tfl_a, tfl_a, tfl_a, tfl_a)) });
 
     let mut call = OpcodeBuilder::new(m[28].clone(), cfg, rng);
     let c_a = call.raw_inst(2); let c_b = call.raw_inst(3); let c_c = call.raw_inst(4);
@@ -56,7 +61,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut tforcall = OpcodeBuilder::new(m[47].clone(), cfg, rng);
     let tfc_a = tforcall.raw_inst(2); let tfc_c = tforcall.raw_inst(4);
-    out.push_str(&tforcall.build(&format!("local r1, r2, r3, r4, r5, r6 = {{STK}}[{}]({{STK}}[{}+1], {{STK}}[{}+2]); {{STK}}[{}+3] = r1; if {} > 1 then {{STK}}[{}+4] = r2; if {} > 2 then {{STK}}[{}+5] = r3; if {} > 3 then {{STK}}[{}+6] = r4; if {} > 4 then {{STK}}[{}+7] = r5; if {} > 5 then {{STK}}[{}+8] = r6 end end end end end", tfc_a, tfc_a, tfc_a, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a)));
+    out.push_str(&if st_tforcall { tforcall.build_staged(&format!("local r1, r2, r3, r4, r5, r6 = {{STK}}[{}]({{STK}}[{}+1], {{STK}}[{}+2]); {{STK}}[{}+3] = r1; if {} > 1 then {{STK}}[{}+4] = r2; if {} > 2 then {{STK}}[{}+5] = r3; if {} > 3 then {{STK}}[{}+6] = r4; if {} > 4 then {{STK}}[{}+7] = r5; if {} > 5 then {{STK}}[{}+8] = r6 end end end end end", tfc_a, tfc_a, tfc_a, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a)) } else { tforcall.build(&format!("local r1, r2, r3, r4, r5, r6 = {{STK}}[{}]({{STK}}[{}+1], {{STK}}[{}+2]); {{STK}}[{}+3] = r1; if {} > 1 then {{STK}}[{}+4] = r2; if {} > 2 then {{STK}}[{}+5] = r3; if {} > 3 then {{STK}}[{}+6] = r4; if {} > 4 then {{STK}}[{}+7] = r5; if {} > 5 then {{STK}}[{}+8] = r6 end end end end end", tfc_a, tfc_a, tfc_a, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a, tfc_c, tfc_a)) });
 
     let mut tforprep = OpcodeBuilder::new(m[48].clone(), cfg, rng);
     let tfp_a = tforprep.raw_inst(2); let tfp_b = tforprep.raw_inst(3);
