@@ -195,7 +195,7 @@ impl ControlFlowBuilder {
 
         let mut out = String::new();
 
-        out.push_str(&format!("local {}={};", fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b)local r,p=0,1;while a>0 or b>0 do local ra,rb=a%2,b%2;if ra~=rb then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end"));
+        out.push_str(&format!("local qT4b={{}};for i=0,15 do qT4b[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4b[i][j]=r end end;local qT8b={{}};for i=0,255 do qT8b[i]={{}};end;for i=0,255 do local qIb=qT8b[i];local qHb=(i-i%16)/16;for j=0,255 do qIb[j]=qT4b[i%16][j%16]+qT4b[qHb][(j-j%16)/16]*16 end end; local {}={};", fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8b[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"));
         out.push_str(&format!("local {}={};", fn_ba, "bit32 and bit32.band or bit and bit.band or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end"));
         out.push_str(&format!("local {}={};", fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end"));
         

@@ -238,11 +238,15 @@ impl Generator {
         let fn_bx = rng.name();
         let fn_ba = rng.name();
         let fn_bs = rng.name();
+        // ⑱.4 execute 前置 bxor 别名（与 fn_bxor 同实现）：execute 定义在解码器
+        // 函数之前，直接引用 fn_bxor 会捕获成全局 nil——取指/掩码派生专用此别名
+        let fn_bxor2 = rng.name();
         let mut block_p_def = String::new();
-        block_p_def.push_str(&format!("local {}={}; local {}={}; local {}={}; ", 
-            fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b)local r,p=0,1;while a>0 or b>0 do local ra,rb=a%2,b%2;if ra~=rb then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end",
+        block_p_def.push_str(&format!("local qT4c={{}};for i=0,15 do qT4c[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4c[i][j]=r end end;local qT8c={{}};for i=0,255 do qT8c[i]={{}};end;for i=0,255 do local qIc=qT8c[i];local qHc=(i-i%16)/16;for j=0,255 do qIc[j]=qT4c[i%16][j%16]+qT4c[qHc][(j-j%16)/16]*16 end end; local {}={}; local {}={}; local {}={}; local {}={}; ",
+            fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end",
             fn_ba, "bit32 and bit32.band or bit and bit.band or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end",
-            fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end"
+            fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end",
+            fn_bxor2, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"
         ));
         let tbl_def = format!(
             "local {p}={{}};{p}[{g1}]={{}};{p}[{g1}][{bx}]={fbx};{p}[{g1}][{add}]=function(a,b)return a+b end;{p}[{g1}][{ba}]={fba};{p}[{g2}]={{}};{p}[{g2}][{ba2}]=function(a)return {fba}(a,{max_u32})end;{p}[{g2}][{bs2}]=function(a)return {fbs}(a,{one})end;",
@@ -352,25 +356,29 @@ impl Generator {
             raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} or", alias), &format!("uv_inst[1] == {} or", mag));
             raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} then", alias), &format!("uv_inst[1] == {} then", mag));
         }
-        // ⑮ 三处中程读下一条指令的模板（SETLIST/VARARG/CLOSURE 伪指令）同步解码：
-        // 裸 A 读=存值-魔数；复合 inst 的 B/C 按魔数奇偶还原。先改裸读、后改复合体。
+        // ⑮ 三处中程读下一条指令的模板（SETLIST/EXTRAARG/CLOSURE 伪指令）同步解码：
+        // ⑱.4 数组存的是掩码值，中程读必须 bx 还原——掩码名在此提前生成：
+        // 热块内联用 execute 局部，冷块方法体用同名局部（fetch 前缀从槽位自取）
+        let (n_mk1, n_mk2, n_mk3) = (rng.name(), rng.name(), rng.name());
         for (alias, mag) in op_magic.iter() {
             raw_handlers = raw_handlers.replace(&format!("op == {} or", alias), &format!("op == {} or", mag));
             raw_handlers = raw_handlers.replace(&format!("op == {} then", alias), &format!("op == {} then", mag));
         }
         {
             let site1 = format!("then c = {}[{}];", var_a_arr, var_pc);
-            let site1_new = format!("then c = ({}[{}]-{}[{}]);", var_a_arr, var_pc, var_opcodes, var_pc);
+            let site1_new = format!("then c = ({}({}[{}],{})-{}[{}]);", fn_bxor2, var_a_arr, var_pc, n_mk1, var_opcodes, var_pc);
             raw_handlers = raw_handlers.replace(&site1, &site1_new);
             let site3 = format!("[{}[{}] + 1]", var_a_arr, var_pc);
-            let site3_new = format!("[({}[{}]-{}[{}]) + 1]", var_a_arr, var_pc, var_opcodes, var_pc);
+            let site3_new = format!("[({}({}[{}],{})-{}[{}]) + 1]", fn_bxor2, var_a_arr, var_pc, n_mk1, var_opcodes, var_pc);
             raw_handlers = raw_handlers.replace(&site3, &site3_new);
-            let comp_old = format!("({{ {}[{}], {}[{}], {}[{}], {}[{}] }})", var_opcodes, var_pc, var_a_arr, var_pc, var_b_arr, var_pc, var_c_arr, var_pc);
-            let comp_new = format!("({{ {}[{}], {}[{}]-{}[{}], {}[{}]%2~=0 and {}[{}] or {}[{}], {}[{}]%2~=0 and {}[{}] or {}[{}] }})",
-                var_opcodes, var_pc,
-                var_a_arr, var_pc, var_opcodes, var_pc,
-                var_opcodes, var_pc, var_c_arr, var_pc, var_b_arr, var_pc,
-                var_opcodes, var_pc, var_b_arr, var_pc, var_c_arr, var_pc);
+            let comp_old = format!("local uv_inst = ({{ {}[{}], {}[{}], {}[{}], {}[{}] }})", var_opcodes, var_pc, var_a_arr, var_pc, var_b_arr, var_pc, var_c_arr, var_pc);
+            let (cq1, cq2, cq3, cq4) = (rng.name(), rng.name(), rng.name(), rng.name());
+            let comp_new = format!("local {q1}={ops}[{p}]; local {q2}=({bx}({a}[{p}],{m1})-{ops}[{p}]); local {q3}={bx}({b}[{p}],{m2}); if {q3}>=0X80000000 then {q3}={q3}-4294967296 end; local {q4}={bx}({c}[{p}],{m3}); if {q4}>=0X80000000 then {q4}={q4}-4294967296 end; local uv_inst=({{ {q1}, {q2}, {q1}%2~=0 and {q4} or {q3}, {q1}%2~=0 and {q3} or {q4} }})",
+                ops = var_opcodes, p = var_pc,
+                bx = fn_bxor2, a = var_a_arr, m1 = n_mk1,
+                b = var_b_arr, m2 = n_mk2,
+                c = var_c_arr, m3 = n_mk3,
+                q1 = cq1, q2 = cq2, q3 = cq3, q4 = cq4);
             raw_handlers = raw_handlers.replace(&comp_old, &comp_new);
         }
 
@@ -416,9 +424,12 @@ impl Generator {
         // 每个块的局部别名逐块新取，同一个逻辑变量跨块看到的不是同一个名字
         // ④ 槽位号不再写死在产物里
         // `GenRng::slot_key_block`）。这里拿到的全是**局部名字**，插值进 Lua 源码
-        let (sk, sk_setup) = rng.slot_key_block(20);
+        let (sk, sk_setup) = rng.slot_key_block(23);
         let k_pc = sk[0].clone(); let k_stk = sk[1].clone(); let k_top = sk[2].clone();
         let k_ops = sk[3].clone(); let k_aa = sk[4].clone(); let k_bb = sk[5].clone(); let k_cc = sk[6].clone();
+        // ⑱.4 掩码槽键：execute 入口派生后写槽，冷块（CLOSURE 等）中程读自取——
+        // 必须走 slot_key_block 池；裸 rng.name() 键不在池里=运行时 nil 键（前车之鉴）
+        let k_mk1 = sk[20].clone(); let k_mk2 = sk[21].clone(); let k_mk3 = sk[22].clone();
         let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
         let k_upv = sk[9].clone(); let k_env = sk[10].clone();
         let k_va = sk[11].clone(); let k_valen = sk[12].clone();
@@ -475,6 +486,11 @@ impl Generator {
                     let alias = rng.name();
                     body = rename_ident(&body, old, &alias);
                     fetch.push_str(&format!("local {}={}[{}];", alias, "self", key));
+                }
+                // ⑱.4 中程读体需要掩码：从掩码槽自取（execute 入口已派生写入）
+                if body.contains(&n_mk1) {
+                    fetch.push_str(&format!("local {m1},{m2},{m3}=self[{k1}],self[{k2}],self[{k3}];",
+                        m1 = n_mk1, m2 = n_mk2, m3 = n_mk3, k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
                 }
                 body = body.replace("{STOREBACK}", "");
                 let mut text = String::from("local rk1,rk2;");
@@ -562,16 +578,26 @@ impl Generator {
 
 
 
+        let var_idx = rng.name(); let var_b = rng.name(); let var_tamper = rng.name(); let fn_s_byte = rng.name(); let fn_s_sub = rng.name(); let var_raw_p = rng.name(); let var_chk = rng.name(); let var_p = rng.name(); let var_a2 = rng.name(); let fn_a3 = rng.name(); let x = rng.name(); let var__a = rng.name(); let var__b = rng.name(); let fn_read_dec = rng.name(); let fn_bxor = rng.name(); let fn_b_rotr = rng.name(); let fn_a5 = rng.name(); let fn_read_string = rng.name(); let fn_a10 = rng.name(); let fn_decode_chunk = rng.name(); let fn_u32_dec = rng.name(); let l = rng.name(); let s_t = rng.name(); let v = rng.name(); let v_sign = rng.name(); let v_exp = rng.name(); let v_mant = rng.name(); let t = rng.name(); let fn_c = rng.name();
         // 数组槽位只读一次（热路径每指令都读会白花 4 次哈希查找）
         let arrs = format!("{}, {}, {}, {}", var_opcodes, var_a_arr, var_b_arr, var_c_arr);
         block_execute_def.push_str(&format!("local {};{}={}[{}],{}[{}],{}[{}],{}[{}];", arrs, arrs, var_vm, k_ops, var_vm, k_aa, var_vm, k_bb, var_vm, k_cc));
         // pc/top 是**循环外**的局部变量
         // ㉑ 保守版明文窗口变量：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         let (np21, md21, th21, tw21) = (rng.name(), rng.name(), rng.name(), rng.name());
-        let step21 = rng.range(0x8000, 0x40000);
+        // ⑱.4 驻留收紧：水位步长从 0x8000~0x40000 降到 0x2000~0x8000——
+        // proto 明文窗口按 1/4~1/8 频率写回 thunk，dump 窗口随之缩短
+        let step21 = rng.range(0x2000, 0x8000);
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
         block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, k_pc, var_vm, k_top));
 
+        // ⑱.4 数组驻留掩码：body_insts 存的是逐原型掩码值（K 从 kp/pb 派生，同式）。
+        // n_mk1..3 已在中程读站点改写前生成（两处同名）；派生后写掩码槽供冷块自取
+        block_execute_def.push_str(&format!(
+            "local {ma},{mb},{mc}={bx}({c}.{ld},{c}.{lld}),{bx}({c}.{ld},{bx}({c}.{ld},{c}.{lld})),{bx}({c}.{lld},{bx}({c}.{ld},{c}.{lld})); {v}[{k1}]={ma};{v}[{k2}]={mb};{v}[{k3}]={mc}; ",
+            ma = n_mk1, mb = n_mk2, mc = n_mk3,
+            bx = fn_bxor2.as_str(), c = "chunk", v = var_vm, ld = pf_ld, lld = pf_lld,
+            k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）
             block_execute_def.push_str("while true do break end end ");
@@ -581,9 +607,10 @@ impl Generator {
 
             block_execute_def.push_str(&format!("local op={}[{}];", var_opcodes, var_pc));
             // ⑮ 指令解码：A=存值-魔数；魔数奇偶决定 (B,C) 交换还原
-            block_execute_def.push_str(&format!("local inst_A={}[{}]-op;", var_a_arr, var_pc));
-            block_execute_def.push_str(&format!("local inst_B={}[{}];", var_b_arr, var_pc));
-            block_execute_def.push_str(&format!("local inst_C={}[{}];", var_c_arr, var_pc));
+            // ⑱.4 取指单点还原：数组存掩码值，这里 bx 解出语义值（内存 dump 得不到明文指令）
+            block_execute_def.push_str(&format!("local inst_A={bx}({}[{}],{})-op;", var_a_arr, var_pc, n_mk1, bx = fn_bxor2.as_str()));
+            block_execute_def.push_str(&format!("local inst_B={bx}({}[{}],{}); if inst_B>=0X80000000 then inst_B=inst_B-4294967296 end;", var_b_arr, var_pc, n_mk2, bx = fn_bxor2.as_str()));
+            block_execute_def.push_str(&format!("local inst_C={bx}({}[{}],{}); if inst_C>=0X80000000 then inst_C=inst_C-4294967296 end; ", var_c_arr, var_pc, n_mk3, bx = fn_bxor2.as_str()));
             block_execute_def.push_str("if op%2~=0 then inst_B,inst_C=inst_C,inst_B end; ");
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
             block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
@@ -603,7 +630,6 @@ impl Generator {
 
         let block_decoder_script = decoder_script.replace("\n", " ");
         
-        let var_idx = rng.name(); let var_b = rng.name(); let var_tamper = rng.name(); let fn_s_byte = rng.name(); let fn_s_sub = rng.name(); let var_raw_p = rng.name(); let var_chk = rng.name(); let var_p = rng.name(); let var_a2 = rng.name(); let fn_a3 = rng.name(); let x = rng.name(); let var__a = rng.name(); let var__b = rng.name(); let fn_read_dec = rng.name(); let fn_bxor = rng.name(); let fn_b_rotr = rng.name(); let fn_a5 = rng.name(); let fn_read_string = rng.name(); let fn_a10 = rng.name(); let fn_decode_chunk = rng.name(); let fn_u32_dec = rng.name(); let l = rng.name(); let s_t = rng.name(); let v = rng.name(); let v_sign = rng.name(); let v_exp = rng.name(); let v_mant = rng.name(); let t = rng.name(); let fn_c = rng.name();
         let var_boot_env = rng.name(); let var_bname = rng.name();
 
         let fn_qr = rng.name();
@@ -833,14 +859,14 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
         let body_insts = format!(
             "{st}={nxt}; {tree9} {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+0X100000000 end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>=0X80000000 then {w}={w}-0X100000000 end return {w} end; \
-             local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; \
+             local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
              while {i} < {n} do {i} = {i} + 1; \
-             local {mv}={a5}() local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={a10}() {c}.{pf_b_arr}[{i}+{pb}]={dcb}({a10}(),{g18},{kbx},{k1x}) {c}.{pf_c_arr}[{i}+{pb}]={dcb}({a10}(),{g18},{kcx},{k2x}) end; ",
+             local {mv}={a5}() local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%4294967296,{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%4294967296,{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%4294967296,{kc18}) end; ",
             tree9 = it9(&mut rng, var_state.as_str()),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
             i = v_ch_i, n = v_ch_n, cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
-            pb = rng.name(),
+            pb = rng.name(), ka = rng.name(), kb18 = rng.name(), kc18 = rng.name(),
             pf_ld = pf_ld, pf_lld = pf_lld,
             dcb = rng.name(), w = rng.name(), m = rng.name(), k = rng.name(), q = rng.name(),
             bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x
@@ -860,7 +886,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 fn_c.as_str(), pf_consts.as_str(),
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
-                &tag_map18, &salt_names, pf_lld.as_str(), pf_cnt18.as_str())
+                &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str())
         );
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
