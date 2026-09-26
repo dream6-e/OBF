@@ -491,14 +491,20 @@ pub fn build_consts(
                 ];
                 rng.shuffle(&mut ld_defs);
                 let (nBv, nCv, w2v, w3v, w4v) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+                // 高危③：明文记忆缓存水位清空——ca 驻留的明文常量按访问计数周期性
+                // 全清（㉑ 同款窗口模型）：纪元内只有热集明文，dump 不再能拿到
+                // 「程序运行至今累计」的完整常量明文表；记录保留可重复解密
+                let (ecb_n, cab_n) = (rng.name(), rng.name());
+                let (wctr, wlim) = (rng.name(), rng.range(0x2000, 0x10000));
                 let mut lua = format!(
                     // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
                     // pairs 遍历直接报错；后备退化为普通表（fail-open）
-                    "local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; \
+                    "local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
                      local {dsp},{ld}={{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; ",
                     ft = ftds, rt = rtds, rf = rfds,
-                    ec = var_enc_c, ecb = rng.name(), ca = var_cache, cab = rng.name(),
+                    ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
+                    wctr = wctr,
                     m1 = rng.name(), m2 = rng.name(),
                     dsp = dsp_name, ld = ld_name,
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
@@ -514,13 +520,14 @@ pub fn build_consts(
                 lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
                 lua.push_str(&format!(
                     "local {hh}={{}}; \
-                     {hh}[{e_ka}]=function({ix},{ix}) if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
+                     {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in pairs({cab}) do {cab}[{wk}]=nil end end; if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
                      {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if type({ev})~='table' then return {x_nil1} end \
-                       local {h}={dsp}[({ev}[(0X1)])] if not {h} then {ec}[({ix})]=nil return {x_nil1} end local {vv}={h}(0X1,{ev}) {ec}[({ix})]=nil return {x_val1},{vv} end; \
+                       local {h}={dsp}[({ev}[(0X1)])] if not {h} then {ec}[({ix})]=nil return {x_nil1} end local {vv}={h}(0X1,{ev}) return {x_val1},{vv} end; \
                      {hh}[{e_kc}]=function({ix},{aux}) {ca}[({ix})]={aux} while {w3v} do return {x_ret1},{aux} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
                     vv = rng.name(),
+                    wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
