@@ -62,8 +62,6 @@ pub(super) struct EncCtx {
     pub layouts: Vec<[usize; 3]>,
     pub kstr: Vec<u32>,
     pub knum: Vec<u32>,
-    /// ㉓ 常量类型 tag 字母表逐 build 随机（nil/bool/num/str）——固定 0/1/2/3 是文法自证
-    pub tags: [u8; 4],
 }
 
 pub struct CipherKeys {
@@ -473,9 +471,6 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
     let inst_count = r.read_u32();
-    // ㉓ R：对本原型**写出的指令记录**（魔数/A/B/C）滚动——常量密钥派生自此，
-    // 攻击者不解指令流就拿不到任何字符串密钥（解密依赖解释）
-    let mut inst_recs: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(inst_count as usize);
     let mut raw_insts: Vec<(u8, u8, u32, u32)> = Vec::with_capacity(inst_count as usize);
     for _ in 0..inst_count {
         let op = r.read_u8(); let a = r.read_u8(); let b = r.read_u32(); let c = r.read_u32();
@@ -597,7 +592,6 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             let a_enc = (a as u32).wrapping_add(mag);
                             let (fb0, fc0) = if mag % 2 == 1 { (b1, 0u32) } else { (0u32, b1) };
                             let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
-                            inst_recs.push((mag, a_enc, fb0, fc0));
                             w.extend_from_slice(&mag.to_le_bytes());
                             w.extend_from_slice(&a_enc.to_le_bytes());
                             w.extend_from_slice(&fb.to_le_bytes());
@@ -619,7 +613,6 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op_index as u32 };
                 let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
                 let a_enc = (a as u32).wrapping_add(mag);
-                inst_recs.push((mag, a_enc, 0, 0));
                 w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes());
                 w.extend_from_slice(&((mag ^ ki1) ^ kb).to_le_bytes()); w.extend_from_slice(&((mag ^ ki2) ^ kc).to_le_bytes());
                 i += 1;
@@ -632,7 +625,6 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let a_enc = (a as u32).wrapping_add(mag);
         let (fb0, fc0) = if mag % 2 == 1 { (c, b) } else { (b, c) };
         let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
-        inst_recs.push((mag, a_enc, fb0, fc0));
         w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
         i += 1;
     }
@@ -641,77 +633,38 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // 字符串=tag+长度前缀密文；数字=tag+8B 密文。nonce 的池下标改用
     // **节内槽位号**（与 Lua 侧 pos-1 一致）；同值复用同一 (blob,li)。
     w.push(group as u8);
-    // ㉓ R 滚动（与 Lua 侧 body_consts 同式：rotl7/bxor/add-mod）
-    let mut roll: u32 = 0x2545_F491u32 ^ enc.salts[group];
-    for &(mg, av, bv, cv) in &inst_recs {
-        let r7 = roll.rotate_left(7);
-        roll = (r7 ^ mg).wrapping_add(av).wrapping_add(bv ^ cv);
-    }
-    // ㉓ 死常量填充：0..2 条永不引用的伪常量（真加密），破坏「子原型尾巴长度已知
-    // →文法反推」的尺寸预言机
-    let mut pad_buf: Vec<u8> = Vec::new();
+    w.extend_from_slice(&const_count.to_le_bytes());
     let mut slot: u32 = 0;
-    let pad_n = rng.random_range(0..3usize);
-    for _ in 0..pad_n {
-        let is_str = rng.random_range(0..2usize) == 0;
-        let kindv = if is_str { enc.kstr[group] } else { enc.knum[group] };
-        let s1 = roll ^ enc.salts[group];
-        let r7 = roll.rotate_left(7);
-        let s2 = r7 ^ slot.wrapping_mul(6).wrapping_add(kindv);
-        let s3 = enc.salts[group] ^ r7.rotate_left(7);
-        let src = [s1, s2, s3];
-        let nonce = [src[enc.layouts[group][0]], src[enc.layouts[group][1]], src[enc.layouts[group][2]]];
-        if is_str {
-            let ln = rng.random_range(1..13usize);
-            let data: Vec<u8> = (0..ln).map(|_| rng.random_range(0..256u8)).collect();
-            let blob = chacha8_xor(&enc.keys[group], nonce, &data);
-            pad_buf.push(enc.tags[3]);
-            write_string(&mut pad_buf, &blob);
-        } else {
-            let data: Vec<u8> = (0..8).map(|_| rng.random_range(0..256u8)).collect();
-            let blob = chacha8_xor(&enc.keys[group], nonce, &data);
-            pad_buf.push(enc.tags[2]);
-            pad_buf.extend_from_slice(&blob);
-        }
-        slot += 1;
-    }
-    w.extend_from_slice(&(const_count + pad_n as u32).to_le_bytes());
     let mut seen: std::collections::HashMap<Vec<u8>, (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
     for (idx, (c_type, bytes)) in local_consts.iter().enumerate() {
         if omit_const.contains(&idx) {
-            w.push(enc.tags[0]);
+            w.push(0);
             slot += 1;
             continue;
         }
         match c_type {
-            0 => { w.push(enc.tags[0]); }
-            1 => { w.push(enc.tags[1]); w.push(bytes[0]); }
+            0 => { w.push(0); }
+            1 => { w.push(1); w.push(bytes[0]); }
             2 | 3 => {
                 let entry = match seen.get(bytes) {
                     Some(e) => e.clone(),
                     None => {
-                        // ㉓ nonce 三词全部混入 R：槽位号只是区分项，不再是密钥来源
                         let li = slot;
                         let kind = if *c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
-                        let s1 = roll ^ enc.salts[group];
-                        let r7 = roll.rotate_left(7);
-                        let s2 = r7 ^ li.wrapping_mul(6).wrapping_add(kind);
-                        let s3 = enc.salts[group] ^ r7.rotate_left(7);
-                        let src = [s1, s2, s3];
+                        let src = [enc.salts[group], li, kind];
                         let nonce = [src[enc.layouts[group][0]], src[enc.layouts[group][1]], src[enc.layouts[group][2]]];
                         let blob = chacha8_xor(&enc.keys[group], nonce, bytes);
                         seen.insert(bytes.clone(), (*c_type, blob.clone(), li));
                         (*c_type, blob, li)
                     }
                 };
-                w.push(enc.tags[*c_type as usize]);
+                w.push(*c_type);
                 if *c_type == 2 { w.extend_from_slice(&entry.1); } else { write_string(w, &entry.1); }
             }
             _ => panic!(),
         }
         slot += 1;
     }
-    w.extend_from_slice(&pad_buf);
 
     let p_count = r.read_u32();
     w.extend_from_slice(&p_count.to_le_bytes());
