@@ -38,6 +38,7 @@ impl Generator {
         let pf_is_vararg = rng.name();
         let pf_maxstack = rng.name();
         let pf_opcodes = rng.name();
+        let pf_cnt18 = rng.name(); // ⑱.3 指令条数（槽偏移后 # 不可靠，扫描用）
         let pf_a_arr = rng.name();
         let pf_b_arr = rng.name();
         let pf_c_arr = rng.name();
@@ -538,7 +539,7 @@ impl Generator {
         block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
         block_execute_def.push_str(&format!("local {} = setmetatable({{}}, {}); ", var_vm, var_proto));
-        block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, obf1, var_vm, k_stk, var_vm, k_top, obf0));
+        block_execute_def.push_str(&format!("{}[{}]={}.{}+{};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, "chunk", pf_lld, obf1, var_vm, k_stk, var_vm, k_top, obf0));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_ops, pf_opcodes, var_vm, k_aa, pf_a_arr, var_vm, k_bb, pf_b_arr, var_vm, k_cc, pf_c_arr));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_consts, pf_consts, var_vm, k_protos, pf_protos));
         block_execute_def.push_str(&format!("{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};", var_vm, k_upv, var_vm, k_env, var_vm, k_vc, var_vc, var_vm, k_breg, var_builtin_reg));
@@ -832,12 +833,15 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
         let body_insts = format!(
             "{st}={nxt}; {tree9} {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+0X100000000 end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>=0X80000000 then {w}={w}-0X100000000 end return {w} end; \
-             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; \
-             local {mv}={a5}() {c}.{pf_opcodes}[{i}]={mv} {c}.{pf_a_arr}[{i}]={a10}() {c}.{pf_b_arr}[{i}]={dcb}({a10}(),{mv},{kbx},{k1x}) {c}.{pf_c_arr}[{i}]={dcb}({a10}(),{mv},{kcx},{k2x}) end; ",
+             local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; \
+             while {i} < {n} do {i} = {i} + 1; \
+             local {mv}={a5}() local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={a10}() {c}.{pf_b_arr}[{i}+{pb}]={dcb}({a10}(),{g18},{kbx},{k1x}) {c}.{pf_c_arr}[{i}+{pb}]={dcb}({a10}(),{g18},{kcx},{k2x}) end; ",
             tree9 = it9(&mut rng, var_state.as_str()),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
-            i = v_ch_i, n = v_ch_n,
+            i = v_ch_i, n = v_ch_n, cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
+            pb = rng.name(),
+            pf_ld = pf_ld, pf_lld = pf_lld,
             dcb = rng.name(), w = rng.name(), m = rng.name(), k = rng.name(), q = rng.name(),
             bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x
         );
@@ -856,7 +860,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 fn_c.as_str(), pf_consts.as_str(),
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
-                &tag_map18, &salt_names)
+                &tag_map18, &salt_names, pf_lld.as_str(), pf_cnt18.as_str())
         );
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是

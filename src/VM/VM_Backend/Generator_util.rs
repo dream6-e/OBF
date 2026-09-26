@@ -471,12 +471,17 @@ pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSe
 }
 
 pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4]) -> Vec<(usize, u32)> {
-    // ② 元数据剥离：chunk 名/行号定义与 lines/locals/upvalue 名在 VM 端零消费者
+    // ② 元数据剥离：chunk 名/lines/locals/upvalue 名在 VM 端零消费者
     // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
     // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
+    // ⑱.3 每原型随机参数：kp18=本原型线上 op 异或键（二级重映射，跨原型同全局码
+    // 线上值不同）、pb18=pc↔槽仿射偏移（槽=pc+pb，随机死槽；所有 pc 运算皆相对=零模板改动）。
+    // 两值写入 ② 剥离后的 linedefined/numparams 两空槽（随机数，无源信息）。
+    let kp18: u32 = rng.random_range(1..0x2000000u32) | 0x0100_0000;
+    let pb18: u32 = rng.random_range(4..=64u32);
     let _ = r.read_string(); write_string(w, b"");
     let _ = r.read_u32(); let _ = r.read_u32();
-    w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
+    w.extend_from_slice(&kp18.to_le_bytes()); w.extend_from_slice(&pb18.to_le_bytes());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
     let inst_count = r.read_u32();
     let mut raw_insts: Vec<(u8, u8, u32, u32)> = Vec::with_capacity(inst_count as usize);
@@ -614,7 +619,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             let a_enc = (a as u32).wrapping_add(mag);
                             let (fb0, fc0) = if mag % 2 == 1 { (b1, 0u32) } else { (0u32, b1) };
                             let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
-                            w.extend_from_slice(&mag.to_le_bytes());
+                            w.extend_from_slice(&(mag ^ kp18).to_le_bytes());
                             w.extend_from_slice(&a_enc.to_le_bytes());
                             w.extend_from_slice(&fb.to_le_bytes());
                             w.extend_from_slice(&fc.to_le_bytes()); // 常量下标搬进 C
@@ -640,7 +645,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op_index as u32 };
                 let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
                 let a_enc = (a as u32).wrapping_add(mag);
-                w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes());
+                w.extend_from_slice(&(mag ^ kp18).to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes());
                 w.extend_from_slice(&((mag ^ ki1) ^ kb).to_le_bytes()); w.extend_from_slice(&((mag ^ ki2) ^ kc).to_le_bytes());
                 pc18 += 1; // builtin 的 B/C 解码后恒为 0，不参与折叠/引用
                 let r718 = roll18.rotate_left(7);
@@ -655,7 +660,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let a_enc = (a as u32).wrapping_add(mag);
         let (fb0, fc0) = if mag % 2 == 1 { (c, b) } else { (b, c) };
         let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
-        w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
+        w.extend_from_slice(&(mag ^ kp18).to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
         pc18 += 1;
         let r718 = roll18.rotate_left(7);
         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
