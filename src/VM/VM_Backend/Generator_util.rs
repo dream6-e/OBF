@@ -462,9 +462,13 @@ pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSe
     for _ in 0..upv_count { r.read_string(); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng) {
-    write_string(w, r.read_string());
-    w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec()); w.extend_from_slice(&r.read_u32().to_le_bytes().to_vec());
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32) {
+    // ② 元数据剥离：chunk 名/行号定义与 lines/locals/upvalue 名在 VM 端零消费者
+    // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
+    // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
+    let _ = r.read_string(); write_string(w, b"");
+    let _ = r.read_u32(); let _ = r.read_u32();
+    w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
     let inst_count = r.read_u32();
     let mut raw_insts: Vec<(u8, u8, u32, u32)> = Vec::with_capacity(inst_count as usize);
@@ -586,7 +590,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             // ⑮ 线格式：op=魔数、A=(a+魔数) u32、(B,C) 按魔数奇偶预交换
                             let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
                             let a_enc = (a as u32).wrapping_add(mag);
-                            let (fb, fc) = if mag % 2 == 1 { (b1, 0u32) } else { (0u32, b1) };
+                            let (fb0, fc0) = if mag % 2 == 1 { (b1, 0u32) } else { (0u32, b1) };
+                            let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
                             w.extend_from_slice(&mag.to_le_bytes());
                             w.extend_from_slice(&a_enc.to_le_bytes());
                             w.extend_from_slice(&fb.to_le_bytes());
@@ -608,7 +613,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op_index as u32 };
                 let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
                 let a_enc = (a as u32).wrapping_add(mag);
-                w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes()); w.extend_from_slice(&0u32.to_le_bytes());
+                w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes());
+                w.extend_from_slice(&((mag ^ ki1) ^ kb).to_le_bytes()); w.extend_from_slice(&((mag ^ ki2) ^ kc).to_le_bytes());
                 i += 1;
                 continue;
             }
@@ -617,7 +623,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 };
         let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
         let a_enc = (a as u32).wrapping_add(mag);
-        let (fb, fc) = if mag % 2 == 1 { (c, b) } else { (b, c) };
+        let (fb0, fc0) = if mag % 2 == 1 { (c, b) } else { (b, c) };
+        let (fb, fc) = (fb0 ^ (mag ^ ki1) ^ kb, fc0 ^ (mag ^ ki2) ^ kc);
         w.extend_from_slice(&mag.to_le_bytes()); w.extend_from_slice(&a_enc.to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
         i += 1;
     }
@@ -666,19 +673,20 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         // CLOSURE 首调才递归解码——整棵原型树不再一次性展开成明文
         let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng);
+        rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2);
         w.extend_from_slice(&(child.len() as u32).to_le_bytes());
         w.extend_from_slice(&child);
     }
+    // ② 元数据剥离（续）：lines/locals/upvalue 名只消费不落盘
     let l_count = r.read_u32();
-    w.extend_from_slice(&l_count.to_le_bytes());
+    w.extend_from_slice(&0u32.to_le_bytes());
     r.read_bytes((l_count * 4) as usize);
     let loc_count = r.read_u32();
-    w.extend_from_slice(&loc_count.to_le_bytes());
-    for _ in 0..loc_count { write_string(w, r.read_string()); w.extend_from_slice(&r.read_u32().to_le_bytes()); w.extend_from_slice(&r.read_u32().to_le_bytes()); }
+    w.extend_from_slice(&0u32.to_le_bytes());
+    for _ in 0..loc_count { let _ = r.read_string(); let _ = r.read_u32(); let _ = r.read_u32(); }
     let upv_count = r.read_u32();
-    w.extend_from_slice(&upv_count.to_le_bytes());
-    for _ in 0..upv_count { write_string(w, r.read_string()); }
+    w.extend_from_slice(&0u32.to_le_bytes());
+    for _ in 0..upv_count { let _ = r.read_string(); }
 }
 
 pub struct GenRng { used: HashSet<String>, slots: Vec<i64> }

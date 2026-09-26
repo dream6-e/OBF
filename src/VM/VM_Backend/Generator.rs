@@ -135,7 +135,10 @@ impl Generator {
                 op_magic.insert(v, m);
             }
         }
-        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng);
+        // ① B/C 场掩码参数：逐产物随机（掩码=值^(mag^ki)^k，mag 链接逐条变化）
+        let bc_kb = rng.next(); let bc_kc = rng.next();
+        let bc_ki1 = rng.next(); let bc_ki2 = rng.next();
+        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -773,14 +776,25 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
         let it9 = |rng: &mut GenRng, st: &str| format!(
             "if not({st}<=0X{:X}) then if not({st}<=0X{:X}) then else end else end; ",
             rng.range(0x1000, 0xFFFF), rng.range(0x10000, 0xFFFFF));
+        // ① B/C 解掩码：线上=值^(mag^ki)^k（k/ki 逐产物、mag 逐条别名魔数）。
+        // a10 返回带符号值：先回 2^32 域异或，再按 2^31 还原符号——与旧 a10 语义逐位一致
+        let (kb_x, kc_x, ki1_x, ki2_x) = (
+            crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_kb as i64),
+            crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_kc as i64),
+            crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki1 as i64),
+            crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki2 as i64),
+        );
         let body_insts = format!(
             "{st}={nxt}; {tree9} {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
+             local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+0X100000000 end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>=0X80000000 then {w}={w}-0X100000000 end return {w} end; \
              local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; \
-             {c}.{pf_opcodes}[{i}]={a5}(); {c}.{pf_a_arr}[{i}]={a10}(); {c}.{pf_b_arr}[{i}]={a10}(); {c}.{pf_c_arr}[{i}]={a10}(); end; ",
+             local {mv}={a5}() {c}.{pf_opcodes}[{i}]={mv} {c}.{pf_a_arr}[{i}]={a10}() {c}.{pf_b_arr}[{i}]={dcb}({a10}(),{mv},{kbx},{k1x}) {c}.{pf_c_arr}[{i}]={dcb}({a10}(),{mv},{kcx},{k2x}) end; ",
             tree9 = it9(&mut rng, var_state.as_str()),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
-            i = v_ch_i, n = v_ch_n
+            i = v_ch_i, n = v_ch_n,
+            dcb = rng.name(), w = rng.name(), m = rng.name(), k = rng.name(), q = rng.name(),
+            bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x
         );
         let (bi0, bi1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
         let sc_index2 = at.st.call("__index", bi0, bi1);
