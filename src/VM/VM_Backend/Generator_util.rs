@@ -656,7 +656,11 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // 字符串=tag+长度前缀密文；数字=tag+8B 密文。nonce 的池下标改用
     // **节内槽位号**（与 Lua 侧 pos-1 一致）；同值复用同一 (blob,li)。
     w.push(group as u8);
-    w.extend_from_slice(&const_count.to_le_bytes());
+    // ㉓-C 死常量：每原型追加随机个诱饵槽（nil/bool/num 混排，blob=随机字节——
+    // 惰性解码下诱饵永不被访问即永不解密），常量槽数量/节尺寸不再对应真实使用。
+    // 诱饵槽排在真实槽之后，指令的 RK 引用不可能到达（li<真实数），无副作用。
+    let d_count18: u32 = rng.random_range(0..=1 + (const_count as usize).min(24) as u32);
+    w.extend_from_slice(&((const_count + d_count18).to_le_bytes()));
     let mut slot: u32 = 0;
     let mut seen: std::collections::HashMap<(Vec<u8>, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
     for (idx, (c_type, bytes)) in local_consts.iter().enumerate() {
@@ -690,6 +694,15 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             _ => panic!(),
         }
         slot += 1;
+    }
+
+    // ㉓-C 诱饵槽发射（排在真实槽后；blob 随机字节即可——永不解密）
+    for _ in 0..d_count18 {
+        match rng.random_range(0..5) {
+            0 => { w.push(0); } // nil：仅占一个槽号
+            1 => { w.push(1); w.push(rng.random_range(0..=255u8)); } // bool
+            _ => { w.push(2); for _ in 0..8 { w.push(rng.random_range(0..=255u8)); } } // num
+        }
     }
 
     let p_count = r.read_u32();
