@@ -470,7 +470,7 @@ pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSe
     for _ in 0..upv_count { r.read_string(); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx) -> Vec<(usize, u32)> {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4]) -> Vec<(usize, u32)> {
     // ② 元数据剥离：chunk 名/行号定义与 lines/locals/upvalue 名在 VM 端零消费者
     // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
     // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
@@ -665,13 +665,13 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let mut seen: std::collections::HashMap<(Vec<u8>, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
     for (idx, (c_type, bytes)) in local_consts.iter().enumerate() {
         if omit_const.contains(&idx) {
-            w.push(0);
+            w.push(tag_map[0]); // ㉓-B 省略槽 tag 逐 build 随机
             slot += 1;
             continue;
         }
         match c_type {
-            0 => { w.push(0); }
-            1 => { w.push(1); w.push(bytes[0]); }
+            0 => { w.push(tag_map[0]); }
+            1 => { w.push(tag_map[1]); w.push(bytes[0]); }
             2 | 3 => {
                 // #3 折叠：本槽密钥混入 F_li=Σf(pc)（引用本槽的指令位置和）
                 let fold = fold_map.get(&slot).copied().unwrap_or(0u32);
@@ -688,7 +688,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         (*c_type, blob, li)
                     }
                 };
-                w.push(*c_type);
+                w.push(tag_map[*c_type as usize]);
                 if *c_type == 2 { w.extend_from_slice(&entry.1); } else { write_string(w, &entry.1); }
             }
             _ => panic!(),
@@ -699,9 +699,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // ㉓-C 诱饵槽发射（排在真实槽后；blob 随机字节即可——永不解密）
     for _ in 0..d_count18 {
         match rng.random_range(0..5) {
-            0 => { w.push(0); } // nil：仅占一个槽号
-            1 => { w.push(1); w.push(rng.random_range(0..=255u8)); } // bool
-            _ => { w.push(2); for _ in 0..8 { w.push(rng.random_range(0..=255u8)); } } // num
+            0 => { w.push(tag_map[0]); } // nil：仅占一个槽号
+            1 => { w.push(tag_map[1]); w.push(rng.random_range(0..=255u8)); } // bool
+            _ => { w.push(tag_map[2]); for _ in 0..8 { w.push(rng.random_range(0..=255u8)); } } // num
         }
     }
 
@@ -717,7 +717,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         pidx18 += 1;
         let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18);
+        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map);
         let ln_off = w.len();
         w.extend_from_slice(&(child.len() as u32).to_le_bytes());
         let child_base = w.len();

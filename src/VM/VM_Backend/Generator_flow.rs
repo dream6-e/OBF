@@ -399,6 +399,7 @@ pub fn build_consts(
     v_ch_i: &str, v_ch_n: &str, t: &str,
     pf_opcodes: &str, pf_b_arr: &str, pf_c_arr: &str, fn_rotl: &str,
     fc: &crate::VM::VM_Backend::Generator_util::FoldCtx,
+    tag_map: &[u8; 4],
 ) -> String {
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
     let (eh_ret, eh_nil, eh_next, eh_val, eh_fail) =
@@ -439,9 +440,11 @@ pub fn build_consts(
                 let _got_name = rng.name();
                 let val_name = rng.name();
                 let ddm = rng.name(); let ddd = rng.name(); let ddl = rng.name();
-                let one = rng.obfuscate_num(1i64, 1, &keys);
-                let two = rng.obfuscate_num(2i64, 1, &keys);
-                let three = rng.obfuscate_num(3i64, 1, &keys);
+                // ㉓-B 线上 tag 键 = tag_map（逐 build 随机字母表，与写侧同源）；
+                // one/two/three 曾是固定 1/2/3（DF 缺陷），record 内部标记沿用同值
+                let one = rng.obfuscate_num(tag_map[1] as i64, 1, &keys);
+                let two = rng.obfuscate_num(tag_map[2] as i64, 1, &keys);
+                let three = rng.obfuscate_num(tag_map[3] as i64, 1, &keys);
                 let zero = rng.obfuscate_num(0i64, 1, &keys);
                 let decoy_ld = rng.range(60, 250);
                 let decoy_dsp = rng.range(60, 250);
@@ -469,13 +472,17 @@ pub fn build_consts(
                 // 读入侧：tag → 装载闭包（定义顺序洗牌）
                 let bn = rng.name();
                 let bj = rng.name();
+                // 记录内部标记 = tag_map 同值（与 dsp 键耦合；仅内存态，不落线）；
+                // tag_map[0]（nil/省略）注册空消费句柄（线上 tag 不再恒 0..3）
                 let mut ld_defs = vec![
-                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() {ec}[(pos)]={{3,bl,pos-1}} end; ",
-                        l = ld_name, t3 = three, rs = fn_read_string, ec = var_enc_c, ddl = ddl),
-                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{2,{bn},pos-1}} end; ",
-                        l = ld_name, t2 = two, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl),
-                    format!("{l}[{t1}]=function({ddl},pos) {ec}[(pos)]={{1,{rd}()~={zero}}} end; ",
-                        l = ld_name, t1 = one, ec = var_enc_c, rd = fn_read_dec, zero = zero, ddl = ddl),
+                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() {ec}[(pos)]={{{tvm3},bl,pos-1}} end; ",
+                        l = ld_name, t3 = three, rs = fn_read_string, ec = var_enc_c, ddl = ddl, tvm3 = tag_map[3] as i64),
+                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{{tvm2},{bn},pos-1}} end; ",
+                        l = ld_name, t2 = two, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm2 = tag_map[2] as i64),
+                    format!("{l}[{t1}]=function({ddl},pos) {ec}[(pos)]={{{tvm1},{rd}()~={zero}}} end; ",
+                        l = ld_name, t1 = one, ec = var_enc_c, rd = fn_read_dec, zero = zero, ddl = ddl, tvm1 = tag_map[1] as i64),
+                    format!("{l}[{t0}]=function({ddl}) end; ",
+                        l = ld_name, t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys), ddl = ddl),
                     format!("{l}[{dd}]=function() end; ", l = ld_name, dd = decoy_ld),
                 ];
                 rng.shuffle(&mut ld_defs);

@@ -145,7 +145,19 @@ impl Generator {
             r6c: rng.range(1, 17) as u32, p1c: rng.next(), p3c: rng.range(30, 70) as u32,
             f1: rng.next() | 1, f2: rng.next(),
         };
-        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18);
+        // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
+        // 从 0..59∪251..255 取互不相同值（避开 60..250 诱饵键区）；写侧推送与
+        // 读侧 ld/dsp 键两侧同源（修 DF「tag 源/线上不一致」缺陷——线上不再恒为 0..3）
+        let mut tag_pool18: Vec<u8> = (0..=59u8).chain(251..=255u8).collect();
+        let mut tag_map18 = [0u8; 4];
+        for tm in tag_map18.iter_mut() {
+            let k18 = rng.range(0, tag_pool18.len());
+            *tm = tag_pool18[k18];
+            let last18 = tag_pool18.len() - 1;
+            tag_pool18.swap(k18, last18);
+            tag_pool18.pop();
+        }
+        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -840,7 +852,8 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 fn_a5.as_str(), fn_read_dec.as_str(), var_enc_c.as_str(), var_cache.as_str(),
                 fn_c.as_str(), pf_consts.as_str(),
                 &v_ch_i, &v_ch_n, &t,
-                pf_opcodes.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18)
+                pf_opcodes.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
+                &tag_map18)
         );
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
