@@ -402,6 +402,7 @@ pub fn build_consts(
     tag_map: &[u8; 4],
     salt_names: &[String; 4],
     pf_ld_key: &str, pf_lld_key: &str, pf_cnt_key: &str,
+    psn: &str,
 ) -> String {
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
     let (eh_ret, eh_nil, eh_next, eh_val, eh_fail) =
@@ -470,7 +471,7 @@ pub fn build_consts(
                     format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
                         d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
                     format!("{d}[{t1}]=function({ddd},ev) return ev[(0X2)] end; ", d = dsp_name, t1 = one, ddd = ddd),
-                    format!("{d}[{dd}]=function(ev) return nil end; ", d = dsp_name, dd = decoy_dsp),
+                    format!("{d}[{dd}]=function(ev) return {kobf}..((({dd}*2654435761))%4294967296) end; ", d = dsp_name, dd = decoy_dsp, kobf = sc_kobf),
                 ];
                 rng.shuffle(&mut dsp_defs);
                 // 读入侧：tag → 装载闭包（定义顺序洗牌）
@@ -487,7 +488,8 @@ pub fn build_consts(
                         l = ld_name, t1 = one, ec = var_enc_c, rd = fn_read_dec, zero = zero, ddl = ddl, tvm1 = tag_map[1] as i64),
                     format!("{l}[{t0}]=function({ddl}) end; ",
                         l = ld_name, t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys), ddl = ddl),
-                    format!("{l}[{dd}]=function() end; ", l = ld_name, dd = decoy_ld),
+                    format!("{l}[{dd}]=function(_,p2) {ec}[(p2)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}} end; ",
+                        l = ld_name, dd = decoy_ld, ec = var_enc_c, tvm2 = tag_map[2] as i64),
                 ];
                 rng.shuffle(&mut ld_defs);
                 let (nBv, nCv, w2v, w3v, w4v) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
@@ -495,16 +497,18 @@ pub fn build_consts(
                 // 全清（㉑ 同款窗口模型）：纪元内只有热集明文，dump 不再能拿到
                 // 「程序运行至今累计」的完整常量明文表；记录保留可重复解密
                 let (ecb_n, cab_n) = (rng.name(), rng.name());
+                let pfn_n = rng.name();
                 let (wctr, wlim) = (rng.name(), rng.range(0x2000, 0x10000));
                 let mut lua = format!(
                     // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
                     // pairs 遍历直接报错；后备退化为普通表（fail-open）
                     "local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
-                     local {dsp},{ld}={{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; ",
+                     local {dsp},{ld}={{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
+                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*2654435761+0X9E3779B9)%4294967296 elseif tq=='string' then return {kobf}..(((#q)*2654435761)%4294967296) elseif tq=='boolean' then return not q end return q end; ",
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
-                    wctr = wctr,
+                    wctr = wctr, pfn = pfn_n, kobf = sc_kobf,
                     m1 = rng.name(), m2 = rng.name(),
                     dsp = dsp_name, ld = ld_name,
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
@@ -524,10 +528,11 @@ pub fn build_consts(
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
                      {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if type({ev})~='table' then return {x_nil1} end \
                        local {h}={dsp}[({ev}[(0X1)])] if not {h} then {ec}[({ix})]=nil return {x_nil1} end local {vv}={h}(0X1,{ev}) return {x_val1},{vv} end; \
-                     {hh}[{e_kc}]=function({ix},{aux}) {ca}[({ix})]={aux} while {w3v} do return {x_ret1},{aux} end end; ",
+                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={psn} and {pfn}({aux}) or {aux}; {ca}[({ix})]={pv}; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
                     vv = rng.name(),
-                    wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n,
+                    wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, pv = rng.name(),
+                    pfn = pfn_n, psn = psn,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,

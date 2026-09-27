@@ -273,6 +273,9 @@ impl Generator {
         let block_packer_vars = format!("local {}, {}, {}; ", var_junk, var_vc, var_builtin_reg);
 
         let fn_execute = "execute";
+        // 诱饵投毒旗（prelude 局部）：守卫失败/诱饵 handler 置位 → 后续常量解码
+        // 全部 type-preserving 扰乱——程序继续跑、不报错、输出乱码（用户指示）
+        let psn_n = rng.name();
         let var_pc = rng.name();
         let var_stk = rng.name();
         let var_top = rng.name();
@@ -527,6 +530,31 @@ impl Generator {
                     tree_entries.push((op, body.clone()));
                 }
             }
+        }
+        // 诱饵假 handler（用户指示）：2 个永不合法命中的魔数，挂在派发树**之后**
+        // 的独立 if（不加深主树——树深影响每指令派发，hash 实测 +13% 的教训）。
+        // body 形似真 handler（栈写入+算术）——逆向者分析的是假逻辑；
+        // 被字节码补丁/garbage op 撞中：静默压 garbage + 置投毒旗（错误分支）
+        // 诱饵假 handler（用户指示）：2 个注册进方法表但**永不路由**的假块——
+        // 纯静态蜜罐（逆向者分析的是假逻辑），零运行时开销（树内/树后每指令
+        // 评估的形态实测 hash +13%，弃）。garbage op 不命中主树无兜底 else→
+        // 自然滑过=静默错误分支；运行时诱饵由守卫投毒+解密诱饵承担
+        let decoy_ops: Vec<u32> = {
+            let used_ops: Vec<u32> = op_magic.iter().map(|(_, m)| *m).collect();
+            let mut v = Vec::new();
+            while v.len() < 2 {
+                let c = rng.range(0x0100_0000, 0x7FFF_FFFF) as u32;
+                if !used_ops.contains(&c) && !v.contains(&c) { v.push(c); }
+            }
+            v
+        };
+        // 静态蜜罐注册（永不路由）：形似真 handler 的假块，逆向分析陷阱
+        for &dop in decoy_ops.iter() {
+            let (dg, skv) = (rng.name(), rng.name());
+            defs.push(format!(
+                "{mv}.{nm}=function(self,op,inst_A,inst_B,inst_C) local {dg}={bx2}(op,0X{dop:X})%4294967296; local {skv}=self[{ks}]; {skv}[self[{kt}]+0X1]={dg}; self[{kt}]=self[{kt}]+0X1; {psn}=true end;",
+                mv = var_methods, nm = rng.name(), dg = dg, bx2 = fn_bxor2.as_str(),
+                dop = dop, skv = skv, ks = k_stk, kt = k_top, psn = psn_n));
         }
         // ③ 随机代码块分配：注册顺序打乱，分发树按**状态号**（随机大整数）路由
         rng.shuffle(&mut defs);
@@ -917,7 +945,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 fn_c.as_str(), pf_consts.as_str(),
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
-                &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str())
+                &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(), psn_n.as_str())
         );
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
@@ -1033,10 +1061,12 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             rng.shuffle(&mut hopts);
             let hn = 1 + rng.range(0, 2);
             for i in 0..hn { ht_body.push_str(&hopts[i]); }
+            // 诱饵化：命中失败不再抛同型错误（用户指示：运行不报错）——
+            // 改置投毒旗（后续常量解码全乱码、程序走进错误分支），形态保持 if not u 触发族
             if rng.range(0, 2) == 0 {
-                ht_body.push_str(&ts);
+                ht_body.push_str(&format!("if not {u} then {psn}=true else {ts} end; ", u = p_u, psn = psn_n, ts = ts));
             } else {
-                ht_body.push_str(&format!("if not {u} then {ts} end; ", u = p_u, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {psn}=true end; if {u} then {ts} end; ", u = p_u, psn = psn_n, ts = ts));
             }
             let mut ms = vec![
                 format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",
@@ -1123,7 +1153,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&header_block);
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
-        out.push_str(&format!("local {np},{md},{th},{tw},{rk},{kreg}=0,{{}},{{}},0X0,0X0,setmetatable({{}},{{__mode='k'}}); ", np = np21, md = md21, th = th21, tw = tw21, rk = rk21, kreg = kreg_n));
+        out.push_str(&format!("local {np},{md},{th},{tw},{rk},{kreg},{psn}=0,{{}},{{}},0X0,0X0,setmetatable({{}},{{__mode='k'}}),false; ", np = np21, md = md21, th = th21, tw = tw21, rk = rk21, kreg = kreg_n, psn = psn_n));
         // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
         // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
         out.push_str(&line_guard(&mut rng));
