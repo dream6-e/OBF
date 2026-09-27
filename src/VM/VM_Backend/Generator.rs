@@ -603,7 +603,7 @@ impl Generator {
         // pf_lld 是入口 pc 基址（每次入口读）必须留在 chunk——半分量分驻+换钥兜底
         let (n_kon, n_ka) = (rng.name(), rng.name());
         block_execute_def.push_str(&format!(
-            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt} end; \
+            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; {c}.{cnt}=nil end; \
              local {ka}={bx}({kon},{c}.{lld}); \
              local {ma},{mb},{mc}={ka},{bx}({kon},{ka}),{bx}({c}.{lld},{ka}); {v}[{k1}]={ma};{v}[{k2}]={mb};{v}[{k3}]={mc}; ",
             kon = n_kon, kreg = kreg_n,
@@ -636,6 +636,7 @@ impl Generator {
             block_execute_def.push_str(&format!(
                 "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; for {j}=1,#{md} do if type({md}[{j}])=='table' then {md}[{j}]={th}[{j}] end end; \
                  {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
+                   local {kmt}=getmetatable({kreg}); local {kold}={kreg}; {kreg}=setmetatable({{}},{{}}); setmetatable({kreg},{kmt}); for {kc1},{kv1} in pairs({kold}) do {kreg}[{kc1}]={kv1} end; \
                    local {lv}={c}.{lld}; local {nk1}={bx}({kon},{pc}%4294967296)%4294967296; \
                    local {na},{nb},{nc}={bx}({nk1},{lv}),{bx}({nk1},{bx}({nk1},{lv})),{bx}({lv},{bx}({nk1},{lv})); \
                    local {d1},{d2},{d3}={bx}({ma},{na}),{bx}({mb},{nb}),{bx}({mc},{nc}); \
@@ -650,6 +651,7 @@ impl Generator {
                 nk1 = rng.name(), lv = rng.name(), na = rng.name(), nb = rng.name(), nc = rng.name(),
                 d1 = rng.name(), d2 = rng.name(), d3 = rng.name(), ri = rng.name(),
                 kreg = kreg_n, c = "chunk",
+                kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name(),
                 v = var_vm,
                 aa = var_a_arr, bb = var_b_arr, cc = var_c_arr,
                 k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
