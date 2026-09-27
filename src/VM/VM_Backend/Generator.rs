@@ -485,35 +485,92 @@ impl Generator {
                 // CLOSURE 模板里有字面量 env（内层闭包用），方法表是共享的
                 // 必须走槽位拿当前调用的环境，不能捕获第一次调用的 env
                 body = rename_ident(&body, "env", &format!("self[{}]", k_env));
-                let mut fetch = String::new();
+                // 取指别名对（别名↔槽位绑定不变；抓取顺序与分组随机）
+                let mut alias_pairs: Vec<(String, String)> = Vec::new();
                 for (old, key, _mutable) in state_fields.iter() {
                     if !uses_ident(&body, old) { continue; }
                     let alias = rng.name();
                     body = rename_ident(&body, old, &alias);
-                    fetch.push_str(&format!("local {}={}[{}];", alias, "self", key));
+                    alias_pairs.push((alias, format!("self[{}]", key)));
                 }
+                rng.shuffle(&mut alias_pairs);
                 // ⑱.4 中程读体需要掩码：从掩码槽自取（execute 入口已派生写入）
+                let mut mk_stmt: Option<String> = None;
                 if body.contains(&n_mk1) {
-                    fetch.push_str(&format!("local {m1},{m2},{m3}=self[{k1}],self[{k2}],self[{k3}];",
+                    mk_stmt = Some(format!("local {m1},{m2},{m3}=self[{k1}],self[{k2}],self[{k3}];",
                         m1 = n_mk1, m2 = n_mk2, m3 = n_mk3, k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
                 }
                 body = body.replace("{STOREBACK}", "");
-                let mut text = String::from("local rk1,rk2;");
+                // ── 冷块前奏打散：{rk 声明 + 状态自校验 + 取指分组} 全是独立纯读/声明，
+                // 任意线性化等价 → 语句池洗牌，"校验必居首 + 取指两连"的指纹消失；
+                // 校验恒先于任何写（体在后），跳错块照旧拒绝。常数经 obfuscate 去指纹。
+                let mut pre: Vec<String> = Vec::new();
+                pre.push("local rk1,rk2;".to_string());
                 // 状态号自校验：分发器刚把本块的状态号写进槽位，对不上说明跳错了块
-                text.push_str(&format!("if self[{}]~={} then return end;", k_state, st_lua));
-                text.push_str(&fetch);
+                // 常数混淆固定 depth=1：差式嵌套 depth≥2 会造出 ≥2^32 中间值，
+                // 32 位 bxor（bit32/回退实现）高位丢失 → 校验值错（obf0/1/2 用 1 从未暴露）
+                let st_obf = rng.obfuscate_num(*st as i64, 1, &keys);
+                match rng.range(0, 4) {
+                    0 => pre.push(format!("if self[{}]~={} then return end;", k_state, st_obf)),
+                    1 => pre.push(format!("if self[{}]-{}~=0 then return end;", k_state, st_obf)),
+                    2 => pre.push(format!("if self[{}]=={} then else return end;", k_state, st_obf)),
+                    _ => pre.push(format!("if not(self[{}]=={}) then return end;", k_state, st_obf)),
+                }
+                let mut ai = 0usize;
+                while ai < alias_pairs.len() {
+                    let rem = alias_pairs.len() - ai;
+                    let take = 1 + rng.range(0, rem.min(3));
+                    let ns: Vec<String> = alias_pairs[ai..ai + take].iter().map(|(n, _)| n.clone()).collect();
+                    let es: Vec<String> = alias_pairs[ai..ai + take].iter().map(|(_, e)| e.clone()).collect();
+                    pre.push(format!("local {}={};", ns.join(","), es.join(",")));
+                    ai += take;
+                }
+                if let Some(mk) = mk_stmt { pre.push(mk); }
+                rng.shuffle(&mut pre);
+                let mut text = pre.concat();
                 text.push_str(&body);
                 // 必须用 `.名字=function` 注册
                 // 成员名统一改名时字符串键不改，两边对不上变 nil。
                 defs.push(format!("{}.{}=function(self,op,inst_A,inst_B,inst_C) {} end;", var_methods, name, text));
                 // 冷路径才付同步代价：进出方法前后各存/取一次 pc 与 top
                 // 并把本块状态号写进槽位（方法入口自校验）。
-                let leaf = format!(
-                    "{}[{}]={};{}[{}]={};{}[{}]={};{},{},{}={}:{}(op,inst_A,inst_B,inst_C);{}={}[{}];{}={}[{}]",
-                    var_vm, k_pc, var_pc, var_vm, k_top, var_top, var_vm, k_state, st_lua,
-                    var_r1, var_r2, var_r3, var_vm, name,
-                    var_pc, var_vm, k_pc, var_top, var_vm, k_top
-                );
+                // 叶子打散：三连存乱序/分组 + 状态号常数去指纹 + 调用别名/恢复序随机（0=原版保留）
+                let leaf = if rng.range(0, 4) == 0 {
+                    format!(
+                        "{}[{}]={};{}[{}]={};{}[{}]={};{},{},{}={}:{}(op,inst_A,inst_B,inst_C);{}={}[{}];{}={}[{}]",
+                        var_vm, k_pc, var_pc, var_vm, k_top, var_top, var_vm, k_state, st_lua,
+                        var_r1, var_r2, var_r3, var_vm, name,
+                        var_pc, var_vm, k_pc, var_top, var_vm, k_top
+                    )
+                } else {
+                    let st_o = rng.obfuscate_num(*st as i64, 1, &keys);
+                    let mut sync: Vec<(String, String)> = vec![
+                        (format!("{}[{}]", var_vm, k_pc), var_pc.clone()),
+                        (format!("{}[{}]", var_vm, k_top), var_top.clone()),
+                        (format!("{}[{}]", var_vm, k_state), st_o),
+                    ];
+                    rng.shuffle(&mut sync);
+                    let mut sync_stmts = String::new();
+                    let mut si = 0usize;
+                    while si < sync.len() {
+                        let take = 1 + rng.range(0, sync.len() - si);
+                        let lhs: Vec<String> = sync[si..si + take].iter().map(|(l, _)| l.clone()).collect();
+                        let rhs: Vec<String> = sync[si..si + take].iter().map(|(_, r)| r.clone()).collect();
+                        sync_stmts.push_str(&format!("{}={};", lhs.join(","), rhs.join(",")));
+                        si += take;
+                    }
+                    // 方法经 __index 解析（裸索引 vm[name]=nil）→ 别名臂只能别 self
+                    let call = if rng.range(0, 2) == 0 {
+                        format!("{},{},{}={}:{}(op,inst_A,inst_B,inst_C);", var_r1, var_r2, var_r3, var_vm, name)
+                    } else {
+                        let vname = rng.name();
+                        format!("local {}={};{},{},{}={}:{}(op,inst_A,inst_B,inst_C);", vname, var_vm, var_r1, var_r2, var_r3, vname, name)
+                    };
+                    let rs_pc = format!("{}={}[{}];", var_pc, var_vm, k_pc);
+                    let rs_top = format!("{}={}[{}];", var_top, var_vm, k_top);
+                    let (ra, rb) = if rng.range(0, 2) == 0 { (rs_pc, rs_top) } else { (rs_top, rs_pc) };
+                    format!("{}{}{}{}", sync_stmts, call, ra, rb)
+                };
                 for &op in ops.iter() {
                     tree_entries.push((op, leaf.clone()));
                 }
