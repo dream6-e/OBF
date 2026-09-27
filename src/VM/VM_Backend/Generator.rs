@@ -632,15 +632,53 @@ impl Generator {
         // 中危刀1 密钥分驻：pf_ld（仅掩码用）从 chunk 蒸发进弱键注册表 KREG（键=chunk）；
         // pf_lld 是入口 pc 基址（每次入口读）必须留在 chunk——半分量分驻+换钥兜底
         let (n_kon, n_ka) = (rng.name(), rng.name());
+        // 数据流打散（本轮）：钥匙派生不再走单一「ka→三元组→升序三存」线性模板——
+        // 拓扑池（0=原版保留在池中）× 存储语句乱序（(槽,值) 配对恒定，只换时间序）。
+        // 全变体输出恒等：ma=bx(kon,lld)、mb=bx(kon,ma)、mc=bx(lld,ma)。入口一次，跳数无感。
+        let bx_s = fn_bxor2.as_str();
+        let lld_ref = format!("{}.{}", "chunk", pf_lld);
+        let st_ma = format!("{}[{}]={};", var_vm, k_mk1, n_mk1);
+        let st_mb = format!("{}[{}]={};", var_vm, k_mk2, n_mk2);
+        let st_mc = format!("{}[{}]={};", var_vm, k_mk3, n_mk3);
+        let deriv = match rng.range(0, 4) {
+            0 => format!(
+                "local {ka}={bx}({kon},{lld}); local {ma},{mb},{mc}={ka},{bx}({kon},{ka}),{bx}({lld},{ka}); {s1}{s2}{s3}",
+                ka = n_ka, bx = bx_s, kon = n_kon, lld = lld_ref,
+                ma = n_mk1, mb = n_mk2, mc = n_mk3, s1 = st_ma, s2 = st_mb, s3 = st_mc),
+            1 => {
+                // 实参交换 + 逐条派生 + 存储乱序
+                let mut ord = vec![st_ma, st_mb, st_mc];
+                rng.shuffle(&mut ord);
+                format!(
+                    "local {ka}={bx}({lld},{kon}); local {mc}={bx}({lld},{ka}); local {mb}={bx}({ka},{kon}); local {ma}={ka}; {o1}{o2}{o3}",
+                    ka = n_ka, bx = bx_s, lld = lld_ref, kon = n_kon,
+                    ma = n_mk1, mb = n_mk2, mc = n_mk3, o1 = ord[0], o2 = ord[1], o3 = ord[2])
+            }
+            2 => {
+                // ma 链根（无 ka 临时）+ 算完即存；mb/mc 计算序随机（槽时序随计算序）
+                let root = format!("local {ma}={bx}({kon},{lld}); {sma}",
+                    ma = n_mk1, bx = bx_s, kon = n_kon, lld = lld_ref, sma = st_ma);
+                let mb_line = format!("local {mb}={bx}({kon},{ma}); {smb}",
+                    mb = n_mk2, bx = bx_s, kon = n_kon, ma = n_mk1, smb = st_mb);
+                let mc_line = format!("local {mc}={bx}({lld},{ma}); {smc}",
+                    mc = n_mk3, bx = bx_s, lld = lld_ref, ma = n_mk1, smc = st_mc);
+                let mut lines = vec![mb_line, mc_line];
+                rng.shuffle(&mut lines);
+                format!("{} {} {}", root, lines[0], lines[1])
+            }
+            _ => {
+                // 拆条派生 + 存储全乱序（6 排列）
+                let mut ord = vec![st_ma, st_mb, st_mc];
+                rng.shuffle(&mut ord);
+                format!(
+                    "local {ka}={bx}({kon},{lld}); local {mb}={bx}({kon},{ka}); local {mc}={bx}({lld},{ka}); local {ma}={ka}; {o1}{o2}{o3}",
+                    ka = n_ka, bx = bx_s, kon = n_kon, lld = lld_ref,
+                    ma = n_mk1, mb = n_mk2, mc = n_mk3, o1 = ord[0], o2 = ord[1], o3 = ord[2])
+            }
+        };
         block_execute_def.push_str(&format!(
-            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; {c}.{cnt}=nil end; \
-             local {ka}={bx}({kon},{c}.{lld}); \
-             local {ma},{mb},{mc}={ka},{bx}({kon},{ka}),{bx}({c}.{lld},{ka}); {v}[{k1}]={ma};{v}[{k2}]={mb};{v}[{k3}]={mc}; ",
-            kon = n_kon, kreg = kreg_n,
-            ka = n_ka,
-            ma = n_mk1, mb = n_mk2, mc = n_mk3,
-            bx = fn_bxor2.as_str(), c = "chunk", v = var_vm, ld = pf_ld, lld = pf_lld, cnt = pf_cnt18,
-            k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
+            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; {c}.{cnt}=nil end; {deriv} ",
+            kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18, deriv = deriv));
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）
             block_execute_def.push_str("while true do break end end ");
@@ -663,28 +701,66 @@ impl Generator {
             block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
             // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
             // 活跃闭包持有明文引用不受影响；未来 CLOSURE 经 type(p)=='function' 重解
+            // 换钥高频路径零新增调用：嵌套双 bx 拆平（5 次→3 次）+ 声明序/实参对/存储乱序
+            let (lv_n, nk1_n, na_n, nb_n, nc_n, d1_n, d2_n, d3_n, ri_n) =
+                (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+            let bx_s2 = fn_bxor2.as_str();
+            let nn_seg = {
+                let na_e = format!("{}({},{})", bx_s2, nk1_n, lv_n);
+                let (nb_a, nb_b) = if rng.range(0, 2) == 0 { (nk1_n.clone(), na_n.clone()) } else { (na_n.clone(), nk1_n.clone()) };
+                let (nc_a, nc_b) = if rng.range(0, 2) == 0 { (lv_n.clone(), na_n.clone()) } else { (na_n.clone(), lv_n.clone()) };
+                let nb_e = format!("{}({},{})", bx_s2, nb_a, nb_b);
+                let nc_e = format!("{}({},{})", bx_s2, nc_a, nc_b);
+                if rng.range(0, 2) == 0 {
+                    format!("local {a}={nae}; local {b}={nbe}; local {c}={nce};", a=na_n, b=nb_n, c=nc_n, nae=na_e, nbe=nb_e, nce=nc_e)
+                } else {
+                    format!("local {a}={nae}; local {c}={nce}; local {b}={nbe};", a=na_n, b=nb_n, c=nc_n, nae=na_e, nbe=nb_e, nce=nc_e)
+                }
+            };
+            let dline_seg = {
+                let mut parts = Vec::new();
+                for trio in [(&d1_n, &n_mk1, &na_n), (&d2_n, &n_mk2, &nb_n), (&d3_n, &n_mk3, &nc_n)] {
+                    let (dn, mn, xn) = trio;
+                    let e = if rng.range(0, 2) == 0 {
+                        format!("{}({},{})", bx_s2, mn, xn)
+                    } else {
+                        format!("{}({},{})", bx_s2, xn, mn)
+                    };
+                    parts.push(format!("local {}={};", dn, e));
+                }
+                parts.join(" ")
+            };
+            let rk_tail_seg = {
+                let mut stmts = vec![
+                    format!("{}[{}]={};", var_vm, k_mk1, na_n),
+                    format!("{}[{}]={};", var_vm, k_mk2, nb_n),
+                    format!("{}[{}]={};", var_vm, k_mk3, nc_n),
+                ];
+                rng.shuffle(&mut stmts);
+                format!("{}[{}][1]={}; {}{}{} {},{},{}={},{},{}; ",
+                    kreg_n, "chunk", nk1_n, stmts[0], stmts[1], stmts[2],
+                    n_mk1, n_mk2, n_mk3, na_n, nb_n, nc_n)
+            };
             block_execute_def.push_str(&format!(
                 "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; for {j}=1,#{md} do if type({md}[{j}])=='table' then {md}[{j}]={th}[{j}] end end; \
                  {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
                    local {kmt}=getmetatable({kreg}); local {kold}={kreg}; {kreg}=setmetatable({{}},{{}}); setmetatable({kreg},{kmt}); for {kc1},{kv1} in pairs({kold}) do {kreg}[{kc1}]={kv1} end; \
-                   local {lv}={c}.{lld}; local {nk1}={bx}({kon},{pc}%4294967296)%4294967296; \
-                   local {na},{nb},{nc}={bx}({nk1},{lv}),{bx}({nk1},{bx}({nk1},{lv})),{bx}({lv},{bx}({nk1},{lv})); \
-                   local {d1},{d2},{d3}={bx}({ma},{na}),{bx}({mb},{nb}),{bx}({mc},{nc}); \
+                   local {lv}={c}.{lld}; local {nk1}={bx}({kon},{pc}%4294967296)%4294967296; {nn} \
+                   {dline} \
                    for {ri}=1,{kreg}[{c}][2] do {aa}[{ri}]={bx}({aa}[{ri}],{d1}); {bb}[{ri}]={bx}({bb}[{ri}],{d2}); {cc}[{ri}]={bx}({cc}[{ri}],{d3}) end; \
-                   {kreg}[{c}][1]={nk1}; {v}[{k1}]={na}; {v}[{k2}]={nb}; {v}[{k3}]={nc}; {ma},{mb},{mc}={na},{nb},{nc}; \
+                   {rk_tail} \
                  end end; ",
                 flg = var_state_flag, pc = var_pc, tw = tw21, sx = step21,
                 j = rng.name(), md = md21, th = th21,
                 rk = rk21, rn = rng.format_num(rkey_every as i64),
-                bx = fn_bxor2.as_str(), ma = n_mk1, mb = n_mk2, mc = n_mk3,
+                bx = fn_bxor2.as_str(),
                 lld = pf_lld, kon = n_kon,
-                nk1 = rng.name(), lv = rng.name(), na = rng.name(), nb = rng.name(), nc = rng.name(),
-                d1 = rng.name(), d2 = rng.name(), d3 = rng.name(), ri = rng.name(),
+                nk1 = nk1_n, lv = lv_n, ri = ri_n,
+                d1 = d1_n, d2 = d2_n, d3 = d3_n,
+                nn = nn_seg, dline = dline_seg, rk_tail = rk_tail_seg,
                 kreg = kreg_n, c = "chunk",
                 kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name(),
-                v = var_vm,
-                aa = var_a_arr, bb = var_b_arr, cc = var_c_arr,
-                k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
+                aa = var_a_arr, bb = var_b_arr, cc = var_c_arr));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
         }
