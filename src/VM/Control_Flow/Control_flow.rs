@@ -65,20 +65,52 @@ impl ControlFlowBuilder {
     }
 
     fn generate_opaque_predicate(val: i64, var_name: &str, comp_op: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
+        // ── 谓词池（多样化 ⑤）：四族不透明谓词，按节点随机抽取——
+        // 全部恒等于「(var) <op> val」：
+        //   A 加法式（原版）：(a<=a and a or j)+k <op> v+k
+        //   B 双差式：a-(a and a or j)+k2 <op> v+k2（sel 恒真→减自身=0，平移抵消）
+        //   C 按位族：BA(a,0XFFFF) 截低 16 位（路由值 0..27 恒等）
+        //   D 交换式：(j>a and j or (a<=a and a)) 恒取 a
+        let fam = rng.range(0, 4);
         let key = rng.range(0x10, 0xFFF) as i64;
         let mutated_val = val.wrapping_add(key);
-        format!("{}[{}][{}]({}<={} and {} or {},{}){}{}", 
-            keys.tbl_p,
-            Self::format_num(keys.grp1 as i64, rng),
-            Self::format_num(keys.key_add as i64, rng),
-            var_name, 
-            var_name, 
-            var_name, 
-            Self::format_num(rng.range(0, 0xFFFF) as i64, rng), 
-            Self::format_num(key, rng), 
-            comp_op,
-            Self::format_num(mutated_val, rng)
-        )
+        let jn = Self::format_num(rng.range(0, 0xFFFF) as i64, rng);
+        let g1 = Self::format_num(keys.grp1 as i64, rng);
+        let kadd = Self::format_num(keys.key_add as i64, rng);
+        let kba = Self::format_num(keys.key_ba as i64, rng);
+        let add_call = format!("{}[{}][{}](", keys.tbl_p, g1, kadd);
+        match fam {
+            0 => format!("{}[{}][{}]({}<={} and {} or {},{}){}{}",
+                keys.tbl_p, g1, kadd,
+                var_name, var_name, var_name, jn,
+                Self::format_num(key, rng), comp_op, Self::format_num(mutated_val, rng)),
+            1 => {
+                let k2 = rng.range(0x10, 0xFFF) as i64;
+                // 双差式：add(V,k2)-(k2 and k2 or 0) ≡ V（add 两参数齐全）
+                format!("{}{},{})-({} and {} or {}){}{}",
+                    add_call,
+                    var_name, Self::format_num(k2, rng),
+                    Self::format_num(k2, rng), Self::format_num(k2, rng), Self::format_num(0, rng),
+                    comp_op, Self::format_num(val, rng))
+            }
+            2 => {
+                // 按位族：band(V,低16位全1掩码)+key ≡ V+key（掩码随 build 随机化避免定值指纹）
+                let ba_mask = 0xFFFF + (rng.range(0, 0x10) as i64) * 0x10000;
+                format!("{}[{}][{}]({}[{}][{}]({}<={} and {} or {},{}),{}){}{}",
+                    keys.tbl_p, g1, kadd,
+                    keys.tbl_p, g1, kba,
+                    var_name, var_name, var_name, jn,
+                    Self::format_num(ba_mask, rng), Self::format_num(key, rng),
+                    comp_op, Self::format_num(mutated_val, rng))
+            }
+            _ => format!("{}({}<{} and ({}+{}-{}) or ({}<={} and {} or {})),{}){}{}",
+                add_call,
+                jn, var_name,
+                var_name, Self::format_num(key, rng), Self::format_num(key, rng),
+                var_name, var_name, var_name, jn,
+                Self::format_num(key, rng),
+                comp_op, Self::format_num(mutated_val, rng))
+        }
     }
 
     pub fn build_fast_router(
@@ -159,9 +191,41 @@ impl ControlFlowBuilder {
             Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)
         ));
 
-        out.push_str("while not(nil and false) do ");
-        
-        out.push_str(&format!("if {}=={} then ", var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)));
+        // ── 骨架多样化 ①：恒真壳池（解析器无法用单一「while 恒真」指纹定位主循环）──
+        // 三族壳运行语义相同（无限循环），形态不同：
+        //   A while not(nil and false)（原版保留）；B repeat...until (nil and false)；
+        //   C while {} do ... if (nil and false) then break end end（体首 break 哨兵）
+        let loop_kind = rng.range(0, 3);
+        match loop_kind {
+            0 => { out.push_str("while not(nil and false) do "); }
+            1 => { out.push_str("repeat "); }
+            _ => { out.push_str("while {} do "); }
+        }
+
+        // ── 骨架多样化 ②：骨架 2~4 态（原版线性二态是其中一种）──
+        // fetch(取指) → dispatch(派发) 是功能两态；中间插 0~2 个功能空转态：
+        //   check 态（d_junk 一致性自检后落到 dispatch）/ shuffle 态（打乱后落 dispatch）。
+        // 循环走「态图」：t=当前态 → 各态分支 → 无条件写下一态，解析器提不出线性两态模板。
+        let extra_states = rng.range(0, 2); // 0..=2 个中间态
+        let mut mid_states: Vec<i64> = Vec::new();
+        let mut mid_kinds: Vec<u8> = Vec::new(); // 0=check 1=shuffle
+        for _ in 0..extra_states {
+            mid_states.push(rng.range(0x3000, 0x4FFF) as i64);
+            mid_kinds.push(if rng.range(0, 2) == 0 { 0 } else { 1 });
+        }
+        // 随机中间态顺序（各自回到 dispatch）
+        let mut mid_order: Vec<usize> = (0..extra_states).collect();
+        rng.shuffle(&mut mid_order);
+
+        let dispatch_entry: String;
+        if extra_states == 0 {
+            out.push_str(&format!("if {}=={} then ", var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)));
+            dispatch_entry = String::new();
+        } else {
+            // fetch 态取指后落入第一个中间态（而非直接 dispatch）
+            out.push_str(&format!("if {}=={} then ", var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)));
+            dispatch_entry = String::new();
+        }
         out.push_str(&format!("if {}>#{} then return end;", var_pc, var_insts));
         out.push_str(&format!("{},{}={}[{}],{}+{};", var_inst, var_pc, var_insts, var_pc, var_pc, Self::obfuscate_num_depth(1, 1, &keys, rng)));
         
@@ -172,10 +236,35 @@ impl ControlFlowBuilder {
             Self::format_num(num_routes, rng)
         );
         out.push_str(&format!("{}={};", q_route, q_route_expr));
-        
+        // ── 树形多样化 ③（放弃的方案留档）：route→handler 序号置换映射会改语义
+        //（递归树的区间比较对「路由序」敏感，置换后 tree_entries 区间不再对应正确
+        // handler——实测 compare two nil）。多样化由三叉+不等宽切分承担。
         let dispatch_state = rng.range(0x1000, 0x2FFF) as i64;
-        out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
-        
+        if extra_states == 0 {
+            out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
+        } else {
+            // 态图：fetch → 第一个中间态
+            let first_mid = mid_states[mid_order[0] as usize];
+            out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(first_mid, 1, &keys, rng)));
+        }
+        // 中间态分支（check/shuffle 空转后落 dispatch；功能零影响）
+        for &mi in mid_order.iter() {
+            let st_m = mid_states[mi as usize];
+            out.push_str(&format!("elseif {}=={} then ", var_t, Self::obfuscate_num_depth(st_m, 1, &keys, rng)));
+            match mid_kinds[mi as usize] {
+                0 => {
+                    // check 态：d_junk 一致性空转自检（与原版 junk 判定同族形态）
+                    let fake_c = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
+                    out.push_str(&format!("if {}=={} then {}={}+{}; end ", d_junk, fake_c, d_junk, d_junk, Self::format_num(1, rng)));
+                }
+                _ => {
+                    // shuffle 态：无副作用交换（对临时值双写同值）
+                    let (sa, sb) = (Self::format_num(rng.range(0x10, 0xFF) as i64, rng), Self::format_num(rng.range(0x10, 0xFF) as i64, rng));
+                    out.push_str(&format!("{}={};{}={}; ", f_tmp, sa, f_tmp, sb));
+                }
+            }
+            out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
+        }
         out.push_str("elseif ");
         out.push_str(&format!("{}=={} then ", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
         out.push_str(&Self::generate_recursive_tree(
@@ -200,7 +289,13 @@ impl ControlFlowBuilder {
             var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng), var_r_vals, Self::format_num(1, rng), var_r_len, var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)
         ));
 
-        out.push_str("end end ");
+        out.push_str("end "); // 闭合骨架态图 if
+        // 壳闭合（与开头三族壳一一对应；repeat 由 until 自闭，勿多发 end）
+        match loop_kind {
+            0 => { out.push_str("end "); } // while not(...) 壳
+            1 => { out.push_str("until (nil and false) "); } // repeat 壳
+            _ => { out.push_str("if (nil and false) then break end end "); } // 哨兵 if + while {} 壳
+        }
         out
     }
 
@@ -276,7 +371,28 @@ impl ControlFlowBuilder {
             return real_leaf;
         }
 
-        let mid = (min + max) / 2;
+        let span = max - min + 1;
+        // ── 树形多样化 ④：span≥6 时约 1/3 概率用三叉节点（两次比较走三路）；
+        // 二叉时切分点随机偏移（不等宽），不再是恒等 mid
+        if span >= 6 && rng.range(0, 3) == 0 {
+            let cut1 = min + 1 + rng.range(0, (span - 2) / 2);
+            let cut2 = cut1 + 1 + rng.range(0, max - cut1 - 1);
+            let c1 = Self::generate_opaque_predicate(cut1 as i64, q_route, "<=", keys, rng);
+            let c2 = Self::generate_opaque_predicate(cut2 as i64, q_route, "<=", keys, rng);
+            let mut branch = format!("if {} then {} elseif {} then {} else {} end ",
+                c1,
+                Self::generate_recursive_tree(min, cut1, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng),
+                c2,
+                Self::generate_recursive_tree(cut1 + 1, cut2, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng),
+                Self::generate_recursive_tree(cut2 + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
+            return branch;
+        }
+        let mid = if span >= 4 && rng.range(0, 2) == 0 {
+            // 不等宽切分：mid 在 [min+1, max-1] 内随机偏移
+            min + 1 + rng.range(0, span - 2)
+        } else {
+            (min + max) / 2
+        };
         let mut branch = String::new();
         let direction = rng.range(0, 2) == 0;
 
