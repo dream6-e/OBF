@@ -950,12 +950,22 @@ impl GenRng {
                 extra.push(v);
             }
         }
-        let (x_name, arr_name, i_name) = (self.name(), self.name(), self.name());
+        let (x_name, arr_name, _i_name) = (self.name(), self.name(), self.name());
         let names: Vec<String> = (0..count).map(|_| self.name()).collect();
+        // ㉒① LCG 推导循环 → 数值游标机（原 for 的每一步都保留，只是改走
+        // while true + if G==K 的扁平化游走；P 表此刻未建，常数用混合进制字面量）。
+        let states = ((last + 7) / 8).min(8).max(2);
+        let walk_off = self.range(0, 100);
+        let walk = {
+            let (xn, an) = (x_name.clone(), arr_name.clone());
+            let (ah, mh) = (format!("0X{:X}", a), format!("0X{:X}", m));
+            let unit = |iv: &str| format!("{x}=({x}*{a})%{m};{arr}[{iv}]={x};", x = xn, a = ah, m = mh, arr = an);
+            cursor_walk_static(self, None, walk_off, 1, last as i64, states, None, &unit)
+        };
         let setup = format!(
-            "local {x}=0X{seed:X};local {arr}={{}};for {i}=1,{last} do {x}=({x}*0X{a:X})%0X{m:X};{arr}[{i}]={x} end;local {bindings}={picks}; ",
-            x = x_name, arr = arr_name, i = i_name, last = last,
-            seed = seed, a = a, m = m,
+            "local {x}=0X{seed:X};local {arr}={{}};{walk}local {bindings}={picks}; ",
+            x = x_name, arr = arr_name, walk = walk,
+            seed = seed,
             bindings = names.join(","),
             picks = kept.iter().map(|(i, _)| format!("{}[{}]", arr_name, i))
                 .chain(extra.iter().map(|v| format!("0X{:X}", v)))
@@ -1348,4 +1358,155 @@ impl StreamTable {
         }
         format!("local {}={{{}}}; ", self.name, items.join(","))
     }
+}
+
+// ── ㉒ 控制流范畴消除：数值游标步行器 + 焊接缓存 ─────────────────────
+//
+// ① 数值游标+守卫的随机游走（打 CFG 重建）：把顺序批量工作改写为
+//    `while true do if G==K then …` 的游走——每条出边 G=<混淆常量表达式>，
+//    去平坦化退化成符号执行；全程游走 ≤10 次。不是循环，是扁平化游标机。
+// ② 焊接构造（打人读）：一个 if 同时干「惰性缓存 + 大随机数当键 + 校验恒等式」
+//    三件事——`if not X then X=f(…) end` 形态第二次执行在逻辑上无分支，
+//    「这个分支会不会被走到」在文本上无法判定。长时状态只剩槽号，
+//    新增局部名压到单字母并故意重复遮蔽（ShadowNames）。
+
+/// 单字母名字池：故意循环复用同一小撮字母——兄弟作用域里反复出现同一个字母
+/// （这里 E 是载荷槽、隔一段又变成寄存器），破坏「按作用域栈读代码」的习惯。
+/// 同一作用域里允许重复声明遮蔽（Lua 允许 `local e; … local e;`）。
+pub(super) struct ShadowNames { pool: Vec<char>, i: usize }
+impl ShadowNames {
+    pub fn new(off: usize) -> Self {
+        let pool: Vec<char> = "emkqjwcgzh".chars().collect();
+        Self { pool, i: off }
+    }
+    pub fn next(&mut self) -> String {
+        let c = self.pool[self.i % self.pool.len()];
+        self.i += 1;
+        c.to_string()
+    }
+}
+
+/// 焊接缓存：3 张缓存表 + 焊接语句发射器。
+pub(super) struct WeldCache { pub tables: Vec<String>, used: std::collections::HashSet<u32>, dpool: Vec<char>, di: usize }
+impl WeldCache {
+    pub fn new(rng: &mut GenRng) -> Self {
+        Self { tables: vec![rng.name(), rng.name(), rng.name()], used: std::collections::HashSet::new(),
+               // 焊接目标名单独池：与游标机字母池（emkqjwcgzh）完全不相交，
+               // 杜绝同作用域内焊接值被游标遮蔽（cb 混合模数曾因此被除数替换）。
+               dpool: "uvnpdftybl".chars().collect(), di: rng.range(0, 10) }
+    }
+    /// 取下一个焊接目标单字母（循环复用→同字母反复承载不同状态）。
+    pub fn dst(&mut self) -> String {
+        let c = self.dpool[self.di % self.dpool.len()];
+        self.di += 1;
+        c.to_string()
+    }
+    pub fn declare(&self) -> String {
+        format!("local {a},{b},{c}={{}},{{}},{{}}; ", a = self.tables[0], b = self.tables[1], c = self.tables[2])
+    }
+    fn key(&mut self, rng: &mut GenRng) -> u32 {
+        loop {
+            let k = rng.range(0x0200_0000, 0x7FFF_FFFF) as u32;
+            if self.used.insert(k) { return k; }
+        }
+    }
+    /// 焊接语句：`if not T[k] then dst=C+((value)-C); T[k]=dst else dst=(T[k]) end;`
+    /// 三种拼写（两臂换序 / 存储拆出）。C 为校验常数；被缓存值必须是真值（数字）。
+    /// **dst 由调用方按作用域声明并复用**（局部数压到 1——同一字母在同一作用域
+    /// 里反复承载不同状态，命名维度彻底消失；也避开 Lua5.1 单函数 200 局部上限）。
+    pub fn weld(&mut self, rng: &mut GenRng, dst: &str, value: &str) -> String {
+        let d = dst;
+        let k = self.key(rng);
+        let kf = rng.format_num(k as i64);
+        let t = self.tables[rng.range(0, self.tables.len())].clone();
+        let c = rng.range64(0x1000_0000, 0x7FFF_FFFF);
+        let cs = rng.format_num(c);
+        match rng.range(0, 3) {
+            0 => format!("if not {t}[{k}] then {d}={cs}+(({v})-{cs}); {t}[{k}]={d} else {d}=({t}[{k}]) end; ",
+                         d = d, t = t, k = kf, cs = cs, v = value),
+            1 => format!("if {t}[{k}] then {d}=({t}[{k}]) else {d}={cs}+(({v})-{cs}); {t}[{k}]={d} end; ",
+                         d = d, t = t, k = kf, cs = cs, v = value),
+            _ => format!("if not {t}[{k}] then {t}[{k}]={cs}+(({v})-{cs}) end; {d}=({t}[{k}]); ",
+                         d = d, t = t, k = kf, cs = cs, v = value),
+        }
+    }
+}
+
+/// 静态分段游标步行器：原 `for i=lo,hi do <unit> end` → 游标机（≤states+1 次游走）。
+/// `unit(idx)` 产出以 `idx` 为索引名的单次迭代体。keys=None（P 表尚不在作用域）
+/// 时状态常数退化为混合进制字面量；否则走 obfuscate_num depth=1 常量表达式。
+pub(super) fn cursor_walk_static(
+    rng: &mut GenRng, keys: Option<&CipherKeys>, off: usize,
+    lo: i64, hi: i64, states: usize,
+    fix_iv: Option<&str>,
+    unit: &dyn Fn(&str) -> String,
+) -> String {
+    let mut sn = ShadowNames::new(off);
+    let g = sn.next();
+    let mut ks: Vec<i64> = Vec::new();
+    while ks.len() < states + 1 {
+        let v = rng.range64(0x0200_0000, 0x7FFF_FFFF);
+        if !ks.contains(&v) { ks.push(v); }
+    }
+    let n = (hi - lo + 1).max(1) as usize;
+    let states = states.min(n).max(1);
+    let per = (n + states - 1) / states;
+    let mut out = format!("local {}={}; while true do ", g, match keys { Some(kk) => rng.obfuscate_num(ks[0], 1, kk), None => rng.format_num(ks[0]) });
+    let mut done = 0usize; let mut sidx = 0usize; let mut cur = lo;
+    while done < n {
+        let take = per.min(n - done);
+        let seg_hi = cur + take as i64 - 1;
+        let iv = fix_iv.map(|f| f.to_string()).unwrap_or_else(|| sn.next());
+        let batch = format!("local {}={}; while {}<={} do {} {}={}+1 end; ",
+            iv, cur, iv, seg_hi, unit(&iv), iv, iv);
+        let cond = match keys { Some(kk) => rng.obfuscate_num(ks[sidx], 1, kk), None => rng.format_num(ks[sidx]) };
+        let nxt = match keys { Some(kk) => rng.obfuscate_num(ks[sidx + 1], 1, kk), None => rng.format_num(ks[sidx + 1]) };
+        let body = if rng.range(0, 10) < 4 {
+            format!("repeat {}{}={}; break until false; ", batch, g, nxt)
+        } else {
+            format!("{}{}={}; ", batch, g, nxt)
+        };
+        let kw = if sidx == 0 { "if" } else { "elseif" };
+        out.push_str(&format!("{} {}=={} then {} ", kw, g, cond, body));
+        done += take; cur = seg_hi + 1; sidx += 1;
+    }
+    out.push_str("else break end end; ");
+    out
+}
+
+/// 动态分段游标步行器：上界是运行期表达式 `n_expr`（如 chunk 数、寄存器键数）。
+/// 状态循环复用（K0→K1→…→K0），每轮推进 ≤batch 项，游标耗尽走出口态。
+/// 总游走 ≈ ceil(n/batch)+1。
+pub(super) fn cursor_walk_dyn(
+    rng: &mut GenRng, keys: Option<&CipherKeys>, off: usize,
+    n_expr: &str, batch: i64, states: usize,
+    unit: &dyn Fn(&str) -> String,
+) -> String {
+    let mut sn = ShadowNames::new(off);
+    let g = sn.next(); let idx = sn.next();
+    let mut ks: Vec<i64> = Vec::new();
+    while ks.len() < states + 1 {
+        let v = rng.range64(0x0200_0000, 0x7FFF_FFFF);
+        if !ks.contains(&v) { ks.push(v); }
+    }
+    let obf = |rr: &mut GenRng, v: i64| -> String {
+        match keys { Some(kk) => rr.obfuscate_num(v, 1, kk), None => rr.format_num(v) }
+    };
+    let mut out = format!("local {}={}; local {}=1; while true do ", g, obf(rng, ks[0]), idx);
+    for s in 0..states {
+        let cond = obf(rng, ks[s]);
+        let nxt = obf(rng, ks[(s + 1) % states]);
+        let exit_k = obf(rng, ks[states]);
+        let e = sn.next();
+        let body = format!(
+            "local {}={}; if {}+{}-1<{} then {}={}+{}-1 end; while {}<={} do {} {}={}+1 end; if {}>{} then {}={} else {}={} end; ",
+            e, n_expr, idx, batch, n_expr, e, idx, batch,
+            idx, e, unit(&idx), idx, idx,
+            idx, n_expr, g, exit_k, g, nxt);
+        let kw = if s == 0 { "if" } else { "elseif" };
+        let body = if rng.range(0, 10) < 4 { format!("repeat {}break until false; ", body) } else { body };
+        out.push_str(&format!("{} {}=={} then {} ", kw, g, cond, body));
+    }
+    out.push_str("else break end end; ");
+    out
 }

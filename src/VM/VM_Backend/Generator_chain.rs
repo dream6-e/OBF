@@ -106,6 +106,7 @@ pub(super) struct ChainIn {
     pub pm_s: [u64; 8],
     pub tag_map18: [u8; 4],
     pub fc18: crate::VM::VM_Backend::Generator_util::FoldCtx,
+    pub weld: crate::VM::VM_Backend::Generator_util::WeldCache,
 }
 
 /// 第二阶段：chacha 簇 + 解码链 + 装配，返回最终目标源码。
@@ -196,14 +197,35 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         var_state_flag,
         wai,
         xor_tbl_var,
+        weld: mut weld,
     } = x;
     // CG 原为第一阶段块内 const，随代码原样搬迁重声明（同值同路径）。
     #[allow(dead_code)]
     const CG: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
         let mut block_chacha_setup = String::new();
+        // ㉒① XOR 表构建（256×256）→ 双层数值游标机：外层扫行（8 态×32 行），
+        // 内层扫列（8 态×32 列）。经典双重 for 消失，只剩 while true + if G==K
+        // 的扁平化游走（行游标名固定 av，供内层文本引用；列表格名 rw 双字母
+        // 避开单字母遮蔽池）。每格里的位运算 while 是数据驱动的游标守卫，保留。
+        let xor_walk = {
+            use crate::VM::VM_Backend::Generator_util::{cursor_walk_static};
+            let xt2 = xor_tbl_var.clone();
+            let in_off = rng.range(0, 100);
+            let inner = {
+                let unit = |jv: &str| format!(
+                    "local x,y,r,p=av,{jv},0,1; while x>0 or y>0 do local rx,ry=x%2,y%2; if rx~=ry then r=r+p end; x,y,p=math_floor(x/2),math_floor(y/2),p*2 end; rw[{jv}]=r; ",
+                    jv = jv);
+                cursor_walk_static(&mut rng, None, in_off, 0, 255, 8, Some("cv"), &unit)
+            };
+            let out_off = rng.range(0, 100);
+            let outer_unit = |av: &str| format!(
+                "local rw={{}}; {inner} {xt}[{av}]=rw; ",
+                inner = inner, xt = xt2, av = av);
+            cursor_walk_static(&mut rng, None, out_off, 0, 255, 8, Some("av"), &outer_unit)
+        };
         block_chacha_setup.push_str(&format!(
-            "local {xt}={{}}; for a=0,255 do local row={{}}; for b=0,255 do local x,y,r,p=a,b,0,1; while x>0 or y>0 do local rx,ry=x%2,y%2; if rx~=ry then r=r+p end; x,y,p=math_floor(x/2),math_floor(y/2),p*2 end; row[b]=r end; {xt}[a]=row end; ",
-            xt = xor_tbl_var
+            "local {xt}={{}}; {walk} ",
+            xt = xor_tbl_var, walk = xor_walk
         ));
         block_chacha_setup.push_str(&format!(
             "local function {xor32}(a,b) local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/65536)%256,math_floor(a/16777216)%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/65536)%256,math_floor(b/16777216)%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*65536+{xt}[a4][b4]*16777216 end; ",
@@ -231,34 +253,54 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let m_qr1 = mk_m(&mut rng); let m_qr2 = mk_m(&mut rng);
         let x32 = fn_xor32.as_str(); let rt = fn_rotl32.as_str();
         let qr_def = match rng.range(0, 4) {
-            0 => format!(
-                "local function {qr}({S},{A},{B},{C},{D}) {S}[{A}]=({S}[{A}]+{S}[{B}])%{m1}; {S}[{D}]={x}({S}[{D}],{S}[{A}]); {S}[{D}]={r}({S}[{D}],{c1}); {S}[{C}]=({S}[{C}]+{S}[{D}])%{m1}; {S}[{B}]={x}({S}[{B}],{S}[{C}]); {S}[{B}]={r}({S}[{B}],{c2}); {S}[{A}]=({S}[{A}]+{S}[{B}])%{m1}; {S}[{D}]={x}({S}[{D}],{S}[{A}]); {S}[{D}]={r}({S}[{D}],{c3}); {S}[{C}]=({S}[{C}]+{S}[{D}])%{m1}; {S}[{B}]={x}({S}[{B}],{S}[{C}]); {S}[{B}]={r}({S}[{B}],{c4}) end; ",
-                qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD,
-                m1 = m_qr1, x = x32, r = rt, c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e),
+            0 => {
+                // ㉒② 焊接模数：QR 每块 20 轮重入，第二次起该 if 逻辑上无分支。
+                let qe = weld.dst();
+                let qw = format!("local {};", qe) + &weld.weld(&mut rng, &qe, &m_qr1);
+                format!(
+                "local function {qr}({S},{A},{B},{C},{D}) {w} {S}[{A}]=({S}[{A}]+{S}[{B}])%{m1}; {S}[{D}]={x}({S}[{D}],{S}[{A}]); {S}[{D}]={r}({S}[{D}],{c1}); {S}[{C}]=({S}[{C}]+{S}[{D}])%{m1}; {S}[{B}]={x}({S}[{B}],{S}[{C}]); {S}[{B}]={r}({S}[{B}],{c2}); {S}[{A}]=({S}[{A}]+{S}[{B}])%{m1}; {S}[{D}]={x}({S}[{D}],{S}[{A}]); {S}[{D}]={r}({S}[{D}],{c3}); {S}[{C}]=({S}[{C}]+{S}[{D}])%{m1}; {S}[{B}]={x}({S}[{B}],{S}[{C}]); {S}[{B}]={r}({S}[{B}],{c4}) end; ",
+                qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD, w = qw,
+                m1 = qe, x = x32, r = rt, c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
+            },
             1 => {
                 // 半轮助手四连调用：视觉上不再是「加/异或/移位」三连奏
                 let hname = rng.name(); let m_h = mk_m(&mut rng);
+                let he = weld.dst();
+                let hw = format!("local {};", he) + &weld.weld(&mut rng, &he, &m_h);
                 format!(
-                    "local function {h}({S},{U},{V},{W},{Rr}) {S}[{U}]=({S}[{U}]+{S}[{V}])%{m}; {S}[{W}]={x}({S}[{W}],{S}[{U}]); {S}[{W}]={r}({S}[{W}],{Rr}) end; local function {qr}({S},{A},{B},{C},{D}) {h}({S},{A},{B},{D},{c1}); {h}({S},{C},{D},{B},{c2}); {h}({S},{A},{B},{D},{c3}); {h}({S},{C},{D},{B},{c4}) end; ",
-                    h = hname, qr = fn_qr, S = qS, U = rng.name(), V = rng.name(), W = rng.name(), Rr = rng.name(),
-                    A = qA, B = qB, C = qC, D = qD, m = m_h, x = x32, r = rt,
+                    "local function {h}({S},{U},{V},{W},{Rr}) {w} {S}[{U}]=({S}[{U}]+{S}[{V}])%{m}; {S}[{W}]={x}({S}[{W}],{S}[{U}]); {S}[{W}]={r}({S}[{W}],{Rr}) end; local function {qr}({S},{A},{B},{C},{D}) {h}({S},{A},{B},{D},{c1}); {h}({S},{C},{D},{B},{c2}); {h}({S},{A},{B},{D},{c3}); {h}({S},{C},{D},{B},{c4}) end; ",
+                    h = hname, qr = fn_qr, S = qS, U = rng.name(), V = rng.name(), W = rng.name(), Rr = rng.name(), w = hw,
+                    A = qA, B = qB, C = qC, D = qD, m = he, x = x32, r = rt,
                     c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
             }
             2 => {
                 // 局部化平展：热路径零表索引，收尾一次写回
-                format!(
-                    "local function {qr}({S},{A},{B},{C},{D}) local {a},{b},{c},{d}={S}[{A}],{S}[{B}],{S}[{C}],{S}[{D}]; {a}=({a}+{b})%{m1}; {d}={x}({d},{a}); {d}={r}({d},{c1}); {c}=({c}+{d})%{m1}; {b}={x}({b},{c}); {b}={r}({b},{c2}); {a}=({a}+{b})%{m1}; {d}={x}({d},{a}); {d}={r}({d},{c3}); {c}=({c}+{d})%{m1}; {b}={x}({b},{c}); {b}={r}({b},{c4}); {S}[{A}],{S}[{B}],{S}[{C}],{S}[{D}]={a},{b},{c},{d} end; ",
-                    qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD,
+                {
+                    let qe2 = weld.dst();
+                    let qw2 = format!("local {};", qe2) + &weld.weld(&mut rng, &qe2, &m_qr1);
+                    format!(
+                    "local function {qr}({S},{A},{B},{C},{D}) local {a},{b},{c},{d}={S}[{A}],{S}[{B}],{S}[{C}],{S}[{D}]; {w} {a}=({a}+{b})%{m1}; {d}={x}({d},{a}); {d}={r}({d},{c1}); {c}=({c}+{d})%{m1}; {b}={x}({b},{c}); {b}={r}({b},{c2}); {a}=({a}+{b})%{m1}; {d}={x}({d},{a}); {d}={r}({d},{c3}); {c}=({c}+{d})%{m1}; {b}={x}({b},{c}); {b}={r}({b},{c4}); {S}[{A}],{S}[{B}],{S}[{C}],{S}[{D}]={a},{b},{c},{d} end; ",
+                    qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD, w = qw2,
                     a = rng.name(), b = rng.name(), c = rng.name(), d = rng.name(),
-                    m1 = m_qr1, x = x32, r = rt, c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
+                    m1 = qe2, x = x32, r = rt, c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
+                }
             }
             _ => {
                 // 步骤闭包表+驱动：与 QR 形态最远（12 个无序可读的单操作闭包）
                 let st = rng.name(); let m_s = mk_m(&mut rng);
+                // ㉒② 模数焊接（闭包捕获焊接值）；㉒① 12 闭包驱动环 → 3 态游标机。
+                let qe3 = weld.dst();
+                let qw3 = format!("local {};", qe3) + &weld.weld(&mut rng, &qe3, &m_s);
+                let qw_off = rng.range(0, 100);
+                let st2 = st.clone();
+                let qwalk = {
+                    let unit = |iv: &str| format!("{}[{}](); ", st2, iv);
+                    crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, qw_off, 1, 12, 3, None, &unit)
+                };
                 format!(
-                    "local function {qr}({S},{A},{B},{C},{D}) local {st}={{function() {S}[{A}]=({S}[{A}]+{S}[{B}])%{m} end,function() {S}[{D}]={x}({S}[{D}],{S}[{A}]) end,function() {S}[{D}]={r}({S}[{D}],{c1}) end,function() {S}[{C}]=({S}[{C}]+{S}[{D}])%{m} end,function() {S}[{B}]={x}({S}[{B}],{S}[{C}]) end,function() {S}[{B}]={r}({S}[{B}],{c2}) end,function() {S}[{A}]=({S}[{A}]+{S}[{B}])%{m} end,function() {S}[{D}]={x}({S}[{D}],{S}[{A}]) end,function() {S}[{D}]={r}({S}[{D}],{c3}) end,function() {S}[{C}]=({S}[{C}]+{S}[{D}])%{m} end,function() {S}[{B}]={x}({S}[{B}],{S}[{C}]) end,function() {S}[{B}]={r}({S}[{B}],{c4}) end}}; for {i}=1,#{st} do {st}[{i}]() end end; ",
-                    qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD,
-                    st = st, i = rng.name(), m = m_s, x = x32, r = rt,
+                    "local function {qr}({S},{A},{B},{C},{D}) {w} local {st}={{function() {S}[{A}]=({S}[{A}]+{S}[{B}])%{m} end,function() {S}[{D}]={x}({S}[{D}],{S}[{A}]) end,function() {S}[{D}]={r}({S}[{D}],{c1}) end,function() {S}[{C}]=({S}[{C}]+{S}[{D}])%{m} end,function() {S}[{B}]={x}({S}[{B}],{S}[{C}]) end,function() {S}[{B}]={r}({S}[{B}],{c2}) end,function() {S}[{A}]=({S}[{A}]+{S}[{B}])%{m} end,function() {S}[{D}]={x}({S}[{D}],{S}[{A}]) end,function() {S}[{D}]={r}({S}[{D}],{c3}) end,function() {S}[{C}]=({S}[{C}]+{S}[{D}])%{m} end,function() {S}[{B}]={x}({S}[{B}],{S}[{C}]) end,function() {S}[{B}]={r}({S}[{B}],{c4}) end}}; {walk} end; ",
+                    qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD, w = qw3, walk = qwalk,
+                    st = st, m = qe3, x = x32, r = rt,
                     c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
             }
         };
@@ -311,16 +353,36 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             cl.push_str(&format!(
                 "local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
                 kn = kname, key_lua = key_lua, sl = slname, salt_lua = salt_lua));
+            // ㉒ 簇内 cb 同 boot 域处理：焊接混合模数 + 两条 16 环游标化。
+            let gmix_v = mk_m(&mut rng);
+            let gmix_e = weld.dst();
+            let gmix_weld = format!("local {};", gmix_e) + &weld.weld(&mut rng, &gmix_e, &format!("({})", gmix_v));
+            let gs1_walk = {
+                let off = rng.range(0, 100);
+                let unit = |iv: &str| format!("o[{iv}]=s[{iv}]; ", iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
+            };
+            let gs2_walk = {
+                let off = rng.range(0, 100);
+                let me = gmix_e.clone();
+                let unit = |iv: &str| format!("local wq=(s[{iv}]+o[{iv}])%{me}; out[({iv}-1)*4+1]=wq%256; out[({iv}-1)*4+2]=math_floor(wq/256)%256; out[({iv}-1)*4+3]=math_floor(wq/65536)%256; out[({iv}-1)*4+4]=math_floor(wq/16777216)%256; ", me = me, iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
+            };
             cl.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; {rounds} local out={{}}; for i=1,16 do local w=(s[i]+o[i])%{mix_m}; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
-                cb = cbname, kn = kname, sig = sigma_lua,
-                rounds = mk_rounds(&mut rng, fn_qr.as_str()), mix_m = mk_m(&mut rng)));
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; {w1} {rounds} local out={{}}; {w2} return out end; ",
+                cb = cbname, kn = kname, sig = sigma_lua, mixw = gmix_weld, w1 = gs1_walk, w2 = gs2_walk,
+                rounds = mk_rounds(&mut rng, fn_qr.as_str())));
             // ㉓-A sm 换公式：nonce=[盐^roll^fold, r7^(槽*6+kind), 盐^rotl7(r7)]——
             // layouts 直传退役；roll/fold 由 body_consts 扫描重算后经 dsp 透传
             let salt_v18 = slname.as_str();
+            let gsm_walk = {
+                let off = rng.range(0, 100);
+                let unit = |iv: &str| format!("if pos>n then break end; out[pos]=blk[{iv}]; pos=pos+1; ", iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 64, 4, None, &unit)
+            };
             cl.push_str(&format!(
-                "local function {sm}(pool_idx,kind,n,fold,rl) local out={{}}; local ctr=0; local pos=1; local {r7v}={rot}(rl or 0X0,0X7); while pos<=n do local blk={cb}({bx}({bx}({sl},rl or 0X0),fold or 0X0), {bx}({r7v},pool_idx*0X6+kind), {bx}({sl},{rot}({r7v},0X7)), ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
-                sm = sname, cb = cbname, sl = salt_v18, bx = fn_bxor.as_str(), rot = fn_rotl32.as_str(), r7v = rng.name()));
+                "local function {sm}(pool_idx,kind,n,fold,rl) local out={{}}; local ctr=0; local pos=1; local {r7v}={rot}(rl or 0X0,0X7); while pos<=n do local blk={cb}({bx}({bx}({sl},rl or 0X0),fold or 0X0), {bx}({r7v},pool_idx*0X6+kind), {bx}({sl},{rot}({r7v},0X7)), ctr); {w64} ctr=ctr+1 end; return out end; ",
+                sm = sname, cb = cbname, sl = salt_v18, bx = fn_bxor.as_str(), rot = fn_rotl32.as_str(), r7v = rng.name(), w64 = gsm_walk));
             // 组专属解码器：kind 常量内嵌（每组不同随机值），下标参数=节内槽位号
             let (vb, vs, ve, vm) = (rng.name(), rng.name(), rng.name(), rng.name());
             let mut f64_parts = vec![format!("({vb}[7]%16)*2^48", vb = vb), format!("({vb}[6]*2^40)", vb = vb), format!("({vb}[5]*2^32)", vb = vb), format!("({vb}[4]*2^24)", vb = vb), format!("({vb}[3]*2^16)", vb = vb), format!("({vb}[2]*2^8)", vb = vb), format!("{vb}[1]", vb = vb)];
@@ -727,6 +789,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
         out.push_str(&format!("local {np},{md},{th},{tw},{rk},{kreg},{psn}=0,{{}},{{}},0X0,0X0,setmetatable({{}},{{__mode='k'}}),false; ", np = np21, md = md21, th = th21, tw = tw21, rk = rk21, kreg = kreg_n, psn = psn_n));
+        // ㉒② 焊接缓存表声明：长时状态只剩槽号；此后各站点以「一个 if 三件事」
+        // 形态（惰性缓存+大随机数当键+校验恒等式）发射焊接构造。
+        out.push_str(&weld.declare());
         // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
         // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
         out.push_str(&line_guard(&mut rng));
@@ -798,13 +863,35 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             out.push_str(&format!(
                 "local {bp}={{{lits}}}; local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
                 bp = bpt, lits = boot_lits.join(","), kn = bk, key_lua = key_lua, sl = bs, salt_lua = salt_lua));
+            // ㉒② 焊接混合模数（cb 每 64 字节块重入——第二次起逻辑无分支）；
+            // ㉒① 两条 16 环 → 4 态游标机（块内局部名 wq 双字母避开遮蔽池）。
+            let mix_m_v = mk_m(&mut rng);
+            let mix_e = weld.dst();
+            let mix_weld = format!("local {};", mix_e) + &weld.weld(&mut rng, &mix_e, &format!("({})", mix_m_v));
+            let s1_walk = {
+                let off = rng.range(0, 100);
+                let unit = |iv: &str| format!("o[{iv}]=s[{iv}]; ", iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
+            };
+            let s2_walk = {
+                let off = rng.range(0, 100);
+                let me = mix_e.clone();
+                let unit = |iv: &str| format!("local wq=(s[{iv}]+o[{iv}])%{me}; out[({iv}-1)*4+1]=wq%256; out[({iv}-1)*4+2]=math_floor(wq/256)%256; out[({iv}-1)*4+3]=math_floor(wq/65536)%256; out[({iv}-1)*4+4]=math_floor(wq/16777216)%256; ", me = me, iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
+            };
             out.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; {rounds} local out={{}}; for i=1,16 do local w=(s[i]+o[i])%{mix_m}; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
-                cb = bcb, kn = bk, sig = sigma_lua,
-                rounds = mk_rounds(&mut rng, fn_qr.as_str()), mix_m = mk_m(&mut rng)));
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; {w1} {rounds} local out={{}}; {w2} return out end; ",
+                cb = bcb, kn = bk, sig = sigma_lua, mixw = mix_weld, w1 = s1_walk, w2 = s2_walk,
+                rounds = mk_rounds(&mut rng, fn_qr.as_str())));
+            // ㉒① 64 字节分发环 → 4 态游标机（pos>n 提前出口保留为批内 break）。
+            let sm_walk = {
+                let off = rng.range(0, 100);
+                let unit = |iv: &str| format!("if pos>n then break end; out[pos]=blk[{iv}]; pos=pos+1; ", iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 64, 4, None, &unit)
+            };
             out.push_str(&format!(
-                "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({sl},pool_idx,kind,ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
-                sm = bsm, cb = bcb, sl = bs));
+                "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({sl},pool_idx,kind,ctr); {w64} ctr=ctr+1 end; return out end; ",
+                sm = bsm, cb = bcb, sl = bs, w64 = sm_walk));
             let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
             let fd18b = rng.name(); // 哑形参：boot 域 bsm 是 3 参，fold/rl 实参多余即弃
             let rl18b = rng.name();
@@ -813,14 +900,22 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &mut rng, bdec.as_str(), bsm.as_str(), bkind_lit.as_str(),
                 xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
                 v_str_i.as_str(), v_str_g.as_str(), fd18b.as_str(), rl18b.as_str()));
+            // ㉒② 每个内建槽号过一次焊接构造：惰性缓存+大随机键+校验恒等式。
+            // 全块只声明一个单字母局部（do 域内复用——E 先是载荷槽、下一个内建又变
+            // 寄存器位），局部数不膨胀，命名维度消失。
+            let bi_e = weld.dst();
+            out.push_str(&format!("do local {};", bi_e));
             for (i, _) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
                 let slot = builtin_slot_perm[i];
+                let wslot_stmt = weld.weld(&mut rng, &bi_e, &(slot + 1).to_string());
                 out.push_str(&format!(
-                    "{bname}={bdec}({bp}[{lidx}],{ridx}); {reg}[{slot}]={benv}[{bname}]; if {reg}[{slot}]==nil and getgenv then {reg}[{slot}]=getgenv()[{bname}] end; ",
+                    "{bname}={bdec}({bp}[{lidx}],{ridx}); {ws} {reg}[{we}]={benv}[{bname}]; if {reg}[{we}]==nil and getgenv then {reg}[{we}]=getgenv()[{bname}] end; ",
                     bname = var_bname, bdec = bdec, bp = bpt, lidx = i + 1, ridx = i,
-                    reg = var_builtin_reg, slot = slot + 1, benv = var_boot_env
+                    ws = wslot_stmt, we = bi_e,
+                    reg = var_builtin_reg, benv = var_boot_env
                 ));
             }
+            out.push_str(" end; ");
             // ⑱ 用毕销毁（⑳.1 伪装化）：连续 X=nil 运行是指纹——每个变量换一种
             // "取值赋值" 形态消化，nil 全部来自合法表达式的自然缺失：
             // 槽位表取未用键 / 未命中补取(恒执行) / 空表取键 / or 链 /
@@ -841,8 +936,14 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5, h6 = h6));
         }
         // ㉑ thunk 快照：密文 thunk 常驻，明文可随时写回回收
-        out.push_str(&format!("for {j}=1,{np} do {th}[{j}]={md}[{j}] end; ",
-            j = rng.name(), np = np21, th = th21, md = md21));
+        // ㉒① thunk 快照环 → 动态分段游标机（上界=运行期原型数，P 表在作用域）。
+        let thunk_walk = {
+            let (th2, md2) = (th21.clone(), md21.clone());
+            let off = rng.range(0, 100);
+            let unit = |iv: &str| format!("{th}[{iv}]={md}[{iv}]; ", th = th2, md = md2, iv = iv);
+            crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &np21, 2, 3, &unit)
+        };
+        out.push_str(&thunk_walk);
         let fu = rng.name();
         
         // ⑳.5 尾部探针：此前最后一个采样点在 parts 之后——main_chunk 解码/内建簇/

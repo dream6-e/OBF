@@ -52,6 +52,8 @@ impl Generator {
         let pf_vn = rng.name();
         
         let key_seed_var = rng.name();
+        // ㉒② 焊接缓存：三张缓存表随产物生成，供第二/三阶段各站点发射焊接构造。
+        let mut weld = crate::VM::VM_Backend::Generator_util::WeldCache::new(&mut rng);
         let mut at = AntiTamper::generate_split(true, &key_seed_var);
         
         let mut used_ops = HashSet::new();
@@ -814,26 +816,43 @@ impl Generator {
                     kreg_n, "chunk", nk1_n, stmts[0], stmts[1], stmts[2],
                     n_mk1, n_mk2, n_mk3, na_n, nb_n, nc_n)
             };
+            // ㉒② 焊接 2^32 模数（execute 换钥分支每次重走——第二次起逻辑无分支）；
+            // ㉒① thunk 回写环、寄存器键轮换环 → 动态分段数值游标机
+            // （execute 作用域内 P 表已建，状态常数走 obfuscate_num 算式化出边）。
+            let w2_dst = weld.dst();
+            let w2_stmt = format!("local {};", w2_dst) + &weld.weld(&mut rng, &w2_dst, "4294967296");
+            let md_walk = {
+                let (md2, th2) = (md21.clone(), th21.clone());
+                let off = rng.range(0, 100);
+                let unit = |iv: &str| format!("if type({md}[{iv}])=='table' then {md}[{iv}]={th}[{iv}] end; ", md = md2, th = th2, iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &format!("#{}", md21), 2, 3, &unit)
+            };
+            let rot_walk = {
+                let (aa2, bb2, cc2, d12, d22, d32, bx2) = (var_a_arr.clone(), var_b_arr.clone(), var_c_arr.clone(), d1_n.clone(), d2_n.clone(), d3_n.clone(), fn_bxor2.clone());
+                let off = rng.range(0, 100);
+                let nexp = format!("{}[chunk][2]", kreg_n);
+                let unit = |iv: &str| format!("{aa}[{iv}]={bx}({aa}[{iv}],{d1}); {bb}[{iv}]={bx}({bb}[{iv}],{d2}); {cc}[{iv}]={bx}({cc}[{iv}],{d3}); ", aa = aa2, bb = bb2, cc = cc2, bx = bx2, d1 = d12, d2 = d22, d3 = d32, iv = iv);
+                crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &nexp, 3, 3, &unit)
+            };
             block_execute_def.push_str(&format!(
-                "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; for {j}=1,#{md} do if type({md}[{j}])=='table' then {md}[{j}]={th}[{j}] end end; \
+                "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; {mdw} \
                  {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
                    local {kmt}=getmetatable({kreg}); local {kold}={kreg}; {kreg}=setmetatable({{}},{{}}); setmetatable({kreg},{kmt}); for {kc1},{kv1} in pairs({kold}) do {kreg}[{kc1}]={kv1} end; \
-                   local {lv}={c}.{lld}; local {nk1}={bx}({kon},{pc}%4294967296)%4294967296; {nn} \
+                   local {lv}={c}.{lld}; {w2} local {nk1}={bx}({kon},{pc}%{m32})%{m32}; {nn} \
                    {dline} \
-                   for {ri}=1,{kreg}[{c}][2] do {aa}[{ri}]={bx}({aa}[{ri}],{d1}); {bb}[{ri}]={bx}({bb}[{ri}],{d2}); {cc}[{ri}]={bx}({cc}[{ri}],{d3}) end; \
+                   {rotw} \
                    {rk_tail} \
                  end end; ",
                 flg = var_state_flag, pc = var_pc, tw = tw21, sx = step21,
-                j = rng.name(), md = md21, th = th21,
+                mdw = md_walk,
                 rk = rk21, rn = rng.format_num(rkey_every as i64),
                 bx = fn_bxor2.as_str(),
                 lld = pf_lld, kon = n_kon,
-                nk1 = nk1_n, lv = lv_n, ri = ri_n,
-                d1 = d1_n, d2 = d2_n, d3 = d3_n,
+                w2 = w2_stmt, m32 = w2_dst,
+                nk1 = nk1_n, lv = lv_n,
                 nn = nn_seg, dline = dline_seg, rk_tail = rk_tail_seg,
-                kreg = kreg_n, c = "chunk",
-                kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name(),
-                aa = var_a_arr, bb = var_b_arr, cc = var_c_arr));
+                kreg = kreg_n, c = "chunk", rotw = rot_walk,
+                kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
         }
@@ -860,6 +879,7 @@ impl Generator {
             var_b, var_builtin_reg, var_chk, var_idx, var_junk, var_p, var_raw_p, var_tamper, var_vc, np21,
             md21, th21, tw21, rk21, kreg_n,
             fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, sk_setup, t, x, var_bname, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
+            weld,
         })
     }
 }
