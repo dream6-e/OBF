@@ -430,6 +430,8 @@ impl Generator {
         // ⑱.4 掩码槽键：execute 入口派生后写槽，冷块（CLOSURE 等）中程读自取——
         // 必须走 slot_key_block 池；裸 rng.name() 键不在池里=运行时 nil 键（前车之鉴）
         let k_mk1 = sk[20].clone(); let k_mk2 = sk[21].clone(); let k_mk3 = sk[22].clone();
+        // 中危刀1 密钥分驻：kp/pb/cnt 不入 chunk 表也不入 VM 槽（嵌套闭包交错会串），
+        // 存弱键注册表 KREG（键=chunk 表）——与被掩码数组异表分驻，重解原型自动回收
         let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
         let k_upv = sk[9].clone(); let k_env = sk[10].clone();
         let k_va = sk[11].clone(); let k_valen = sk[12].clone();
@@ -588,15 +590,26 @@ impl Generator {
         // ⑱.4 驻留收紧：水位步长从 0x8000~0x40000 降到 0x2000~0x8000——
         // proto 明文窗口按 1/4~1/8 频率写回 thunk，dump 窗口随之缩短
         let step21 = rng.range(0x2000, 0x8000);
+        // 中危刀1 纪元换钥：每 rn 次水位事件重派生 kp/pb 并原位重掩码三数组
+        //（旧钥即弃，跨时刻两份 dump 无法互推；rn 放大换钥摊销成本）
+        let rk21 = rng.name();
+        let rkey_every = rng.range(4, 16);
+        let kreg_n = rng.name();
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
         block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, k_pc, var_vm, k_top));
 
         // ⑱.4 数组驻留掩码：body_insts 存的是逐原型掩码值（K 从 kp/pb 派生，同式）。
-        // n_mk1..3 已在中程读站点改写前生成（两处同名）；派生后写掩码槽供冷块自取
+        // 中危刀1 密钥分驻：pf_ld（仅掩码用）从 chunk 蒸发进弱键注册表 KREG（键=chunk）；
+        // pf_lld 是入口 pc 基址（每次入口读）必须留在 chunk——半分量分驻+换钥兜底
+        let (n_kon, n_ka) = (rng.name(), rng.name());
         block_execute_def.push_str(&format!(
-            "local {ma},{mb},{mc}={bx}({c}.{ld},{c}.{lld}),{bx}({c}.{ld},{bx}({c}.{ld},{c}.{lld})),{bx}({c}.{lld},{bx}({c}.{ld},{c}.{lld})); {v}[{k1}]={ma};{v}[{k2}]={mb};{v}[{k3}]={mc}; ",
+            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt} end; \
+             local {ka}={bx}({kon},{c}.{lld}); \
+             local {ma},{mb},{mc}={ka},{bx}({kon},{ka}),{bx}({c}.{lld},{ka}); {v}[{k1}]={ma};{v}[{k2}]={mb};{v}[{k3}]={mc}; ",
+            kon = n_kon, kreg = kreg_n,
+            ka = n_ka,
             ma = n_mk1, mb = n_mk2, mc = n_mk3,
-            bx = fn_bxor2.as_str(), c = "chunk", v = var_vm, ld = pf_ld, lld = pf_lld,
+            bx = fn_bxor2.as_str(), c = "chunk", v = var_vm, ld = pf_ld, lld = pf_lld, cnt = pf_cnt18,
             k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）
@@ -621,9 +634,25 @@ impl Generator {
             // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
             // 活跃闭包持有明文引用不受影响；未来 CLOSURE 经 type(p)=='function' 重解
             block_execute_def.push_str(&format!(
-                "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; for {j}=1,#{md} do if type({md}[{j}])=='table' then {md}[{j}]={th}[{j}] end end end; ",
+                "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; for {j}=1,#{md} do if type({md}[{j}])=='table' then {md}[{j}]={th}[{j}] end end; \
+                 {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
+                   local {lv}={c}.{lld}; local {nk1}={bx}({kon},{pc}%4294967296)%4294967296; \
+                   local {na},{nb},{nc}={bx}({nk1},{lv}),{bx}({nk1},{bx}({nk1},{lv})),{bx}({lv},{bx}({nk1},{lv})); \
+                   local {d1},{d2},{d3}={bx}({ma},{na}),{bx}({mb},{nb}),{bx}({mc},{nc}); \
+                   for {ri}=1,{kreg}[{c}][2] do {aa}[{ri}]={bx}({aa}[{ri}],{d1}); {bb}[{ri}]={bx}({bb}[{ri}],{d2}); {cc}[{ri}]={bx}({cc}[{ri}],{d3}) end; \
+                   {kreg}[{c}][1]={nk1}; {v}[{k1}]={na}; {v}[{k2}]={nb}; {v}[{k3}]={nc}; {ma},{mb},{mc}={na},{nb},{nc}; \
+                 end end; ",
                 flg = var_state_flag, pc = var_pc, tw = tw21, sx = step21,
-                j = rng.name(), md = md21, th = th21));
+                j = rng.name(), md = md21, th = th21,
+                rk = rk21, rn = rng.format_num(rkey_every as i64),
+                bx = fn_bxor2.as_str(), ma = n_mk1, mb = n_mk2, mc = n_mk3,
+                lld = pf_lld, kon = n_kon,
+                nk1 = rng.name(), lv = rng.name(), na = rng.name(), nb = rng.name(), nc = rng.name(),
+                d1 = rng.name(), d2 = rng.name(), d3 = rng.name(), ri = rng.name(),
+                kreg = kreg_n, c = "chunk",
+                v = var_vm,
+                aa = var_a_arr, bb = var_b_arr, cc = var_c_arr,
+                k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
         }
@@ -1092,7 +1121,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&header_block);
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
-        out.push_str(&format!("local {np},{md},{th},{tw}=0,{{}},{{}},0X0; ", np = np21, md = md21, th = th21, tw = tw21));
+        out.push_str(&format!("local {np},{md},{th},{tw},{rk},{kreg}=0,{{}},{{}},0X0,0X0,setmetatable({{}},{{__mode='k'}}); ", np = np21, md = md21, th = th21, tw = tw21, rk = rk21, kreg = kreg_n));
         // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
         // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
         out.push_str(&line_guard(&mut rng));
