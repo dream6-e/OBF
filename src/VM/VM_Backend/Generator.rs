@@ -551,10 +551,12 @@ impl Generator {
         // 静态蜜罐注册（永不路由）：形似真 handler 的假块，逆向分析陷阱
         for &dop in decoy_ops.iter() {
             let (dg, skv) = (rng.name(), rng.name());
+            let (ha_, hb_) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
+            let htaut = format!("(0X{:X}-0X{:X}==0X{:X})", ha_, hb_, ha_ - hb_);
             defs.push(format!(
-                "{mv}.{nm}=function(self,op,inst_A,inst_B,inst_C) local {dg}={bx2}(op,0X{dop:X})%4294967296; local {skv}=self[{ks}]; {skv}[self[{kt}]+0X1]={dg}; self[{kt}]=self[{kt}]+0X1; {psn}=true end;",
+                "{mv}.{nm}=function(self,op,inst_A,inst_B,inst_C) local {dg}={bx2}(op,0X{dop:X})%4294967296; local {skv}=self[{ks}]; {skv}[self[{kt}]+0X1]={dg}; self[{kt}]=self[{kt}]+0X1; {psn}={psn} or {taut} end;",
                 mv = var_methods, nm = rng.name(), dg = dg, bx2 = fn_bxor2.as_str(),
-                dop = dop, skv = skv, ks = k_stk, kt = k_top, psn = psn_n));
+                dop = dop, skv = skv, ks = k_stk, kt = k_top, psn = psn_n, taut = htaut));
         }
         // ③ 随机代码块分配：注册顺序打乱，分发树按**状态号**（随机大整数）路由
         rng.shuffle(&mut defs);
@@ -1049,6 +1051,10 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             // 触发语句按随机形态收尾（直尾 / if not u 尾）——触发语义不变：
             // u=nil 时 ts 仍抛同型自然错误
             let (f1, f2) = (rng.name(), rng.name());
+            // 投毒赋值去 "=true" 指纹：差式恒真谓词（0XA-0XB==0XC，逐守卫实例随机，
+            // 与库内既有差式数字形态一致）；psn=psn or (…) 幂等
+            let (ga, gb) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
+            let taut = format!("(0X{:X}-0X{:X}==0X{:X})", ga, gb, ga - gb);
             let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}=type({u}); ",
                 u = p_u, h = p_hit, tol = tolerant, f1 = f1);
             let mut hopts = vec![
@@ -1064,9 +1070,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             // 诱饵化：命中失败不再抛同型错误（用户指示：运行不报错）——
             // 改置投毒旗（后续常量解码全乱码、程序走进错误分支），形态保持 if not u 触发族
             if rng.range(0, 2) == 0 {
-                ht_body.push_str(&format!("if not {u} then {psn}=true else {ts} end; ", u = p_u, psn = psn_n, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {psn}={psn} or {taut} else {ts} end; ", u = p_u, psn = psn_n, taut = taut, ts = ts));
             } else {
-                ht_body.push_str(&format!("if not {u} then {psn}=true end; if {u} then {ts} end; ", u = p_u, psn = psn_n, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {psn}={psn} or {taut} end; if {u} then {ts} end; ", u = p_u, psn = psn_n, taut = taut, ts = ts));
             }
             let mut ms = vec![
                 format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",

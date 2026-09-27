@@ -465,13 +465,20 @@ pub fn build_consts(
                 let ftds = rng.name();
                 let rtds = rng.name(); // ㉓-A Rtbl：li → 最后引用指令后的 R 状态
                 let rfds = rng.name(); // 链末兜底
+                let k_dsp = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64) | 1;
+                let k_mul = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64) | 1;
+                let k_add = rng.range(0x1_0000, 0xFFFF_FFFF) as i64;
+                let k_smul = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64) | 1;
+                let (kdsp_s, kmul_s, kadd_s, ksmul_s) = (
+                    format!("0X{:X}", k_dsp), format!("0X{:X}", k_mul),
+                    format!("0X{:X}", k_add), format!("0X{:X}", k_smul));
                 let mut dsp_defs = vec![
                     format!("{d}[{t3}]=function({ddd},ev) return {fds}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
                         d = dsp_name, t3 = three, fds = fds, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
                     format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
                         d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
                     format!("{d}[{t1}]=function({ddd},ev) return ev[(0X2)] end; ", d = dsp_name, t1 = one, ddd = ddd),
-                    format!("{d}[{dd}]=function(ev) return {kobf}..((({dd}*2654435761))%4294967296) end; ", d = dsp_name, dd = decoy_dsp, kobf = sc_kobf),
+                    format!("{d}[{dd}]=function(ev) return {kobf}..((({dd}*{kdsp}))%4294967296) end; ", d = dsp_name, dd = decoy_dsp, kobf = sc_kobf, kdsp = kdsp_s),
                 ];
                 rng.shuffle(&mut dsp_defs);
                 // 读入侧：tag → 装载闭包（定义顺序洗牌）
@@ -498,6 +505,9 @@ pub fn build_consts(
                 // 「程序运行至今累计」的完整常量明文表；记录保留可重复解密
                 let (ecb_n, cab_n) = (rng.name(), rng.name());
                 let pfn_n = rng.name();
+                // 诱饵/投毒常数逐产物随机（去黄金比例 2654435761/9E3779B9 指纹）：
+                // 乘数取奇数保证双射性（mod 2^32 下奇乘可逆）
+
                 let (wctr, wlim) = (rng.name(), rng.range(0x2000, 0x10000));
                 let mut lua = format!(
                     // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
@@ -505,10 +515,10 @@ pub fn build_consts(
                     "local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
                      local {dsp},{ld}={{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
-                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*2654435761+0X9E3779B9)%4294967296 elseif tq=='string' then return {kobf}..(((#q)*2654435761)%4294967296) elseif tq=='boolean' then return not q end return q end; ",
+                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*{kmul}+{kadd})%4294967296 elseif tq=='string' then return {kobf}..((#q*{ksmul})%4294967296) elseif tq=='boolean' then return not q end return q end; ",
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
-                    wctr = wctr, pfn = pfn_n, kobf = sc_kobf,
+                    wctr = wctr, pfn = pfn_n, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
                     m1 = rng.name(), m2 = rng.name(),
                     dsp = dsp_name, ld = ld_name,
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
