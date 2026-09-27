@@ -587,7 +587,10 @@ impl Expr {
                         TableField::Rec(k, v) => {
                             match k {
                                 Expr::String(s) if !s.contains('"') && !s.contains('\'') && s.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
-                                    let mapped_s = if s.len() > 4 && !is_reserved_member(s) {
+                                    // ㉖.4 元方法协议键（__index/__newindex/__mode/…）是 Lua 内部
+                                    // 协议名，不是成员名——映射会让元表失灵（KREG 弱表此前
+                                    // 一直被此 bug 静默降级成强表，属连带修复）
+                                    let mapped_s = if s.len() > 4 && !is_reserved_member(s) && !s.starts_with("__") {
                                         ctx.map_string(s)
                                     } else {
                                         s.clone()
