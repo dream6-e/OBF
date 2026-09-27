@@ -7,6 +7,9 @@ use std::collections::HashSet;
 use rand::{rng, Rng, SeedableRng};
 use rand::rngs::StdRng;
 use super::AntiTamper;
+pub(crate) static DBG_MASK: bool = true;
+pub(crate) static DBG_PROXY: bool = true;
+pub(crate) static DBG_ARITH: bool = true;
 
 // 底层工具层已拆到 Generator_util.rs（原文件 69 KB 太大）。
 // GenRng 继续从这里 re-export，保持 crate 内既有的引用路径不变。
