@@ -1410,8 +1410,14 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             j = rng.name(), np = np21, th = th21, md = md21));
         let fu = rng.name();
         
+        // ⑳.5 尾部探针：此前最后一个采样点在 parts 之后——main_chunk 解码/内建簇/
+        // thunk 快照/return 壳整段是"探针之下"的插入盲区（用户实测 print 插行未检出）。
+        // 紧贴 return 再布一枚，把盲区压缩到 return 语句本身；⑤ fu 壳内最后一针
+        // 封住 return 壳表达式内的语句缝隙。二者均在行 2 内，针式 :2: 一致。
+        out.push_str(&line_guard(&mut rng));
+        out.push_str(&line_guard(&mut rng));
         out.push_str(" ");
-        out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) x:{}() end", fn_execute, var_boot_env, var_l, fu, wai));
+        out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng), wai));
         out.push_str(&format!(" }}):{}()", fu));
         out
     }
