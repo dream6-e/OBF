@@ -15,8 +15,8 @@ pub(crate) static DBG_ARITH: bool = true;
 // GenRng 继续从这里 re-export，保持 crate 内既有的引用路径不变。
 pub use super::Generator_util::{CipherKeys, GenRng};
 use super::Generator_util::{
-    build_opcode_tree, chacha8_xor, rename_ident, rewrite_chunk, scan_setglobal_targets,
-    scan_used_opcodes, uses_ident, write_string, PayloadReader,
+    build_opcode_tree, chacha8_xor, rename_ident, rewrite_chunk, scan_max_stack,
+    scan_setglobal_targets, scan_used_opcodes, uses_ident, write_string, PayloadReader,
 };
 
 
@@ -105,6 +105,18 @@ impl Generator {
         let mut rewritten_chunks = Vec::new();
         let mut reader = PayloadReader { data: payload, pos: 0 };
         let mut rewrite_rng = StdRng::seed_from_u64(self.ctx.seed + 1);
+        // 反混淆判据③修复（寄存器平移）：所有原型寄存器统一平移 G。G 的上限由
+        // 全原型最大 maxstack 钉死（平移后寄存器必须仍 <128，否则撞 RK 常量域）；
+        // execute 入口的实参落位同步 +G（见 block_execute_def）。
+        let gshift: u8 = {
+            let mut max_stack_all = 0u8;
+            let mut scan_reader = PayloadReader { data: payload, pos: 0 };
+            scan_max_stack(&mut scan_reader, &mut max_stack_all);
+            if max_stack_all < 127 {
+                let cap = (127u8 - max_stack_all).min(48);
+                rewrite_rng.random_range(1u8..=cap.max(1))
+            } else { 0 }
+        };
         let mut fused_used: HashSet<usize> = HashSet::new();
         // ⑰ 常量按原型分组内联加密：每组独立 key/salt/nonce 布局/kind；
         // 密文直接写进各原型常量节，中央 gs/gn 密文表废除
@@ -161,7 +173,7 @@ impl Generator {
             tag_pool18.swap(k18, last18);
             tag_pool18.pop();
         }
-        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18);
+        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, gshift);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -651,7 +663,7 @@ impl Generator {
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_ops, pf_opcodes, var_vm, k_aa, pf_a_arr, var_vm, k_bb, pf_b_arr, var_vm, k_cc, pf_c_arr));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_consts, pf_consts, var_vm, k_protos, pf_protos));
         block_execute_def.push_str(&format!("{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};", var_vm, k_upv, var_vm, k_env, var_vm, k_vc, var_vc, var_vm, k_breg, var_builtin_reg));
-        block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1] = {}[{}](_,...) end; ", pf_numparams, var_vm, k_stk, var_s, hex_select_idx));
+        block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1+{}] = {}[{}](_,...) end; ", pf_numparams, var_vm, k_stk, rng.format_num(gshift as i64), var_s, hex_select_idx));
         block_execute_def.push_str(&format!("local {} = {} - chunk.{}; local {} = {{{}[{}](chunk.{} + 1, ...)}}; ", var_varargs_len, var_L, pf_numparams, var_varargs, var_s, hex_select_idx, pf_numparams));
         block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};", var_vm, k_va, var_varargs, var_vm, k_valen, var_varargs_len));
         block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};{}[{}]=nil;{}[{}]={};{}[{}]={};", var_vm, k_state, obf0, var_vm, k_mode, obf0, var_vm, k_retv, var_vm, k_retf, obf0, var_vm, k_rett, obf0));
@@ -1126,7 +1138,7 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+0X100000000 end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>=0X80000000 then {w}={w}-0X100000000 end return {w} end; \
              local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
              while {i} < {n} do {i} = {i} + 1; \
-             local {mv}={a5}() local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%4294967296,{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%4294967296,{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%4294967296,{kc18}) end; ",
+             local {mv}={a5}() local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%4294967296,{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%4294967296,{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%4294967296,{kc18}) local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {rd}() end end; ",
             tree9 = it9(&mut rng, var_state.as_str()),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
@@ -1134,7 +1146,8 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             pb = rng.name(), ka = rng.name(), kb18 = rng.name(), kc18 = rng.name(),
             pf_ld = pf_ld, pf_lld = pf_lld,
             dcb = rng.name(), w = rng.name(), m = rng.name(), k = rng.name(), q = rng.name(),
-            bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x
+            bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x,
+            jv = rng.name(), rd = fn_read_dec.as_str()
         );
         let (bi0, bi1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
         let sc_index2 = at.st.call("__index", bi0, bi1);

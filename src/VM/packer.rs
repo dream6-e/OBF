@@ -58,20 +58,23 @@ impl Packer {
         for _ in 0..16 {
             keys.push((rng.next() & 0xFF) as u8);
         }
-        let alpha_str = Self::generate_alphabet();
+        let (alpha_str, alpha_perm) = Self::generate_alphabet();
 
         let sandbox = generate_sandbox("kryvex");
         let compressed_sb = Self::encode_stream(sandbox.payload.as_bytes());
         let encrypted_sb = Self::xor_stream_with_keys(&compressed_sb, &keys);
-        let b86_sb = Self::base86_encode_with_alpha(&encrypted_sb, &alpha_str);
+        let b86_sb = Self::base86_encode_with_alpha(&encrypted_sb, &alpha_str, &alpha_perm);
 
         let compressed_main = Self::encode_stream(input);
         let encrypted_main = Self::xor_stream_with_keys(&compressed_main, &keys);
-        let b86_main = Self::base86_encode_with_alpha(&encrypted_main, &alpha_str);
+        let b86_main = Self::base86_encode_with_alpha(&encrypted_main, &alpha_str, &alpha_perm);
 
-        let lua_payload = format!("{}~{}", b86_sb, b86_main);
-        
-        let (decoder_script, entry_func) = Self::build_decoder(&keys, &alpha_str, vm_rng);
+        // 判据①修复：'~' 分隔符废除——载荷是连续一段，sb/main 边界由
+        // 解码器按字符运行点切分（split_pos 随解码脚本下发并混淆拼写）
+        let split_pos = b86_sb.len();
+        let lua_payload = format!("{}{}", b86_sb, b86_main);
+
+        let (decoder_script, entry_func) = Self::build_decoder(&keys, &alpha_str, &alpha_perm, split_pos, vm_rng);
         (lua_payload, decoder_script, entry_func)
     }
 
@@ -194,24 +197,41 @@ impl Packer {
         output
     }
 
-    fn generate_alphabet() -> String {
+    /// 反混淆判据①修复：旧字母表 86 字符，载荷字符集 = 86 + 分隔符 '~' = 恰好 87
+    /// （「87 差 1」），一次集合比对就锁定编码与字母表。现在：
+    /// - 91 个安全可见字符（剔除 [ ] ~ ：长字符串定界 `]=]` 相关字符不用）取 86+K（K=3..5）；
+    /// - 数字 0..85 随机注入其中 86 个槽位（返回的 perm：数字 → 字母表位置），
+    ///   其余 K 个是永不入载荷的诱饵；
+    /// - 分隔符 '~' 废除（sb/main 边界改按运行期长度切分，见 build_decoder）。
+    /// 集合比对结果 = K + 未命中字符数，逐产物浮动，不再是干净的「差 1」。
+    fn generate_alphabet() -> (String, Vec<usize>) {
         let seed = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u32)
             .unwrap_or(0x56781234);
         let mut rng = SimpleRng::new(seed);
 
-        let mut base_chars: Vec<char> = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&()*+,./:;<=>?@|_\'\"\\".chars().collect();
-        let n = base_chars.len();
+        let mut pool: Vec<char> = (33u8..=126u8)
+            .filter(|&c| c != b'[' && c != b']' && c != b'~')
+            .map(|c| c as char)
+            .collect();
+        let n = pool.len();
         for i in (1..n).rev() {
             let j = rng.next_range(0, i + 1);
-            base_chars.swap(i, j);
+            pool.swap(i, j);
         }
-        base_chars.insert(0, '-');
-        base_chars.iter().collect()
+        let extra = rng.next_range(3, 6);
+        let alphabet: Vec<char> = pool[..86 + extra].to_vec();
+        let mut slots: Vec<usize> = (0..alphabet.len()).collect();
+        for i in (1..slots.len()).rev() {
+            let j = rng.next_range(0, i + 1);
+            slots.swap(i, j);
+        }
+        let perm: Vec<usize> = slots[..86].to_vec();
+        (alphabet.iter().collect(), perm)
     }
 
-    fn base86_encode_with_alpha(input: &[u8], alphabet_str: &str) -> String {
+    fn base86_encode_with_alpha(input: &[u8], alphabet_str: &str, perm: &[usize]) -> String {
         let base_chars: Vec<char> = alphabet_str.chars().collect();
         let mut encoded = String::new();
         let len = input.len();
@@ -229,11 +249,11 @@ impl Packer {
             let r3 = r2 % 7396;
             let c4 = r3 / 86;
             let c5 = r3 % 86;
-            encoded.push(base_chars[c1]);
-            encoded.push(base_chars[c2]);
-            encoded.push(base_chars[c3]);
-            encoded.push(base_chars[c4]);
-            encoded.push(base_chars[c5]);
+            encoded.push(base_chars[perm[c1 as usize]]);
+            encoded.push(base_chars[perm[c2 as usize]]);
+            encoded.push(base_chars[perm[c3 as usize]]);
+            encoded.push(base_chars[perm[c4 as usize]]);
+            encoded.push(base_chars[perm[c5 as usize]]);
         }
         let rem = len % 4;
         if rem == 3 {
@@ -246,30 +266,30 @@ impl Packer {
             let r2 = r1 % 7396;
             let c3 = r2 / 86;
             let c4 = r2 % 86;
-            encoded.push(base_chars[c1]);
-            encoded.push(base_chars[c2]);
-            encoded.push(base_chars[c3]);
-            encoded.push(base_chars[c4]);
+            encoded.push(base_chars[perm[c1 as usize]]);
+            encoded.push(base_chars[perm[c2 as usize]]);
+            encoded.push(base_chars[perm[c3 as usize]]);
+            encoded.push(base_chars[perm[c4 as usize]]);
         } else if rem == 2 {
             let val = ((input[len - 2] as usize) << 8) | (input[len - 1] as usize);
             let c1 = val / 7396;
             let r1 = val % 7396;
             let c2 = r1 / 86;
             let c3 = r1 % 86;
-            encoded.push(base_chars[c1]);
-            encoded.push(base_chars[c2]);
-            encoded.push(base_chars[c3]);
+            encoded.push(base_chars[perm[c1 as usize]]);
+            encoded.push(base_chars[perm[c2 as usize]]);
+            encoded.push(base_chars[perm[c3 as usize]]);
         } else if rem == 1 {
             let val = input[len - 1] as usize;
             let c1 = val / 86;
             let c2 = val % 86;
-            encoded.push(base_chars[c1]);
-            encoded.push(base_chars[c2]);
+            encoded.push(base_chars[perm[c1 as usize]]);
+            encoded.push(base_chars[perm[c2 as usize]]);
         }
         encoded
     }
 
-    fn build_decoder(keys: &[u8], alphabet: &str, rng: &mut GenRng) -> (String, String) {
+    fn build_decoder(keys: &[u8], alphabet: &str, perm: &[usize], split_pos: usize, rng: &mut GenRng) -> (String, String) {
         let f_entry = rng.name();
         let v_data = rng.name();
         // 只用原生 loadstring：执行器/沙盒常把 loadstring 换成 Lua 钩子，
@@ -441,6 +461,11 @@ impl Packer {
         let combined_key_expr = key_parts_exprs.join(",");
 
         let chars: Vec<char> = alphabet.chars().collect();
+        // 判据①修复：数字串与字母表位置一一对应（byte=数字+1；诱饵位=255，
+        // 永不查表）。解码端按「字符→数字串同位字节-1」建表，不再用位置序号，
+        // 所以诱饵可以插在字母表任意位置。
+        let mut dig_bytes: Vec<u8> = vec![255u8; chars.len()];
+        for (d, &pos) in perm.iter().enumerate() { dig_bytes[pos] = (d + 1) as u8; }
         let num_parts = rng.range(6, 12);
         let mut part_boundaries = Vec::new();
         for _ in 0..num_parts - 1 {
@@ -455,14 +480,16 @@ impl Packer {
         }
 
         let mut parts_exprs = Vec::new();
+        let mut digs_exprs = Vec::new();
         let num_actual_parts = boundaries.len() - 1;
 
         for i in 0..num_actual_parts {
             let start = boundaries[i];
             let end = boundaries[i + 1];
             let part_chars = &chars[start..end];
+            let part_digs = &dig_bytes[start..end];
             let method = rng.range(0, 3);
-            let expr = match method {
+            let (expr, dexpr) = match method {
                 0 => {
                     let mut rev_chars = part_chars.to_vec();
                     rev_chars.reverse();
@@ -477,7 +504,10 @@ impl Packer {
                             _ => safe_str.push(c),
                         }
                     }
-                    format!("s.reverse(\"{}\")", safe_str)
+                    let mut rev_digs = part_digs.to_vec();
+                    rev_digs.reverse();
+                    (format!("s.reverse(\"{}\")", safe_str),
+                     format!("s.reverse(\"{}\")", crate::VM::VM_Backend::Generator_util::lua_mixed(&rev_digs)))
                 }
                 1 => {
                     let mut char_args = String::new();
@@ -485,23 +515,29 @@ impl Packer {
                         if idx > 0 { char_args.push(','); }
                         char_args.push_str(&(*c as u8).to_string());
                     }
-                    format!("s.char({})", char_args)
+                    let mut dig_args = String::new();
+                    for (idx, d) in part_digs.iter().enumerate() {
+                        if idx > 0 { dig_args.push(','); }
+                        dig_args.push_str(&d.to_string());
+                    }
+                    (format!("s.char({})", char_args), format!("s.char({})", dig_args))
                 }
-                _ => format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(&part_chars.iter().map(|&c| c as u8).collect::<Vec<u8>>()))
+                _ => (format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(&part_chars.iter().map(|&c| c as u8).collect::<Vec<u8>>())),
+                      format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(part_digs)))
             };
             parts_exprs.push(expr);
+            digs_exprs.push(dexpr);
         }
         
         let combined_alpha_expr = parts_exprs.join(",");
+        let combined_digs_expr = digs_exprs.join(",");
 
         // 自定义流加密解码器（packer 脚本独立作用域自备一只）：
         // probe 的类型串、gmatch 模式、"return " 前缀、chunk 名都走它，不留明文。
         // 流加密键表：packer 脚本独立作用域自备一张（解码器匿名挂表里）。
         let mut sc_st = crate::VM::VM_Backend::Generator_util::StreamTable::new(rng.name());
-        let (sp0, sp1) = crate::VM::VM_Backend::Generator_util::stream_key("[^~]+", rng);
         let (sr0, sr1) = crate::VM::VM_Backend::Generator_util::stream_key("return ", rng);
         let (sk0, sk1) = crate::VM::VM_Backend::Generator_util::stream_key("kryvex", rng);
-        let sc_pat = sc_st.call("[^~]+", sp0, sp1);
         let sc_ret = sc_st.call("return ", sr0, sr1);
         let sc_chunk = sc_st.call("kryvex", sk0, sk1);
         let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut sc_st, rng);
@@ -569,8 +605,9 @@ impl Packer {
         ];
         rng.shuffle(&mut pk_s2);
         let pk_s2_assigns = pk_s2.join(" ");
-        let (pk_parts, pk_it, pk_tick) = (rng.name(), rng.name(), rng.name());
         let (pk_fet, pk_code, pk_env, pk_maker) = (rng.name(), rng.name(), rng.name(), rng.name());
+        // 判据①修复：载荷切分点（sb 段字符数）以混淆数字拼写下发，'~' 不再出现
+        let split_lit = rng.format_num(split_pos as i64);
 
         let script = format!("
 local function {f_entry}({v_data})
@@ -631,13 +668,17 @@ local function {f_entry}({v_data})
     s.idx = i;
     return q:{m_next}(s);
 end,
-        {m_init_map} = function(q, s, parts, alpha, i, kparts, kstr)
+        {m_init_map} = function(q, s, parts, alpha, i, kparts, kstr, dparts, digs)
             parts = {{{combined_alpha_expr}}};
             alpha = \"\";
             i = 0;
             while i < {num_actual_parts} do i = i + 1; alpha = alpha .. parts[i]; end;
+            dparts = {{{combined_digs_expr}}};
+            digs = \"\";
             i = 0;
-            while i < #alpha do i = i + 1; s.map[s.byte(alpha, i)] = i - 1; end;
+            while i < {num_actual_parts} do i = i + 1; digs = digs .. dparts[i]; end;
+            i = 0;
+            while i < #alpha do i = i + 1; s.map[s.byte(alpha, i)] = s.byte(digs, i) - 1; end;
             kparts = {{{combined_key_expr}}};
             kstr = \"\";
             i = 0;
@@ -654,24 +695,13 @@ end,
         {m_run} = function(q, s)
             {router_code}
         end,
-        {m_main} = function(q, data, unpack, char, byte, floor, insert, concat, remove, reverse, sub, load_func, gmatch)
+        {m_main} = function(q, data, split_at, unpack, char, byte, floor, insert, concat, remove, reverse, sub, load_func)
             return (function(s)
                 q:{m_init_map}(s);
                 q:{m_init_insts}(s);
                 q:{m_init_handlers}(s);
                 
-                local {pk_parts} = {{}}
-                local {pk_it} = gmatch(s.data, {sc_pat});
-                if {pk_it} ~= nil then
-                    while true do
-                        local {pk_tick} = {pk_it}();
-                        if {pk_tick} == nil then break end;
-                        if {pk_tick} == {pk_parts} then break end;
-                        insert({pk_parts}, {pk_tick});
-                    end
-                end
-                
-                s.data = {pk_parts}[1];
+                s.data = sub(data, 1, {split_lit});
                 s.len = #s.data;
                 local sb_expr = q:{m_run}(s);
                 
@@ -681,7 +711,7 @@ end,
                 
                 local stage2 = function()
                     {pk_s2_assigns}
-                    s.data = {pk_parts}[2];
+                    s.data = sub(data, {split_lit} + 1);
                     s.len = #s.data;
                     return q:{m_run}(s);
                 end
@@ -692,7 +722,7 @@ end,
                 {pk_init_table}
             }});
         end
-    }}):{m_main}({v_data}, unpack or table.unpack, string.char, string.byte, math.floor, table.insert, table.concat, table.remove, string.reverse, string.sub, {v_pload}, string.gmatch);
+    }}):{m_main}({v_data}, {split_lit}, unpack or table.unpack, string.char, string.byte, math.floor, table.insert, table.concat, table.remove, string.reverse, string.sub, {v_pload});
 end
 ");
         // 脚本里所有 s.<字段> 的访问统一换成随机名（router / init_insts_loop /
