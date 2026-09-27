@@ -844,14 +844,81 @@ impl Generator {
             "local function {xor32}(a,b) local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/65536)%256,math_floor(a/16777216)%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/65536)%256,math_floor(b/16777216)%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*65536+{xt}[a4][b4]*16777216 end; ",
             xor32 = fn_xor32, xt = xor_tbl_var
         ));
+        // ㉔ 2^32 逐实例算式化（k-差式=k 恒等 2^32；各站点独立推导不同形）
+        let mk_m = |rng: &mut GenRng| -> String {
+            let k = rng.range(0x1000, 0xFFFFFF) as u64;
+            format!("(0X{:X}-0X{:X})", 4294967296u64 + k, k)
+        };
+        let (m_rot1, m_rot2) = (mk_m(&mut rng), mk_m(&mut rng));
         block_chacha_setup.push_str(&format!(
-            "local function {rotl32}(x,n) local m=2^n; return ((x*m)%4294967296)+math_floor(x/(4294967296/m)) end; ",
-            rotl32 = fn_rotl32
+            "local function {rotl32}(x,n) local m=2^n; return ((x*m)%{m1})+math_floor(x/({m2}/m)) end; ",
+            rotl32 = fn_rotl32, m1 = m_rot1, m2 = m_rot2
         ));
-        block_chacha_setup.push_str(&format!(
-            "local function {qr}(s,a,b,c,d) s[a]=(s[a]+s[b])%4294967296; s[d]={xor32}(s[d],s[a]); s[d]={rotl32}(s[d],16); s[c]=(s[c]+s[d])%4294967296; s[b]={xor32}(s[b],s[c]); s[b]={rotl32}(s[b],12); s[a]=(s[a]+s[b])%4294967296; s[d]={xor32}(s[d],s[a]); s[d]={rotl32}(s[d],8); s[c]=(s[c]+s[d])%4294967296; s[b]={xor32}(s[b],s[c]); s[b]={rotl32}(s[b],7) end; ",
-            qr = fn_qr, xor32 = fn_xor32, rotl32 = fn_rotl32
-        ));
+        // ㉔ quarter-round 去指纹：正文四臂结构池（0=教科书原版保留）+ 旋转常数
+        // 16/12/8/7 逐实例算式化 + 形参随机化（单字母 s,a,b,c,d 即参考实现指纹）。
+        // 各臂输出与标准 QR 恒等（A+=B;D^=A;D=rot(D,16);C+=D;B^=C;B=rot(B,12);×2 变体）。
+        let r_lit = |rng: &mut GenRng, v: u32| -> String {
+            let k = rng.range(0x10, 0xFFFF) as u32;
+            format!("(0X{:X}-0X{:X})", v + k, k)
+        };
+        let (qS, qA, qB, qC, qD) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let (r1e, r2e, r3e, r4e) = (r_lit(&mut rng, 16), r_lit(&mut rng, 12), r_lit(&mut rng, 8), r_lit(&mut rng, 7));
+        let m_qr1 = mk_m(&mut rng); let m_qr2 = mk_m(&mut rng);
+        let x32 = fn_xor32.as_str(); let rt = fn_rotl32.as_str();
+        let qr_def = match rng.range(0, 4) {
+            0 => format!(
+                "local function {qr}({S},{A},{B},{C},{D}) {S}[{A}]=({S}[{A}]+{S}[{B}])%{m1}; {S}[{D}]={x}({S}[{D}],{S}[{A}]); {S}[{D}]={r}({S}[{D}],{c1}); {S}[{C}]=({S}[{C}]+{S}[{D}])%{m1}; {S}[{B}]={x}({S}[{B}],{S}[{C}]); {S}[{B}]={r}({S}[{B}],{c2}); {S}[{A}]=({S}[{A}]+{S}[{B}])%{m1}; {S}[{D}]={x}({S}[{D}],{S}[{A}]); {S}[{D}]={r}({S}[{D}],{c3}); {S}[{C}]=({S}[{C}]+{S}[{D}])%{m1}; {S}[{B}]={x}({S}[{B}],{S}[{C}]); {S}[{B}]={r}({S}[{B}],{c4}) end; ",
+                qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD,
+                m1 = m_qr1, x = x32, r = rt, c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e),
+            1 => {
+                // 半轮助手四连调用：视觉上不再是「加/异或/移位」三连奏
+                let hname = rng.name(); let m_h = mk_m(&mut rng);
+                format!(
+                    "local function {h}({S},{U},{V},{W},{Rr}) {S}[{U}]=({S}[{U}]+{S}[{V}])%{m}; {S}[{W}]={x}({S}[{W}],{S}[{U}]); {S}[{W}]={r}({S}[{W}],{Rr}) end; local function {qr}({S},{A},{B},{C},{D}) {h}({S},{A},{B},{D},{c1}); {h}({S},{C},{D},{B},{c2}); {h}({S},{A},{B},{D},{c3}); {h}({S},{C},{D},{B},{c4}) end; ",
+                    h = hname, qr = fn_qr, S = qS, U = rng.name(), V = rng.name(), W = rng.name(), Rr = rng.name(),
+                    A = qA, B = qB, C = qC, D = qD, m = m_h, x = x32, r = rt,
+                    c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
+            }
+            2 => {
+                // 局部化平展：热路径零表索引，收尾一次写回
+                format!(
+                    "local function {qr}({S},{A},{B},{C},{D}) local {a},{b},{c},{d}={S}[{A}],{S}[{B}],{S}[{C}],{S}[{D}]; {a}=({a}+{b})%{m1}; {d}={x}({d},{a}); {d}={r}({d},{c1}); {c}=({c}+{d})%{m1}; {b}={x}({b},{c}); {b}={r}({b},{c2}); {a}=({a}+{b})%{m1}; {d}={x}({d},{a}); {d}={r}({d},{c3}); {c}=({c}+{d})%{m1}; {b}={x}({b},{c}); {b}={r}({b},{c4}); {S}[{A}],{S}[{B}],{S}[{C}],{S}[{D}]={a},{b},{c},{d} end; ",
+                    qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD,
+                    a = rng.name(), b = rng.name(), c = rng.name(), d = rng.name(),
+                    m1 = m_qr1, x = x32, r = rt, c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
+            }
+            _ => {
+                // 步骤闭包表+驱动：与 QR 形态最远（12 个无序可读的单操作闭包）
+                let st = rng.name(); let m_s = mk_m(&mut rng);
+                format!(
+                    "local function {qr}({S},{A},{B},{C},{D}) local {st}={{function() {S}[{A}]=({S}[{A}]+{S}[{B}])%{m} end,function() {S}[{D}]={x}({S}[{D}],{S}[{A}]) end,function() {S}[{D}]={r}({S}[{D}],{c1}) end,function() {S}[{C}]=({S}[{C}]+{S}[{D}])%{m} end,function() {S}[{B}]={x}({S}[{B}],{S}[{C}]) end,function() {S}[{B}]={r}({S}[{B}],{c2}) end,function() {S}[{A}]=({S}[{A}]+{S}[{B}])%{m} end,function() {S}[{D}]={x}({S}[{D}],{S}[{A}]) end,function() {S}[{D}]={r}({S}[{D}],{c3}) end,function() {S}[{C}]=({S}[{C}]+{S}[{D}])%{m} end,function() {S}[{B}]={x}({S}[{B}],{S}[{C}]) end,function() {S}[{B}]={r}({S}[{B}],{c4}) end}}; for {i}=1,#{st} do {st}[{i}]() end end; ",
+                    qr = fn_qr, S = qS, A = qA, B = qB, C = qC, D = qD,
+                    st = st, i = rng.name(), m = m_s, x = x32, r = rt,
+                    c1 = r1e, c2 = r2e, c3 = r3e, c4 = r4e)
+            }
+        };
+        block_chacha_setup.push_str(&qr_def);
+        // ㉔ 调用矩阵去指纹：列组/对角组内洗牌（4 列互不相交、4 对角互不相交，
+        // 组内换序恒等；组间顺序固定保 ChaCha 语义），8 元组改数据表驱动，
+        // 元组数字部分裸写部分算式化；循环次数 4 同步算式化。
+        let mk_rounds = |rng: &mut GenRng, qrn: &str| -> String {
+            let mut cols: Vec<(u32, u32, u32, u32)> = vec![(1,5,9,13),(2,6,10,14),(3,7,11,15),(4,8,12,16)];
+            let mut dias: Vec<(u32, u32, u32, u32)> = vec![(1,6,11,16),(2,7,12,13),(3,8,9,14),(4,5,10,15)];
+            rng.shuffle(&mut cols); rng.shuffle(&mut dias);
+            let mut ents: Vec<String> = Vec::new();
+            for &(a, b, c, d) in cols.iter().chain(dias.iter()) {
+                let f = |rng: &mut GenRng, v: u32| -> String {
+                    if rng.range(0, 2) == 0 { v.to_string() }
+                    else { let k = rng.range(0x10, 0xFFFF) as u32; format!("(0X{:X}-0X{:X})", v + k, k) }
+                };
+                ents.push(format!("{{{},{},{},{}}}", f(rng, a), f(rng, b), f(rng, c), f(rng, d)));
+            }
+            let (tv, iv, ev) = (rng.name(), rng.name(), rng.name());
+            let kf = rng.range(0x10, 0xFFFF) as u32;
+            format!(
+                "local {tv}={{{ents}}}; for _=1,(0X{:X}-0X{:X}) do for {iv}=1,#{tv} do local {ev}={tv}[{iv}]; {qrn}({sv},{ev}[1],{ev}[2],{ev}[3],{ev}[4]) end end; ",
+                kf + 4, kf, tv = tv, iv = iv, ev = ev, ents = ents.join(","), qrn = qrn, sv = "s")
+        };
         // ⑰ 每组一个自包含簇：K/salt/sigma 排列/cblock/cstream + 专属 dec_str/dec_num
         // （无统一路由入口——四个簇打散插到产物不同位置，各原型按组直连本簇解码器）
         let mut clusters: Vec<String> = Vec::with_capacity(CG);
@@ -880,8 +947,9 @@ impl Generator {
                 "local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
                 kn = kname, key_lua = key_lua, sl = slname, salt_lua = salt_lua));
             cl.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
-                cb = cbname, kn = kname, qr = fn_qr, sig = sigma_lua));
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; {rounds} local out={{}}; for i=1,16 do local w=(s[i]+o[i])%{mix_m}; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
+                cb = cbname, kn = kname, sig = sigma_lua,
+                rounds = mk_rounds(&mut rng, fn_qr.as_str()), mix_m = mk_m(&mut rng)));
             // ㉓-A sm 换公式：nonce=[盐^roll^fold, r7^(槽*6+kind), 盐^rotl7(r7)]——
             // layouts 直传退役；roll/fold 由 body_consts 扫描重算后经 dsp 透传
             let salt_v18 = slname.as_str();
@@ -1365,8 +1433,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 "local {bp}={{{lits}}}; local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
                 bp = bpt, lits = boot_lits.join(","), kn = bk, key_lua = key_lua, sl = bs, salt_lua = salt_lua));
             out.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; for _=1,4 do {qr}(s,1,5,9,13); {qr}(s,2,6,10,14); {qr}(s,3,7,11,15); {qr}(s,4,8,12,16); {qr}(s,1,6,11,16); {qr}(s,2,7,12,13); {qr}(s,3,8,9,14); {qr}(s,4,5,10,15) end; local out={{}}; for i=1,16 do local w=(s[i]+o[i])%4294967296; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
-                cb = bcb, kn = bk, qr = fn_qr, sig = sigma_lua));
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; for i=1,16 do o[i]=s[i] end; {rounds} local out={{}}; for i=1,16 do local w=(s[i]+o[i])%{mix_m}; out[(i-1)*4+1]=w%256; out[(i-1)*4+2]=math_floor(w/256)%256; out[(i-1)*4+3]=math_floor(w/65536)%256; out[(i-1)*4+4]=math_floor(w/16777216)%256 end; return out end; ",
+                cb = bcb, kn = bk, sig = sigma_lua,
+                rounds = mk_rounds(&mut rng, fn_qr.as_str()), mix_m = mk_m(&mut rng)));
             out.push_str(&format!(
                 "local function {sm}(pool_idx,kind,n) local out={{}}; local ctr=0; local pos=1; while pos<=n do local blk={cb}({sl},pool_idx,kind,ctr); for i=1,64 do if pos>n then break end; out[pos]=blk[i]; pos=pos+1 end; ctr=ctr+1 end; return out end; ",
                 sm = bsm, cb = bcb, sl = bs));
