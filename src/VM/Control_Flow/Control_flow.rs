@@ -276,6 +276,8 @@ impl ControlFlowBuilder {
 
         let num_routes = rng.range(16, 28) as i64;
         let mut junk_limit = rng.range(5, 12);
+        // ㉗ 出口码序号：叶子逐个领取唯一出口槽（≤ 路由数28 + 垃圾叶11，带域 64..112 足够）
+        let mut exit_seq: usize = 0;
 
         let mut out = String::new();
 
@@ -313,7 +315,7 @@ impl ControlFlowBuilder {
         //   首项 = svMix*k0 + svTrm*k1 + k2；公差 = ((svMix+svTrm) % dm)*2 + db（恒奇）
         // 状态值运行时填进状态值表；文本只剩混合常量与槽序号——常量集合 ≠
         // 可达状态集合，静态区间/差分分析失去锚点。
-        // 槽位：1=fetch 2=dispatch 3..5=中间态 6..53=叶子路由态。
+        // 槽位：1=fetch 2=dispatch 3..5=中间态 6..53=叶子路由态 64..=出口码带（㉗ 每叶唯一）。
         let (sv_t, sv_m, sv_n, sv_f, sv_d, sv_i) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         keys.sv_tbl = sv_t.clone();
@@ -332,7 +334,7 @@ impl ControlFlowBuilder {
             sv_n, var_tamper,
             sv_f, sv_m, Self::obf_num(k0 as i64, rng), sv_n, Self::obf_num(k1 as i64, rng), Self::obf_num(k2, rng),
             sv_d, sv_m, sv_n, dm, db,
-            sv_i, Self::obf_num(53, rng), sv_t, sv_i, sv_f, sv_f, sv_f, sv_d));
+            sv_i, Self::obf_num(112, rng), sv_t, sv_i, sv_f, sv_f, sv_f, sv_d));
 
         out.push_str(&format!("{},{},{}={},{},{};", 
             s_state, t_shadow, d_junk, 
@@ -428,7 +430,7 @@ impl ControlFlowBuilder {
             &d_junk,
             &f_tmp,
             &var_t,
-            0,
+            &mut exit_seq,
             &mut junk_limit,
             &keys,
             rng
@@ -459,14 +461,19 @@ impl ControlFlowBuilder {
         d_junk: &str,
         f_tmp: &str,
         var_t: &str,
-        _fetch_state: i64,
+        exit_seq: &mut usize,
         keys: &CipherKeys,
         rng: &mut GenRng,
     ) -> String {
         // ㉖ 路由态 = 运行时状态值表槽 6..53（值含运行时种子，文本零状态常量）
         let next_slot = 6 + rng.range(0, 48);
         let s_state_trans = Self::transition_assign_expr(s_state, &Self::sv_ref(keys, next_slot, rng), keys, rng);
-        let state_transition = Self::transition_assign(var_t, 0, keys, rng);
+        // ㉗ 出口码不复用：每叶从出口槽带 64+ 顺序取唯一槽（值经运行时状态值表），
+        // 不再共享哨兵 0——文本里没有「所有叶子写同一值」的结构指纹，
+        // 动态出口枚举必须逐路径解析。
+        let exit_slot = 64 + *exit_seq;
+        *exit_seq += 1;
+        let state_transition = Self::transition_assign_expr(var_t, &Self::sv_ref(keys, exit_slot, rng), keys, rng);
         let leaf_type = rng.range(0, 5);
         let mut node = String::new();
         let idx_1 = Self::format_num(1, rng);
@@ -507,16 +514,16 @@ impl ControlFlowBuilder {
         d_junk: &str,
         f_tmp: &str,
         var_t: &str,
-        fetch_state: i64,
+        exit_seq: &mut usize,
         junk_limit: &mut usize,
         keys: &CipherKeys,
         rng: &mut GenRng,
     ) -> String {
         if min == max {
-            let real_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
+            let real_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
             if *junk_limit > 0 && rng.range(0, 5) == 0 {
                 *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
+                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
                 let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
                 return format!("if {}=={} then {} else {} end ", d_junk, fake_cond, junk_leaf, real_leaf);
             }
@@ -533,10 +540,10 @@ impl ControlFlowBuilder {
             let c2 = Self::generate_opaque_predicate(cut2 as i64, q_route, "<=", keys, rng);
             let mut branch = format!("if {} then {} elseif {} then {} else {} end ",
                 c1,
-                Self::generate_recursive_tree(min, cut1, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng),
+                Self::generate_recursive_tree(min, cut1, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng),
                 c2,
-                Self::generate_recursive_tree(cut1 + 1, cut2, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng),
-                Self::generate_recursive_tree(cut2 + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
+                Self::generate_recursive_tree(cut1 + 1, cut2, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng),
+                Self::generate_recursive_tree(cut2 + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
             return branch;
         }
         let mid = if span >= 4 && rng.range(0, 2) == 0 {
@@ -552,33 +559,33 @@ impl ControlFlowBuilder {
 
         if direction {
             branch.push_str(&format!("if {} then ", comp_expr));
-            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
             
             if *junk_limit > 0 && rng.range(0, 4) == 0 {
                 *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
+                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
                 let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
                 branch.push_str(&format!("elseif {}=={} then {} ", d_junk, fake_cond, junk_leaf));
             }
 
             branch.push_str("else ");
-            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
             branch.push_str("end ");
         } else {
             let rev_comp = Self::generate_opaque_predicate(mid as i64, q_route, ">", keys, rng);
 
             branch.push_str(&format!("if {} then ", rev_comp));
-            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
             
             if *junk_limit > 0 && rng.range(0, 4) == 0 {
                 *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
+                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
                 let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
                 branch.push_str(&format!("elseif {}=={} then {} ", d_junk, fake_cond, junk_leaf));
             }
 
             branch.push_str("else ");
-            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
             branch.push_str("end ");
         }
         branch
