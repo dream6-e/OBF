@@ -150,7 +150,7 @@ impl StubGenerator {
 
         // ㉕ 初始化状态机运行时耦合化：状态号文本零出现（等差数列运行期填表）
         let (insts_decl, insts_body) =
-            ControlFlowBuilder::build_router_machine(&insts_init, "while ky(false) do ", &v_st, &mut srng);
+            ControlFlowBuilder::build_router_machine(&insts_init, "while ky(false) do ", &v_st, &format!("({v_s}.{p_len})+({v_s}.{p_k}[1])", v_s=v_s, p_len=p_len, p_k=p_k), &mut srng);
         let m_init_insts_body = format!("local function ky(...) return not(...) end {}{}", insts_decl, insts_body);
 
         let mut handlers_init = Vec::new();
@@ -178,7 +178,7 @@ impl StubGenerator {
 
         // ㉕ 句柄注册状态机同样运行时耦合化
         let (handlers_decl, handlers_body) =
-            ControlFlowBuilder::build_router_machine(&handlers_init, "while not(nil) or false do ", &v_st, &mut srng);
+            ControlFlowBuilder::build_router_machine(&handlers_init, "while not(nil) or false do ", &v_st, &format!("({v_s}.{p_len})+({v_s}.{p_k}[1])", v_s=v_s, p_len=p_len, p_k=p_k), &mut srng);
         let m_init_handlers_body = format!("{}{}", handlers_decl, handlers_body);
 
         let mut map_init = String::new();

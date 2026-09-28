@@ -380,7 +380,7 @@ impl Packer {
         // ㉕ 初始化状态机运行时耦合化：状态号（原 1..N 洗牌裸字面量）改为
         // 运行期等差数列填表，比较/转移/初值经状态表/惰性槽/委托三形态流动
         let (insts_decl, init_insts_loop_body) =
-            ControlFlowBuilder::build_router_machine(&insts_init, "while not(false or false) do ", "st", rng);
+            ControlFlowBuilder::build_router_machine(&insts_init, "while not(false or false) do ", "st", "(#s.data)+(s.k[1])", rng);
         let init_insts_loop = format!("{}{}", insts_decl, init_insts_loop_body);
 
         let mut handlers_init = Vec::new();
@@ -407,11 +407,12 @@ impl Packer {
 
         // ㉕ 句柄注册状态机同样运行时耦合化（原 1..N 洗牌裸字面量）
         let (handlers_decl, init_handlers_loop_body) =
-            ControlFlowBuilder::build_router_machine(&handlers_init, "while true do ", "st", rng);
+            ControlFlowBuilder::build_router_machine(&handlers_init, "while true do ", "st", "(#s.data)+(s.k[1])", rng);
         let init_handlers_loop = format!("{}{}", handlers_decl, init_handlers_loop_body);
 
         let router_code = ControlFlowBuilder::build_fast_router(
-            "s.pc", "s.insts", "inst", "s.handlers", "s.r_flg", "s.r_vals", "s.r_len", "s.tamper", "s.tail_flg", rng
+            "s.pc", "s.insts", "inst", "s.handlers", "s.r_flg", "s.r_vals", "s.r_len", "s.tamper", "s.tail_flg",
+            "(#s.data)+(s.k[1])", rng
         );
 
         let num_key_parts = rng.range(3, 7);

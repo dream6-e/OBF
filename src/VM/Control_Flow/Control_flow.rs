@@ -13,6 +13,8 @@ pub struct CipherKeys {
     // ㉔ 状态号等差数列（首项+公差）与四形态转移基建（状态表/惰性槽/委托）
     pub st_tbl: String, pub sl_tbl: String, pub dv_a: String, pub dv_b: String,
     pub st_first: i64, pub st_diff: i64,
+    // ㉖ 运行时状态值表：状态空间（首项/公差）由运行时读数推导后填进此表
+    pub sv_tbl: String,
 }
 
 pub struct ControlFlowBuilder;
@@ -35,21 +37,39 @@ impl ControlFlowBuilder {
     /// 返回「把 var 写成 target」的完整语句（含尾分号）。
     fn transition_assign(var: &str, target: i64, keys: &CipherKeys, rng: &mut GenRng) -> String {
         let v = Self::obfuscate_num_depth(target, 1, keys, rng);
+        Self::transition_assign_expr(var, &v, keys, rng)
+    }
+
+    /// ㉖ 运行时状态值表槽引用（25% 概率再包一层恒等委托）。
+    /// 状态数值本身不落文本——分析者只能看到「表[混淆序号]」。
+    fn sv_ref(keys: &CipherKeys, slot: usize, rng: &mut GenRng) -> String {
+        let r = format!("{}[{}]", keys.sv_tbl, Self::obf_num(slot as i64, rng));
+        if rng.range(0, 4) == 0 {
+            let dv = if rng.range(0, 2) == 0 { &keys.dv_a } else { &keys.dv_b };
+            format!("{}({}, {})", dv, Self::obf_num(rng.range64(0x100, 0xFFFF), rng), r)
+        } else {
+            r
+        }
+    }
+
+    /// ㉖ 转移四形态的表达式目标版：target 可以是运行时状态表槽引用等任意表达式
+    /// （状态值依赖运行时数据时使用；文本里不再出现该状态的数值）。
+    fn transition_assign_expr(var: &str, target_expr: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
         match rng.range(0, 4) {
-            0 => format!("{}={};", var, v),
+            0 => format!("{}={};", var, target_expr),
             1 => {
                 let k = Self::obfuscate_num_depth(rng.range(0x100, 0xFFFFF) as i64, 1, keys, rng);
-                format!("{}[{}]={};{}={}[{}];", keys.st_tbl, k, v, var, keys.st_tbl, k)
+                format!("{}[{}]={};{}={}[{}];", keys.st_tbl, k, target_expr, var, keys.st_tbl, k)
             }
             2 => {
                 let k = Self::obfuscate_num_depth(rng.range(0x100, 0xFFFFF) as i64, 1, keys, rng);
                 format!("if not {}[{}] then {}[{}]={} end;{}={}[{}];",
-                    keys.sl_tbl, k, keys.sl_tbl, k, v, var, keys.sl_tbl, k)
+                    keys.sl_tbl, k, keys.sl_tbl, k, target_expr, var, keys.sl_tbl, k)
             }
             _ => {
                 let j = Self::obfuscate_num_depth(rng.range(0x100, 0xFFFF) as i64, 1, keys, rng);
                 let dv = if rng.range(0, 2) == 0 { &keys.dv_a } else { &keys.dv_b };
-                format!("{}={}({},{});", var, dv, j, v)
+                format!("{}={}({},{});", var, dv, j, target_expr)
             }
         }
     }
@@ -66,7 +86,7 @@ impl ControlFlowBuilder {
         let core = match rng.range(0, 4) {
             0 => format!("({}-{})", hex(v + r, rng), hex(r, rng)),
             1 => format!("(-{}+{})", hex(r, rng), hex(r + v, rng)),
-            2 => format!("(({})-({}))+{}", hex(r, rng), hex(r, rng), hex(v, rng)),
+            2 => format!("((({})-({}))+{})", hex(r, rng), hex(r, rng), hex(v, rng)),
             _ => {
                 let q = rng.range64(3, 25);
                 format!("(({})/({}))", hex(v * q, rng), hex(q, rng))
@@ -79,18 +99,20 @@ impl ControlFlowBuilder {
     }
 
     /// ㉕ 运行时耦合的初始化状态机：把一串顺序执行的语句打散进 while-状态机，
-    /// 但状态号在产物文本里零出现——等差数列（随机首项+随机奇数公差）只在运行时
-    /// 由填充循环算进状态表；比较/转移/初值全部经状态表引用、惰性槽、恒等委托
-    /// 三种间接形态流动。单步分析者必须先执行填充循环才能知道任何状态值。
+    /// 但状态号在产物文本里零出现——㉖ 起首项/公差也依赖运行时：
+    /// 首项 = (seed_src % 0X10000)*k0 + k1、公差 = ((seed_src) % dm)*2 + db（恒奇），
+    /// seed_src 由调用点给（如「#载荷 + 密钥首字节」），只在运行时可求值——
+    /// 常量集合 ≠ 可达状态集合。比较/转移/初值仍经状态表/惰性槽/委托间接流动。
     /// 返回 (局部声明+基建, 机器本体)；loop_kw 保留各调用点原有的循环头写法。
     pub fn build_router_machine(
-        stmts: &[String], loop_kw: &str, st_var: &str, rng: &mut GenRng,
+        stmts: &[String], loop_kw: &str, st_var: &str, seed_src: &str, rng: &mut GenRng,
     ) -> (String, String) {
         let n = stmts.len();
-        let (ct, sl, dv, ci, cc, dd) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-        let first = rng.range64(0x3000, 0x5FFF);
-        let diff = rng.range64(7, 101) | 1;
-        let val = |k: usize| first + k as i64 * diff;
+        let (ct, sl, dv, ci, cc, dd, sd) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let k0 = rng.range(2, 9);
+        let k1 = rng.range64(0x100, 0xFFF);
+        let dm = rng.range(19, 47);
+        let db = rng.range(3, 50) | 1;
         let mut perm: Vec<usize> = (0..=n).collect();
         for i in (1..perm.len()).rev() { let j = rng.range(0, i + 1); perm.swap(i, j); }
         let idx_of = |k: usize, rng: &mut GenRng| Self::obf_num((perm[k] + 1) as i64, rng);
@@ -110,8 +132,10 @@ impl ControlFlowBuilder {
             }
         };
         let mut decl = format!("local {}={{}};local {}={{}};local {}=function(w,u) local z=w%0X2 return u+(z-z) end;", ct, sl, dv);
-        decl.push_str(&format!("local {}={};local {}={};for {}=1,{} do {}[{}]={};{}={}+{} end;",
-            cc, Self::obf_num(first, rng), dd, Self::obf_num(diff, rng),
+        decl.push_str(&format!("local {}=({});local {}=(({})%0X10000)*{}+{};local {}=((({}))%{})*2+{};for {}=1,{} do {}[{}]={};{}={}+{} end;",
+            sd, seed_src,
+            cc, sd, Self::obf_num(k0 as i64, rng), Self::obf_num(k1, rng),
+            dd, sd, dm, db,
             ci, Self::obf_num((n + 1) as i64, rng), ct, ci, cc, cc, cc, dd));
         let mut body = format!("{}={};", st_var, trans(0, rng));
         body.push_str(loop_kw);
@@ -219,6 +243,7 @@ impl ControlFlowBuilder {
         var_r_len: &str,
         var_tamper: &str,
         var_tail_flg: &str,
+        var_seed: &str,
         rng: &mut GenRng,
     ) -> String {
         // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng::distinct
@@ -235,6 +260,7 @@ impl ControlFlowBuilder {
             tbl_p: rng.name(),
             st_tbl: rng.name(), sl_tbl: rng.name(), dv_a: rng.name(), dv_b: rng.name(),
             st_first: 0, st_diff: 0,
+            sv_tbl: String::new(),
         };
 
         let s_state = rng.name();
@@ -281,22 +307,40 @@ impl ControlFlowBuilder {
             st = keys.st_tbl, sl = keys.sl_tbl, da = keys.dv_a, db = keys.dv_b,
             w = rng.name(), u = rng.name(), z = rng.name()));
         
-        // ㉔ 状态号 = 等差数列 + 随机首项：fetch/dispatch/中间态/叶子路由态全是
-        // 数列成员（first + k*diff），静态提不出「随机小数状态」旧画像。
-        let st_first = rng.range(0x1000, 0x2FFF) as i64;
-        let st_diff = (rng.range(7, 101) as i64) | 1;
-        keys.st_first = st_first; keys.st_diff = st_diff;
-        let fetch_state = st_first + st_diff;
+        // ㉖ 状态空间运行时依赖：首项/公差由运行时读数当场推导——
+        //   svMix = (#insts + #handlers + <载荷种子表达式>) % 0X100
+        //   svTrm = tamper % 0X40
+        //   首项 = svMix*k0 + svTrm*k1 + k2；公差 = ((svMix+svTrm) % dm)*2 + db（恒奇）
+        // 状态值运行时填进状态值表；文本只剩混合常量与槽序号——常量集合 ≠
+        // 可达状态集合，静态区间/差分分析失去锚点。
+        // 槽位：1=fetch 2=dispatch 3..5=中间态 6..53=叶子路由态。
+        let (sv_t, sv_m, sv_n, sv_f, sv_d, sv_i) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        keys.sv_tbl = sv_t.clone();
+        let k0 = rng.range(3, 31);
+        let k1 = rng.range(2, 17);
+        let k2 = rng.range64(0x100, 0xFFF);
+        let dm = rng.range(19, 47);
+        let db = rng.range(3, 50) | 1;
         let init_val1 = rng.range(10, 1000) as i64;
         let init_val2 = rng.range(1, 1000) as i64;
-        
+
+        out.push_str(&format!(
+            "local {}={{}};local {}=((#{}+#{}+({}))%0X100);local {}=(({})%0X40);local {}=({})*{}+({})*{}+{};local {}=((({}+({}))%{})*2+{});for {}=1,{} do {}[{}]={};{}={}+{} end;",
+            sv_t,
+            sv_m, var_insts, var_handlers, var_seed,
+            sv_n, var_tamper,
+            sv_f, sv_m, Self::obf_num(k0 as i64, rng), sv_n, Self::obf_num(k1 as i64, rng), Self::obf_num(k2, rng),
+            sv_d, sv_m, sv_n, dm, db,
+            sv_i, Self::obf_num(53, rng), sv_t, sv_i, sv_f, sv_f, sv_f, sv_d));
+
         out.push_str(&format!("{},{},{}={},{},{};", 
             s_state, t_shadow, d_junk, 
             Self::format_num(init_val1, rng), 
             Self::format_num(0, rng), 
             Self::format_num(init_val2, rng)
         ));
-        out.push_str(&Self::transition_assign(&var_t, fetch_state, &keys, rng));
+        out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng));
 
         // ── 骨架多样化 ①：恒真壳池（解析器无法用单一「while 恒真」指纹定位主循环）──
         // 三族壳运行语义相同（无限循环），形态不同：
@@ -314,10 +358,10 @@ impl ControlFlowBuilder {
         //   check 态（d_junk 一致性自检后落到 dispatch）/ shuffle 态（打乱后落 dispatch）。
         // 循环走「态图」：t=当前态 → 各态分支 → 无条件写下一态，解析器提不出线性两态模板。
         let extra_states = rng.range(0, 2); // 0..=2 个中间态
-        let mut mid_states: Vec<i64> = Vec::new();
+        let mut mid_states: Vec<usize> = Vec::new();
         let mut mid_kinds: Vec<u8> = Vec::new(); // 0=check 1=shuffle
         for mi_k in 0..extra_states {
-            mid_states.push(st_first + (3 + mi_k as i64) * st_diff);
+            mid_states.push(3 + mi_k);
             mid_kinds.push(if rng.range(0, 2) == 0 { 0 } else { 1 });
         }
         // 随机中间态顺序（各自回到 dispatch）
@@ -326,11 +370,11 @@ impl ControlFlowBuilder {
 
         let dispatch_entry: String;
         if extra_states == 0 {
-            out.push_str(&format!("if {}=={} then ", var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)));
+            out.push_str(&format!("if {}=={} then ", var_t, Self::sv_ref(&keys, 1, rng)));
             dispatch_entry = String::new();
         } else {
             // fetch 态取指后落入第一个中间态（而非直接 dispatch）
-            out.push_str(&format!("if {}=={} then ", var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)));
+            out.push_str(&format!("if {}=={} then ", var_t, Self::sv_ref(&keys, 1, rng)));
             dispatch_entry = String::new();
         }
         out.push_str(&format!("if {}>#{} then return end;", var_pc, var_insts));
@@ -346,18 +390,17 @@ impl ControlFlowBuilder {
         // ── 树形多样化 ③（放弃的方案留档）：route→handler 序号置换映射会改语义
         //（递归树的区间比较对「路由序」敏感，置换后 tree_entries 区间不再对应正确
         // handler——实测 compare two nil）。多样化由三叉+不等宽切分承担。
-        let dispatch_state = st_first + 2 * st_diff;
         if extra_states == 0 {
-            out.push_str(&Self::transition_assign(&var_t, dispatch_state, &keys, rng));
+            out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 2, rng), &keys, rng));
         } else {
             // 态图：fetch → 第一个中间态
             let first_mid = mid_states[mid_order[0] as usize];
-            out.push_str(&Self::transition_assign(&var_t, first_mid, &keys, rng));
+            out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, first_mid, rng), &keys, rng));
         }
         // 中间态分支（check/shuffle 空转后落 dispatch；功能零影响）
         for &mi in mid_order.iter() {
             let st_m = mid_states[mi as usize];
-            out.push_str(&format!("elseif {}=={} then ", var_t, Self::obfuscate_num_depth(st_m, 1, &keys, rng)));
+            out.push_str(&format!("elseif {}=={} then ", var_t, Self::sv_ref(&keys, st_m, rng)));
             match mid_kinds[mi as usize] {
                 0 => {
                     // check 态：d_junk 一致性空转自检（与原版 junk 判定同族形态）
@@ -370,10 +413,10 @@ impl ControlFlowBuilder {
                     out.push_str(&format!("{}={};{}={}; ", f_tmp, sa, f_tmp, sb));
                 }
             }
-            out.push_str(&Self::transition_assign(&var_t, dispatch_state, &keys, rng));
+            out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 2, rng), &keys, rng));
         }
         out.push_str("elseif ");
-        out.push_str(&format!("{}=={} then ", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
+        out.push_str(&format!("{}=={} then ", var_t, Self::sv_ref(&keys, 2, rng)));
         out.push_str(&Self::generate_recursive_tree(
             0,
             num_routes as usize - 1,
@@ -385,15 +428,15 @@ impl ControlFlowBuilder {
             &d_junk,
             &f_tmp,
             &var_t,
-            fetch_state,
+            0,
             &mut junk_limit,
             &keys,
             rng
         ));
         
         out.push_str("else ");
-        let tf_a = Self::transition_assign(&var_t, fetch_state, &keys, rng);
-        let tf_b = Self::transition_assign(&var_t, fetch_state, &keys, rng);
+        let tf_a = Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng);
+        let tf_b = Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng);
         out.push_str(&format!("if {} then if {} then {},{}=false,false;{}else return(unpack or table.unpack)({},{},{})end else {}end ", 
             var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, tf_a, var_r_vals, Self::format_num(1, rng), var_r_len, tf_b
         ));
@@ -420,9 +463,9 @@ impl ControlFlowBuilder {
         keys: &CipherKeys,
         rng: &mut GenRng,
     ) -> String {
-        // ㉔ 路由态同为数列成员；两条转移按四形态随机
-        let next_s = keys.st_first + rng.range(1, 48) as i64 * keys.st_diff;
-        let s_state_trans = Self::transition_assign(s_state, next_s, keys, rng);
+        // ㉖ 路由态 = 运行时状态值表槽 6..53（值含运行时种子，文本零状态常量）
+        let next_slot = 6 + rng.range(0, 48);
+        let s_state_trans = Self::transition_assign_expr(s_state, &Self::sv_ref(keys, next_slot, rng), keys, rng);
         let state_transition = Self::transition_assign(var_t, 0, keys, rng);
         let leaf_type = rng.range(0, 5);
         let mut node = String::new();
