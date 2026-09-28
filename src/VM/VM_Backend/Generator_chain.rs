@@ -652,7 +652,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // 驱动，数据流折进参数树（t:dz(t:cx(e))），定义顺序洗牌+诱饵方法埋伏；
         // 链路：驱动→m1(pcall 自派发)→m2(探针错误族随机)→m3(find 针式)→
         // m4(触发族随机：h and 容纳值 or nil 折叠，nil 时自然崩溃)
-        let line_guard = |rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream| -> String {
+        // ㉓ inline=true：守卫落在 fu（兄弟字段，先于 wai 执行、够不到前导局部），
+        // 型别填充不走统一流，用自足 string.char(数字) 拼装——同样零字面量。
+        let line_guard = |rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream, inline: bool| -> String {
             let tbl = rng.name();
             let probe_body = |rng: &mut GenRng| -> String {
                 let v = rng.name();
@@ -692,9 +694,14 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             let taut = format!("(0X{:X}-0X{:X}==0X{:X})", ga, gb, ga - gb);
             let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}=type({u}); ",
                 u = p_u, h = p_hit, tol = tolerant, f1 = f1);
-            // ㉓ 统一流：填充语里的型别串也走惰性解密
-            let jf_id = uni.register("function");
-            let (jf_stmt, jf_expr) = uni.fetch(&mut *rng, jf_id);
+            // ㉓ 填充语型别串：壳内守卫走统一流惰性解密；fu 内守卫（inline）
+            // 用 string.char 数字拼装自足表达，二者都零字面量。
+            let (jf_stmt, jf_expr) = if inline {
+                (String::new(), "string.char(102,117,110,99,116,105,111,110)".to_string())
+            } else {
+                let jf_id = uni.register("function");
+                uni.fetch(&mut *rng, jf_id)
+            };
             let mut hopts = vec![
                 format!("if {u}~={u} then {u}={u} end; ", u = p_u),
                 format!("{jf_stmt}if {f1}=={jf_expr}then {u}={u} end; ", jf_stmt = jf_stmt, f1 = f1, jf_expr = jf_expr, u = p_u),
@@ -779,7 +786,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         ];
 
         {
-            let lg20 = line_guard(&mut rng, &mut uni);
+            let lg20 = line_guard(&mut rng, &mut uni, false);
             let gap20 = rng.range(0, parts.len() + 1);
             parts.insert(gap20, lg20);
         }
@@ -794,13 +801,12 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
 
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
-        // ㉓ 统一流前导（表+惰性解码器）：必须落在 return({}) 壳**内**（用户指示，
-        // 与 ⑳.4「壳外零代码」一致）——用 IIFE 包住字段表：前导在 IIFE 体内、
-        // return 表达式之内，wai/fu 等所有字段方法都以 upvalue 共享解码表。
-        out.push_str("return ((function() ");
-        out.push_str(&uni.emit_prelude(&mut rng));
-        out.push_str(" return (");
         out.push_str(&header_block);
+        // ㉓ 统一流前导（表+惰性解码器）：直接落在主 return({}) 壳内——header_block
+        // 打开的 wai 函数体开头（用户指示，不另起壳）；壳内所有取用点（守卫/散点/
+        // 打乱 parts/解码脚本）都在其后，解码脚本以 upvalue 捕获。fu 是兄弟字段且在
+        // wai 之前执行，其守卫的型别填充改用自足 string.char 数字拼装（见 line_guard）。
+        out.push_str(&uni.emit_prelude(&mut rng));
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
         out.push_str(&format!("local {np},{md},{th},{tw},{rk},{kreg},{psn}=0,{{}},{{}},0X0,0X0,setmetatable({{}},{{__mode='k'}}),false; ", np = np21, md = md21, th = th21, tw = tw21, rk = rk21, kreg = kreg_n, psn = psn_n));
@@ -809,7 +815,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&weld.declare());
         // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
         // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
-        out.push_str(&line_guard(&mut rng, &mut uni));
+        out.push_str(&line_guard(&mut rng, &mut uni, false));
         // ④ 槽位键的运行期推导块必须在所有用键代码之前；
         // finish_setup 把状态链种子/陷阱门等收尾语句并进 setup（在全部注册后调用）
         out.push_str(&sk_setup);
@@ -847,7 +853,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             out.push_str(" ");
         }
 
-        out.push_str(&line_guard(&mut rng, &mut uni));
+        out.push_str(&line_guard(&mut rng, &mut uni, false));
         out.push_str(&format!("local main_chunk={}(); ", fn_decode_chunk));
         out.push_str(&at.trigger);
         out.push_str(&format!(" {} = {{}}; local {} = (getfenv and getfenv() or _ENV or _G); local {}; ", var_builtin_reg, var_boot_env, var_bname));
@@ -965,10 +971,10 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // thunk 快照/return 壳整段是"探针之下"的插入盲区（用户实测 print 插行未检出）。
         // 紧贴 return 再布一枚，把盲区压缩到 return 语句本身；⑤ fu 壳内最后一针
         // 封住 return 壳表达式内的语句缝隙。二者均在行 2 内，针式 :2: 一致。
-        out.push_str(&line_guard(&mut rng, &mut uni));
-        out.push_str(&line_guard(&mut rng, &mut uni));
+        out.push_str(&line_guard(&mut rng, &mut uni, false));
+        out.push_str(&line_guard(&mut rng, &mut uni, false));
         out.push_str(" ");
-        out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni), wai));
-        out.push_str(&format!(" }}) end)()):{}()", fu));
+        out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni, true), wai));
+        out.push_str(&format!(" }}):{}()", fu));
         out
 }
