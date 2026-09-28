@@ -338,10 +338,16 @@ pub fn build_readers(
                 // read_string 四态梯子
                 {
                     let (t, i, j) = (rng.name(), rng.name(), rng.name());
-                    let shell = if rng.range(0, 2) == 0 {
-                        format!("local {i}=0; while {i}<{l} do {i}={i}+1; {t}[({i})]=string_char({rd}()) end", i = i, l = v_rs_l, t = t, rd = fn_read_dec)
-                    } else {
-                        format!("for {j}=0X1,{l} do {t}[({j})]=string_char({rd}()) end", j = j, l = v_rs_l, t = t, rd = fn_read_dec)
+                    // ㉘D5 第三形态：逐字符读取也走动态游标机（上界=运行期长度
+                    // v_rs_l），while/for 两种线性壳只在 2/3 概率保留
+                    let shell = match rng.range(0, 3) {
+                        0 => format!("local {i}=0; while {i}<{l} do {i}={i}+1; {t}[({i})]=string_char({rd}()) end", i = i, l = v_rs_l, t = t, rd = fn_read_dec),
+                        1 => format!("for {j}=0X1,{l} do {t}[({j})]=string_char({rd}()) end", j = j, l = v_rs_l, t = t, rd = fn_read_dec),
+                        _ => {
+                            let off = rng.range(0, 100);
+                            let unit = |iv: &str| format!("{t}[({iv})]=string_char({rd}())", t = t, iv = iv, rd = fn_read_dec);
+                            crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(keys), off, v_rs_l, 2, 3, &unit)
+                        }
                     };
                     let sv = rng.name();
                     let (lit_a, lit_b, lit_c) = (e_a, e_b, e_c);

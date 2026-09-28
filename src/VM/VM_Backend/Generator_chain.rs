@@ -828,7 +828,27 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&uni.emit_prelude(&mut rng));
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
-        out.push_str(&format!("local {np},{md},{th},{tw},{rk},{kreg},{psn}=0,{{}},{{}},0X0,0X0,setmetatable({{}},{{__mode='k'}}),false; ", np = np21, md = md21, th = th21, tw = tw21, rk = rk21, kreg = kreg_n, psn = psn_n));
+        // ㉘D1 七件套声明形式打乱：名字-初值配对后洗牌发射——固定的
+        // 「np,md,th,tw,rk,kreg,psn」字面顺序消失；后续按名引用，顺序无语义
+        {
+            // 注意：此处早于 block_p_def（键表），不能用 obfuscate_num 的键表形态，
+            // 只用纯算式零（大写十六进制）
+            let zk = rng.range(0x100, 0xFFFFF);
+            let z_rk = format!("(0X{:X}-0X{:X})", zk, zk);
+            let mut decls: Vec<(String, String)> = vec![
+                (np21.clone(), "0".to_string()),
+                (md21.clone(), "{}".to_string()),
+                (th21.clone(), "{}".to_string()),
+                (tw21.clone(), "0X0".to_string()),
+                (rk21.clone(), z_rk),
+                (kreg_n.clone(), "setmetatable({},{__mode='k'})".to_string()),
+                (psn_n.clone(), "false".to_string()),
+            ];
+            rng.shuffle(&mut decls);
+            let names: Vec<String> = decls.iter().map(|(n, _)| n.clone()).collect();
+            let vals: Vec<String> = decls.iter().map(|(_, v)| v.clone()).collect();
+            out.push_str(&format!("local {}={}; ", names.join(","), vals.join(",")));
+        }
         // ㉒② 焊接缓存表声明：长时状态只剩槽号；此后各站点以「一个 if 三件事」
         // 形态（惰性缓存+大随机数当键+校验恒等式）发射焊接构造。
         out.push_str(&weld.declare());
@@ -840,7 +860,11 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&sk_setup);
         at.finish_setup();
         out.push_str(&at.setup);
-        out.push_str(&format!(" local {} = 0; ", key_seed_var));
+        // ㉘D1 key_seed 初值零改算式形态（此处早于键表，纯减法零）
+        {
+            let zk2 = rng.range(0x100, 0xFFFFF);
+            out.push_str(&format!(" local {} = (0X{:X}-0X{:X}); ", key_seed_var, zk2, zk2));
+        }
         out.push_str(" ");
         // A 解码器前奏打散：五件套不再「库-函数」对齐并列（math.floor,string.char,... 教科书
         // 解码器开场）。先落随机键库表，五个 local 按洗牌序逐个经表取用，.m/["m"] 访问混用；
@@ -873,9 +897,11 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         }
 
         out.push_str(&line_guard(&mut rng, &mut uni, false));
-        out.push_str(&format!("local main_chunk={}(); ", fn_decode_chunk));
-        out.push_str(&at.trigger);
+        // ㉘D7 尾部形式改写：reg/env/名暂存三声明与解码调用互不依赖，前移到解码
+        // 之前；解码调用包一层函数边界，打破「解码→触发→取环境」的平铺调用链形态
         out.push_str(&format!(" {} = {{}}; local {} = (getfenv and getfenv() or _ENV or _G); local {}; ", var_builtin_reg, var_boot_env, var_bname));
+        out.push_str(&format!("local main_chunk=(function() return {}() end)(); ", fn_decode_chunk));
+        out.push_str(&at.trigger);
         // ⑰ 内建名专用簇：独立 key/salt/kind，密文以混合转义字面量内嵌，
         // 与四组常量簇完全分离——导出任何常量簇参数都拿不到内建名
         {
@@ -900,9 +926,14 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            out.push_str(&format!(
-                "local {bp}={{{lits}}}; local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
-                bp = bpt, lits = boot_lits.join(","), kn = bk, key_lua = key_lua, sl = bs, salt_lua = salt_lua));
+            // ㉘D7 簇头三条声明互无依赖（bp 密文表/kn 键表/sl 盐），洗牌发射
+            let mut cluster_decls: Vec<String> = vec![
+                format!("local {bp}={{{lits}}}; ", bp = bpt, lits = boot_lits.join(",")),
+                format!("local {kn}={{{key_lua}}}; ", kn = bk, key_lua = key_lua),
+                format!("local {sl}={salt_lua}; ", sl = bs, salt_lua = salt_lua),
+            ];
+            rng.shuffle(&mut cluster_decls);
+            for d in &cluster_decls { out.push_str(d); }
             // ㉒② 焊接混合模数（cb 每 64 字节块重入——第二次起逻辑无分支）；
             // ㉒① 两条 16 环 → 4 态游标机（块内局部名 wq 双字母避开遮蔽池）。
             let mix_m_v = mk_m(&mut rng);
@@ -945,16 +976,21 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             // 寄存器位），局部数不膨胀，命名维度消失。
             let bi_e = weld.dst();
             out.push_str(&format!("do local {};", bi_e));
+            // ㉘D6 内建名各次迭代互不依赖（各自写不同槽位、bname 仅暂存、焊接
+            // 构造按调用独立缓存）——迭代整体洗牌，消除 BUILTIN_NAMES 的固定枚举序
+            let mut builtin_stmts: Vec<String> = Vec::new();
             for (i, _) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
                 let slot = builtin_slot_perm[i];
                 let wslot_stmt = weld.weld(&mut rng, &bi_e, &(slot + 1).to_string());
-                out.push_str(&format!(
+                builtin_stmts.push(format!(
                     "{bname}={bdec}({bp}[{lidx}],{ridx}); {ws} {reg}[{we}]={benv}[{bname}]; if {reg}[{we}]==nil and getgenv then {reg}[{we}]=getgenv()[{bname}] end; ",
                     bname = var_bname, bdec = bdec, bp = bpt, lidx = i + 1, ridx = i,
                     ws = wslot_stmt, we = bi_e,
                     reg = var_builtin_reg, benv = var_boot_env
                 ));
             }
+            rng.shuffle(&mut builtin_stmts);
+            for stmt in &builtin_stmts { out.push_str(stmt); }
             out.push_str(" end; ");
             // ⑱ 用毕销毁（⑳.1 伪装化）：连续 X=nil 运行是指纹——每个变量换一种
             // "取值赋值" 形态消化，nil 全部来自合法表达式的自然缺失：

@@ -236,8 +236,9 @@ impl Generator {
         let wai = rng.name();
         let mut header_block = String::new();
         header_block.push_str(&format!("return ({{ {} = function(agv,aggv,agv,agv,agv,aggv,agv,agv,aggv,aggv,aggv,agggv,agggv,agggv,agggv,aggv,{},{},{},{}, ...)\n", wai, p_out[0], p_out[1], p_out[2], p_out[3]));
-        header_block.push_str(&format!("local {} = {{}}; local {} = false; ", var_s, var_state_flag));
-        header_block.push_str(&format!("local {} = bit32 and bit32.rshift or bit and bit.rshift; ", var_fU));
+        // ㉘D1 头部两行声明换位（互无依赖）：位库 fallback 先、状态旗后
+        header_block.push_str(&format!("local {} = {{}}; local {} = bit32 and bit32.rshift or bit and bit.rshift; ", var_s, var_fU));
+        header_block.push_str(&format!("local {} = false; ", var_state_flag));
         header_block.push_str(&format!("local {} = function(q, s, M, C) s[{}] = select; end; ", fn_N_, hex_select_idx));
         header_block.push_str(&format!("{}(nil, {}, nil, nil); ", fn_N_, var_s));
         
@@ -262,12 +263,18 @@ impl Generator {
         // 函数之前，直接引用 fn_bxor 会捕获成全局 nil——取指/掩码派生专用此别名
         let fn_bxor2 = rng.name();
         let mut block_p_def = String::new();
-        block_p_def.push_str(&format!("local qT4c={{}};for i=0,15 do qT4c[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4c[i][j]=r end end;local qT8c={{}};for i=0,255 do qT8c[i]={{}};end;for i=0,255 do local qIc=qT8c[i];local qHc=(i-i%16)/16;for j=0,255 do qIc[j]=qT4c[i%16][j%16]+qT4c[qHc][(j-j%16)/16]*16 end end; local {}={}; local {}={}; local {}={}; local {}={}; ",
-            fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end",
-            fn_ba, "bit32 and bit32.band or bit and bit.band or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end",
-            fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end",
-            fn_bxor2, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"
-        ));
+        // ㉘D2 形式改写：qT4c/qT8c 的两段平铺建表折进一个函数边界（双表以返回值
+        // 出界，外层同名局部接住——后续 fn_bx/fn_bxor2 fallback 对 qT8c 的 upvalue
+        // 捕获不变）；四个位库局部互无依赖，洗牌后发射
+        block_p_def.push_str("local qT4c,qT8c=(function() local qT4c={};for i=0,15 do qT4c[i]={};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4c[i][j]=r end end;local qT8c={};for i=0,255 do qT8c[i]={};end;for i=0,255 do local qIc=qT8c[i];local qHc=(i-i%16)/16;for j=0,255 do qIc[j]=qT4c[i%16][j%16]+qT4c[qHc][(j-j%16)/16]*16 end end; return qT4c,qT8c end)(); ");
+        let mut bit_locals: Vec<String> = vec![
+            format!("local {}={}; ", fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"),
+            format!("local {}={}; ", fn_ba, "bit32 and bit32.band or bit and bit.band or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end"),
+            format!("local {}={}; ", fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end"),
+            format!("local {}={}; ", fn_bxor2, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"),
+        ];
+        rng.shuffle(&mut bit_locals);
+        for bl in &bit_locals { block_p_def.push_str(bl); }
         let tbl_def = format!(
             "local {p}={{}};{p}[{g1}]={{}};{p}[{g1}][{bx}]={fbx};{p}[{g1}][{add}]=function(a,b)return a+b end;{p}[{g1}][{ba}]={fba};{p}[{g2}]={{}};{p}[{g2}][{ba2}]=function(a)return {fba}(a,{max_u32})end;{p}[{g2}][{bs2}]=function(a)return {fbs}(a,{one})end;",
             p = keys.tbl_p,
@@ -773,9 +780,15 @@ impl Generator {
             block_execute_def.push_str(&format!("local op={}[{}];", var_opcodes, var_pc));
             // ⑮ 指令解码：A=存值-魔数；魔数奇偶决定 (B,C) 交换还原
             // ⑱.4 取指单点还原：数组存掩码值，这里 bx 解出语义值（内存 dump 得不到明文指令）
-            block_execute_def.push_str(&format!("local inst_A={bx}({}[{}],{})-op;", var_a_arr, var_pc, n_mk1, bx = fn_bxor2.as_str()));
-            block_execute_def.push_str(&format!("local inst_B={bx}({}[{}],{}); if inst_B>=0X80000000 then inst_B=inst_B-4294967296 end;", var_b_arr, var_pc, n_mk2, bx = fn_bxor2.as_str()));
-            block_execute_def.push_str(&format!("local inst_C={bx}({}[{}],{}); if inst_C>=0X80000000 then inst_C=inst_C-4294967296 end; ", var_c_arr, var_pc, n_mk3, bx = fn_bxor2.as_str()));
+            // ㉘D3 三条 inst 解码语句互不依赖（各自读自己的数组+魔数，只共同依赖
+            // 已就位的 op）——洗牌发射，消除 A→B→C 的固定解码序
+            let mut inst_stmts: Vec<String> = vec![
+                format!("local inst_A={bx}({}[{}],{})-op;", var_a_arr, var_pc, n_mk1, bx = fn_bxor2.as_str()),
+                format!("local inst_B={bx}({}[{}],{}); if inst_B>=0X80000000 then inst_B=inst_B-4294967296 end;", var_b_arr, var_pc, n_mk2, bx = fn_bxor2.as_str()),
+                format!("local inst_C={bx}({}[{}],{}); if inst_C>=0X80000000 then inst_C=inst_C-4294967296 end; ", var_c_arr, var_pc, n_mk3, bx = fn_bxor2.as_str()),
+            ];
+            rng.shuffle(&mut inst_stmts);
+            for stmt in &inst_stmts { block_execute_def.push_str(stmt); }
             block_execute_def.push_str("if op%2~=0 then inst_B,inst_C=inst_C,inst_B end; ");
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
             block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
