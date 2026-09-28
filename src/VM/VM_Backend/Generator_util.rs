@@ -1604,52 +1604,61 @@ impl UniStream {
         }
     }
     /// 表 + 解码器声明（壳内一次；零字符串字面量）。
-    /// ㉓.2 去线性化：高频数字（256/模数/a/c）先落为伪装常量局部；解码逻辑拆进
-    /// 驱动表的多个方法（定义洗牌+诱饵方法），解码函数本体是状态机——
-    /// 「初始化→循环→拼接→返回」的教科书骨架消失，数据全走状态表。
+    /// ㉓.6 抗识别化：算式全部拆成单步碎片方法（任一语句都不含完整的
+    /// LCG/键流/反馈形状），控制流改为键表+程序表**间接派发**——程序表是
+    /// 一串随机数键，派发循环逐键取方法执行，循环回卷由其中一枚「回卷方法」
+    /// 改写游标完成；无 if/elseif 状态链，静态读不出在算什么。
     pub fn emit_prelude(&self, rng: &mut GenRng) -> String {
         let (tb, of) = (rng.name(), rng.name());
-        let (st, s) = (rng.name(), rng.name());
-        let drv = rng.name();
-        // 状态表字段名随机
+        let (sv, drv, pl, dp, fv) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        // 状态表字段（含三枚中转槽 u/v/w、垃圾槽 z、游标 pc）
         let (f_n, f_i, f_g, f_d, f_o, f_k) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-        // 驱动表方法：推进 / 取键流字节 / 拼字 + 1~2 个诱饵
-        let mA = rng.name(); let mB = rng.name(); let mC = rng.name();
-        let mA_def = format!("{d}.{m}=function(_, {s}) {s}.{n}=({s}.{n}*{a}+{c})%{mm} end; ",
-            d = drv, m = mA, s = s, n = f_n, a = self.k_a, c = self.k_c, mm = self.k_m);
-        let mB_def = format!("{d}.{m}=function(_, {s}) {s}.{k}=({s}.{n}%{b}+{q0}*(({s}.{g}+{s}.{i}+0X1)%{b})+{q1})%{b} end; ",
-            d = drv, m = mB, s = s, k = f_k, n = f_n, b = self.k_b, g = f_g, i = f_i,
-            q0 = self.plain_num(self.q0), q1 = self.plain_num(self.q1));
-        // ㉓.5 拼字方法兼反馈：p 解出后折进状态，下一字节键流因此依赖明文
-        let pv = rng.name();
-        let mC_def = format!("{d}.{m}=function(_, {s}) local {pv}=({s}.{d2}[{s}.{i}+0X1]-{s}.{k})%{b}; {s}.{o}={s}.{o}..string.char({pv}); {s}.{n}=({s}.{n}+{pv}*{kp}+{kq})%{mm} end; ",
-            d = drv, m = mC, s = s, pv = pv, d2 = f_d, i = f_i, k = f_k, b = self.k_b,
-            o = f_o, n = f_n, kp = self.k_p, kq = self.k_q, mm = self.k_m);
-        let mut methods = vec![mA_def, mB_def, mC_def];
-        for _ in 0..rng.range(1, 3) {
-            let md = rng.name();
-            methods.push(format!("{d}.{m}=function(_, {s}) {s}.{z}=(({s}.{z} or 0X0)+{s}.{n})%{b} end; ",
-                d = drv, m = md, s = s, z = rng.name(), n = f_n, b = self.k_b));
-        }
-        rng.shuffle(&mut methods);
-        // 状态机派发：五个分支洗牌（else break 恒在尾）
-        let (e0, e1, e2, e3, e4, e5) = (rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF),
-            rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF));
-        // ㉓.5 E0 不再是「跳偏移」而是串起始推导：固定 d_rounds 步（伪装值内联）
-        let b0 = format!("{st}==0X{e0:X} then if {s}.{i}<{rd} then {d}:{mA}({s}) {s}.{i}={s}.{i}+0X1 else {s}.{i}=0X0 {st}=0X{e1:X} end",
-            st = st, s = s, i = f_i, rd = self.mask_num(rng, self.d_rounds),
-            d = drv, mA = mA, e0 = e0, e1 = e1);
-        // e5 是无分支认领的终态键：置入后下一轮落进 else break
-        let b1 = format!("{st}==0X{e1:X} then if {s}.{i}<#{s}.{d2} then {d}:{mA}({s}) {st}=0X{e2:X} else {st}=0X{e5:X} end",
-            st = st, s = s, i = f_i, d2 = f_d, d = drv, mA = mA, e1 = e1, e2 = e2, e5 = e5);
-        let b2 = format!("{st}==0X{e2:X} then {d}:{mB}({s}) {st}=0X{e3:X}",
-            st = st, e2 = e2, d = drv, mB = mB, s = s, e3 = e3);
-        let b3 = format!("{st}==0X{e3:X} then {d}:{mC}({s}) {st}=0X{e4:X}",
-            st = st, e3 = e3, d = drv, mC = mC, s = s, e4 = e4);
-        let b4 = format!("{st}==0X{e4:X} then {s}.{i}={s}.{i}+0X1 {st}=0X{e1:X}",
-            st = st, s = s, i = f_i, e4 = e4, e1 = e1);
-        let mut branches = vec![b0, b1, b2, b3, b4];
-        rng.shuffle(&mut branches);
+        let (f_u, f_v, f_w, f_z, f_pc) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        // 方法键去重池
+        let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut nk = |rng: &mut GenRng| -> u32 {
+            loop { let k = rng.range(0x0200_0000, 0x7FFF_FFFF) as u32; if used.insert(k) { return k; } }
+        };
+        let bnum = |rng: &mut GenRng, v: u32| -> String {
+            if rng.range(0, 2) == 0 { format!("0X{:X}", v) } else { format!("{}", v) }
+        };
+        // 碎片方法：推进拆两段、键流拆两段、反馈拆两段，中转走槽
+        let mn: Vec<String> = (0..13).map(|_| rng.name()).collect();
+        let mk: Vec<u32> = (0..13).map(|_| nk(rng)).collect();
+        let t = sv.clone();
+        let defs_src: Vec<String> = vec![
+            format!("{d}.{m}=function(_, {t}) {t}.{u}={t}.{n}*{ka} end; ", d = drv, t = t, m = mn[0], u = f_u, n = f_n, ka = self.k_a),
+            format!("{d}.{m}=function(_, {t}) {t}.{n}=({t}.{u}+{kc})%{km} end; ", d = drv, t = t, m = mn[1], u = f_u, n = f_n, kc = self.k_c, km = self.k_m),
+            format!("{d}.{m}=function(_, {t}) {t}.{v}=({t}.{g}+{t}.{i}+0X1)%{kb} end; ", d = drv, t = t, m = mn[2], v = f_v, g = f_g, i = f_i, kb = self.k_b),
+            format!("{d}.{m}=function(_, {t}) {t}.{w}={t}.{n}%{kb} end; ", d = drv, t = t, m = mn[3], w = f_w, n = f_n, kb = self.k_b),
+            format!("{d}.{m}=function(_, {t}) {t}.{k}=({t}.{w}+{q0}*{t}.{v}+{q1})%{kb} end; ", d = drv, t = t, m = mn[4], k = f_k, w = f_w, v = f_v, kb = self.k_b, q0 = self.plain_num(self.q0), q1 = self.plain_num(self.q1)),
+            format!("{d}.{m}=function(_, {t}) {t}.{u}=({t}.{d2}[{t}.{i}+0X1]-{t}.{k})%{kb} end; ", d = drv, t = t, m = mn[5], u = f_u, d2 = f_d, i = f_i, k = f_k, kb = self.k_b),
+            format!("{d}.{m}=function(_, {t}) {t}.{o}={t}.{o}..string.char({t}.{u}) end; ", d = drv, t = t, m = mn[6], o = f_o, u = f_u),
+            format!("{d}.{m}=function(_, {t}) {t}.{v}={t}.{u}*{kp} end; ", d = drv, t = t, m = mn[7], v = f_v, u = f_u, kp = self.k_p),
+            format!("{d}.{m}=function(_, {t}) {t}.{n}=({t}.{n}+{t}.{v}+{kq})%{km} end; ", d = drv, t = t, m = mn[8], n = f_n, v = f_v, kq = self.k_q, km = self.k_m),
+            format!("{d}.{m}=function(_, {t}) {t}.{i}={t}.{i}+0X1 end; ", d = drv, t = t, m = mn[9], i = f_i),
+            format!("{d}.{m}=function(_, {t}) {t}.{z}=(({t}.{z} or 0X0)+{t}.{n})%{kb} end; ", d = drv, t = t, m = mn[10], z = f_z, n = f_n, kb = self.k_b),
+            format!("{d}.{m}=function(_, {t}) {t}.{w}=({t}.{w}+{t}.{i})-{t}.{i} end; ", d = drv, t = t, m = mn[11], w = f_w, i = f_i),
+            String::new(), // 回卷方法稍后装配（依赖程序表长度）
+        ];
+        // 程序表：推导段（d_rounds 个推进对）+ 字节段（含两枚垃圾步）
+        let mut prog: Vec<u32> = Vec::new();
+        for _ in 0..self.d_rounds { prog.push(mk[0]); prog.push(mk[1]); }
+        let loop_at = prog.len(); // 回卷目标（派发侧 +1 前的值）
+        for &idx in &[0usize, 1, 2, 3, 4, 5, 10, 6, 7, 8, 11, 9] { prog.push(mk[idx]); }
+        prog.push(mk[12]);
+        let end_at = prog.len() + rng.range(5, 60);
+        // 回卷方法：未读完 → 游标回字节段首；读完 → 游标越界（派发落空退出）
+        let chk = format!("{d}.{m}=function(_, {t}) if {t}.{i}<#{t}.{d2} then {t}.{pc}={lv} else {t}.{pc}={ev} end end; ",
+            d = drv, m = mn[12], t = t, i = f_i, d2 = f_d, pc = f_pc,
+            lv = self.mask_num(rng, loop_at as u64), ev = self.mask_num(rng, end_at as u64));
+        let mut defs = defs_src;
+        defs[12] = chk;
+        rng.shuffle(&mut defs);
+        // 键表（条目洗牌）与程序表字面量
+        let mut disp: Vec<String> = (0..13).map(|j| format!("[{}]={}.{}", bnum(rng, mk[j]), drv, mn[j])).collect();
+        rng.shuffle(&mut disp);
+        let prog_lit = prog.iter().map(|k| bnum(rng, *k)).collect::<Vec<_>>().join(",");
         // 常量局部：洗牌落位 + 伪装值
         let mut consts = vec![
             format!("local {}={}; ", self.k_b, self.mask_num(rng, 256)),
@@ -1660,12 +1669,21 @@ impl UniStream {
             format!("local {}={}; ", self.k_q, self.mask_num(rng, self.fb_add)),
         ];
         rng.shuffle(&mut consts);
+        // 状态表构造（字段顺序也洗牌）
+        let mut flds = vec![
+            format!("{}=(({seed}+{of}*{dm})%{mm})", f_n, seed = self.mask_num(rng, self.seed), of = of, dm = self.mask_num(rng, self.d_mul), mm = self.k_m),
+            format!("{}=0X0", f_i),
+            format!("{}={}", f_g, of),
+            format!("{}={}", f_d, tb),
+            format!("{}=string.char()", f_o),
+            format!("{}=0X1", f_pc),
+        ];
+        rng.shuffle(&mut flds);
         format!(
-            "{consts}local {t}={{}}; local {d}={{}}; {methods}local function {dec}({tb},{of}) local {s}={{ {n}=(({seed}+{of}*{dm})%{mm}), {i}=0X0, {g}={of}, {d2}={tb}, {o}=string.char() }}; local {st}=0X{e0:X}; while true do {branches} else break end; end; if ({kb}-{kb})~=0X0 then {d}:{mC}({s}) end; return {s}.{o} end; ",
-            consts = consts.join(""), t = self.tbl, d = drv, methods = methods.join(""),
-            dec = self.dec, tb = tb, of = of, s = s, n = f_n, seed = self.mask_num(rng, self.seed),
-            i = f_i, g = f_g, d2 = f_d, o = f_o, st = st, e0 = e0,
-            dm = self.mask_num(rng, self.d_mul), mm = self.k_m,
-            branches = format!("if {}", branches.join(" elseif ")), kb = self.k_b, mC = mC)
+            "{consts}local {tt}={{}}; local {d}={{}}; {defs}local {pl}={{{prog}}}; local {dp}={{{disp}}}; local function {dec}({tb},{of}) local {s}={{ {flds} }}; while true do local {fv}={dp}[{pl}[{s}.{pc}]]; if {fv} then {fv}({d},{s}) {s}.{pc}={s}.{pc}+0X1 else break end end; if ({kb}-{kb})~=0X0 then {d}.{j}({d},{s}) end; return {s}.{o} end; ",
+            consts = consts.join(""), tt = self.tbl, d = drv, defs = defs.join(""),
+            pl = pl, prog = prog_lit, dp = dp, disp = disp.join(","),
+            dec = self.dec, tb = tb, of = of, s = sv, flds = flds.join(","),
+            fv = fv, pc = f_pc, kb = self.k_b, j = mn[10], o = f_o)
     }
 }
