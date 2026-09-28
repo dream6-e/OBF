@@ -10,6 +10,9 @@ pub struct CipherKeys {
     pub key_ba2: u64,
     pub key_bs2: u64,
     pub tbl_p: String,
+    // ㉔ 状态号等差数列（首项+公差）与四形态转移基建（状态表/惰性槽/委托）
+    pub st_tbl: String, pub sl_tbl: String, pub dv_a: String, pub dv_b: String,
+    pub st_first: i64, pub st_diff: i64,
 }
 
 pub struct ControlFlowBuilder;
@@ -25,6 +28,29 @@ impl ControlFlowBuilder {
                 }
             }
             _ => val.to_string(),
+        }
+    }
+
+    /// ㉔ 状态转移四形态：①常量算式 / ②状态表引用 / ③惰性槽 / ④委托调用返回值。
+    /// 返回「把 var 写成 target」的完整语句（含尾分号）。
+    fn transition_assign(var: &str, target: i64, keys: &CipherKeys, rng: &mut GenRng) -> String {
+        let v = Self::obfuscate_num_depth(target, 1, keys, rng);
+        match rng.range(0, 4) {
+            0 => format!("{}={};", var, v),
+            1 => {
+                let k = Self::obfuscate_num_depth(rng.range(0x100, 0xFFFFF) as i64, 1, keys, rng);
+                format!("{}[{}]={};{}={}[{}];", keys.st_tbl, k, v, var, keys.st_tbl, k)
+            }
+            2 => {
+                let k = Self::obfuscate_num_depth(rng.range(0x100, 0xFFFFF) as i64, 1, keys, rng);
+                format!("if not {}[{}] then {}[{}]={} end;{}={}[{}];",
+                    keys.sl_tbl, k, keys.sl_tbl, k, v, var, keys.sl_tbl, k)
+            }
+            _ => {
+                let j = Self::obfuscate_num_depth(rng.range(0x100, 0xFFFF) as i64, 1, keys, rng);
+                let dv = if rng.range(0, 2) == 0 { &keys.dv_a } else { &keys.dv_b };
+                format!("{}={}({},{});", var, dv, j, v)
+            }
         }
     }
 
@@ -127,7 +153,7 @@ impl ControlFlowBuilder {
     ) -> String {
         // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng::distinct
         let idx = rng.distinct(8, 0x10, 0x7F);
-        let keys = CipherKeys {
+        let mut keys = CipherKeys {
             grp1: idx[0],
             grp2: idx[1],
             key_bx: idx[2],
@@ -137,6 +163,8 @@ impl ControlFlowBuilder {
             key_ba2: idx[6],
             key_bs2: idx[7],
             tbl_p: rng.name(),
+            st_tbl: rng.name(), sl_tbl: rng.name(), dv_a: rng.name(), dv_b: rng.name(),
+            st_first: 0, st_diff: 0,
         };
 
         let s_state = rng.name();
@@ -178,18 +206,27 @@ impl ControlFlowBuilder {
         out.push_str(&tbl_def);
 
         out.push_str(&format!("local {},{},{},{},{},{};", s_state, t_shadow, d_junk, q_route, f_tmp, var_t));
+        // ㉔ 四形态转移基建：状态表（写读对）/惰性槽（首访填充）/委托（恒等扰动后返回）
+        out.push_str(&format!("local {st},{sl}={{}},{{}}; local {da}=function({w},{u}) local {z}={w}%0X2 return {u}+({z}-{z}) end; local {db}=function({w},{u}) local {z}=({w}-{w})%0X3 return {u}*0X1+{z} end; ",
+            st = keys.st_tbl, sl = keys.sl_tbl, da = keys.dv_a, db = keys.dv_b,
+            w = rng.name(), u = rng.name(), z = rng.name()));
         
-        let fetch_state = rng.range(0x1000, 0x2FFF) as i64;
+        // ㉔ 状态号 = 等差数列 + 随机首项：fetch/dispatch/中间态/叶子路由态全是
+        // 数列成员（first + k*diff），静态提不出「随机小数状态」旧画像。
+        let st_first = rng.range(0x1000, 0x2FFF) as i64;
+        let st_diff = (rng.range(7, 101) as i64) | 1;
+        keys.st_first = st_first; keys.st_diff = st_diff;
+        let fetch_state = st_first + st_diff;
         let init_val1 = rng.range(10, 1000) as i64;
         let init_val2 = rng.range(1, 1000) as i64;
         
-        out.push_str(&format!("{},{},{},{}={},{},{},{};", 
-            s_state, t_shadow, d_junk, var_t, 
+        out.push_str(&format!("{},{},{}={},{},{};", 
+            s_state, t_shadow, d_junk, 
             Self::format_num(init_val1, rng), 
             Self::format_num(0, rng), 
-            Self::format_num(init_val2, rng), 
-            Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)
+            Self::format_num(init_val2, rng)
         ));
+        out.push_str(&Self::transition_assign(&var_t, fetch_state, &keys, rng));
 
         // ── 骨架多样化 ①：恒真壳池（解析器无法用单一「while 恒真」指纹定位主循环）──
         // 三族壳运行语义相同（无限循环），形态不同：
@@ -209,8 +246,8 @@ impl ControlFlowBuilder {
         let extra_states = rng.range(0, 2); // 0..=2 个中间态
         let mut mid_states: Vec<i64> = Vec::new();
         let mut mid_kinds: Vec<u8> = Vec::new(); // 0=check 1=shuffle
-        for _ in 0..extra_states {
-            mid_states.push(rng.range(0x3000, 0x4FFF) as i64);
+        for mi_k in 0..extra_states {
+            mid_states.push(st_first + (3 + mi_k as i64) * st_diff);
             mid_kinds.push(if rng.range(0, 2) == 0 { 0 } else { 1 });
         }
         // 随机中间态顺序（各自回到 dispatch）
@@ -239,13 +276,13 @@ impl ControlFlowBuilder {
         // ── 树形多样化 ③（放弃的方案留档）：route→handler 序号置换映射会改语义
         //（递归树的区间比较对「路由序」敏感，置换后 tree_entries 区间不再对应正确
         // handler——实测 compare two nil）。多样化由三叉+不等宽切分承担。
-        let dispatch_state = rng.range(0x1000, 0x2FFF) as i64;
+        let dispatch_state = st_first + 2 * st_diff;
         if extra_states == 0 {
-            out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
+            out.push_str(&Self::transition_assign(&var_t, dispatch_state, &keys, rng));
         } else {
             // 态图：fetch → 第一个中间态
             let first_mid = mid_states[mid_order[0] as usize];
-            out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(first_mid, 1, &keys, rng)));
+            out.push_str(&Self::transition_assign(&var_t, first_mid, &keys, rng));
         }
         // 中间态分支（check/shuffle 空转后落 dispatch；功能零影响）
         for &mi in mid_order.iter() {
@@ -263,7 +300,7 @@ impl ControlFlowBuilder {
                     out.push_str(&format!("{}={};{}={}; ", f_tmp, sa, f_tmp, sb));
                 }
             }
-            out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
+            out.push_str(&Self::transition_assign(&var_t, dispatch_state, &keys, rng));
         }
         out.push_str("elseif ");
         out.push_str(&format!("{}=={} then ", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
@@ -285,8 +322,10 @@ impl ControlFlowBuilder {
         ));
         
         out.push_str("else ");
-        out.push_str(&format!("if {} then if {} then {},{}=false,false;{}={};else return(unpack or table.unpack)({},{},{})end else {}={};end ", 
-            var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng), var_r_vals, Self::format_num(1, rng), var_r_len, var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)
+        let tf_a = Self::transition_assign(&var_t, fetch_state, &keys, rng);
+        let tf_b = Self::transition_assign(&var_t, fetch_state, &keys, rng);
+        out.push_str(&format!("if {} then if {} then {},{}=false,false;{}else return(unpack or table.unpack)({},{},{})end else {}end ", 
+            var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, tf_a, var_r_vals, Self::format_num(1, rng), var_r_len, tf_b
         ));
 
         out.push_str("end "); // 闭合骨架态图 if
@@ -311,34 +350,34 @@ impl ControlFlowBuilder {
         keys: &CipherKeys,
         rng: &mut GenRng,
     ) -> String {
-        let next_s = rng.range(0, 512) as i64;
-        let next_s_obf = Self::obfuscate_num_depth(next_s, 1, keys, rng);
-        let else_state = 0i64;
-        let state_transition = format!("{}={};", var_t, Self::obfuscate_num_depth(else_state, 1, keys, rng));
+        // ㉔ 路由态同为数列成员；两条转移按四形态随机
+        let next_s = keys.st_first + rng.range(1, 48) as i64 * keys.st_diff;
+        let s_state_trans = Self::transition_assign(s_state, next_s, keys, rng);
+        let state_transition = Self::transition_assign(var_t, 0, keys, rng);
         let leaf_type = rng.range(0, 5);
         let mut node = String::new();
         let idx_1 = Self::format_num(1, rng);
 
         match leaf_type {
             0 => {
-                node.push_str(&format!("{}={}+{};{}={}[{}[{}]+{}];{}({});{}={};{}", 
-                    d_junk, d_junk, Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
+                node.push_str(&format!("{}={}+{};{}={}[{}[{}]+{}];{}({});{}{}", 
+                    d_junk, d_junk, Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
             }
             1 => {
-                node.push_str(&format!("repeat {}={}[{}[{}]+{}];{}({});{}={};{}break until false;", 
-                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
+                node.push_str(&format!("repeat {}={}[{}[{}]+{}];{}({});{}{}break until false;", 
+                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
             }
             2 => {
-                node.push_str(&format!("for _={},{} do {}={}[{}[{}]+{}];{}({});end {}={};{}", 
-                    Self::format_num(1, rng), Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
+                node.push_str(&format!("for _={},{} do {}={}[{}[{}]+{}];{}({});end {}{}", 
+                    Self::format_num(1, rng), Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
             }
             3 => {
-                node.push_str(&format!("if {}~={} then {}={}[{}[{}]+{}];{}({});{}={};{}end ", 
-                    d_junk, Self::format_num(4294967295i64, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
+                node.push_str(&format!("if {}~={} then {}={}[{}[{}]+{}];{}({});{}{}end ", 
+                    d_junk, Self::format_num(4294967295i64, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
             }
             _ => {
-                node.push_str(&format!("{}={}[{}[{}]+{}];{}({});{}={};{}", 
-                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
+                node.push_str(&format!("{}={}[{}[{}]+{}];{}({});{}{}", 
+                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
             }
         }
         node

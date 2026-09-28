@@ -548,17 +548,40 @@ pub fn build_consts(
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
                     ev = var_e, h = h_name, dsp = dsp_name, x_nil1 = x_nil1,
                     x_val1 = x_val1, ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v));
+                // ㉔ 解码链状态转移四形态化：基形已是键表引用表达式（②），
+                // 追加 ③ 惰性槽 / ④ 委托返回值；函数体开头落转移基建。
+                let (dc_t, dc_s, dc_d) = (rng.name(), rng.name(), rng.name());
+                let dc_infra = format!("local {t},{sl}={{}},{{}}; local {d}=function(w,u) local z=w%0X2 return u+(z-z) end; ",
+                    t = dc_t, sl = dc_s, d = dc_d);
+                let dc_init = if rng.range(0, 2) == 0 {
+                    format!("{}({}, {})", dc_d, format!("0X{:X}", rng.range(0x1000, 0xFFFFF)), x_ka)
+                } else {
+                    x_ka.to_string()
+                };
+                let mut dc_trans = |e: &str| -> String {
+                    match rng.range(0, 3) {
+                        0 => format!("{}={};", hh_cur, e),
+                        1 => {
+                            let k = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
+                            format!("if not {}[{}] then {}[{}]={} end;{}={}[{}];", dc_s, k, dc_s, k, e, hh_cur, dc_s, k)
+                        }
+                        _ => format!("{}={}({}, {});", hh_cur, dc_d, format!("0X{:X}", rng.range(0x1000, 0xFFFFF)), e),
+                    }
+                };
+                let tr_b = dc_trans(e_kb);
+                let tr_c = dc_trans(e_kc);
                 lua.push_str(&format!(
-                    "{mt}[{idx}]=function({tb},{ix}) local {cur}={x_ka}; local {aux}; \
+                    "{mt}[{idx}]=function({tb},{ix}) {infra}local {cur}={init}; local {aux}; \
                      while true do local {a2x}; if {cur}=={e_kc} then {a2x}={aux} else {a2x}={ix} end; local {c},{a2}={hh}[{cur}]({ix},{a2x}); \
                        if {c}=={x_ret1} then return {a2} end; \
                        if {c}=={x_fail1} then return {a2} end; \
                        if {c}=={x_nil1} then while {w4v} do return nil end end; \
-                       if {c}=={x_next1} then {cur}={e_kb}; else {cur}={e_kc}; {aux}={a2} end; \
+                       if {c}=={x_next1} then {tr_b} else {tr_c} {aux}={a2} end; \
                      end end; ",
                     mt = mt_name, idx = sc_index2, tb = var_tbl, ix = var_idx_chunk,
-                    cur = hh_cur, x_ka = x_ka, aux = hh_aux, c = hh_c, a2 = hh_a2,
-                    hh = hh_name, x_fail1 = x_fail1, e_kb = e_kb, e_kc = e_kc, w4v = w4v, a2x = rng.name()));
+                    infra = dc_infra, init = dc_init, tr_b = tr_b, tr_c = tr_c,
+                    cur = hh_cur, aux = hh_aux, c = hh_c, a2 = hh_a2,
+                    hh = hh_name, x_fail1 = x_fail1, e_kc = e_kc, w4v = w4v, a2x = rng.name()));
                 lua.push_str(&format!(
                     "{c}.{pf}=setmetatable({{}},{mt}); {mt}=({{}})[{mtn}]; ",
                     c = fn_c, pf = pf_consts, mt = mt_name, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
