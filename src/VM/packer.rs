@@ -317,23 +317,38 @@ impl Packer {
         let op_state8 = rng.range(901, 1000);
         let op_state9 = rng.range(1001, 1100);
 
-        let mut pcs: Vec<usize> = (1..=10).collect();
+        // ㉕ pc 状态号运行时耦合：值域必须保持 1..10 的稠密排列（路由器用
+        // #s.insts 做越界哨兵、取指后还有 pc+1 快推），但产物文本零裸值——
+        // 每个表槽用混淆算式逐一填充（发射顺序也洗牌），引用走表/委托两形态。
+        let mut pcs: Vec<usize> = (0..10).collect();
         for i in (1..10).rev() {
             let j = rng.range(0, i + 1);
             pcs.swap(i, j);
         }
-        let pc_state0 = pcs[0];
-        let pc_state1 = pcs[1];
-        let pc_state2 = pcs[2];
-        let pc_state3 = pcs[3];
-        let pc_state4 = pcs[4];
-        let pc_state5 = pcs[5];
-        let pc_state6 = pcs[6];
-        let pc_state7 = pcs[7];
-        let pc_state8 = pcs[8];
-        let pc_state9 = pcs[9];
 
         let tamper_val = rng.range(10, 50);
+
+        // ㉕ pc 状态表基建：在解码脚本所有方法之前声明，被各闭包按 upvalue 捕获。
+        // 槽位与值全部混淆算式下发，值只在运行时落表；稠密 1..10 保 #s.insts 语义。
+        let (pct, pcdv) = (rng.name(), rng.name());
+        let mut pc_fills: Vec<String> = Vec::new();
+        for n in 0..10 {
+            pc_fills.push(format!("{}[{}]={};", pct,
+                ControlFlowBuilder::obf_num((n + 1) as i64, rng),
+                ControlFlowBuilder::obf_num((pcs[n] + 1) as i64, rng)));
+        }
+        rng.shuffle(&mut pc_fills);
+        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=w%0X2 return u+(z-z) end;",
+            pct, pc_fills.join(""), pcdv);
+        // pc 值引用形态：②状态表引用 / ④委托调用（数值本身永不直出）
+        let pc_ref = |rng: &mut GenRng, n: usize| -> String {
+            let idx = ControlFlowBuilder::obf_num((n + 1) as i64, rng);
+            if rng.range(0, 3) == 0 {
+                format!("{}({},{}[{}])", pcdv, ControlFlowBuilder::obf_num(rng.range64(0x100, 0xFFFF), rng), pct, idx)
+            } else {
+                format!("{}[{}]", pct, idx)
+            }
+        };
 
         // 状态表字段名逐产物随机化：这些字段名原先直接以明文出现在产物里
         // （data / pc / kidx / memo / ...）。压缩器只重命名长度 > 4 的成员名，
@@ -349,46 +364,35 @@ impl Packer {
         let p_p2 = rng.name(); let p_w = rng.name(); let p_u = rng.name(); let p_ptr = rng.name();
 
         let mut insts_init = Vec::new();
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state0, op_state0));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state1, op_state1));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state2, op_state2));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state3, op_state3));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state4, op_state4));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state5, op_state5));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state6, op_state6));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state7, op_state7));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state8, op_state8));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_state9, op_state9));
+        // ㉕ pc 键走状态表引用；op 值改混淆算式（运行期仍为同一数值，
+        // 与句柄注册键 op+tamper 在运行时对齐）
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 0), ControlFlowBuilder::obf_num(op_state0 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 1), ControlFlowBuilder::obf_num(op_state1 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 2), ControlFlowBuilder::obf_num(op_state2 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 3), ControlFlowBuilder::obf_num(op_state3 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 4), ControlFlowBuilder::obf_num(op_state4 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 5), ControlFlowBuilder::obf_num(op_state5 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 6), ControlFlowBuilder::obf_num(op_state6 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 7), ControlFlowBuilder::obf_num(op_state7 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 8), ControlFlowBuilder::obf_num(op_state8 as i64, rng)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 9), ControlFlowBuilder::obf_num(op_state9 as i64, rng)));
 
-        let n_insts = insts_init.len();
-        let mut insts_states: Vec<usize> = (1..=n_insts+1).collect();
-        for i in (1..insts_states.len()).rev() {
-            let j = rng.range(0, i + 1);
-            insts_states.swap(i, j);
-        }
-        
-        let mut init_insts_loop = String::new();
-        init_insts_loop.push_str(&format!("st={};while not(false or false) do ", insts_states[0]));
-        for (i, inst) in insts_init.iter().enumerate() {
-            let curr_st = insts_states[i];
-            let next_st = insts_states[i+1];
-            if i == 0 {
-                init_insts_loop.push_str(&format!("if st=={} then {}st={};", curr_st, inst, next_st));
-            } else {
-                init_insts_loop.push_str(&format!("elseif st=={} then {}st={};", curr_st, inst, next_st));
-            }
-        }
-        init_insts_loop.push_str("else break end end;");
+        // ㉕ 初始化状态机运行时耦合化：状态号（原 1..N 洗牌裸字面量）改为
+        // 运行期等差数列填表，比较/转移/初值经状态表/惰性槽/委托三形态流动
+        let (insts_decl, init_insts_loop_body) =
+            ControlFlowBuilder::build_router_machine(&insts_init, "while not(false or false) do ", "st", rng);
+        let init_insts_loop = format!("{}{}", insts_decl, init_insts_loop_body);
 
         let mut handlers_init = Vec::new();
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.bc = 8; s.res = {{}}; s.pc = {}; end;", op_state0, tamper_val, pc_state1));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) if s.bc > 7 then s.pc = {} else s.pc = {} end end;", op_state1, tamper_val, pc_state2, pc_state3));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.f = q:{}(s); if not s.f then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.bc = 0; s.pc = {}; end;", op_state2, tamper_val, m_next, pc_state3));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) if (s.f % 2) == 1 then s.pc = {} else s.pc = {} end end;", op_state3, tamper_val, pc_state4, pc_state5));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.u = q:{}(s); if not s.u then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.res[#s.res+1] = s.char(s.u); s.pc = {}; end;", op_state4, tamper_val, m_next, pc_state9));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p1 = q:{}(s); if not s.p1 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", op_state5, tamper_val, m_next, pc_state6));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p2 = q:{}(s); if not s.p2 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", op_state6, tamper_val, m_next, pc_state7));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.w = q:{}(s); if not s.w then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", op_state7, tamper_val, m_next, pc_state8));
+        // ㉕ 注册键两操作数各自混淆算式；s.pc 目标走状态表引用/委托
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.bc = 8; s.res = {{}}; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state0 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 1)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) if s.bc > 7 then s.pc = {} else s.pc = {} end end;", ControlFlowBuilder::obf_num(op_state1 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 2), pc_ref(rng, 3)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.f = q:{}(s); if not s.f then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.bc = 0; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state2 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 3)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) if (s.f % 2) == 1 then s.pc = {} else s.pc = {} end end;", ControlFlowBuilder::obf_num(op_state3 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 4), pc_ref(rng, 5)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.u = q:{}(s); if not s.u then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.res[#s.res+1] = s.char(s.u); s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state4 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 9)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p1 = q:{}(s); if not s.p1 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state5 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 6)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p2 = q:{}(s); if not s.p2 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state6 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 7)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.w = q:{}(s); if not s.w then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state7 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 8)));
         // ⑥ 字节拼装算术化（真源=此文件；stub_generator 为旁支同款已同步）：
         // s.p1*256+s.p2 的权重 256 改运行期随机恒等式（差一/零和/约简三选一）
         // 位置权重 256 保值，只伪装拼写
@@ -398,28 +402,13 @@ impl Packer {
             1 => format!("(s.p1*(0X{:X})-s.p1*0X{:X})+s.p2", k6 + 0x100, k6),
             _ => { let d6 = (k6 >> 8).max(1); format!("((s.p1*0X{:X})/0X{:X})+s.p2", d6 << 8, d6) }
         };
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst, iter) s.ptr = #s.res - ({}) + 1; iter = 0; while true do if iter >= s.w + 3 then break end; s.res[#s.res+1] = s.res[s.ptr + iter]; iter = iter + 1; end; s.pc = {}; end;", op_state8, tamper_val, w256, pc_state9));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.f = s.floor(s.f / 2); s.bc = s.bc + 1; s.pc = {}; end;", op_state9, tamper_val, pc_state1));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst, iter) s.ptr = #s.res - ({}) + 1; iter = 0; while true do if iter >= s.w + 3 then break end; s.res[#s.res+1] = s.res[s.ptr + iter]; iter = iter + 1; end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state8 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), w256, pc_ref(rng, 9)));
+        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.f = s.floor(s.f / 2); s.bc = s.bc + 1; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state9 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 1)));
 
-        let n_handlers = handlers_init.len();
-        let mut handlers_states: Vec<usize> = (1..=n_handlers+1).collect();
-        for i in (1..handlers_states.len()).rev() {
-            let j = rng.range(0, i + 1);
-            handlers_states.swap(i, j);
-        }
-        
-        let mut init_handlers_loop = String::new();
-        init_handlers_loop.push_str(&format!("st={};while true do ", handlers_states[0]));
-        for (i, h) in handlers_init.iter().enumerate() {
-            let curr_st = handlers_states[i];
-            let next_st = handlers_states[i+1];
-            if i == 0 {
-                init_handlers_loop.push_str(&format!("if st=={} then {}st={};", curr_st, h, next_st));
-            } else {
-                init_handlers_loop.push_str(&format!("elseif st=={} then {}st={};", curr_st, h, next_st));
-            }
-        }
-        init_handlers_loop.push_str("else break end end;");
+        // ㉕ 句柄注册状态机同样运行时耦合化（原 1..N 洗牌裸字面量）
+        let (handlers_decl, init_handlers_loop_body) =
+            ControlFlowBuilder::build_router_machine(&handlers_init, "while true do ", "st", rng);
+        let init_handlers_loop = format!("{}{}", handlers_decl, init_handlers_loop_body);
 
         let router_code = ControlFlowBuilder::build_fast_router(
             "s.pc", "s.insts", "inst", "s.handlers", "s.r_flg", "s.r_vals", "s.r_len", "s.tamper", "s.tail_flg", rng
@@ -545,9 +534,9 @@ impl Packer {
         // （data/len 那一对有先后依赖，单独保持原序）；gmatch 的 for-in 拆成显式迭代器 + 影子守卫。
         let mut pk_pairs: Vec<String> = vec![
             format!("{} = data", p_data),
-            format!("{} = {}", p_pc, pc_state0),
+            format!("{} = {}", p_pc, pc_ref(rng, 0)),
             format!("{} = {{}}", p_insts),
-            format!("{} = {}", p_tamper, tamper_val),
+            format!("{} = {}", p_tamper, ControlFlowBuilder::obf_num(tamper_val as i64, rng)),
             format!("{} = {{}}", p_handlers),
             format!("{} = false", p_r_flg),
             format!("{} = {{}}", p_r_vals),
@@ -588,7 +577,7 @@ impl Packer {
             "s.kidx = 0".to_string(),
             "s.buf = {}".to_string(),
             "s.res = {}".to_string(),
-            format!("s.pc = {}", pc_state0),
+            format!("s.pc = {}", pc_ref(rng, 0)),
             "s.bc = 0".to_string(),
             "s.f = 0".to_string(),
             "s.p1 = 0".to_string(),
@@ -610,6 +599,7 @@ impl Packer {
         let script = format!("
 local function {f_entry}({v_data})
     {probe}
+    {pc_infra}
     return ({{
         {m_bxor} = function(q, s, a, b, ra, rb, p, c, rra, rrb, k_bxor)
             k_bxor = a * 256 + b;

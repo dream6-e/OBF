@@ -54,6 +54,76 @@ impl ControlFlowBuilder {
         }
     }
 
+    /// ㉕ 无键数值混淆：把任意数值发成恒等算式（±差和/自抵消/倍差/乘除恒等），
+    /// 产物里不再出现裸数字；供打包器解码脚本等没有 CipherKeys 的作用域使用。
+    /// 数值域约束：所有中间量 <0xFFFFFE（压缩管线截断 >24bit 十六进制字面量）。
+    pub fn obf_num(v: i64, rng: &mut GenRng) -> String {
+        let hex = |x: i64, rng: &mut GenRng| -> String {
+            if rng.range(0, 2) == 0 { format!("0X{:X}", x) } else { x.to_string() }
+        };
+        let cap = (0xF0000i64).min(0xFFFFFE - v.abs());
+        let r = rng.range64(0x1000, cap.max(0x1002));
+        let core = match rng.range(0, 4) {
+            0 => format!("({}-{})", hex(v + r, rng), hex(r, rng)),
+            1 => format!("(-{}+{})", hex(r, rng), hex(r + v, rng)),
+            2 => format!("(({})-({}))+{}", hex(r, rng), hex(r, rng), hex(v, rng)),
+            _ => {
+                let q = rng.range64(3, 25);
+                format!("(({})/({}))", hex(v * q, rng), hex(q, rng))
+            }
+        };
+        if rng.range(0, 2) == 0 { core } else {
+            let r2 = rng.range64(0x100, 0xF000);
+            format!("({}+({}-{}))", core, hex(r2, rng), hex(r2, rng))
+        }
+    }
+
+    /// ㉕ 运行时耦合的初始化状态机：把一串顺序执行的语句打散进 while-状态机，
+    /// 但状态号在产物文本里零出现——等差数列（随机首项+随机奇数公差）只在运行时
+    /// 由填充循环算进状态表；比较/转移/初值全部经状态表引用、惰性槽、恒等委托
+    /// 三种间接形态流动。单步分析者必须先执行填充循环才能知道任何状态值。
+    /// 返回 (局部声明+基建, 机器本体)；loop_kw 保留各调用点原有的循环头写法。
+    pub fn build_router_machine(
+        stmts: &[String], loop_kw: &str, st_var: &str, rng: &mut GenRng,
+    ) -> (String, String) {
+        let n = stmts.len();
+        let (ct, sl, dv, ci, cc, dd) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let first = rng.range64(0x3000, 0x5FFF);
+        let diff = rng.range64(7, 101) | 1;
+        let val = |k: usize| first + k as i64 * diff;
+        let mut perm: Vec<usize> = (0..=n).collect();
+        for i in (1..perm.len()).rev() { let j = rng.range(0, i + 1); perm.swap(i, j); }
+        let idx_of = |k: usize, rng: &mut GenRng| Self::obf_num((perm[k] + 1) as i64, rng);
+        let cmp = |k: usize, rng: &mut GenRng| -> String {
+            if rng.range(0, 3) == 0 { format!("{}({},{}[{}])", dv, Self::obf_num(rng.range64(0x100, 0xFFFF), rng), ct, idx_of(k, rng)) }
+            else { format!("{}[{}]", ct, idx_of(k, rng)) }
+        };
+        let trans = |k: usize, rng: &mut GenRng| -> String {
+            match rng.range(0, 3) {
+                0 => format!("{}[{}]", ct, idx_of(k, rng)),
+                1 => {
+                    let sk = Self::obf_num(rng.range64(0x100, 0xFFFFF), rng);
+                    format!("(function() if not {}[{}] then {}[{}]={}[{}] end return {}[{}] end)()",
+                        sl, sk, sl, sk, ct, idx_of(k, rng), sl, sk)
+                }
+                _ => format!("{}({},{}[{}])", dv, Self::obf_num(rng.range64(0x100, 0xFFFF), rng), ct, idx_of(k, rng)),
+            }
+        };
+        let mut decl = format!("local {}={{}};local {}={{}};local {}=function(w,u) local z=w%0X2 return u+(z-z) end;", ct, sl, dv);
+        decl.push_str(&format!("local {}={};local {}={};for {}=1,{} do {}[{}]={};{}={}+{} end;",
+            cc, Self::obf_num(first, rng), dd, Self::obf_num(diff, rng),
+            ci, Self::obf_num((n + 1) as i64, rng), ct, ci, cc, cc, cc, dd));
+        let mut body = format!("{}={};", st_var, trans(0, rng));
+        body.push_str(loop_kw);
+        for i in 0..n {
+            let kw = if i == 0 { format!("if {}=={} then ", st_var, cmp(i, rng)) }
+                     else { format!("elseif {}=={} then ", st_var, cmp(i, rng)) };
+            body.push_str(&format!("{}{}{}={};", kw, stmts[i], st_var, trans(i + 1, rng)));
+        }
+        body.push_str("else break end end;");
+        (decl, body)
+    }
+
     pub fn obfuscate_num_depth(val: i64, depth: usize, keys: &CipherKeys, rng: &mut GenRng) -> String {
         if depth == 0 {
             return Self::format_num(val, rng);

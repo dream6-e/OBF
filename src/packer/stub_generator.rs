@@ -2,6 +2,7 @@ use rand::Rng;
 use std::time::SystemTime;
 use super::utils::NamePool;
 use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, UniStream, GenRng};
+use crate::VM::Control_Flow::ControlFlowBuilder;
 
 pub struct StubGenerator;
 
@@ -93,64 +94,74 @@ impl StubGenerator {
         let op_state8 = pool.rng_mut().next_range(901, 1000);
         let op_state9 = pool.rng_mut().next_range(1001, 1100);
 
-        let mut pcs: Vec<usize> = (1..=10).collect();
+        // ㉕ pc 状态号运行时耦合（与主打包器同规格）：值域保持 1..10 稠密排列
+        // （路由器按 #insts/pc+1 语义），文本零裸值——逐槽混淆算式填充，
+        // 引用走状态表/恒等委托两形态。
+        let mut srng = GenRng::new(seed as u64);
+        let mut pcs: Vec<usize> = (0..10).collect();
         for i in (1..10).rev() {
             let j = pool.rng_mut().next_range(0, i + 1);
             pcs.swap(i, j);
         }
-        let pc_state0 = pcs[0];
-        let pc_state1 = pcs[1];
-        let pc_state2 = pcs[2];
-        let pc_state3 = pcs[3];
-        let pc_state4 = pcs[4];
-        let pc_state5 = pcs[5];
-        let pc_state6 = pcs[6];
-        let pc_state7 = pcs[7];
-        let pc_state8 = pcs[8];
-        let pc_state9 = pcs[9];
+        let (pct, pcdv) = (pool.get(), pool.get());
+        let mut pc_fills: Vec<String> = Vec::new();
+        for n in 0..10 {
+            pc_fills.push(format!("{}[{}]={};", pct,
+                ControlFlowBuilder::obf_num((n + 1) as i64, &mut srng),
+                ControlFlowBuilder::obf_num((pcs[n] + 1) as i64, &mut srng)));
+        }
+        for i in (1..pc_fills.len()).rev() {
+            let j = pool.rng_mut().next_range(0, i + 1);
+            pc_fills.swap(i, j);
+        }
+        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=w%0X2 return u+(z-z) end;",
+            pct, pc_fills.join(""), pcdv);
+        // 每个 pc 值两枚引用形态：a=表引用（给 insts 键/初值），b=表引用或委托（给句柄体）
+        let mut pc_refs_a: Vec<String> = Vec::new();
+        let mut pc_refs_b: Vec<String> = Vec::new();
+        for n in 0..10 {
+            let idx_a = ControlFlowBuilder::obf_num((n + 1) as i64, &mut srng);
+            pc_refs_a.push(format!("{}[{}]", pct, idx_a));
+            let idx_b = ControlFlowBuilder::obf_num((n + 1) as i64, &mut srng);
+            if srng.range(0, 3) == 0 {
+                let junk = ControlFlowBuilder::obf_num(srng.range64(0x100, 0xFFFF), &mut srng);
+                pc_refs_b.push(format!("{}({},{}[{}])", pcdv, junk, pct, idx_b));
+            } else {
+                pc_refs_b.push(format!("{}[{}]", pct, idx_b));
+            }
+        }
+        // ㉕ op/tamper 数值统一经混淆算式下发
+        let obf_op = |v: usize, r: &mut GenRng| ControlFlowBuilder::obf_num(v as i64, r);
 
         let tamper_val = pool.rng_mut().next_range(10, 50);
 
         let mut insts_init = Vec::new();
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state0}]={{{op_state0}}};", v_s=v_s, p_insts=p_insts, pc_state0=pc_state0, op_state0=op_state0));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state1}]={{{op_state1}}};", v_s=v_s, p_insts=p_insts, pc_state1=pc_state1, op_state1=op_state1));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state2}]={{{op_state2}}};", v_s=v_s, p_insts=p_insts, pc_state2=pc_state2, op_state2=op_state2));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state3}]={{{op_state3}}};", v_s=v_s, p_insts=p_insts, pc_state3=pc_state3, op_state3=op_state3));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state4}]={{{op_state4}}};", v_s=v_s, p_insts=p_insts, pc_state4=pc_state4, op_state4=op_state4));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state5}]={{{op_state5}}};", v_s=v_s, p_insts=p_insts, pc_state5=pc_state5, op_state5=op_state5));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state6}]={{{op_state6}}};", v_s=v_s, p_insts=p_insts, pc_state6=pc_state6, op_state6=op_state6));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state7}]={{{op_state7}}};", v_s=v_s, p_insts=p_insts, pc_state7=pc_state7, op_state7=op_state7));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state8}]={{{op_state8}}};", v_s=v_s, p_insts=p_insts, pc_state8=pc_state8, op_state8=op_state8));
-        insts_init.push(format!("{v_s}.{p_insts}[{pc_state9}]={{{op_state9}}};", v_s=v_s, p_insts=p_insts, pc_state9=pc_state9, op_state9=op_state9));
+        // ㉕ pc 键=状态表引用；op 值=混淆算式
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[0], opx=obf_op(op_state0, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[1], opx=obf_op(op_state1, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[2], opx=obf_op(op_state2, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[3], opx=obf_op(op_state3, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[4], opx=obf_op(op_state4, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[5], opx=obf_op(op_state5, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[6], opx=obf_op(op_state6, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[7], opx=obf_op(op_state7, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[8], opx=obf_op(op_state8, &mut srng)));
+        insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[9], opx=obf_op(op_state9, &mut srng)));
 
-        let mut insts_states: Vec<usize> = (1..=insts_init.len()+1).collect();
-        for i in (1..insts_states.len()).rev() {
-            let j = pool.rng_mut().next_range(0, i + 1);
-            insts_states.swap(i, j);
-        }
-        
-        let mut m_init_insts_body = String::new();
-        m_init_insts_body.push_str(&format!("local {v_st}={init_st};local function ky(...) return not(...) end while ky(false) do ", v_st=v_st, init_st=insts_states[0]));
-        for (i, inst) in insts_init.iter().enumerate() {
-            let curr_st = insts_states[i];
-            let next_st = insts_states[i+1];
-            if i == 0 {
-                m_init_insts_body.push_str(&format!("if {v_st}=={curr_st} then {inst} {v_st}={next_st}; ", v_st=v_st, curr_st=curr_st, inst=inst, next_st=next_st));
-            } else {
-                m_init_insts_body.push_str(&format!("elseif {v_st}=={curr_st} then {inst} {v_st}={next_st}; ", v_st=v_st, curr_st=curr_st, inst=inst, next_st=next_st));
-            }
-        }
-        m_init_insts_body.push_str("else break end end;");
+        // ㉕ 初始化状态机运行时耦合化：状态号文本零出现（等差数列运行期填表）
+        let (insts_decl, insts_body) =
+            ControlFlowBuilder::build_router_machine(&insts_init, "while ky(false) do ", &v_st, &mut srng);
+        let m_init_insts_body = format!("local function ky(...) return not(...) end {}{}", insts_decl, insts_body);
 
         let mut handlers_init = Vec::new();
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state0}+{tamper_val}] = function({v_i}) {v_s}.{p_bc}=8; {v_s}.{p_res}={{}}; {v_s}.{p_pc}={pc_state1}; end;", v_s=v_s, p_handlers=p_handlers, op_state0=op_state0, tamper_val=tamper_val, v_i=v_i, p_bc=p_bc, p_res=p_res, p_pc=p_pc, pc_state1=pc_state1));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state1}+{tamper_val}] = function({v_i}) if {v_s}.{p_bc}>7 then {v_s}.{p_pc}={pc_state2} else {v_s}.{p_pc}={pc_state3} end end;", v_s=v_s, p_handlers=p_handlers, op_state1=op_state1, tamper_val=tamper_val, v_i=v_i, p_bc=p_bc, p_pc=p_pc, pc_state2=pc_state2, pc_state3=pc_state3));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state2}+{tamper_val}] = function({v_i}) {v_s}.{p_f}={v_q}:{m_next}({v_s}); if not {v_s}.{p_f} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_bc}=0; {v_s}.{p_pc}={pc_state3}; end;", v_s=v_s, p_handlers=p_handlers, op_state2=op_state2, tamper_val=tamper_val, v_i=v_i, p_f=p_f, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_bc=p_bc, p_pc=p_pc, pc_state3=pc_state3));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state3}+{tamper_val}] = function({v_i}) if ({v_s}.{p_f}%2)==1 then {v_s}.{p_pc}={pc_state4} else {v_s}.{p_pc}={pc_state5} end end;", v_s=v_s, p_handlers=p_handlers, op_state3=op_state3, tamper_val=tamper_val, v_i=v_i, p_f=p_f, p_pc=p_pc, pc_state4=pc_state4, pc_state5=pc_state5));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state4}+{tamper_val}] = function({v_i}) {v_s}.{p_u}={v_q}:{m_next}({v_s}); if not {v_s}.{p_u} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_res}[#{v_s}.{p_res}+1]={f_char}({v_s}.{p_u}); {v_s}.{p_pc}={pc_state9}; end;", v_s=v_s, p_handlers=p_handlers, op_state4=op_state4, tamper_val=tamper_val, v_i=v_i, p_u=p_u, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, f_char=f_char, p_pc=p_pc, pc_state9=pc_state9));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state5}+{tamper_val}] = function({v_i}) {v_s}.{p_p1}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p1} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state6}; end;", v_s=v_s, p_handlers=p_handlers, op_state5=op_state5, tamper_val=tamper_val, v_i=v_i, p_p1=p_p1, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state6=pc_state6));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state6}+{tamper_val}] = function({v_i}) {v_s}.{p_p2}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p2} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state7}; end;", v_s=v_s, p_handlers=p_handlers, op_state6=op_state6, tamper_val=tamper_val, v_i=v_i, p_p2=p_p2, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state7=pc_state7));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state7}+{tamper_val}] = function({v_i}) local {v_len}=0; while true do local {v_lb}={v_q}:{m_next}({v_s}); if not {v_lb} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_len}={v_len}+{v_lb}; if {v_lb}<255 then break end end; {v_s}.{p_w}={v_len}; {v_s}.{p_pc}={pc_state8}; end;", v_s=v_s, p_handlers=p_handlers, op_state7=op_state7, tamper_val=tamper_val, v_i=v_i, v_len=v_len, v_lb=v_lb, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state8=pc_state8));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state0}+{tamper_val}] = function({v_i}) {v_s}.{p_bc}=8; {v_s}.{p_res}={{}}; {v_s}.{p_pc}={pc_state1}; end;", v_s=v_s, p_handlers=p_handlers, op_state0=obf_op(op_state0, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_bc=p_bc, p_res=p_res, p_pc=p_pc, pc_state1=pc_refs_b[1]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state1}+{tamper_val}] = function({v_i}) if {v_s}.{p_bc}>7 then {v_s}.{p_pc}={pc_state2} else {v_s}.{p_pc}={pc_state3} end end;", v_s=v_s, p_handlers=p_handlers, op_state1=obf_op(op_state1, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_bc=p_bc, p_pc=p_pc, pc_state2=pc_refs_b[2], pc_state3=pc_refs_b[3]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state2}+{tamper_val}] = function({v_i}) {v_s}.{p_f}={v_q}:{m_next}({v_s}); if not {v_s}.{p_f} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_bc}=0; {v_s}.{p_pc}={pc_state3}; end;", v_s=v_s, p_handlers=p_handlers, op_state2=obf_op(op_state2, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_f=p_f, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_bc=p_bc, p_pc=p_pc, pc_state3=pc_refs_b[3]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state3}+{tamper_val}] = function({v_i}) if ({v_s}.{p_f}%2)==1 then {v_s}.{p_pc}={pc_state4} else {v_s}.{p_pc}={pc_state5} end end;", v_s=v_s, p_handlers=p_handlers, op_state3=obf_op(op_state3, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_f=p_f, p_pc=p_pc, pc_state4=pc_refs_b[4], pc_state5=pc_refs_b[5]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state4}+{tamper_val}] = function({v_i}) {v_s}.{p_u}={v_q}:{m_next}({v_s}); if not {v_s}.{p_u} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_res}[#{v_s}.{p_res}+1]={f_char}({v_s}.{p_u}); {v_s}.{p_pc}={pc_state9}; end;", v_s=v_s, p_handlers=p_handlers, op_state4=obf_op(op_state4, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_u=p_u, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, f_char=f_char, p_pc=p_pc, pc_state9=pc_refs_b[9]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state5}+{tamper_val}] = function({v_i}) {v_s}.{p_p1}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p1} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state6}; end;", v_s=v_s, p_handlers=p_handlers, op_state5=obf_op(op_state5, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_p1=p_p1, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state6=pc_refs_b[6]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state6}+{tamper_val}] = function({v_i}) {v_s}.{p_p2}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p2} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state7}; end;", v_s=v_s, p_handlers=p_handlers, op_state6=obf_op(op_state6, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_p2=p_p2, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state7=pc_refs_b[7]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state7}+{tamper_val}] = function({v_i}) local {v_len}=0; while true do local {v_lb}={v_q}:{m_next}({v_s}); if not {v_lb} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_len}={v_len}+{v_lb}; if {v_lb}<255 then break end end; {v_s}.{p_w}={v_len}; {v_s}.{p_pc}={pc_state8}; end;", v_s=v_s, p_handlers=p_handlers, op_state7=obf_op(op_state7, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, v_len=v_len, v_lb=v_lb, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state8=pc_refs_b[8]));
         // ⑥ 字节拼装算术化：p1*256+p2 的权重 256 是两字节合一字的反编译锚——
         // 改成运行期随机恒等算式（差一式/零和式/约简式三选一），语义不变
         let bp1 = format!("{v_s}.{p_p1}", v_s = v_s, p_p1 = p_p1);
@@ -162,27 +173,13 @@ impl StubGenerator {
             1 => format!("({}*(0X{:X})-{}*0X{:X})+{}", bp1, k6 + 0x100, bp1, k6, bp2),
             _ => { let d6 = (k6 >> 8).max(1); format!("(({}*0X{:X})/0X{:X})+{}", bp1, d6 << 8, d6, bp2) }
         };
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state8}+{tamper_val}] = function({v_i}, {v_iter}) {v_s}.{p_ptr}=#{v_s}.{p_res}-({w256})+1; {v_iter}=0; while true do if {v_iter}>={v_s}.{p_w}+3 then break end; {v_s}.{p_res}[#{v_s}.{p_res}+1]={v_s}.{p_res}[{v_s}.{p_ptr}+{v_iter}]; {v_iter}={v_iter}+1; end; {v_s}.{p_pc}={pc_state9}; end;", v_s=v_s, p_handlers=p_handlers, op_state8=op_state8, tamper_val=tamper_val, v_i=v_i, v_iter=v_iter, p_ptr=p_ptr, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state9=pc_state9));
-        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state9}+{tamper_val}] = function({v_i}) {v_s}.{p_f}={f_floor}({v_s}.{p_f}/2); {v_s}.{p_bc}={v_s}.{p_bc}+1; {v_s}.{p_pc}={pc_state1}; end;", v_s=v_s, p_handlers=p_handlers, op_state9=op_state9, tamper_val=tamper_val, v_i=v_i, p_f=p_f, f_floor=f_floor, p_bc=p_bc, p_pc=p_pc, pc_state1=pc_state1));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state8}+{tamper_val}] = function({v_i}, {v_iter}) {v_s}.{p_ptr}=#{v_s}.{p_res}-({w256})+1; {v_iter}=0; while true do if {v_iter}>={v_s}.{p_w}+3 then break end; {v_s}.{p_res}[#{v_s}.{p_res}+1]={v_s}.{p_res}[{v_s}.{p_ptr}+{v_iter}]; {v_iter}={v_iter}+1; end; {v_s}.{p_pc}={pc_state9}; end;", v_s=v_s, p_handlers=p_handlers, op_state8=obf_op(op_state8, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, v_iter=v_iter, p_ptr=p_ptr, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state9=pc_refs_b[9]));
+        handlers_init.push(format!("{v_s}.{p_handlers}[{op_state9}+{tamper_val}] = function({v_i}) {v_s}.{p_f}={f_floor}({v_s}.{p_f}/2); {v_s}.{p_bc}={v_s}.{p_bc}+1; {v_s}.{p_pc}={pc_state1}; end;", v_s=v_s, p_handlers=p_handlers, op_state9=obf_op(op_state9, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_f=p_f, f_floor=f_floor, p_bc=p_bc, p_pc=p_pc, pc_state1=pc_refs_b[1]));
 
-        let mut handlers_states: Vec<usize> = (1..=handlers_init.len()+1).collect();
-        for i in (1..handlers_states.len()).rev() {
-            let j = pool.rng_mut().next_range(0, i + 1);
-            handlers_states.swap(i, j);
-        }
-        
-        let mut m_init_handlers_body = String::new();
-        m_init_handlers_body.push_str(&format!("local {v_st}={init_st}; while not(nil) or false do ", v_st=v_st, init_st=handlers_states[0]));
-        for (i, h) in handlers_init.iter().enumerate() {
-            let curr_st = handlers_states[i];
-            let next_st = handlers_states[i+1];
-            if i == 0 {
-                m_init_handlers_body.push_str(&format!("if {v_st}=={curr_st} then {h} {v_st}={next_st}; ", v_st=v_st, curr_st=curr_st, h=h, next_st=next_st));
-            } else {
-                m_init_handlers_body.push_str(&format!("elseif {v_st}=={curr_st} then {h} {v_st}={next_st}; ", v_st=v_st, curr_st=curr_st, h=h, next_st=next_st));
-            }
-        }
-        m_init_handlers_body.push_str("else break end end;");
+        // ㉕ 句柄注册状态机同样运行时耦合化
+        let (handlers_decl, handlers_body) =
+            ControlFlowBuilder::build_router_machine(&handlers_init, "while not(nil) or false do ", &v_st, &mut srng);
+        let m_init_handlers_body = format!("{}{}", handlers_decl, handlers_body);
 
         let mut map_init = String::new();
         for (i, &c) in alphabet.iter().enumerate() {
@@ -268,7 +265,7 @@ impl StubGenerator {
                     if {v_s}.{p_tamper} == 0 then return end
                     break
                 end
-                if {v_s}.{p_tamper} ~= {tamper_val} then {v_current} = {v_current} - {tamper_val} end
+                if {v_s}.{p_tamper} ~= {tcmp} then {v_current} = {v_current} - {tsub} end
                 local {v_h} = {v_s}.{p_handlers}[{v_i}[1] + {v_s}.{p_tamper}];
                 if {v_h} then
                     local {v_succ}, {v_err} = {f_pcall}({v_h}, {v_i});
@@ -280,7 +277,9 @@ impl StubGenerator {
                 {v_current} = {v_s}.{p_pc};
             end
             return {f_concat}({v_s}.{p_r_vals});
-        ", v_current=v_current, v_s=v_s, p_pc=p_pc, v_i=v_i, p_insts=p_insts, p_tamper=p_tamper, tamper_val=tamper_val, v_h=v_h, p_handlers=p_handlers, v_succ=v_succ, v_err=v_err, f_pcall=f_pcall, p_r_flg=p_r_flg, f_concat=f_concat, p_r_vals=p_r_vals);
+        ", v_current=v_current, v_s=v_s, p_pc=p_pc, v_i=v_i, p_insts=p_insts, p_tamper=p_tamper,
+        tcmp=ControlFlowBuilder::obf_num(tamper_val as i64, &mut srng), tsub=ControlFlowBuilder::obf_num(tamper_val as i64, &mut srng),
+        v_h=v_h, p_handlers=p_handlers, v_succ=v_succ, v_err=v_err, f_pcall=f_pcall, p_r_flg=p_r_flg, f_concat=f_concat, p_r_vals=p_r_vals);
 
         let mut k_str = String::from("{");
         for (i, &k) in keys.iter().enumerate() {
@@ -306,6 +305,7 @@ return (function(...)
     local {f_gsub} = function(s, p, r) return string.gsub(s, p, r) end
     local {f_remove} = function(t, pos) return table.remove(t, pos) end
     local function {v_entry}({v_data}, ...)
+        {pc_infra}
         local {v_q} = {{
             {m_bxor} = function({v_q}, {v_s}, {v_a}, {v_b})
                 {m_bxor_body}
@@ -328,9 +328,9 @@ return (function(...)
             {m_main} = function({v_q}, {v_data}, ...)
                 local {v_s} = {{
                     {p_data}={v_data},
-                    {p_pc}={pc_state0},
+                    {p_pc}={pc_state0x},
                     {p_insts}={{}},
-                    {p_tamper}={tamper_val},
+                    {p_tamper}={tamper_tbl},
                     {p_handlers}={{}},
                     {p_r_flg}=false,
                     {p_r_vals}={{}},
@@ -367,8 +367,9 @@ end)(...)
         v_entry=v_entry, v_data=v_data, v_q=v_q, m_bxor=m_bxor, v_s=v_s, v_a=v_a, v_b=v_b, m_bxor_body=m_bxor_body, m_next=m_next,
         m_next_body=m_next_body, m_init_map=m_init_map, m_init_map_body=m_init_map_body, m_init_insts=m_init_insts,
         m_init_insts_body=m_init_insts_body, m_init_handlers=m_init_handlers, m_init_handlers_body=m_init_handlers_body,
-        m_run=m_run, m_run_body=m_run_body, m_main=m_main, p_data=p_data, p_pc=p_pc, pc_state0=pc_state0, p_insts=p_insts,
-        p_tamper=p_tamper, tamper_val=tamper_val, p_handlers=p_handlers, p_r_flg=p_r_flg, p_r_vals=p_r_vals,
+        m_run=m_run, m_run_body=m_run_body, m_main=m_main, p_data=p_data, p_pc=p_pc, p_insts=p_insts,
+        p_tamper=p_tamper, tamper_tbl=ControlFlowBuilder::obf_num(tamper_val as i64, &mut srng),
+        pc_state0x=pc_refs_a[0], p_handlers=p_handlers, p_r_flg=p_r_flg, p_r_vals=p_r_vals,
         p_map=p_map, p_idx=p_idx, p_len=p_len, p_k=p_k, k_str=k_str, p_kidx=p_kidx, p_memo=p_memo, p_bc=p_bc, p_res=p_res,
         p_f=p_f, p_p1=p_p1, p_p2=p_p2, p_w=p_w, p_u=p_u, p_ptr=p_ptr, p_buf=p_buf, v_r=v_r, payload=payload
         )
