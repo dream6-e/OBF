@@ -362,6 +362,8 @@ impl Packer {
         let p_insert = rng.name(); let p_concat = rng.name(); let p_remove = rng.name(); let p_reverse = rng.name();
         let p_bc = rng.name(); let p_res = rng.name(); let p_f = rng.name(); let p_p1 = rng.name();
         let p_p2 = rng.name(); let p_w = rng.name(); let p_u = rng.name(); let p_ptr = rng.name();
+        // ㉙② 句柄键基/步长字段（运行时推导，防句柄静态计数）
+        let p_hk = rng.name(); let p_hs = rng.name();
 
         let mut insts_init = Vec::new();
         // ㉕ pc 键走状态表引用；op 值改混淆算式（运行期仍为同一数值，
@@ -379,20 +381,92 @@ impl Packer {
 
         // ㉕ 初始化状态机运行时耦合化：状态号（原 1..N 洗牌裸字面量）改为
         // 运行期等差数列填表，比较/转移/初值经状态表/惰性槽/委托三形态流动
+        let kseed_i = format!("(#s.data)+(s.k[{}])", ControlFlowBuilder::obf_num(1, rng));
         let (insts_decl, init_insts_loop_body) =
-            ControlFlowBuilder::build_router_machine(&insts_init, "while not(false or false) do ", "st", "(#s.data)+(s.k[1])", rng);
+            ControlFlowBuilder::build_router_machine(&insts_init, "while not(false or false) do ", "st", &kseed_i, rng);
         let init_insts_loop = format!("{}{}", insts_decl, init_insts_loop_body);
 
         let mut handlers_init = Vec::new();
-        // ㉕ 注册键两操作数各自混淆算式；s.pc 目标走状态表引用/委托
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.bc = 8; s.res = {{}}; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state0 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 1)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) if s.bc > 7 then s.pc = {} else s.pc = {} end end;", ControlFlowBuilder::obf_num(op_state1 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 2), pc_ref(rng, 3)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.f = q:{}(s); if not s.f then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.bc = 0; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state2 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 3)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) if (s.f % 2) == 1 then s.pc = {} else s.pc = {} end end;", ControlFlowBuilder::obf_num(op_state3 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 4), pc_ref(rng, 5)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.u = q:{}(s); if not s.u then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.res[#s.res+1] = s.char(s.u); s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state4 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 9)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p1 = q:{}(s); if not s.p1 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state5 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 6)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.p2 = q:{}(s); if not s.p2 then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state6 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 7)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.w = q:{}(s); if not s.w then s.r_flg = true; s.r_vals = {{s.concat(s.res)}}; s.r_len = 1; return end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state7 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), m_next, pc_ref(rng, 8)));
+        // ㉙③ 句柄体去平坦：每个句柄改成「加载期语句闭包表 + 运行期游走」——
+        // 语句组变闭包（定义洗牌发射），真实执行序编进混淆键序列 S；组返回
+        // false 立即停走（早退语义与原 return end 一致）。闭包表在建句柄时一次
+        // 建成，热路径每步只多一次表查+微调用。
+        let scramble_handler = |groups: Vec<String>, rng: &mut GenRng| -> String {
+            let tn = rng.name();
+            let sn = rng.name();
+            let mut def_keys: Vec<String> = Vec::new();
+            let mut defs: Vec<String> = Vec::new();
+            for g in &groups {
+                let k = ControlFlowBuilder::obf_num(rng.range64(0x100, 0xFFFFF), rng);
+                def_keys.push(k.clone());
+                defs.push(format!("{}[{}]=function() {} end;", tn, k, g));
+            }
+            rng.shuffle(&mut defs);
+            let jn = rng.name();
+            let gj = rng.name();
+            format!("(function() local {}={{}};{}local {}={{{}}};return function(inst) local {}={};while {}<={} do local {}={}[{}[{}]];if not {}() then break end;{}={}+{} end end end)()",
+                tn, defs.join(""), sn, def_keys.join(","),
+                jn, ControlFlowBuilder::obf_num(1, rng),
+                jn, ControlFlowBuilder::obf_num(groups.len() as i64, rng),
+                gj, tn, sn, jn, gj, jn, jn, ControlFlowBuilder::obf_num(1, rng))
+        };
+        // ㉙② 注册键运行时化：键 = 键基 + (指令码+篡改常量)*步长；键基/步长在
+        // m_main 里由密钥字节运行时推导（见模板），静态求值拿不到键集合
+        let reg_key = |op: usize, rng: &mut GenRng| format!("s.hk+(({})+({}))*s.hs",
+            ControlFlowBuilder::obf_num(op as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng));
+        let fail_g = |fld: &str, rng: &mut GenRng| format!(
+            "if not s.{} then s.r_flg=true;s.r_vals={{s.concat(s.res)}};s.r_len={};return false end;",
+            fld, ControlFlowBuilder::obf_num(1, rng));
+
+        // H0：复位位计数/结果表 → 落 pc1
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state0, rng),
+            scramble_handler(vec![
+                format!("s.bc={};s.res={{}};return true", ControlFlowBuilder::obf_num(8, rng)),
+                format!("s.pc={};return true", pc_ref(rng, 1)),
+            ], rng)));
+        // H1：位计数分流（and/or 选择式替代显式 if）
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state1, rng),
+            scramble_handler(vec![
+                format!("s.bc=s.bc+{};return true", ControlFlowBuilder::obf_num(0, rng)),
+                format!("s.pc=(s.bc>{} and ({}) or ({}));return true",
+                    ControlFlowBuilder::obf_num(7, rng), pc_ref(rng, 2), pc_ref(rng, 3)),
+            ], rng)));
+        // H2：读标志字节（失败早退）→ 位计数清零 → 落 pc3
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state2, rng),
+            scramble_handler(vec![
+                format!("s.f=q:{}(s);{}s.bc={};return true", m_next, fail_g("f", rng), ControlFlowBuilder::obf_num(0, rng)),
+                format!("s.pc={};return true", pc_ref(rng, 3)),
+            ], rng)));
+        // H3：标志位分流（模二选择式）
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state3, rng),
+            scramble_handler(vec![
+                format!("s.bc=s.bc+{};return true", ControlFlowBuilder::obf_num(0, rng)),
+                format!("s.pc=((s.f%{})=={} and ({}) or ({}));return true",
+                    ControlFlowBuilder::obf_num(2, rng), ControlFlowBuilder::obf_num(1, rng), pc_ref(rng, 4), pc_ref(rng, 5)),
+            ], rng)));
+        // H4：读一字节入结果表（失败早退）→ 落 pc9
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state4, rng),
+            scramble_handler(vec![
+                format!("s.u=q:{}(s);{}s.res[#s.res+{}]=s.char(s.u);return true",
+                    m_next, fail_g("u", rng), ControlFlowBuilder::obf_num(1, rng)),
+                format!("s.pc={};return true", pc_ref(rng, 9)),
+            ], rng)));
+        // H5/H6/H7：读参数（失败早退）→ 落各自下一态
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state5, rng),
+            scramble_handler(vec![
+                format!("s.p1=q:{}(s);{}return true", m_next, fail_g("p1", rng)),
+                format!("s.pc={};return true", pc_ref(rng, 6)),
+            ], rng)));
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state6, rng),
+            scramble_handler(vec![
+                format!("s.p2=q:{}(s);{}return true", m_next, fail_g("p2", rng)),
+                format!("s.pc={};return true", pc_ref(rng, 7)),
+            ], rng)));
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state7, rng),
+            scramble_handler(vec![
+                format!("s.w=q:{}(s);{}return true", m_next, fail_g("w", rng)),
+                format!("s.pc={};return true", pc_ref(rng, 8)),
+            ], rng)));
         // ⑥ 字节拼装算术化（真源=此文件；stub_generator 为旁支同款已同步）：
         // s.p1*256+s.p2 的权重 256 改运行期随机恒等式（差一/零和/约简三选一）
         // 位置权重 256 保值，只伪装拼写
@@ -402,17 +476,41 @@ impl Packer {
             1 => format!("(s.p1*(0X{:X})-s.p1*0X{:X})+s.p2", k6 + 0x100, k6),
             _ => { let d6 = (k6 >> 8).max(1); format!("((s.p1*0X{:X})/0X{:X})+s.p2", d6 << 8, d6) }
         };
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst, iter) s.ptr = #s.res - ({}) + 1; iter = 0; while true do if iter >= s.w + 3 then break end; s.res[#s.res+1] = s.res[s.ptr + iter]; iter = iter + 1; end; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state8 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), w256, pc_ref(rng, 9)));
-        handlers_init.push(format!("s.handlers[{}+{}] = function(inst) s.f = s.floor(s.f / 2); s.bc = s.bc + 1; s.pc = {}; end;", ControlFlowBuilder::obf_num(op_state9 as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng), pc_ref(rng, 1)));
+        // H8：回引复制（循环体整组装进一个组，局部迭代器替代原形参）→ 落 pc9
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state8, rng),
+            scramble_handler(vec![
+                {
+                    let it = rng.name();
+                    format!("s.ptr=#s.res-({})+{};local {}={};while true do if {}>=s.w+{} then break end;s.res[#s.res+{}]=s.res[s.ptr+{}];{}={}+{} end;return true",
+                        w256, ControlFlowBuilder::obf_num(1, rng), it, ControlFlowBuilder::obf_num(0, rng),
+                        it, ControlFlowBuilder::obf_num(3, rng), ControlFlowBuilder::obf_num(1, rng), it, it, it, ControlFlowBuilder::obf_num(1, rng))
+                },
+                format!("s.pc={};return true", pc_ref(rng, 9)),
+            ], rng)));
+        // H9：位计数推进（三组语句三闭包）→ 落 pc1
+        handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state9, rng),
+            scramble_handler(vec![
+                format!("s.f=s.floor(s.f/{});return true", ControlFlowBuilder::obf_num(2, rng)),
+                format!("s.bc=s.bc+{};return true", ControlFlowBuilder::obf_num(1, rng)),
+                format!("s.pc={};return true", pc_ref(rng, 1)),
+            ], rng)));
+        // ㉙② 诱饵句柄：键域远离真实键系数带（指令码+篡改 ≤ 1150），永不命中；
+        // 键集枚举/计数看到的不再是「恰好 10 个连续可推键」
+        for _ in 0..3 {
+            let dk = rng.range(2000, 9000);
+            handlers_init.push(format!("s.handlers[s.hk+({})*s.hs] = function(inst) end;",
+                ControlFlowBuilder::obf_num(dk as i64, rng)));
+        }
 
         // ㉕ 句柄注册状态机同样运行时耦合化（原 1..N 洗牌裸字面量）
+        let kseed = format!("(#s.data)+(s.k[{}])", ControlFlowBuilder::obf_num(1, rng));
         let (handlers_decl, init_handlers_loop_body) =
-            ControlFlowBuilder::build_router_machine(&handlers_init, "while true do ", "st", "(#s.data)+(s.k[1])", rng);
+            ControlFlowBuilder::build_router_machine(&handlers_init, "while true do ", "st", &kseed, rng);
         let init_handlers_loop = format!("{}{}", handlers_decl, init_handlers_loop_body);
 
         let router_code = ControlFlowBuilder::build_fast_router(
             "s.pc", "s.insts", "inst", "s.handlers", "s.r_flg", "s.r_vals", "s.r_len", "s.tamper", "s.tail_flg",
-            "(#s.data)+(s.k[1])", rng
+            &kseed, "s.hk", "s.hs", rng
         );
 
         let num_key_parts = rng.range(3, 7);
@@ -596,6 +694,14 @@ impl Packer {
         let (pk_fet, pk_code, pk_env, pk_maker) = (rng.name(), rng.name(), rng.name(), rng.name());
         // 判据①修复：载荷切分点（sb 段字符数）以混淆数字拼写下发，'~' 不再出现
         let split_lit = rng.format_num(split_pos as i64);
+        // ㉙② 句柄键基/步长运行时推导：取密钥前 3 字节混合（init_map 之后 s.k
+        // 已就位），值域 <0XFFFFF；步长恒奇。注册/查表两侧共用 → 键集合不落文本
+        let hk_derive = format!(
+            "s.hk=(s.k[{}]*{}+s.k[{}]*{}+s.k[{}]*{})%0XFFFFF;s.hs=((s.hk%{})*0X2)+{};",
+            ControlFlowBuilder::obf_num(1, rng), ControlFlowBuilder::obf_num(rng.range64(100, 999), rng),
+            ControlFlowBuilder::obf_num(2, rng), ControlFlowBuilder::obf_num(rng.range64(100, 999), rng),
+            ControlFlowBuilder::obf_num(3, rng), ControlFlowBuilder::obf_num(rng.range64(100, 999), rng),
+            ControlFlowBuilder::obf_num(rng.range64(7, 61), rng), ControlFlowBuilder::obf_num(1, rng));
 
         let script = format!("
 local function {f_entry}({v_data})
@@ -687,6 +793,7 @@ end,
         {m_main} = function(q, data, split_at, unpack, char, byte, floor, insert, concat, remove, reverse, sub, load_func)
             return (function(s)
                 q:{m_init_map}(s);
+                {hk_derive}
                 q:{m_init_insts}(s);
                 q:{m_init_handlers}(s);
                 
@@ -751,6 +858,8 @@ end
                 ("w", p_w),
                 ("u", p_u),
                 ("ptr", p_ptr),
+                ("hk", p_hk),
+                ("hs", p_hs),
             ],
         );
         (script, f_entry)

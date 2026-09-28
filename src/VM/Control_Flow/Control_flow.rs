@@ -116,10 +116,6 @@ impl ControlFlowBuilder {
         let mut perm: Vec<usize> = (0..=n).collect();
         for i in (1..perm.len()).rev() { let j = rng.range(0, i + 1); perm.swap(i, j); }
         let idx_of = |k: usize, rng: &mut GenRng| Self::obf_num((perm[k] + 1) as i64, rng);
-        let cmp = |k: usize, rng: &mut GenRng| -> String {
-            if rng.range(0, 3) == 0 { format!("{}({},{}[{}])", dv, Self::obf_num(rng.range64(0x100, 0xFFFF), rng), ct, idx_of(k, rng)) }
-            else { format!("{}[{}]", ct, idx_of(k, rng)) }
-        };
         let trans = |k: usize, rng: &mut GenRng| -> String {
             match rng.range(0, 3) {
                 0 => format!("{}[{}]", ct, idx_of(k, rng)),
@@ -132,19 +128,28 @@ impl ControlFlowBuilder {
             }
         };
         let mut decl = format!("local {}={{}};local {}={{}};local {}=function(w,u) local z=w%0X2 return u+(z-z) end;", ct, sl, dv);
-        decl.push_str(&format!("local {}=({});local {}=(({})%0X10000)*{}+{};local {}=((({}))%{})*2+{};for {}=1,{} do {}[{}]={};{}={}+{} end;",
+        // ㉙① 去裸数字：公差除数 dm / 加数 db / 填表循环下界 1 全部混淆算式化
+        decl.push_str(&format!("local {}=({});local {}=(({})%0X10000)*{}+{};local {}=((({}))%{})*2+{};for {}={},{} do {}[{}]={};{}={}+{} end;",
             sd, seed_src,
             cc, sd, Self::obf_num(k0 as i64, rng), Self::obf_num(k1, rng),
-            dd, sd, dm, db,
-            ci, Self::obf_num((n + 1) as i64, rng), ct, ci, cc, cc, cc, dd));
+            dd, sd, Self::obf_num(dm as i64, rng), Self::obf_num(db as i64, rng),
+            ci, Self::obf_num(1, rng), Self::obf_num((n + 1) as i64, rng), ct, ci, cc, cc, cc, dd));
+        // ㉙① 条件表化：废除「状态变量==值」的可读 if/elseif 等式链——每步语句
+        // 变成加载期闭包，装进派发表，键 = 运行时状态表槽值（ct[混淆下标] 表达式
+        // 直接作键），闭包定义顺序洗牌；运行时按状态值一次查表取闭包执行。
+        // 静态文本里没有状态比较序列，动态单步也只能看到「查表→调用」。
+        let hb = rng.name();
+        let mut hdefs: Vec<String> = Vec::new();
+        for i in 0..n {
+            hdefs.push(format!("{}[{}[{}]]=function() {}{}={};end;",
+                hb, ct, idx_of(i, rng), stmts[i], st_var, trans(i + 1, rng)));
+        }
+        rng.shuffle(&mut hdefs);
+        decl.push_str(&format!("local {}={{}};{}", hb, hdefs.join("")));
+        let gj = rng.name();
         let mut body = format!("{}={};", st_var, trans(0, rng));
         body.push_str(loop_kw);
-        for i in 0..n {
-            let kw = if i == 0 { format!("if {}=={} then ", st_var, cmp(i, rng)) }
-                     else { format!("elseif {}=={} then ", st_var, cmp(i, rng)) };
-            body.push_str(&format!("{}{}{}={};", kw, stmts[i], st_var, trans(i + 1, rng)));
-        }
-        body.push_str("else break end end;");
+        body.push_str(&format!("local {}={}[{}];if {} then {}() else break end end;", gj, hb, st_var, gj, gj));
         (decl, body)
     }
 
@@ -233,6 +238,34 @@ impl ControlFlowBuilder {
         }
     }
 
+    /// ㉙① 状态比较间接化（热路径四形态）：①直等（少数保留）②双侧恒等委托
+    /// ③双侧平移（+K 后比）④双侧低位掩码（band，值域 <2^20 时恒等）。
+    /// 条件文本不再是裸的「t==表[槽]」单形态。
+    fn state_cmp(var_t: &str, slot_ref: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
+        match rng.range(0, 4) {
+            0 => format!("{}=={}", var_t, slot_ref),
+            1 => {
+                let dv1 = if rng.range(0, 2) == 0 { &keys.dv_a } else { &keys.dv_b };
+                let dv2 = if rng.range(0, 2) == 0 { &keys.dv_a } else { &keys.dv_b };
+                format!("{}({}, {})=={}({}, {})",
+                    dv1, Self::obfuscate_num_depth(rng.range(0x100, 0xFFFF) as i64, 1, keys, rng), var_t,
+                    dv2, Self::obfuscate_num_depth(rng.range(0x100, 0xFFFF) as i64, 1, keys, rng), slot_ref)
+            }
+            2 => {
+                let k = Self::obfuscate_num_depth(rng.range(0x100, 0xFFFF) as i64, 1, keys, rng);
+                format!("{}[{}][{}]({},{})=={}[{}][{}]({},{})",
+                    keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_add as i64, rng), var_t, k,
+                    keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_add as i64, rng), slot_ref, k)
+            }
+            _ => {
+                let mask = Self::format_num((1i64 << rng.range(20, 24)) - 1, rng);
+                format!("{}[{}][{}]({},{})=={}[{}][{}]({},{})",
+                    keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_ba as i64, rng), var_t, mask,
+                    keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_ba as i64, rng), slot_ref, mask)
+            }
+        }
+    }
+
     pub fn build_fast_router(
         var_pc: &str,
         var_insts: &str,
@@ -244,6 +277,8 @@ impl ControlFlowBuilder {
         var_tamper: &str,
         var_tail_flg: &str,
         var_seed: &str,
+        h_base: &str,
+        h_stride: &str,
         rng: &mut GenRng,
     ) -> String {
         // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng::distinct
@@ -327,20 +362,22 @@ impl ControlFlowBuilder {
         let init_val1 = rng.range(10, 1000) as i64;
         let init_val2 = rng.range(1, 1000) as i64;
 
+        // ㉙① 去裸数字：公差除数/加数（dm/db）与填表循环下界 1 全部混淆算式化
         out.push_str(&format!(
-            "local {}={{}};local {}=((#{}+#{}+({}))%0X100);local {}=(({})%0X40);local {}=({})*{}+({})*{}+{};local {}=((({}+({}))%{})*2+{});for {}=1,{} do {}[{}]={};{}={}+{} end;",
+            "local {}={{}};local {}=((#{}+#{}+({}))%0X100);local {}=(({})%0X40);local {}=({})*{}+({})*{}+{};local {}=((({}+({}))%{})*2+{});for {}={},{} do {}[{}]={};{}={}+{} end;",
             sv_t,
             sv_m, var_insts, var_handlers, var_seed,
             sv_n, var_tamper,
             sv_f, sv_m, Self::obf_num(k0 as i64, rng), sv_n, Self::obf_num(k1 as i64, rng), Self::obf_num(k2, rng),
-            sv_d, sv_m, sv_n, dm, db,
-            sv_i, Self::obf_num(112, rng), sv_t, sv_i, sv_f, sv_f, sv_f, sv_d));
+            sv_d, sv_m, sv_n, Self::obf_num(dm as i64, rng), Self::obf_num(db as i64, rng),
+            sv_i, Self::obf_num(1, rng), Self::obf_num(112, rng), sv_t, sv_i, sv_f, sv_f, sv_f, sv_d));
 
-        out.push_str(&format!("{},{},{}={},{},{};", 
-            s_state, t_shadow, d_junk, 
-            Self::format_num(init_val1, rng), 
-            Self::format_num(0, rng), 
-            Self::format_num(init_val2, rng)
+        // ㉙① 状态机三个辅助状态初值改混淆算式（原先 50% 概率裸十进制）
+        out.push_str(&format!("{},{},{}={},{},{};",
+            s_state, t_shadow, d_junk,
+            Self::obfuscate_num_depth(init_val1, 1, &keys, rng),
+            Self::obfuscate_num_depth(0, 1, &keys, rng),
+            Self::obfuscate_num_depth(init_val2, 1, &keys, rng)
         ));
         out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng));
 
@@ -370,77 +407,91 @@ impl ControlFlowBuilder {
         let mut mid_order: Vec<usize> = (0..extra_states).collect();
         rng.shuffle(&mut mid_order);
 
-        let dispatch_entry: String;
-        if extra_states == 0 {
-            out.push_str(&format!("if {}=={} then ", var_t, Self::sv_ref(&keys, 1, rng)));
-            dispatch_entry = String::new();
-        } else {
-            // fetch 态取指后落入第一个中间态（而非直接 dispatch）
-            out.push_str(&format!("if {}=={} then ", var_t, Self::sv_ref(&keys, 1, rng)));
-            dispatch_entry = String::new();
-        }
-        out.push_str(&format!("if {}>#{} then return end;", var_pc, var_insts));
-        out.push_str(&format!("{},{}={}[{}],{}+{};", var_inst, var_pc, var_insts, var_pc, var_pc, Self::obfuscate_num_depth(1, 1, &keys, rng)));
-        
-        let q_route_expr = format!("{}[{}][{}]({}[{}][{}]({}[{}],{}),{})", 
+        // ㉙① 骨架键控分支（fetch/中间态/派发）互斥——先各自建成再洗牌发射；
+        // 条件走 state_cmp 四形态；else 尾支（返回语义）保持语法末位。
+        let mut branches: Vec<(String, String)> = Vec::new();
+
+        // fetch 支：越界哨兵 + 取指 + 路由推导 + 转移（1/路由数均混淆算式）
+        let mut fetch_body = String::new();
+        fetch_body.push_str(&format!("if {}>#{} then return end;", var_pc, var_insts));
+        fetch_body.push_str(&format!("{},{}={}[{}],{}+{};", var_inst, var_pc, var_insts, var_pc, var_pc, Self::obfuscate_num_depth(1, 1, &keys, rng)));
+        let q_route_expr = format!("{}[{}][{}]({}[{}][{}]({}[{}],{}),{})",
             keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_ba as i64, rng),
             keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_add as i64, rng),
-            var_inst, Self::format_num(1, rng), s_state,
-            Self::format_num(num_routes, rng)
+            var_inst, Self::obfuscate_num_depth(1, 1, &keys, rng), s_state,
+            Self::obfuscate_num_depth(num_routes, 1, &keys, rng)
         );
-        out.push_str(&format!("{}={};", q_route, q_route_expr));
+        fetch_body.push_str(&format!("{}={};", q_route, q_route_expr));
         // ── 树形多样化 ③（放弃的方案留档）：route→handler 序号置换映射会改语义
         //（递归树的区间比较对「路由序」敏感，置换后 tree_entries 区间不再对应正确
         // handler——实测 compare two nil）。多样化由三叉+不等宽切分承担。
         if extra_states == 0 {
-            out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 2, rng), &keys, rng));
+            fetch_body.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 2, rng), &keys, rng));
         } else {
             // 态图：fetch → 第一个中间态
             let first_mid = mid_states[mid_order[0] as usize];
-            out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, first_mid, rng), &keys, rng));
+            fetch_body.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, first_mid, rng), &keys, rng));
         }
-        // 中间态分支（check/shuffle 空转后落 dispatch；功能零影响）
+        let sr_fetch = Self::sv_ref(&keys, 1, rng);
+        branches.push((Self::state_cmp(&var_t, &sr_fetch, &keys, rng), fetch_body));
+
+        // 中间态分支（check/shuffle 空转后落 dispatch；功能零影响；+1 亦混淆）
         for &mi in mid_order.iter() {
             let st_m = mid_states[mi as usize];
-            out.push_str(&format!("elseif {}=={} then ", var_t, Self::sv_ref(&keys, st_m, rng)));
+            let mut mid_body = String::new();
             match mid_kinds[mi as usize] {
                 0 => {
                     // check 态：d_junk 一致性空转自检（与原版 junk 判定同族形态）
                     let fake_c = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
-                    out.push_str(&format!("if {}=={} then {}={}+{}; end ", d_junk, fake_c, d_junk, d_junk, Self::format_num(1, rng)));
+                    mid_body.push_str(&format!("if {}=={} then {}={}+{}; end ", d_junk, fake_c, d_junk, d_junk, Self::obfuscate_num_depth(1, 1, &keys, rng)));
                 }
                 _ => {
                     // shuffle 态：无副作用交换（对临时值双写同值）
                     let (sa, sb) = (Self::format_num(rng.range(0x10, 0xFF) as i64, rng), Self::format_num(rng.range(0x10, 0xFF) as i64, rng));
-                    out.push_str(&format!("{}={};{}={}; ", f_tmp, sa, f_tmp, sb));
+                    mid_body.push_str(&format!("{}={};{}={}; ", f_tmp, sa, f_tmp, sb));
                 }
             }
-            out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 2, rng), &keys, rng));
+            mid_body.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 2, rng), &keys, rng));
+            let sr_mid = Self::sv_ref(&keys, st_m, rng);
+            branches.push((Self::state_cmp(&var_t, &sr_mid, &keys, rng), mid_body));
         }
-        out.push_str("elseif ");
-        out.push_str(&format!("{}=={} then ", var_t, Self::sv_ref(&keys, 2, rng)));
-        out.push_str(&Self::generate_recursive_tree(
-            0,
-            num_routes as usize - 1,
-            &q_route,
-            var_inst,
-            var_handlers,
-            var_tamper,
-            &s_state,
-            &d_junk,
-            &f_tmp,
-            &var_t,
-            &mut exit_seq,
-            &mut junk_limit,
-            &keys,
-            rng
+
+        // dispatch 支：递归树（句柄索引走运行时键基/步长）
+        let sr_disp = Self::sv_ref(&keys, 2, rng);
+        branches.push((
+            Self::state_cmp(&var_t, &sr_disp, &keys, rng),
+            Self::generate_recursive_tree(
+                0,
+                num_routes as usize - 1,
+                &q_route,
+                var_inst,
+                var_handlers,
+                var_tamper,
+                &s_state,
+                &d_junk,
+                &f_tmp,
+                &var_t,
+                &mut exit_seq,
+                &mut junk_limit,
+                h_base,
+                h_stride,
+                &keys,
+                rng
+            )
         ));
-        
+
+        rng.shuffle(&mut branches);
+        for (bi, (cond, body)) in branches.iter().enumerate() {
+            if bi == 0 { out.push_str(&format!("if {} then ", cond)); }
+            else { out.push_str(&format!("elseif {} then ", cond)); }
+            out.push_str(body);
+        }
+
         out.push_str("else ");
         let tf_a = Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng);
         let tf_b = Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng);
         out.push_str(&format!("if {} then if {} then {},{}=false,false;{}else return(unpack or table.unpack)({},{},{})end else {}end ", 
-            var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, tf_a, var_r_vals, Self::format_num(1, rng), var_r_len, tf_b
+            var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, tf_a, var_r_vals, Self::obfuscate_num_depth(1, 1, &keys, rng), var_r_len, tf_b
         ));
 
         out.push_str("end "); // 闭合骨架态图 if
@@ -462,6 +513,8 @@ impl ControlFlowBuilder {
         f_tmp: &str,
         var_t: &str,
         exit_seq: &mut usize,
+        h_base: &str,
+        h_stride: &str,
         keys: &CipherKeys,
         rng: &mut GenRng,
     ) -> String {
@@ -476,28 +529,31 @@ impl ControlFlowBuilder {
         let state_transition = Self::transition_assign_expr(var_t, &Self::sv_ref(keys, exit_slot, rng), keys, rng);
         let leaf_type = rng.range(0, 5);
         let mut node = String::new();
-        let idx_1 = Self::format_num(1, rng);
+        let idx_1 = Self::obfuscate_num_depth(1, 1, keys, rng);
+        // ㉙② 句柄索引运行时化：handlers[键基+(指令码+篡改)*步长]——键基/步长
+        // 均为运行时推导值（见 packer m_main），静态求值注册表达式拿不到键集合
+        let hidx = format!("{}[{}+({}[{}]+{})*{}]", var_handlers, h_base, var_inst, idx_1, var_tamper, h_stride);
 
         match leaf_type {
             0 => {
-                node.push_str(&format!("{}={}+{};{}={}[{}[{}]+{}];{}({});{}{}", 
-                    d_junk, d_junk, Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
+                node.push_str(&format!("{}={}+{};{}={};{}({});{}{}",
+                    d_junk, d_junk, Self::obfuscate_num_depth(1, 1, keys, rng), f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
             1 => {
-                node.push_str(&format!("repeat {}={}[{}[{}]+{}];{}({});{}{}break until false;", 
-                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
+                node.push_str(&format!("repeat {}={};{}({});{}{}break until false;",
+                    f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
             2 => {
-                node.push_str(&format!("for _={},{} do {}={}[{}[{}]+{}];{}({});end {}{}", 
-                    Self::format_num(1, rng), Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
+                node.push_str(&format!("for _={},{} do {}={};{}({});end {}{}",
+                    Self::obfuscate_num_depth(1, 1, keys, rng), Self::obfuscate_num_depth(1, 1, keys, rng), f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
             3 => {
-                node.push_str(&format!("if {}~={} then {}={}[{}[{}]+{}];{}({});{}{}end ", 
-                    d_junk, Self::format_num(4294967295i64, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
+                node.push_str(&format!("if {}~={} then {}={};{}({});{}{}end ",
+                    d_junk, Self::obfuscate_num_depth(4294967295i64, 1, keys, rng), f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
             _ => {
-                node.push_str(&format!("{}={}[{}[{}]+{}];{}({});{}{}", 
-                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state_trans, state_transition));
+                node.push_str(&format!("{}={};{}({});{}{}",
+                    f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
         }
         node
@@ -516,14 +572,16 @@ impl ControlFlowBuilder {
         var_t: &str,
         exit_seq: &mut usize,
         junk_limit: &mut usize,
+        h_base: &str,
+        h_stride: &str,
         keys: &CipherKeys,
         rng: &mut GenRng,
     ) -> String {
         if min == max {
-            let real_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
+            let real_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, h_base, h_stride, keys, rng);
             if *junk_limit > 0 && rng.range(0, 5) == 0 {
                 *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
+                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, h_base, h_stride, keys, rng);
                 let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
                 return format!("if {}=={} then {} else {} end ", d_junk, fake_cond, junk_leaf, real_leaf);
             }
@@ -540,10 +598,10 @@ impl ControlFlowBuilder {
             let c2 = Self::generate_opaque_predicate(cut2 as i64, q_route, "<=", keys, rng);
             let mut branch = format!("if {} then {} elseif {} then {} else {} end ",
                 c1,
-                Self::generate_recursive_tree(min, cut1, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng),
+                Self::generate_recursive_tree(min, cut1, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, h_base, h_stride, keys, rng),
                 c2,
-                Self::generate_recursive_tree(cut1 + 1, cut2, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng),
-                Self::generate_recursive_tree(cut2 + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
+                Self::generate_recursive_tree(cut1 + 1, cut2, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, h_base, h_stride, keys, rng),
+                Self::generate_recursive_tree(cut2 + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, h_base, h_stride, keys, rng));
             return branch;
         }
         let mid = if span >= 4 && rng.range(0, 2) == 0 {
@@ -559,33 +617,33 @@ impl ControlFlowBuilder {
 
         if direction {
             branch.push_str(&format!("if {} then ", comp_expr));
-            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, h_base, h_stride, keys, rng));
             
             if *junk_limit > 0 && rng.range(0, 4) == 0 {
                 *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
+                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, h_base, h_stride, keys, rng);
                 let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
                 branch.push_str(&format!("elseif {}=={} then {} ", d_junk, fake_cond, junk_leaf));
             }
 
             branch.push_str("else ");
-            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, h_base, h_stride, keys, rng));
             branch.push_str("end ");
         } else {
             let rev_comp = Self::generate_opaque_predicate(mid as i64, q_route, ">", keys, rng);
 
             branch.push_str(&format!("if {} then ", rev_comp));
-            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, h_base, h_stride, keys, rng));
             
             if *junk_limit > 0 && rng.range(0, 4) == 0 {
                 *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, keys, rng);
+                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, h_base, h_stride, keys, rng);
                 let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
                 branch.push_str(&format!("elseif {}=={} then {} ", d_junk, fake_cond, junk_leaf));
             }
 
             branch.push_str("else ");
-            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, keys, rng));
+            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, exit_seq, junk_limit, h_base, h_stride, keys, rng));
             branch.push_str("end ");
         }
         branch
