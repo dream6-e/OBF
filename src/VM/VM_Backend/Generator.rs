@@ -54,6 +54,8 @@ impl Generator {
         let key_seed_var = rng.name();
         // ㉒② 焊接缓存：三张缓存表随产物生成，供第二/三阶段各站点发射焊接构造。
         let mut weld = crate::VM::VM_Backend::Generator_util::WeldCache::new(&mut rng);
+        // ㉓ 统一流：packer 脚本串/探测九件套/守卫散点串共用的一条密钥流（惰性解密）。
+        let mut uni = crate::VM::VM_Backend::Generator_util::UniStream::new(&mut rng);
         let mut at = AntiTamper::generate_split(true, &key_seed_var);
         
         let mut used_ops = HashSet::new();
@@ -286,7 +288,7 @@ impl Generator {
 
         let block_vm_core = Lua_core::build_vm_core().replace("\n", " ");
         
-        let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng);
+        let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng, &mut uni);
         let var_junk = rng.name(); let var_vc = rng.name(); let var_builtin_reg = rng.name();
         let block_packer_vars = format!("local {}, {}, {}; ", var_junk, var_vc, var_builtin_reg);
 
@@ -649,15 +651,22 @@ impl Generator {
         // 状态对象每个调用一个，方法通过 __index 原型共享，调用仍是 `V
         let mut block_methods = String::new();
         block_methods.push_str(&format!("local {}; ", fn_execute));
-        let (h0, h1) = crate::VM::VM_Backend::Generator_util::stream_key("#", &mut rng);
-        let sc_hash = at.st.call("#", h0, h1);
-        block_methods.push_str(&format!("local {} = function(...) return {}[{}]({}, ...) end; ", var_get_count, var_s, hex_select_idx, sc_hash));
+        // ㉓ 统一流取用：惰性解密语句+纯数字密文，替换原池调用
+        let (hash_stmt, hash_expr) = {
+            let id = uni.register("#");
+            uni.fetch(&mut rng, id)
+        };
+        block_methods.push_str(&hash_stmt);
+        block_methods.push_str(&format!("local {} = function(...) return {}[{}]({}, ...) end; ", var_get_count, var_s, hex_select_idx, hash_expr));
         block_methods.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{{}={}(...),...}} end; ", pf_vn, var_get_count));
         block_methods.push_str(&format!("local {}={{}};local {}={{}};", var_methods, var_proto));
         for d in defs.iter() { block_methods.push_str(d); block_methods.push(' '); }
-        let (ix0, ix1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
-        let sc_index = at.st.call("__index", ix0, ix1);
-        block_methods.push_str(&format!("{}[{}]={};", var_proto, sc_index, var_methods));
+        let (idx_stmt, idx_expr) = {
+            let id = uni.register("__index");
+            uni.fetch(&mut rng, id)
+        };
+        block_methods.push_str(&idx_stmt);
+        block_methods.push_str(&format!("{}[{}]={};", var_proto, idx_expr, var_methods));
 
         block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
@@ -880,6 +889,7 @@ impl Generator {
             md21, th21, tw21, rk21, kreg_n,
             fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, sk_setup, t, x, var_bname, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
             weld,
+            uni,
         })
     }
 }

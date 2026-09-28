@@ -48,7 +48,7 @@ enum Step {
 pub struct Packer;
 
 impl Packer {
-    pub fn pack(input: &[u8], vm_rng: &mut GenRng) -> (String, String, String) {
+    pub fn pack(input: &[u8], vm_rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream) -> (String, String, String) {
         let seed = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u32)
@@ -74,7 +74,7 @@ impl Packer {
         let split_pos = b86_sb.len();
         let lua_payload = format!("{}{}", b86_sb, b86_main);
 
-        let (decoder_script, entry_func) = Self::build_decoder(&keys, &alpha_str, &alpha_perm, split_pos, vm_rng);
+        let (decoder_script, entry_func) = Self::build_decoder(&keys, &alpha_str, &alpha_perm, split_pos, vm_rng, uni);
         (lua_payload, decoder_script, entry_func)
     }
 
@@ -289,7 +289,7 @@ impl Packer {
         encoded
     }
 
-    fn build_decoder(keys: &[u8], alphabet: &str, perm: &[usize], split_pos: usize, rng: &mut GenRng) -> (String, String) {
+    fn build_decoder(keys: &[u8], alphabet: &str, perm: &[usize], split_pos: usize, rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream) -> (String, String) {
         let f_entry = rng.name();
         let v_data = rng.name();
         // 只用原生 loadstring：执行器/沙盒常把 loadstring 换成 Lua 钩子，
@@ -532,16 +532,14 @@ impl Packer {
         let combined_alpha_expr = parts_exprs.join(",");
         let combined_digs_expr = digs_exprs.join(",");
 
-        // 自定义流加密解码器（packer 脚本独立作用域自备一只）：
-        // probe 的类型串、gmatch 模式、"return " 前缀、chunk 名都走它，不留明文。
-        // 流加密键表：packer 脚本独立作用域自备一张（解码器匿名挂表里）。
-        let mut sc_st = crate::VM::VM_Backend::Generator_util::StreamTable::new(rng.name());
-        let (sr0, sr1) = crate::VM::VM_Backend::Generator_util::stream_key("return ", rng);
-        let (sk0, sk1) = crate::VM::VM_Backend::Generator_util::stream_key("kryvex", rng);
-        let sc_ret = sc_st.call("return ", sr0, sr1);
-        let sc_chunk = sc_st.call("kryvex", sk0, sk1);
-        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut sc_st, rng);
-        let sc_def = sc_st.emit();
+        // ㉓ 统一流加密（UniStream）："return " 前缀、chunk 名、probe 九件套、
+        // 守卫散点串全并入同一条 LCG 密钥流——惰性解密+缓存，密文只以数字落盘，
+        // 解码脚本作用域里零 "" 字面量。
+        let id_ret = uni.register("return ");
+        let id_chunk = uni.register("kryvex");
+        let (ret_stmt, ret_expr) = uni.fetch(rng, id_ret);
+        let (chunk_stmt, chunk_expr) = uni.fetch(rng, id_chunk);
+        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, uni, rng);
         // ── 第 2 项：这层解码器也不再是「初始化 → 拆分 → 解码 → 执行」的清晰骨架 ──
         // 状态表构造里 32 个键值对彼此独立，顺序打乱；stage2 里 16 条初始化赋值同样打乱
         // （data/len 那一对有先后依赖，单独保持原序）；gmatch 的 for-in 拆成显式迭代器 + 影子守卫。
@@ -611,7 +609,7 @@ impl Packer {
 
         let script = format!("
 local function {f_entry}({v_data})
-    {sc_def}{probe}
+    {probe}
     return ({{
         {m_bxor} = function(q, s, a, b, ra, rb, p, c, rra, rrb, k_bxor)
             k_bxor = a * 256 + b;
@@ -705,9 +703,9 @@ end,
                 s.len = #s.data;
                 local sb_expr = q:{m_run}(s);
                 
-                local {pk_fet} = load_func({sc_ret} .. sb_expr);
-                local {pk_code} = {pk_fet} and {pk_fet}() or \"\";
-                local {pk_env} = load_func({pk_code}, {sc_chunk});
+                {ret_stmt}local {pk_fet} = load_func({ret_expr} .. sb_expr);
+                local {pk_code} = {pk_fet} and {pk_fet}() or string.char();
+                {chunk_stmt}local {pk_env} = load_func({pk_code}, {chunk_expr});
                 
                 local stage2 = function()
                     {pk_s2_assigns}

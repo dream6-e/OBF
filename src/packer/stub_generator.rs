@@ -1,7 +1,7 @@
 use rand::Rng;
 use std::time::SystemTime;
 use super::utils::NamePool;
-use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, StreamTable, GenRng};
+use crate::VM::VM_Backend::Generator_util::{loadstring_probe_lua, UniStream, GenRng};
 
 pub struct StubGenerator;
 
@@ -289,11 +289,11 @@ impl StubGenerator {
         }
         k_str.push('}');
 
-        // 流键表：先注册（probe 往里写条目），再 emit —— 必须同一张表。
-        let sc_name = pool.get();
-        let mut sc_st = StreamTable::new(sc_name);
-        let probe = loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut sc_st, &mut GenRng::new(seed as u64));
-        let sc_def = sc_st.emit();
+        // ㉓ 统一流：壳脚本自带一只（惰性解密+数字密文），与主产物同一机制。
+        let mut uni_rng = GenRng::new(seed as u64);
+        let mut uni = UniStream::new(&mut uni_rng);
+        let probe = loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut uni, &mut uni_rng);
+        let sc_def = uni.emit_prelude(&mut uni_rng);
         format!("
 return (function(...)
     {sc_def}{probe}

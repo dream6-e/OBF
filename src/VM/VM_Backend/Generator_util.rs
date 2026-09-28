@@ -1079,8 +1079,8 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
 /// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
 /// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
 /// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
-pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, st: &mut StreamTable, rng: &mut GenRng) -> String {
-    // ── 要隐藏的字符串：顺序与下面 format! 里的 k1…k9 一一对应 ──
+pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream, rng: &mut GenRng) -> String {
+    // ── 要隐藏的字符串（九件套 + 三个类型名）全并入统一流（㉓）──
     const PLAIN: [&str; 9] = [
         "getinfo",    // info 表的键
         "what",       // 判定是否为原生函数
@@ -1092,73 +1092,51 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, st: &mut StreamTabl
         "loadstring", // 候选名
         "load",       // 候选名
     ];
-    let mut names: Vec<String> = Vec::with_capacity(PLAIN.len());
-    let mut lits: Vec<String> = Vec::with_capacity(PLAIN.len());
-    let mut ks: Vec<u32> = Vec::with_capacity(PLAIN.len());
-    for p in PLAIN.iter() {
-        let (k0, k1) = mix_key(p, rng);
-        names.push(rng.name());
-        lits.push(mix_lit(p, k0, k1));
-        ks.push(k0 * 256 + k1);
+    // 逐串登记进统一流；取用在各函数体内**惰性**发生：第一次走进才解密，
+    // 其后命中缓存直通（共享串第二次解码逻辑上无分支）。密文纯数字，零字面量。
+    let mut ids: Vec<usize> = Vec::with_capacity(PLAIN.len() + 3);
+    for ptxt in PLAIN.iter() { ids.push(uni.register(ptxt)); }
+    let id_s = uni.register("S");
+    let id_table = uni.register("table");
+    let id_function = uni.register("function");
+    let mut exprs: Vec<String> = Vec::new();
+    let mut stmts: Vec<String> = Vec::new();
+    for &id in ids.iter() {
+        let (st, ex) = uni.fetch(rng, id);
+        stmts.push(st); exprs.push(ex);
     }
+    let (st_s, ex_s) = uni.fetch(rng, id_s);
+    let (st_table, ex_table) = uni.fetch(rng, id_table);
+    let (st_fn, ex_fn) = uni.fetch(rng, id_function);
 
-    // ── 解密器：纯算术 XOR，不用任何位库 ──
-    let v_dx = rng.name();
-    let (v_s, v_k) = (rng.name(), rng.name());
-    let (v_o, v_i, v_n) = (rng.name(), rng.name(), rng.name());
-    let (v_k1, v_k0) = (rng.name(), rng.name());
-    let (v_a, v_b) = (rng.name(), rng.name());
-    let (v_r, v_p, v_w) = (rng.name(), rng.name(), rng.name());
-    let (v_xb, v_yb) = (rng.name(), rng.name());
-    // 密文按**位置相关**的密钥解：先按 (k0 * i + k1) % 256 取该位置的密钥异或，
-    // 再减 k1。单字节 XOR 的破绽是「密文 − 明文」到处都一样，肉眼比对两次调用就能
-    // 反推密钥；密钥随下标走以后，同一个明文字符在不同位置、不同串上的密文都不一样。
-    let dx_def = format!(
-        "local function {dx}({s},{K}) local {o},{i}='',0; local {n}=#{s}; \
-         local {k1}={K}%256; local {k0}=({K}-{k1})/256; \
-         while {i}<{n} do {i}={i}+1; local {a}=({k0}*{i}+{k1})%256; local {b}=string.byte({s},{i}); \
-         local {r},{p}=0,1; for {w}=1,8 do local {xb},{yb}={a}%2,{b}%2; \
-         if {xb}~={yb} then {r}={r}+{p} end; {a}=({a}-{xb})/2; {b}=({b}-{yb})/2; {p}={p}*2; end; \
-         {o}={o}..string.char(({r}-{k1})%256); end; return {o}; end;",
-        dx = v_dx, s = v_s, K = v_k, o = v_o, i = v_i, n = v_n,
-        k1 = v_k1, k0 = v_k0, a = v_a, b = v_b, r = v_r, p = v_p, w = v_w, xb = v_xb, yb = v_yb
-    );
-    let mut keys_lua = String::new();
-    for i in 0..PLAIN.len() {
-        keys_lua.push_str(&format!("local {}={}({},0X{:04X});", names[i], v_dx, lits[i], ks[i]));
-    }
-
-    // 类型名与 getinfo 选项：自定义流加密就地还原（不碰全局访问形态——
-    // debug/pcall/loadstring/load 这些裸全局读写保持原样，执行器已验证）。
-    let (sk_s_k0, sk_s_k1) = stream_key("S", rng);
-    let (sk_t_k0, sk_t_k1) = stream_key("table", rng);
-    let (sk_f_k0, sk_f_k1) = stream_key("function", rng);
-    let v_d = rng.name();
-    let v_gi = rng.name();
-    let v_list = rng.name();
-    let v_alt = rng.name();
-    let v_i = rng.name();
-    let v_n = rng.name();
-    let v_f = rng.name();
-    let v_t = rng.name();
-    let v_g = rng.name();
-    let v_ok = rng.name();
-    let v_inf = rng.name();
-    let v_gg = rng.name();
-    let v_ge = rng.name();
-    let v_env2 = rng.name();
-    let body = format!(
+    let v_d = rng.name(); let v_gi = rng.name();
+    let v_ok = rng.name(); let v_inf = rng.name();
+    // nat：用到 getinfo/what/C/source/=[C]/S/table/function
+    let nat_stmts = format!("{}{}{}{}{}{}{}{}",
+        stmts[0], stmts[1], stmts[2], stmts[3], stmts[4], st_s, st_table, st_fn);
+    let nat_body = format!(
         "local function {nat}({f}) \
-            local {d} = debug; \
+            local {d} = debug; {stms} \
             if type({d}) ~= {sc_t} then return true end; \
             local {gi} = {d}[{k1}]; \
             if type({gi}) ~= {sc_f} then return true end; \
             local {ok}, {inf} = pcall({gi}, {f}, {sc_s}); \
             if not {ok} or type({inf}) ~= {sc_t} then return true end; \
             return {inf}[{k2}] == {k3} and {inf}[{k4}] == {k5}; \
-        end; \
-        local function {getf}() \
-            local {g} = (getfenv and getfenv()) or _G; \
+        end; ",
+        nat = nat, f = rng.name(), d = v_d, stms = nat_stmts,
+        sc_t = ex_table, sc_f = ex_fn, sc_s = ex_s,
+        gi = v_gi, k1 = exprs[0], ok = v_ok, inf = v_inf,
+        k2 = exprs[1], k3 = exprs[2], k4 = exprs[3], k5 = exprs[4]);
+
+    // getf：用到 getgenv/getrenv/loadstring/load/function（table/function 命中缓存）
+    let (v_g, v_gg, v_ge, v_env2) = (rng.name(), rng.name(), rng.name(), rng.name());
+    let (v_list, v_alt, v_i2, v_n2, v_f2, v_t2) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let getf_stmts = format!("{}{}{}{}{}{}{}",
+        stmts[5], stmts[6], stmts[7], stmts[8], st_fn, st_table, st_s);
+    let getf_body = format!(
+        "local function {getf}() \
+            local {g} = (getfenv and getfenv()) or _G; {stms} \
             local {gg} = {g}[{k6}]; \
             if type({gg}) == {sc_f} then {g} = {gg}() or {g}; end; \
             local {ge} = {g}[{k7}]; \
@@ -1179,16 +1157,12 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, st: &mut StreamTabl
             return {alt}; \
         end; \
         local {pl} = {getf}();\n",
-        nat = nat, getf = getf, pl = pl, d = v_d, gi = v_gi, list = v_list, alt = v_alt,
-        i = v_i, n = v_n, f = v_f, t = v_t, g = v_g, ok = v_ok, inf = v_inf,
-        gg = v_gg, ge = v_ge, env = v_env2,
-        k1 = names[0], k2 = names[1], k3 = names[2], k4 = names[3], k5 = names[4],
-        k6 = names[5], k7 = names[6], k8 = names[7], k9 = names[8],
-        sc_s = st.call("S", sk_s_k0, sk_s_k1),
-        sc_t = st.call("table", sk_t_k0, sk_t_k1),
-        sc_f = st.call("function", sk_f_k0, sk_f_k1)
-    );
-    format!("{dx_def}{keys_lua}{body}")
+        getf = getf, g = v_g, stms = getf_stmts,
+        gg = v_gg, k6 = exprs[5], sc_f = ex_fn, ge = v_ge, k7 = exprs[6],
+        env = v_env2, list = v_list, k8 = exprs[7], k9 = exprs[8],
+        alt = v_alt, i = v_i2, n = v_n2, f = v_f2, t = v_t2,
+        nat = nat, pl = pl);
+    format!("{}{}", nat_body, getf_body)
 }
 
 /// 把明文按密钥异或后写成 Lua 的 `\ddd` 十进制转义字符串字面量。
@@ -1509,4 +1483,99 @@ pub(super) fn cursor_walk_dyn(
     }
     out.push_str("else break end end; ");
     out
+}
+
+// ── ㉓ 统一流加密（UniStream）：4/5/6 三线并一流 ──────────────────────
+// 一条逐产物随机的 LCG 密钥流扫过**全部**登记的明文：每个串占一段独立偏移，
+// 密文 `c[g] = (p[g] + ks[g] + q0*g + q1) % 256`（g 为全流绝对位置，1 起计）——
+// 位置相关双字节混合的「位置」维度升级为全流坐标，同一字符在不同串/不同位置
+// 密文全不同。落盘形态：密文只以**数字**出现（字节表字面量，十进制/0X/拆和式
+// 混写），产物里零 `""` 字面量；解码器用 `string.char()`（无参=空串，同样零
+// 字面量）累积。取用形态=焊接式惰性解密：`if not U[k] then U[k]=D({c…},off) end;`
+// 第一次走到才解，第二次起缓存直通（逻辑上无分支）。
+
+pub struct UniStream {
+    pub tbl: String,
+    pub dec: String,
+    a: u64, c: u64, m: u64, seed: u64, q0: u64, q1: u64,
+    cur: u64,
+    enc: Vec<u8>,
+    entries: Vec<(Vec<u8>, usize)>, // (密文字节, 全流偏移)
+    used: std::collections::HashSet<u32>,
+}
+
+impl UniStream {
+    pub fn new(rng: &mut GenRng) -> Self {
+        let m = 0x7FFFFF01u64; // 奇数 < 2^31：x*a < 2^47，double 精确
+        let a = (rng.range(3, 0x1_0000) as u64) | 1;
+        let c = rng.range(1, 0x1_0000) as u64;
+        let seed = rng.range(1, 0x7FFF_FFFF) as u64;
+        let q0 = rng.range(1, 256) as u64;
+        let q1 = rng.range(1, 256) as u64;
+        Self { tbl: rng.name(), dec: rng.name(), a, c, m, seed, q0, q1,
+               cur: seed, enc: Vec::new(), entries: Vec::new(), used: std::collections::HashSet::new() }
+    }
+    fn key(&mut self, rng: &mut GenRng) -> u32 {
+        loop {
+            let k = rng.range(0x0200_0000, 0x7FFF_FFFF) as u32;
+            if self.used.insert(k) { return k; }
+        }
+    }
+    /// 登记一个明文：加密后占一段新偏移。返回条目号。
+    pub fn register(&mut self, plain: &str) -> usize {
+        let b = plain.as_bytes();
+        let off = self.enc.len();
+        for &p in b {
+            self.cur = (self.cur.wrapping_mul(self.a).wrapping_add(self.c)) % self.m;
+            let g = (self.enc.len() + 1) as u64;
+            let ks = ((self.cur % 256) + self.q0 * (g % 256) + self.q1) % 256;
+            self.enc.push((((p as u64) + ks) % 256) as u8);
+        }
+        self.entries.push((self.enc[off..off + b.len()].to_vec(), off));
+        self.entries.len() - 1
+    }
+    /// 字节数字的混写形态：十进制 / 0X 大写 / (A+B)%256 拆和。
+    fn byte_num(&self, rng: &mut GenRng, v: u8) -> String {
+        match rng.range(0, 3) {
+            0 => format!("{}", v),
+            1 => format!("0X{:X}", v),
+            _ => {
+                let a = rng.range(0, 256);
+                let b = ((v as usize) + 256 - a) % 256;
+                format!("({}+{})%256", a, b)
+            }
+        }
+    }
+    fn plain_num(&self, v: u64) -> String {
+        if v > 0x1000 && self.cur % 2 == 0 { format!("0X{:X}", v) } else { format!("{}", v) }
+    }
+    /// 取用形态：返回 (惰性解密语句, 取串表达式)。密文纯数字，零字面量。
+    pub fn fetch(&mut self, rng: &mut GenRng, id: usize) -> (String, String) {
+        let (cipher, off) = self.entries[id].clone();
+        let k = self.key(rng);
+        let kf = rng.format_num(k as i64);
+        let bytes: Vec<String> = cipher.iter().map(|b| self.byte_num(rng, *b)).collect();
+        let of = self.plain_num(off as u64);
+        let stmt = match rng.range(0, 3) {
+            0 => format!("if not {t}[{k}] then {t}[{k}]={d}({{{b}}},{o}) end; ",
+                         t = self.tbl, k = kf, d = self.dec, b = bytes.join(","), o = of),
+            1 => format!("if {t}[{k}] then else {t}[{k}]={d}({{{b}}},{o}) end; ",
+                         t = self.tbl, k = kf, d = self.dec, b = bytes.join(","), o = of),
+            _ => format!("if not {t}[{k}] then repeat {t}[{k}]={d}({{{b}}},{o}); break until false end; ",
+                         t = self.tbl, k = kf, d = self.dec, b = bytes.join(","), o = of),
+        };
+        (stmt, format!("{}[{}]", self.tbl, kf))
+    }
+    /// 表 + 解码器声明（产物主作用域一次；解码器体零字符串字面量）。
+    pub fn emit_prelude(&self, rng: &mut GenRng) -> String {
+        let (tb, of) = (rng.name(), rng.name());
+        let (o, x, i) = (rng.name(), rng.name(), rng.name());
+        let (n, j, g) = (rng.name(), rng.name(), rng.name());
+        let ksv = rng.name();
+        format!(
+            "local {t}={{}}; local function {d}({tb},{of}) local {o}=string.char(); local {x}={seed}; local {i}=0; while {i}<{of} do {x}=({x}*{a}+{c})%{m}; {i}={i}+1 end; local {n}=#{tb}; local {j}=1; while {j}<={n} do {x}=({x}*{a}+{c})%{m}; local {g}={of}+{j}; local {ks}=({x}%256+{q0}*({g}%256)+{q1})%256; {o}={o}..string.char(({tb}[{j}]-{ks})%256); {j}={j}+1 end; return {o} end; ",
+            t = self.tbl, d = self.dec, tb = tb, of = of, o = o, x = x, i = i,
+            seed = self.plain_num(self.seed), a = self.plain_num(self.a), c = self.plain_num(self.c), m = self.plain_num(self.m),
+            n = n, j = j, g = g, ks = ksv, q0 = self.plain_num(self.q0), q1 = self.plain_num(self.q1))
+    }
 }

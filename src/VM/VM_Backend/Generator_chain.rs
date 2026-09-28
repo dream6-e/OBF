@@ -107,6 +107,7 @@ pub(super) struct ChainIn {
     pub tag_map18: [u8; 4],
     pub fc18: crate::VM::VM_Backend::Generator_util::FoldCtx,
     pub weld: crate::VM::VM_Backend::Generator_util::WeldCache,
+    pub uni: crate::VM::VM_Backend::Generator_util::UniStream,
 }
 
 /// 第二阶段：chacha 簇 + 解码链 + 装配，返回最终目标源码。
@@ -198,6 +199,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         wai,
         xor_tbl_var,
         weld: mut weld,
+        uni: mut uni,
     } = x;
     // CG 原为第一阶段块内 const，随代码原样搬迁重声明（同值同路径）。
     #[allow(dead_code)]
@@ -420,17 +422,19 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             clusters[cluster_order[3]].clone(),
         ];
         
-        let (fh0, fh1) = crate::VM::VM_Backend::Generator_util::stream_key("function", &mut rng);
-        let sc_fn_hdr = at.st.call("function", fh0, fh1);
-        let (md0, md1) = crate::VM::VM_Backend::Generator_util::stream_key("__mode", &mut rng);
-        let sc_mode = at.st.call("__mode", md0, md1);
-        let (mk0, mk1) = crate::VM::VM_Backend::Generator_util::stream_key("k", &mut rng);
-        let sc_k = at.st.call("k", mk0, mk1);
+        // ㉓ 统一流守卫："function"/"__mode"/"k" 不留明文（惰性解密+纯数字密文）
+        let hid_fun = uni.register("function");
+        let hid_mode = uni.register("__mode");
+        let hid_k = uni.register("k");
+        let (fun_stmt, sc_fn_hdr) = uni.fetch(&mut rng, hid_fun);
+        let (mode_stmt, sc_mode) = uni.fetch(&mut rng, hid_mode);
+        let (k_stmt, sc_k) = uni.fetch(&mut rng, hid_k);
         let block_dec_header = crate::VM::VM_Backend::Generator_flow::build_header(
             &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
             var_chk.as_str(), var_idx.as_str(), var_junk.as_str(), var_b.as_str(), var_tamper.as_str(),
             var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
             sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str());
+        let block_dec_header = format!("{fun_stmt}{mode_stmt}{k_stmt}") + &block_dec_header;
         // ── 解码链（第 6 项：解密逻辑打乱）──
         // 冷路径一次性函数，放心打乱形态。
         let (v_bx_a, v_bx_b, v_bx_r, v_bx_w, v_bx_g, v_bx_s) =
@@ -561,10 +565,11 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x,
             jv = rng.name(), rd = fn_read_dec.as_str()
         );
-        let (bi0, bi1) = crate::VM::VM_Backend::Generator_util::stream_key("__index", &mut rng);
-        let sc_index2 = at.st.call("__index", bi0, bi1);
-        let (ko0, ko1) = crate::VM::VM_Backend::Generator_util::stream_key("KryvexObf_", &mut rng);
-        let sc_kobf = at.st.call("KryvexObf_", ko0, ko1);
+        // ㉓ 统一流守卫："__index"/"KryvexObf_" 不留明文（惰性解密）
+        let cid_index = uni.register("__index");
+        let cid_gk = uni.register("KryvexObf_");
+        let (ci_stmt, sc_index2) = uni.fetch(&mut rng, cid_index);
+        let (gk_stmt, sc_kobf) = uni.fetch(&mut rng, cid_gk);
         let body_consts = format!(
             "{st}={nxt}; {bc_scatter} ",
             st = var_state, nxt = obf_s_protos,
@@ -578,6 +583,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
                 &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(), psn_n.as_str())
         );
+        let body_consts = format!("{ci_stmt}{gk_stmt}") + &body_consts;
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
         // 滚动密钥流（k1..k4 随消费演化）——跳读须逐字节喂 rd() 推进外层密钥；
@@ -646,7 +652,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // 驱动，数据流折进参数树（t:dz(t:cx(e))），定义顺序洗牌+诱饵方法埋伏；
         // 链路：驱动→m1(pcall 自派发)→m2(探针错误族随机)→m3(find 针式)→
         // m4(触发族随机：h and 容纳值 or nil 折叠，nil 时自然崩溃)
-        let line_guard = |rng: &mut GenRng| -> String {
+        let line_guard = |rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream| -> String {
             let tbl = rng.name();
             let probe_body = |rng: &mut GenRng| -> String {
                 let v = rng.name();
@@ -686,9 +692,12 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             let taut = format!("(0X{:X}-0X{:X}==0X{:X})", ga, gb, ga - gb);
             let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}=type({u}); ",
                 u = p_u, h = p_hit, tol = tolerant, f1 = f1);
+            // ㉓ 统一流：填充语里的型别串也走惰性解密
+            let jf_id = uni.register("function");
+            let (jf_stmt, jf_expr) = uni.fetch(&mut *rng, jf_id);
             let mut hopts = vec![
                 format!("if {u}~={u} then {u}={u} end; ", u = p_u),
-                format!("if {f1}==\"function\"then {u}={u} end; ", f1 = f1, u = p_u),
+                format!("{jf_stmt}if {f1}=={jf_expr}then {u}={u} end; ", jf_stmt = jf_stmt, f1 = f1, jf_expr = jf_expr, u = p_u),
                 format!("if {f1}==\"string\"and #{u}>0X0 then {u}={u} end; ", f1 = f1, u = p_u),
                 format!("for {f2}=0X1,0X{} do if {u} then break end end; ", rng.range(2, 6), f2 = f2, u = p_u),
                 format!("local {f2}=({u})and 0X1 or 0X0; ", f2 = f2, u = p_u),
@@ -770,7 +779,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         ];
 
         {
-            let lg20 = line_guard(&mut rng);
+            let lg20 = line_guard(&mut rng, &mut uni);
             let gap20 = rng.range(0, parts.len() + 1);
             parts.insert(gap20, lg20);
         }
@@ -784,6 +793,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         }
 
         let mut out = String::new();
+        // ㉓ 统一流前导（表+惰性解码器）：先于打乱 parts 落位，保证解码脚本与各
+        // 散点语句无论乱序都在解码器定义之后。
+        out.push_str(&uni.emit_prelude(&mut rng));
         out.push_str(&format!("local {} = ...;\n", var_l));
         out.push_str(&header_block);
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
@@ -794,7 +806,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&weld.declare());
         // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
         // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
-        out.push_str(&line_guard(&mut rng));
+        out.push_str(&line_guard(&mut rng, &mut uni));
         // ④ 槽位键的运行期推导块必须在所有用键代码之前；
         // finish_setup 把状态链种子/陷阱门等收尾语句并进 setup（在全部注册后调用）
         out.push_str(&sk_setup);
@@ -832,7 +844,7 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             out.push_str(" ");
         }
 
-        out.push_str(&line_guard(&mut rng));
+        out.push_str(&line_guard(&mut rng, &mut uni));
         out.push_str(&format!("local main_chunk={}(); ", fn_decode_chunk));
         out.push_str(&at.trigger);
         out.push_str(&format!(" {} = {{}}; local {} = (getfenv and getfenv() or _ENV or _G); local {}; ", var_builtin_reg, var_boot_env, var_bname));
@@ -950,10 +962,10 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // thunk 快照/return 壳整段是"探针之下"的插入盲区（用户实测 print 插行未检出）。
         // 紧贴 return 再布一枚，把盲区压缩到 return 语句本身；⑤ fu 壳内最后一针
         // 封住 return 壳表达式内的语句缝隙。二者均在行 2 内，针式 :2: 一致。
-        out.push_str(&line_guard(&mut rng));
-        out.push_str(&line_guard(&mut rng));
+        out.push_str(&line_guard(&mut rng, &mut uni));
+        out.push_str(&line_guard(&mut rng, &mut uni));
         out.push_str(" ");
-        out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng), wai));
+        out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni), wai));
         out.push_str(&format!(" }}):{}()", fu));
         out
 }

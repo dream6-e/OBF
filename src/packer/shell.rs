@@ -895,7 +895,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
         "local ok, f = G.pcall(R, N);",
         &mut out,
     );
-    line(1, "u(ok and f and W(f) == \"function\");", &mut out);
+    line(1, "u(ok and f and W(f) == string.char(102,117,110,99,116,105,111,110));", &mut out);
     line(1, "return f(...);", &mut out);
     out.push_str("end)(...);\n");
     out
