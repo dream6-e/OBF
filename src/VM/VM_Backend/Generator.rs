@@ -235,7 +235,9 @@ impl Generator {
         let var_state_flag = rng.name();
         let wai = rng.name();
         let mut header_block = String::new();
-        header_block.push_str(&format!("return ({{ {} = function(agv,aggv,agv,agv,agv,aggv,agv,agv,aggv,aggv,aggv,agggv,agggv,agggv,agggv,aggv,{},{},{},{}, ...)\n", wai, p_out[0], p_out[1], p_out[2], p_out[3]));
+        // ㉓ 外壳由 build_chain 统一包（return((function() 前导 return({ ... })end)()):fu()），
+        // 这里只产「字段表体」——前导落在 IIFE 内、return({}) 壳表达式内。
+        header_block.push_str(&format!("{{ {} = function(agv,aggv,agv,agv,agv,aggv,agv,agv,aggv,aggv,aggv,agggv,agggv,agggv,agggv,aggv,{},{},{},{}, ...)\n", wai, p_out[0], p_out[1], p_out[2], p_out[3]));
         header_block.push_str(&format!("local {} = {{}}; local {} = false; ", var_s, var_state_flag));
         header_block.push_str(&format!("local {} = bit32 and bit32.rshift or bit and bit.rshift; ", var_fU));
         header_block.push_str(&format!("local {} = function(q, s, M, C) s[{}] = select; end; ", fn_N_, hex_select_idx));

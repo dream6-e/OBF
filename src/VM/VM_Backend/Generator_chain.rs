@@ -793,10 +793,13 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         }
 
         let mut out = String::new();
-        // ㉓ 统一流前导（表+惰性解码器）：先于打乱 parts 落位，保证解码脚本与各
-        // 散点语句无论乱序都在解码器定义之后。
-        out.push_str(&uni.emit_prelude(&mut rng));
         out.push_str(&format!("local {} = ...;\n", var_l));
+        // ㉓ 统一流前导（表+惰性解码器）：必须落在 return({}) 壳**内**（用户指示，
+        // 与 ⑳.4「壳外零代码」一致）——用 IIFE 包住字段表：前导在 IIFE 体内、
+        // return 表达式之内，wai/fu 等所有字段方法都以 upvalue 共享解码表。
+        out.push_str("return ((function() ");
+        out.push_str(&uni.emit_prelude(&mut rng));
+        out.push_str(" return (");
         out.push_str(&header_block);
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
@@ -966,6 +969,6 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&line_guard(&mut rng, &mut uni));
         out.push_str(" ");
         out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni), wai));
-        out.push_str(&format!(" }}):{}()", fu));
+        out.push_str(&format!(" }}) end)()):{}()", fu));
         out
 }
