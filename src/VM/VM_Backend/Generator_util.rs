@@ -1498,8 +1498,10 @@ pub struct UniStream {
     pub tbl: String,
     pub dec: String,
     // ㉓.2 高频数字（256/模数/LCG a、c）提升为壳内局部常量，取用点只引名字
-    k_b: String, k_m: String, k_a: String, k_c: String,
+    k_b: String, k_m: String, k_a: String, k_c: String, k_p: String, k_q: String,
     a: u64, c: u64, m: u64, seed: u64, q0: u64, q1: u64,
+    // ㉓.5 自循环：d_mul/d_rounds 串起始推导；fb_mul/fb_add 明文反馈
+    d_mul: u64, d_rounds: u64, fb_mul: u64, fb_add: u64,
     cur: u64,
     enc: Vec<u8>,
     entries: Vec<(Vec<u8>, usize)>, // (密文字节, 全流偏移)
@@ -1514,9 +1516,14 @@ impl UniStream {
         let seed = rng.range(1, 0x7FFF_FFFF) as u64;
         let q0 = rng.range(1, 256) as u64;
         let q1 = rng.range(1, 256) as u64;
+        let d_mul = rng.range(1, 0x1_0000) as u64;
+        let d_rounds = rng.range(4, 16) as u64;
+        let fb_mul = (rng.range(1, 0x4000) as u64) | 1;   // < 2^14：x+p*P+Q < 2^32，double 精确
+        let fb_add = rng.range(1, 0x1_0000) as u64;
         Self { tbl: rng.name(), dec: rng.name(),
                k_b: rng.name(), k_m: rng.name(), k_a: rng.name(), k_c: rng.name(),
-               a, c, m, seed, q0, q1,
+               k_p: rng.name(), k_q: rng.name(),
+               a, c, m, seed, q0, q1, d_mul, d_rounds, fb_mul, fb_add,
                cur: seed, enc: Vec::new(), entries: Vec::new(), used: std::collections::HashSet::new() }
     }
     fn key(&mut self, rng: &mut GenRng) -> u32 {
@@ -1526,16 +1533,26 @@ impl UniStream {
         }
     }
     /// 登记一个明文：加密后占一段新偏移。返回条目号。
+    /// ㉓.5 自循环流：每串起始状态 = (seed + off*d_mul)%m 再走 d_rounds 步推导；
+    /// 逐字节：步进→取键流→加密→**把明文反馈进状态**。解第 j+1 字节必须先有
+    /// 第 j 字节的明文——不存在可直写的线性密钥流公式。
     pub fn register(&mut self, plain: &str) -> usize {
         let b = plain.as_bytes();
         let off = self.enc.len();
-        for &p in b {
-            self.cur = (self.cur.wrapping_mul(self.a).wrapping_add(self.c)) % self.m;
-            let g = (self.enc.len() + 1) as u64;
-            let ks = ((self.cur % 256) + self.q0 * (g % 256) + self.q1) % 256;
-            self.enc.push((((p as u64) + ks) % 256) as u8);
+        let mut x = (self.seed + (off as u64) * self.d_mul) % self.m;
+        for _ in 0..self.d_rounds {
+            x = (x.wrapping_mul(self.a).wrapping_add(self.c)) % self.m;
         }
-        self.entries.push((self.enc[off..off + b.len()].to_vec(), off));
+        let mut ciph = Vec::with_capacity(b.len());
+        for (j, &p) in b.iter().enumerate() {
+            x = (x.wrapping_mul(self.a).wrapping_add(self.c)) % self.m;
+            let g = (off + j + 1) as u64;
+            let ks = ((x % 256) + self.q0 * (g % 256) + self.q1) % 256;
+            ciph.push((((p as u64) + ks) % 256) as u8);
+            x = (x + (p as u64) * self.fb_mul + self.fb_add) % self.m; // 明文反馈
+        }
+        self.enc.extend(std::iter::repeat(0u8).take(b.len())); // 仅占偏移
+        self.entries.push((ciph, off));
         self.entries.len() - 1
     }
     /// 字节数字的混写形态：十进制 / 0X 大写 / (A+B)%256 拆和。
@@ -1603,8 +1620,11 @@ impl UniStream {
         let mB_def = format!("{d}.{m}=function(_, {s}) {s}.{k}=({s}.{n}%{b}+{q0}*(({s}.{g}+{s}.{i}+0X1)%{b})+{q1})%{b} end; ",
             d = drv, m = mB, s = s, k = f_k, n = f_n, b = self.k_b, g = f_g, i = f_i,
             q0 = self.plain_num(self.q0), q1 = self.plain_num(self.q1));
-        let mC_def = format!("{d}.{m}=function(_, {s}) {s}.{o}={s}.{o}..string.char(({s}.{d2}[{s}.{i}+0X1]-{s}.{k})%{b}) end; ",
-            d = drv, m = mC, s = s, o = f_o, d2 = f_d, i = f_i, k = f_k, b = self.k_b);
+        // ㉓.5 拼字方法兼反馈：p 解出后折进状态，下一字节键流因此依赖明文
+        let pv = rng.name();
+        let mC_def = format!("{d}.{m}=function(_, {s}) local {pv}=({s}.{d2}[{s}.{i}+0X1]-{s}.{k})%{b}; {s}.{o}={s}.{o}..string.char({pv}); {s}.{n}=({s}.{n}+{pv}*{kp}+{kq})%{mm} end; ",
+            d = drv, m = mC, s = s, pv = pv, d2 = f_d, i = f_i, k = f_k, b = self.k_b,
+            o = f_o, n = f_n, kp = self.k_p, kq = self.k_q, mm = self.k_m);
         let mut methods = vec![mA_def, mB_def, mC_def];
         for _ in 0..rng.range(1, 3) {
             let md = rng.name();
@@ -1615,8 +1635,10 @@ impl UniStream {
         // 状态机派发：五个分支洗牌（else break 恒在尾）
         let (e0, e1, e2, e3, e4, e5) = (rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF),
             rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF));
-        let b0 = format!("{st}==0X{e0:X} then if {s}.{i}<{of} then {d}:{mA}({s}) {s}.{i}={s}.{i}+0X1 else {s}.{i}=0X0 {st}=0X{e1:X} end",
-            st = st, s = s, i = f_i, of = of, d = drv, mA = mA, e0 = e0, e1 = e1);
+        // ㉓.5 E0 不再是「跳偏移」而是串起始推导：固定 d_rounds 步（伪装值内联）
+        let b0 = format!("{st}==0X{e0:X} then if {s}.{i}<{rd} then {d}:{mA}({s}) {s}.{i}={s}.{i}+0X1 else {s}.{i}=0X0 {st}=0X{e1:X} end",
+            st = st, s = s, i = f_i, rd = self.mask_num(rng, self.d_rounds),
+            d = drv, mA = mA, e0 = e0, e1 = e1);
         // e5 是无分支认领的终态键：置入后下一轮落进 else break
         let b1 = format!("{st}==0X{e1:X} then if {s}.{i}<#{s}.{d2} then {d}:{mA}({s}) {st}=0X{e2:X} else {st}=0X{e5:X} end",
             st = st, s = s, i = f_i, d2 = f_d, d = drv, mA = mA, e1 = e1, e2 = e2, e5 = e5);
@@ -1634,13 +1656,16 @@ impl UniStream {
             format!("local {}={}; ", self.k_m, self.mask_num(rng, self.m)),
             format!("local {}={}; ", self.k_a, self.mask_num(rng, self.a)),
             format!("local {}={}; ", self.k_c, self.mask_num(rng, self.c)),
+            format!("local {}={}; ", self.k_p, self.mask_num(rng, self.fb_mul)),
+            format!("local {}={}; ", self.k_q, self.mask_num(rng, self.fb_add)),
         ];
         rng.shuffle(&mut consts);
         format!(
-            "{consts}local {t}={{}}; local {d}={{}}; {methods}local function {dec}({tb},{of}) local {s}={{ {n}={seed}, {i}=0X0, {g}={of}, {d2}={tb}, {o}=string.char() }}; local {st}=0X{e0:X}; while true do {branches} else break end; end; if ({kb}-{kb})~=0X0 then {d}:{mC}({s}) end; return {s}.{o} end; ",
+            "{consts}local {t}={{}}; local {d}={{}}; {methods}local function {dec}({tb},{of}) local {s}={{ {n}=(({seed}+{of}*{dm})%{mm}), {i}=0X0, {g}={of}, {d2}={tb}, {o}=string.char() }}; local {st}=0X{e0:X}; while true do {branches} else break end; end; if ({kb}-{kb})~=0X0 then {d}:{mC}({s}) end; return {s}.{o} end; ",
             consts = consts.join(""), t = self.tbl, d = drv, methods = methods.join(""),
             dec = self.dec, tb = tb, of = of, s = s, n = f_n, seed = self.mask_num(rng, self.seed),
             i = f_i, g = f_g, d2 = f_d, o = f_o, st = st, e0 = e0,
+            dm = self.mask_num(rng, self.d_mul), mm = self.k_m,
             branches = format!("if {}", branches.join(" elseif ")), kb = self.k_b, mC = mC)
     }
 }
