@@ -1497,6 +1497,8 @@ pub(super) fn cursor_walk_dyn(
 pub struct UniStream {
     pub tbl: String,
     pub dec: String,
+    // ㉓.2 高频数字（256/模数/LCG a、c）提升为壳内局部常量，取用点只引名字
+    k_b: String, k_m: String, k_a: String, k_c: String,
     a: u64, c: u64, m: u64, seed: u64, q0: u64, q1: u64,
     cur: u64,
     enc: Vec<u8>,
@@ -1512,7 +1514,9 @@ impl UniStream {
         let seed = rng.range(1, 0x7FFF_FFFF) as u64;
         let q0 = rng.range(1, 256) as u64;
         let q1 = rng.range(1, 256) as u64;
-        Self { tbl: rng.name(), dec: rng.name(), a, c, m, seed, q0, q1,
+        Self { tbl: rng.name(), dec: rng.name(),
+               k_b: rng.name(), k_m: rng.name(), k_a: rng.name(), k_c: rng.name(),
+               a, c, m, seed, q0, q1,
                cur: seed, enc: Vec::new(), entries: Vec::new(), used: std::collections::HashSet::new() }
     }
     fn key(&mut self, rng: &mut GenRng) -> u32 {
@@ -1542,7 +1546,8 @@ impl UniStream {
             _ => {
                 let a = rng.range(0, 256);
                 let b = ((v as usize) + 256 - a) % 256;
-                format!("({}+{})%256", a, b)
+                // ㉓.2 取模基数引常量名，不再裸写 256
+                format!("({}+{})%{}", a, b, self.k_b)
             }
         }
     }
@@ -1566,16 +1571,76 @@ impl UniStream {
         };
         (stmt, format!("{}[{}]", self.tbl, kf))
     }
-    /// 表 + 解码器声明（产物主作用域一次；解码器体零字符串字面量）。
+    /// ㉓.2 数字伪装：恒等变形（差式/和式/直值），正数、无下划线、0X 大写。
+    fn mask_num(&self, rng: &mut GenRng, v: u64) -> String {
+        match rng.range(0, 3) {
+            0 => format!("{}", v),
+            1 => format!("0X{:X}", v),
+            _ => {
+                let d = rng.range(1, 0x1000) as u64;
+                if rng.range(0, 2) == 0 {
+                    format!("(0X{:X}-0X{:X})", v + d, d)
+                } else {
+                    format!("({}-{})", v + d, d)
+                }
+            }
+        }
+    }
+    /// 表 + 解码器声明（壳内一次；零字符串字面量）。
+    /// ㉓.2 去线性化：高频数字（256/模数/a/c）先落为伪装常量局部；解码逻辑拆进
+    /// 驱动表的多个方法（定义洗牌+诱饵方法），解码函数本体是状态机——
+    /// 「初始化→循环→拼接→返回」的教科书骨架消失，数据全走状态表。
     pub fn emit_prelude(&self, rng: &mut GenRng) -> String {
         let (tb, of) = (rng.name(), rng.name());
-        let (o, x, i) = (rng.name(), rng.name(), rng.name());
-        let (n, j, g) = (rng.name(), rng.name(), rng.name());
-        let ksv = rng.name();
+        let (st, s) = (rng.name(), rng.name());
+        let drv = rng.name();
+        // 状态表字段名随机
+        let (f_n, f_i, f_g, f_d, f_o, f_k) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        // 驱动表方法：推进 / 取键流字节 / 拼字 + 1~2 个诱饵
+        let mA = rng.name(); let mB = rng.name(); let mC = rng.name();
+        let mA_def = format!("{d}.{m}=function(_, {s}) {s}.{n}=({s}.{n}*{a}+{c})%{mm} end; ",
+            d = drv, m = mA, s = s, n = f_n, a = self.k_a, c = self.k_c, mm = self.k_m);
+        let mB_def = format!("{d}.{m}=function(_, {s}) {s}.{k}=({s}.{n}%{b}+{q0}*(({s}.{g}+{s}.{i}+0X1)%{b})+{q1})%{b} end; ",
+            d = drv, m = mB, s = s, k = f_k, n = f_n, b = self.k_b, g = f_g, i = f_i,
+            q0 = self.plain_num(self.q0), q1 = self.plain_num(self.q1));
+        let mC_def = format!("{d}.{m}=function(_, {s}) {s}.{o}={s}.{o}..string.char(({s}.{d2}[{s}.{i}+0X1]-{s}.{k})%{b}) end; ",
+            d = drv, m = mC, s = s, o = f_o, d2 = f_d, i = f_i, k = f_k, b = self.k_b);
+        let mut methods = vec![mA_def, mB_def, mC_def];
+        for _ in 0..rng.range(1, 3) {
+            let md = rng.name();
+            methods.push(format!("{d}.{m}=function(_, {s}) {s}.{z}=(({s}.{z} or 0X0)+{s}.{n})%{b} end; ",
+                d = drv, m = md, s = s, z = rng.name(), n = f_n, b = self.k_b));
+        }
+        rng.shuffle(&mut methods);
+        // 状态机派发：五个分支洗牌（else break 恒在尾）
+        let (e0, e1, e2, e3, e4, e5) = (rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF),
+            rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF));
+        let b0 = format!("{st}==0X{e0:X} then if {s}.{i}<{of} then {d}:{mA}({s}) {s}.{i}={s}.{i}+0X1 else {s}.{i}=0X0 {st}=0X{e1:X} end",
+            st = st, s = s, i = f_i, of = of, d = drv, mA = mA, e0 = e0, e1 = e1);
+        // e5 是无分支认领的终态键：置入后下一轮落进 else break
+        let b1 = format!("{st}==0X{e1:X} then if {s}.{i}<#{s}.{d2} then {d}:{mA}({s}) {st}=0X{e2:X} else {st}=0X{e5:X} end",
+            st = st, s = s, i = f_i, d2 = f_d, d = drv, mA = mA, e1 = e1, e2 = e2, e5 = e5);
+        let b2 = format!("{st}==0X{e2:X} then {d}:{mB}({s}) {st}=0X{e3:X}",
+            st = st, e2 = e2, d = drv, mB = mB, s = s, e3 = e3);
+        let b3 = format!("{st}==0X{e3:X} then {d}:{mC}({s}) {st}=0X{e4:X}",
+            st = st, e3 = e3, d = drv, mC = mC, s = s, e4 = e4);
+        let b4 = format!("{st}==0X{e4:X} then {s}.{i}={s}.{i}+0X1 {st}=0X{e1:X}",
+            st = st, s = s, i = f_i, e4 = e4, e1 = e1);
+        let mut branches = vec![b0, b1, b2, b3, b4];
+        rng.shuffle(&mut branches);
+        // 常量局部：洗牌落位 + 伪装值
+        let mut consts = vec![
+            format!("local {}={}; ", self.k_b, self.mask_num(rng, 256)),
+            format!("local {}={}; ", self.k_m, self.mask_num(rng, self.m)),
+            format!("local {}={}; ", self.k_a, self.mask_num(rng, self.a)),
+            format!("local {}={}; ", self.k_c, self.mask_num(rng, self.c)),
+        ];
+        rng.shuffle(&mut consts);
         format!(
-            "local {t}={{}}; local function {d}({tb},{of}) local {o}=string.char(); local {x}={seed}; local {i}=0; while {i}<{of} do {x}=({x}*{a}+{c})%{m}; {i}={i}+1 end; local {n}=#{tb}; local {j}=1; while {j}<={n} do {x}=({x}*{a}+{c})%{m}; local {g}={of}+{j}; local {ks}=({x}%256+{q0}*({g}%256)+{q1})%256; {o}={o}..string.char(({tb}[{j}]-{ks})%256); {j}={j}+1 end; return {o} end; ",
-            t = self.tbl, d = self.dec, tb = tb, of = of, o = o, x = x, i = i,
-            seed = self.plain_num(self.seed), a = self.plain_num(self.a), c = self.plain_num(self.c), m = self.plain_num(self.m),
-            n = n, j = j, g = g, ks = ksv, q0 = self.plain_num(self.q0), q1 = self.plain_num(self.q1))
+            "{consts}local {t}={{}}; local {d}={{}}; {methods}local function {dec}({tb},{of}) local {s}={{ {n}={seed}, {i}=0X0, {g}={of}, {d2}={tb}, {o}=string.char() }}; local {st}=0X{e0:X}; while true do {branches} else break end; end; if ({kb}-{kb})~=0X0 then {d}:{mC}({s}) end; return {s}.{o} end; ",
+            consts = consts.join(""), t = self.tbl, d = drv, methods = methods.join(""),
+            dec = self.dec, tb = tb, of = of, s = s, n = f_n, seed = self.mask_num(rng, self.seed),
+            i = f_i, g = f_g, d2 = f_d, o = f_o, st = st, e0 = e0,
+            branches = format!("if {}", branches.join(" elseif ")), kb = self.k_b, mC = mC)
     }
 }
