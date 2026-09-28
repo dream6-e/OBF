@@ -697,7 +697,26 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             // ㉓ 填充语型别串：壳内守卫走统一流惰性解密；fu 内守卫（inline）
             // 用 string.char 数字拼装自足表达，二者都零字面量。
             let (jf_stmt, jf_expr) = if inline {
-                (String::new(), "string.char(102,117,110,99,116,105,111,110)".to_string())
+                // ㉓.4 fu 守卫型别串：字节先与随机掩码异或落为密文数字，运行期用
+                // 自带算术 XOR（不依赖 bit32/bit，Lua 5.1 与 Luau 通吃）还原——
+                // ASCII 明文数字消失，string.char 只做字节→字符拼装。
+                let mask = rng.range(1, 256) as u8;
+                let plain: [u8; 8] = [102, 117, 110, 99, 116, 105, 111, 110]; // "function"
+                let (xh, mv) = (rng.name(), rng.name());
+                let (pa, pb, pr, pw, pv, pda, pdb) = (rng.name(), rng.name(), rng.name(),
+                    rng.name(), rng.name(), rng.name(), rng.name());
+                let nlit = |rng: &mut GenRng, v: u8| -> String {
+                    if rng.range(0, 2) == 0 { format!("{}", v) } else { format!("0X{:X}", v) }
+                };
+                let stmt = format!(
+                    "local {xh}=function({a},{b}) local {r},{w}=0X0,0X1 for {v}=0X1,0X8 do local {da},{db}={a}%0X2,{b}%0X2 if {da}~={db} then {r}={r}+{w} end; {a}=({a}-{da})/0X2 {b}=({b}-{db})/0X2 {w}={w}+{w} end; return {r} end; local {mv}={mk}; ",
+                    xh = xh, a = pa, b = pb, r = pr, w = pw, v = pv, da = pda, db = pdb,
+                    mv = mv, mk = nlit(&mut *rng, mask));
+                let args = plain.iter()
+                    .map(|b| format!("{xh}({c},{m})", xh = xh, c = nlit(&mut *rng, b ^ mask), m = mv))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (stmt, format!("string.char({})", args))
             } else {
                 let jf_id = uni.register("function");
                 uni.fetch(&mut *rng, jf_id)
