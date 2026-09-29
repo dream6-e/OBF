@@ -408,6 +408,7 @@ pub fn build_consts(
     tag_map: &[u8; 4],
     salt_names: &[String; 4],
     pf_ld_key: &str, pf_lld_key: &str, pf_cnt_key: &str,
+    chain_delta: u32, chain_m: u64, chain_k0: u64,
     psn: &str,
 ) -> String {
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
@@ -602,7 +603,7 @@ pub fn build_consts(
                     "({g}==0X0 and {s0} or {g}==0X1 and {s1} or {g}==0X2 and {s2} or {s3})",
                     g = gname, s0 = salt_names[0], s1 = salt_names[1], s2 = salt_names[2], s3 = salt_names[3]);
                 lua.push_str(&format!(
-                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}(0X2545F491,{sal}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>=0X80000000 then {bv}={bv}-4294967296 end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>=0X80000000 then {cv}={cv}-4294967296 end; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%4294967296,0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%4294967296+{bx}({bv}%4294967296,{cv}%4294967296)%4294967296)%4294967296; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
+                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%0X100000000; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}(0X2545F491,{sal}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>=0X80000000 then {bv}={bv}-4294967296 end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>=0X80000000 then {cv}={cv}-4294967296 end; {ob}=({ob}-({ch}%0X100)*0X2-{dl})%0X100000000; {av}=({av}-(({ch}-({ch}%0X100))/0X100)%0X100)%0X100000000; local {cbv}=({ch}*0X10001)%0X100000000; {bv}={bx}({bv}%0X100000000,{cbv}); if {bv}>=0X80000000 then {bv}={bv}-0X100000000 end; {cv}={bx}({cv}%0X100000000,({cbv}*0X45D9+{ch})%0X100000000); if {cv}>=0X80000000 then {cv}={cv}-0X100000000 end; {ch}=({ch}*0X3+{ob}*0X101+{av}*0X1001+{bv}%0X100000000+({cv}%0X100000000)*0X11)%0X100000000; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%4294967296,0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%4294967296+{bx}({bv}%4294967296,{cv}%4294967296)%4294967296)%4294967296; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
                     av = rng.name(), ob = rng.name(), bv = rng.name(),
                     cv = rng.name(), fp = rng.name(), sk = rng.name(),
@@ -613,7 +614,11 @@ pub fn build_consts(
                     pld = pf_ld_key, plld = pf_lld_key, pcnt = pf_cnt_key,
                     f1 = fc.f1, f2 = fc.f2,
                     rb = fc.r6b, pb1 = fc.p1b, pb3 = fc.p3b,
-                    rc = fc.r6c, pc1 = fc.p1c, pc3 = fc.p3c));
+                    rc = fc.r6c, pc1 = fc.p1c, pc3 = fc.p3c,
+                    ch = rng.name(), cbv = rng.name(),
+                    dl = deep10(rng, fn_bxor, chain_delta as i64),
+                    chm = deep10(rng, fn_bxor, chain_m as i64),
+                    chk0 = deep10(rng, fn_bxor, chain_k0 as i64)));
                 lua.push_str(&format!(
                     "local {i}=0; local {n}={a5}(); if not(not {pj}[({pk6})]) then {i}={n}; else \
                      while {i}<{n} do {i}={i}+1; local {t}={rd}(); \

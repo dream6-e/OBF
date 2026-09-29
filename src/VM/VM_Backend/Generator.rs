@@ -159,6 +159,18 @@ impl Generator {
         // ① B/C 场掩码参数：逐产物随机（掩码=值^(mag^ki)^k，mag 链接逐条变化）
         let bc_kb = rng.next(); let bc_kc = rng.next();
         let bc_ki1 = rng.next(); let bc_ki2 = rng.next();
+        // ㉚ 指令链式编码：每条指令的四个线上字段叠加「由前一条解码输出推进」的
+        // 链偏移（op 偶偏移 EO、A 加偏移 CA、B/C 异或掩码 CB/CC）——单条公式不再
+        // 能解全部指令，只能从链种子顺序模拟。种子=(kp18^pb18)*ch_m+ch_k0（每原型
+        // 线上槽位推导，写/读两侧同式）。DELTA（偶）全局折进 op 域+派发树常数，
+        // 直方图/跨样本统计锚点消失。三参数同时下发扫描读侧与 execute 解码器。
+        let (chain_delta, chain_m, chain_k0): (u32, u64, u64) = if std::env::var("OBF_NOCHAIN").is_ok() {
+            (0, 0, 0)
+        } else {
+            (((rng.range(0x10_0000, 0x1FFF_FFFF) as u32) & !1) | 2,
+             (rng.range(0x8001, 0xFFFF) as u64) | 1,
+             rng.range(0x1000, 0xFFFF_FFFF) as u64)
+        };
         // #3 折叠参数：谓词 pv(v)=(rotl32(v,r)^p1)%100<p3、f(pc)=(pc*f1)^f2 —— 逐产物随机，
         // Rust 写侧与 Lua body_consts 扫描两侧同式（静态读产物得不出「哪些 op 参与」）
         let fc18 = crate::VM::VM_Backend::Generator_util::FoldCtx {
@@ -178,7 +190,7 @@ impl Generator {
             tag_pool18.swap(k18, last18);
             tag_pool18.pop();
         }
-        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, gshift);
+        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, gshift, chain_delta, chain_m, chain_k0);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -371,44 +383,64 @@ impl Generator {
             .replace("{RET0}", &format!("self:{}", fn_ret0))
             .replace("{RET1}", &format!("self:{}", fn_ret1))
             .replace("{RET2}", &format!("self:{}", fn_ret2));
+        // ㉚ 目标②：RET 钩子逐出现轮换别名（每钩 3 池）——统一派发点形态消失，
+        // 跨样本对 `:fnX(` 的直方图对齐作废；别名在方法表里等价挂接。
+        let mut ret_alias_map: Vec<(String, Vec<String>)> = Vec::new();
+        for base in [fn_ret0.clone(), fn_ret1.clone(), fn_ret2.clone()] {
+            let pool = vec![base.clone(), rng.name(), rng.name()];
+            let token = format!(":{}(", base);
+            let parts: Vec<String> = raw_handlers.split(&token).map(|x| x.to_string()).collect();
+            let mut out = parts[0].clone();
+            for p2 in parts.iter().skip(1) {
+                let sel = pool[rng.range(0, pool.len())].clone();
+                out.push_str(&format!(":{}(", sel));
+                out.push_str(p2);
+            }
+            raw_handlers = out;
+            ret_alias_map.push((base, pool));
+        }
 
         // ⑮ 派发条件换魔数：模板条件是 `elseif op == 别名 then/or`，
-        // 把别名 token 整体换成魔数——下游 parsed/tree 全部拿到魔数
+        // 把别名 token 整体换成魔数——下游 parsed/tree 全部拿到魔数。
+        // ㉚：运行时 op 已是 mag+Δ（DC 条目里链偏移未撤销），树键/伪指令比较
+        // 必须同加 Δ，否则二分树按裸魔数导航→错叶崩溃。
         for (alias, mag) in op_magic.iter() {
-            raw_handlers = raw_handlers.replace(&format!("op == {} or", alias), &format!("op == {} or", mag));
+            let key = mag.wrapping_add(chain_delta);
+            raw_handlers = raw_handlers.replace(&format!("op == {} or", alias), &format!("op == {} or", key));
         }
         for (alias, mag) in op_magic.iter() {
-            raw_handlers = raw_handlers.replace(&format!("op == {} then", alias), &format!("op == {} then", mag));
+            let key = mag.wrapping_add(chain_delta);
+            raw_handlers = raw_handlers.replace(&format!("op == {} then", alias), &format!("op == {} then", key));
         }
         // CLOSURE 模板体内还有一层伪指令 op 值比较（uv_inst[1] == 别名），同批换魔数
         // （带 " or"/" then" 尾边界——个位数 fallback key 否则会前缀污染长数字）
         for (alias, mag) in op_magic.iter() {
-            raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} or", alias), &format!("uv_inst[1] == {} or", mag));
-            raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} then", alias), &format!("uv_inst[1] == {} then", mag));
+            let key = mag.wrapping_add(chain_delta);
+            raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} or", alias), &format!("uv_inst[1] == {} or", key));
+            raw_handlers = raw_handlers.replace(&format!("uv_inst[1] == {} then", alias), &format!("uv_inst[1] == {} then", key));
         }
         // ⑮ 三处中程读下一条指令的模板（SETLIST/EXTRAARG/CLOSURE 伪指令）同步解码：
         // ⑱.4 数组存的是掩码值，中程读必须 bx 还原——掩码名在此提前生成：
         // 热块内联用 execute 局部，冷块方法体用同名局部（fetch 前缀从槽位自取）
         let (n_mk1, n_mk2, n_mk3) = (rng.name(), rng.name(), rng.name());
-        for (alias, mag) in op_magic.iter() {
-            raw_handlers = raw_handlers.replace(&format!("op == {} or", alias), &format!("op == {} or", mag));
-            raw_handlers = raw_handlers.replace(&format!("op == {} then", alias), &format!("op == {} then", mag));
-        }
+        // ㉚ 目标①：DC 惰性解码缓存表名（热块 execute 局部 / 冷块自槽位取回同名）
+        let n_dc = rng.name();
+        // ㉚：DC 链状态表名（ds）——execute 局部；换钥块需回写新掩码进 ds，故提升可见域
+        let dc_ds = rng.name();
+        // （⑮ 魔数替换已在上方完成——树键= mag+Δ；此处曾有裸魔数重复循环，
+        //  会把 Δ 撤销成裸魔数导致错叶，已删。）
         {
             let site1 = format!("then c = {}[{}];", var_a_arr, var_pc);
-            let site1_new = format!("then c = ({}({}[{}],{})-{}[{}]);", fn_bxor2, var_a_arr, var_pc, n_mk1, var_opcodes, var_pc);
+            let site1_new = format!("then c = {}[{}][2];", n_dc, var_pc);
             raw_handlers = raw_handlers.replace(&site1, &site1_new);
             let site3 = format!("[{}[{}] + 1]", var_a_arr, var_pc);
-            let site3_new = format!("[({}({}[{}],{})-{}[{}]) + 1]", fn_bxor2, var_a_arr, var_pc, n_mk1, var_opcodes, var_pc);
+            let site3_new = format!("[{}[{}][2] + 1]", n_dc, var_pc);
             raw_handlers = raw_handlers.replace(&site3, &site3_new);
             let comp_old = format!("local uv_inst = ({{ {}[{}], {}[{}], {}[{}], {}[{}] }})", var_opcodes, var_pc, var_a_arr, var_pc, var_b_arr, var_pc, var_c_arr, var_pc);
             let (cq1, cq2, cq3, cq4) = (rng.name(), rng.name(), rng.name(), rng.name());
-            let comp_new = format!("local {q1}={ops}[{p}]; local {q2}=({bx}({a}[{p}],{m1})-{ops}[{p}]); local {q3}={bx}({b}[{p}],{m2}); if {q3}>=0X80000000 then {q3}={q3}-4294967296 end; local {q4}={bx}({c}[{p}],{m3}); if {q4}>=0X80000000 then {q4}={q4}-4294967296 end; local uv_inst=({{ {q1}, {q2}, {q1}%2~=0 and {q4} or {q3}, {q1}%2~=0 and {q3} or {q4} }})",
-                ops = var_opcodes, p = var_pc,
-                bx = fn_bxor2, a = var_a_arr, m1 = n_mk1,
-                b = var_b_arr, m2 = n_mk2,
-                c = var_c_arr, m3 = n_mk3,
-                q1 = cq1, q2 = cq2, q3 = cq3, q4 = cq4);
+            // ㉚：DC 条目已是 {mag+Δ, a, B, C}（奇偶交换在填充时完成）
+            let comp_new = format!("local uv_inst = {}[{}]", n_dc, var_pc);
+            let _ = (cq1, cq2, cq3, cq4);
             raw_handlers = raw_handlers.replace(&comp_old, &comp_new);
         }
 
@@ -454,12 +486,13 @@ impl Generator {
         // 每个块的局部别名逐块新取，同一个逻辑变量跨块看到的不是同一个名字
         // ④ 槽位号不再写死在产物里
         // `GenRng::slot_key_block`）。这里拿到的全是**局部名字**，插值进 Lua 源码
-        let (sk, sk_setup) = rng.slot_key_block(23);
+        let (sk, sk_setup) = rng.slot_key_block(24);
         let k_pc = sk[0].clone(); let k_stk = sk[1].clone(); let k_top = sk[2].clone();
         let k_ops = sk[3].clone(); let k_aa = sk[4].clone(); let k_bb = sk[5].clone(); let k_cc = sk[6].clone();
         // ⑱.4 掩码槽键：execute 入口派生后写槽，冷块（CLOSURE 等）中程读自取——
         // 必须走 slot_key_block 池；裸 rng.name() 键不在池里=运行时 nil 键（前车之鉴）
         let k_mk1 = sk[20].clone(); let k_mk2 = sk[21].clone(); let k_mk3 = sk[22].clone();
+        let k_dc = sk[23].clone(); // ㉚ DC 缓存表槽位（冷块中程读自取）
         // 中危刀1 密钥分驻：kp/pb/cnt 不入 chunk 表也不入 VM 槽（嵌套闭包交错会串），
         // 存弱键注册表 KREG（键=chunk 表）——与被掩码数组异表分驻，重解原型自动回收
         let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
@@ -526,6 +559,11 @@ impl Generator {
                 if body.contains(&n_mk1) {
                     mk_stmt = Some(format!("local {m1},{m2},{m3}=self[{k1}],self[{k2}],self[{k3}];",
                         m1 = n_mk1, m2 = n_mk2, m3 = n_mk3, k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
+                }
+                // ㉚：中程读站点改走 DC 缓存——冷块同样自槽位取回同名局部
+                if body.contains(&n_dc) {
+                    let dc_stmt = format!("local {dc}=self[{kd}];", dc = n_dc, kd = k_dc);
+                    mk_stmt = Some(match mk_stmt.take() { Some(x) => x + &dc_stmt, None => dc_stmt });
                 }
                 body = body.replace("{STOREBACK}", "");
                 // ── 冷块前奏打散：{rk 声明 + 状态自校验 + 取指分组} 全是独立纯读/声明，
@@ -698,6 +736,12 @@ impl Generator {
         block_methods.push_str(&format!("{}.{}=function(self)self[{}]={};return true end;", var_methods, fn_ret0, k_mode, obf0));
         block_methods.push_str(&format!("{}.{}=function(self,v)self[{}]={};self[{}]=v;return true end;", var_methods, fn_ret1, k_mode, obf1, k_retv));
         block_methods.push_str(&format!("{}.{}=function(self,t,f,l)self[{}]={};self[{}]=t;self[{}]=f;self[{}]=l;return true end;", var_methods, fn_ret2, k_mode, obf2, k_retv, k_retf, k_rett));
+        // ㉚：RET 别名等价挂接（方法表同一函数体多入口名）
+        for (ret_base, ret_pool) in &ret_alias_map {
+            for al in ret_pool.iter().skip(1) {
+                block_methods.push_str(&format!("{}.{}={}.{};", var_methods, al, var_methods, ret_base));
+            }
+        }
 
 
 
@@ -770,6 +814,89 @@ impl Generator {
         block_execute_def.push_str(&format!(
             "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; {c}.{cnt}=nil end; {deriv} ",
             kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18, deriv = deriv));
+        // ㉚ 目标①：指令解码结构代码化——DC 缓存表 + 元表前向填充 + load() 片段
+        // 拼接（四选一模板族）。链偏移 (EO,CA,CB,CC) 由链状态逐条推进，填充即解码；
+        // 链种子与写侧/扫描同式：(bxor(kon,lld)*chm+chk0)%2^32；Δ 折进 op 域。
+        {
+            let dc_fr = rng.name(); let dc_ok = rng.name();
+            let dc_fn = rng.name(); let dc_fill = rng.name();
+            let dl_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_delta as i64);
+            let chm_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_m as i64);
+            let chk0_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_k0 as i64);
+            let dc_family = rng.range(0, 4);
+            // 填充语句（P 参数：Pa=ops Pb=aa Pc=bb Pd=cc Pe..Pg=mk1..3 Ph=状态 Pi=DC Pj=bx Pk=Δ）
+            let mut stmts: Vec<String> = vec![
+                "Ph.n=Ph.n+1;".into(),
+                "local Wa=Pa[Ph.n];".into(),
+            ];
+            let mut blk_eo = vec!["local Wb=(Ph.ch%0X100)*0X2;".to_string(),
+                              "local Wc=((Ph.ch-(Ph.ch%0X100))/0X100)%0X100;".to_string()];
+            let blk_cc = vec!["local Wd=(Ph.ch*0X10001)%0X100000000;".to_string(),
+                              "local We=(Wd*0X45D9+Ph.ch)%0X100000000;".to_string()];
+            // 注意：Wd→We 有依赖，blk_cc 不可内部洗牌；仅 EO/CA 对可换序
+            rng.shuffle(&mut blk_eo);
+            let mut blocks: Vec<Vec<String>> = if dc_family == 2 || dc_family == 3 {
+                vec![blk_cc, blk_eo]
+            } else { vec![blk_eo, blk_cc] };
+            if rng.range(0, 2) == 0 { blocks.reverse(); }
+            for blk in &blocks { stmts.extend(blk.iter().cloned()); }
+            let mut g_dec: Vec<String> = vec![
+                if dc_family == 3 { "local Wf=(Wa-(Ph.ch%0X100)*0X2)%0X100000000;".into() } else { "local Wf=(Wa-Wb)%0X100000000;".into() },
+                if dc_family == 3 { "local Wg=(Pj(Pb[Ph.n],Ph.m1)-((Ph.ch-(Ph.ch%0X100))/0X100)%0X100)%0X100000000;".into() } else { "local Wg=(Pj(Pb[Ph.n],Ph.m1)-Wc)%0X100000000;".into() },
+                "local Wh=Pj(Pj(Pc[Ph.n],Ph.m2)%0X100000000,Wd) if Wh>=0X80000000 then Wh=Wh-0X100000000 end;".into(),
+                "local Wi=Pj(Pj(Pd[Ph.n],Ph.m3)%0X100000000,We) if Wi>=0X80000000 then Wi=Wi-0X100000000 end;".into(),
+            ];
+            rng.shuffle(&mut g_dec);
+            stmts.extend(g_dec);
+            let upd = if std::env::var("OBF_NOCHAIN").is_ok() {
+                "Ph.ch=0;".to_string()
+            } else if dc_family == 1 {
+                "local Wx=(Ph.ch*0X3+(Wf-Pk)*0X101+Wg*0X1001)%0X100000000; Ph.ch=(Wx+Wh%0X100000000+(Wi%0X100000000)*0X11)%0X100000000;".to_string()
+            } else {
+                "Ph.ch=(Ph.ch*0X3+(Wf-Pk)*0X101+Wg*0X1001+Wh%0X100000000+(Wi%0X100000000)*0X11)%0X100000000;".to_string()
+            };
+            // 尾部三语句：upd（链推进）必须用「奇偶交换前」的 Wh/Wi（=线上 fb0/fc0，
+            // 与写侧 ch_step 同序）；Wj 与两者无依赖。洗牌只允许 upd 先于 swap 的
+            // 三种安全排列——曾经全洗牌把 swap 排到 upd 前→链漂移→错叶崩溃。
+            let wj_stmt = "local Wj=Wg-(Wf-Pk);".to_string();
+            let swap_stmt = "if Wf%0X2~=0 then Wh,Wi=Wi,Wh end;".to_string();
+            let g_tail: Vec<String> = match rng.range(0, 3) {
+                0 => vec![upd.clone(), wj_stmt, swap_stmt],
+                1 => vec![upd.clone(), swap_stmt, wj_stmt],
+                _ => vec![wj_stmt, upd.clone(), swap_stmt],
+            };
+            stmts.extend(g_tail);
+            stmts.push("rawset(Pi,Ph.n,{Wf,Wj,Wh,Wi});".into());
+            let body = stmts.join(" ");
+            let params = "Pa,Pb,Pc,Pd,Ph,Pi,Pj,Pk";
+            // 拼接源=柯里包裹+语句片段：chunk 返回「绑定参数后的填充闭包工厂」
+            let mut frag_list: Vec<String> = vec![format!("\"return function({}) return function() \"", params)];
+            frag_list.extend(stmts.iter().map(|x| format!("\"{}\"", x)));
+            frag_list.push("\" end end\"".to_string());
+            let frags = frag_list.join(",");
+            let bind_args = format!("{},{},{},{},{},{},{},{}",
+                var_opcodes, var_a_arr, var_b_arr, var_c_arr,
+                dc_ds, n_dc, fn_bxor2, dl_e);
+            // 填充工厂提升到 execute 之外一次编译（hash 级高频调用原型里
+            // 逐次 load+concat 是 700x 慢化的病根）；execute 内只做绑定调用。
+            // 两路径都归一成 binder(params)→fill：本工具链 lua5.1 带兼容
+            // `load`（要 reader 函数）→ 字符串源必走 fallback，形态必须一致。
+            block_execute_def.insert_str(0, &format!(
+                "local {ff}; do local {ok},{fn}=pcall(loadstring or load,table.concat({{{frags}}})); \
+                 if {ok} and type({fn})==\"function\" then {ff}={fn}() else {ff}=(function({params}) return function() {body} end end) end end; ",
+                ff = dc_fn, ok = dc_ok, fn = rng.name(), frags = frags,
+                params = params, body = body));
+            block_execute_def.push_str(&format!(
+                "local {ndc}={{}}; local {ds}={{n={c}.{lld},ch=({bx}({kon},{c}.{lld})*{chm}+{chk0})%0X100000000,m1={mk1},m2={mk2},m3={mk3}}}; \
+                 local {fill}={fn}({bind}); \
+                 setmetatable({ndc},{{__index=function({tt},{kk}) while {ds}.n<{kk} do {fill}() end return rawget({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
+                ndc = n_dc, ds = dc_ds, c = "chunk", lld = pf_lld,
+                bx = fn_bxor2.as_str(), kon = n_kon, chm = chm_e, chk0 = chk0_e,
+                mk1 = n_mk1, mk2 = n_mk2, mk3 = n_mk3,
+                fill = dc_fill, fn = dc_fn,
+                bind = bind_args,
+                tt = rng.name(), kk = rng.name(), vm = var_vm, kdc = k_dc));
+        }
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）
             block_execute_def.push_str("while true do break end end ");
@@ -777,19 +904,17 @@ impl Generator {
             block_execute_def.push_str("while true do ");
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "true"));
 
-            block_execute_def.push_str(&format!("local op={}[{}];", var_opcodes, var_pc));
-            // ⑮ 指令解码：A=存值-魔数；魔数奇偶决定 (B,C) 交换还原
-            // ⑱.4 取指单点还原：数组存掩码值，这里 bx 解出语义值（内存 dump 得不到明文指令）
-            // ㉘D3 三条 inst 解码语句互不依赖（各自读自己的数组+魔数，只共同依赖
-            // 已就位的 op）——洗牌发射，消除 A→B→C 的固定解码序
-            let mut inst_stmts: Vec<String> = vec![
-                format!("local inst_A={bx}({}[{}],{})-op;", var_a_arr, var_pc, n_mk1, bx = fn_bxor2.as_str()),
-                format!("local inst_B={bx}({}[{}],{}); if inst_B>=0X80000000 then inst_B=inst_B-4294967296 end;", var_b_arr, var_pc, n_mk2, bx = fn_bxor2.as_str()),
-                format!("local inst_C={bx}({}[{}],{}); if inst_C>=0X80000000 then inst_C=inst_C-4294967296 end; ", var_c_arr, var_pc, n_mk3, bx = fn_bxor2.as_str()),
-            ];
-            rng.shuffle(&mut inst_stmts);
-            for stmt in &inst_stmts { block_execute_def.push_str(stmt); }
-            block_execute_def.push_str("if op%2~=0 then inst_B,inst_C=inst_C,inst_B end; ");
+            // ㉚ 目标①：取指改走 DC 缓存（元表前向填充=结构解码；单条公式全解作废）。
+            // 条目={mag+Δ, a, B, C}（链偏移撤销+奇偶交换都在填充内完成）；
+            // 四字段赋值对洗牌发射（名字↔下标配对恒定，只换书写序——纯外观差异）。
+            block_execute_def.push_str(&format!("local inst_t={}[{}];", n_dc, var_pc));
+            {
+                let mut prs: Vec<(&str, u32)> = vec![("op", 1), ("inst_A", 2), ("inst_B", 3), ("inst_C", 4)];
+                rng.shuffle(&mut prs);
+                let lhs: Vec<String> = prs.iter().map(|(n, _)| n.to_string()).collect();
+                let rhs: Vec<String> = prs.iter().map(|(_, i)| format!("inst_t[{}]", i)).collect();
+                block_execute_def.push_str(&format!("local {}={}; ", lhs.join(","), rhs.join(",")));
+            }
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
             block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
 
@@ -834,9 +959,12 @@ impl Generator {
                     format!("{}[{}]={};", var_vm, k_mk3, nc_n),
                 ];
                 rng.shuffle(&mut stmts);
-                format!("{}[{}][1]={}; {}{}{} {},{},{}={},{},{}; ",
+                // ㉚：DC 填充从状态表读掩码——换钥后把新钥同步进 ds，
+                // 否则后续填充用旧钥解新掩码数组→垃圾条目。
+                format!("{}[{}][1]={}; {}{}{} {},{},{}={},{},{}; {}.m1={}; {}.m2={}; {}.m3={}; ",
                     kreg_n, "chunk", nk1_n, stmts[0], stmts[1], stmts[2],
-                    n_mk1, n_mk2, n_mk3, na_n, nb_n, nc_n)
+                    n_mk1, n_mk2, n_mk3, na_n, nb_n, nc_n,
+                    dc_ds, na_n, dc_ds, nb_n, dc_ds, nc_n)
             };
             // ㉒② 焊接 2^32 模数（execute 换钥分支每次重走——第二次起逻辑无分支）；
             // ㉒① thunk 回写环、寄存器键轮换环 → 动态分段数值游标机
@@ -865,7 +993,7 @@ impl Generator {
                    {rotw} \
                    {rk_tail} \
                  end end; ",
-                flg = var_state_flag, pc = var_pc, tw = tw21, sx = step21,
+                flg = format!("({}) and true", var_state_flag), pc = var_pc, tw = tw21, sx = step21,
                 mdw = md_walk,
                 rk = rk21, rn = rng.format_num(rkey_every as i64),
                 bx = fn_bxor2.as_str(),
@@ -900,7 +1028,7 @@ impl Generator {
             pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, var_a2,
             var_b, var_builtin_reg, var_chk, var_idx, var_junk, var_p, var_raw_p, var_tamper, var_vc, np21,
             md21, th21, tw21, rk21, kreg_n,
-            fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, sk_setup, t, x, var_bname, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
+            fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, sk_setup, t, x, var_bname, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
             weld,
             uni,
         })

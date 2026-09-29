@@ -6,6 +6,8 @@ use super::ast::{Block, LastStmt, Stmt, Expr, PrefixExpr, Var, Call, LocalVar, T
 thread_local! {
     static RECURSION_DEPTH: RefCell<usize> = RefCell::new(0);
     static STRING_MAPPING: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    // 已分配名字的水位线：跳过禁名后保证不同源名不落到同一目标名（单射）
+    static MAP_WATERMARK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn is_reserved_member(name: &str) -> bool {
@@ -175,19 +177,9 @@ fn is_reserved_member(name: &str) -> bool {
     )
 }
 
-pub struct CodegenContext {
-    pub mapping: HashMap<VarId, String>,
-    pub shuffled_chars: Vec<char>,
-    pub map_string_start_idx: usize,
-}
-
-impl CodegenContext {
-    pub fn map_string(&self, name: &str) -> String {
-        if name.is_empty() {
-            return name.to_string();
-        }
-        if matches!(
-            name,
+fn is_reserved_name(name: &str) -> bool {
+    matches!(
+        name,
             "self"
                 | "_G"
                 | "_VERSION"
@@ -249,7 +241,32 @@ impl CodegenContext {
                 | "UDim"
                 | "continue"
                 | "raknet"
-        ) {
+            | "getgenv"
+            | "getrenv"
+    )
+}
+
+fn is_lua_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function"
+            | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return"
+            | "then" | "true" | "until" | "while"
+    )
+}
+
+pub struct CodegenContext {
+    pub mapping: HashMap<VarId, String>,
+    pub shuffled_chars: Vec<char>,
+    pub map_string_start_idx: usize,
+}
+
+impl CodegenContext {
+    pub fn map_string(&self, name: &str) -> String {
+        if name.is_empty() {
+            return name.to_string();
+        }
+        if is_reserved_name(name) {
             return name.to_string();
         }
         let is_valid_id = name.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
@@ -271,24 +288,29 @@ impl CodegenContext {
             };
             let base = chars.len();
 
-            let mut index = map.len() + self.map_string_start_idx;
-            let mut mapped_name = String::new();
-            loop {
-                mapped_name.push(chars[index % base]);
-                index /= base;
-                if index == 0 {
-                    break;
+            // 起始下标取「基址 + 已分配数」与水位线的较大者：跳过禁名时水位线
+            // 记录真正用掉的下标，防止两个源名跳过同一批禁名后撞车（单射性）。
+            // 生成名必须避开关键字与保留全局名——曾经映射结果撞上真实全局
+            // （getgenv→os/io），运行期把真库表当函数调用而崩溃。
+            let mut index = (map.len() + self.map_string_start_idx)
+                .max(MAP_WATERMARK.with(|w| w.get()));
+            let final_name = loop {
+                let mut n = index;
+                let mut mapped_name = String::new();
+                loop {
+                    mapped_name.push(chars[n % base]);
+                    n /= base;
+                    if n == 0 {
+                        break;
+                    }
                 }
-            }
-            let rev_name: String = mapped_name.chars().rev().collect();
-            let final_name = match rev_name.as_str() {
-                "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function"
-                | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return"
-                | "then" | "true" | "until" | "while" => {
-                    format!("{}{}", rev_name, chars[0])
+                let cand: String = mapped_name.chars().rev().collect();
+                if !is_reserved_name(&cand) && !is_lua_keyword(&cand) {
+                    break cand;
                 }
-                _ => rev_name,
+                index += 1;
             };
+            MAP_WATERMARK.with(|w| w.set(index + 1));
 
             map.insert(name.to_string(), final_name.clone());
             final_name
@@ -307,6 +329,7 @@ impl Block {
 
         if is_top_level {
             STRING_MAPPING.with(|map| map.borrow_mut().clear());
+            MAP_WATERMARK.with(|w| w.set(0));
         }
 
         for s in &self.stmts {

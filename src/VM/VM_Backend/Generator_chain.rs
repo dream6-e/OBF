@@ -93,6 +93,9 @@ pub(super) struct ChainIn {
     pub bc_kc: u32,
     pub bc_ki1: u32,
     pub bc_ki2: u32,
+    pub chain_delta: u32,
+    pub chain_m: u64,
+    pub chain_k0: u64,
     pub pm_r0: u32,
     pub pm_r1: u32,
     pub pm_r2: u32,
@@ -155,6 +158,9 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         bc_kc,
         bc_ki1,
         bc_ki2,
+        chain_delta,
+        chain_m,
+        chain_k0,
         pm_r0,
         pm_r1,
         pm_r2,
@@ -554,7 +560,7 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+0X100000000 end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>=0X80000000 then {w}={w}-0X100000000 end return {w} end; \
              local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
              while {i} < {n} do {i} = {i} + 1; \
-             local {mv}={a5}() local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%4294967296,{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%4294967296,{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%4294967296,{kc18}) local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {rd}() end end; ",
+             local {mv}={a5}() if {mv}<0 then {mv}={mv}+0X100000000 end local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%4294967296,{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%4294967296,{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%4294967296,{kc18}) local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {rd}() end end; ",
             tree9 = it9(&mut rng, var_state.as_str()),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
@@ -581,7 +587,8 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 fn_c.as_str(), pf_consts.as_str(),
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
-                &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(), psn_n.as_str())
+                &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
+                chain_delta, chain_m, chain_k0, psn_n.as_str())
         );
         let body_consts = format!("{ci_stmt}{gk_stmt}") + &body_consts;
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
