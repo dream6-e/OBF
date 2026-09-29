@@ -870,8 +870,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         }
         match c_type {
             0 => { w.push(tag_map[0]); }
-            1 => { w.push(tag_map[1]); w.push(bytes[0]); }
-            2 | 3 => {
+            // ③-2 统一加密：bool 不再裸字节——按 0.0/1.0 双精度走 knum 加密
+            // 管线（8B 密文），线上形态与数字槽完全一致
+            1 | 2 | 3 => {
                 // #3 折叠 + ㉓-A R 链混入：nonce=[盐^roll^F, r7^(槽*6+kind), 盐^rotl7(r7)]
                 // roll=最后引用本槽指令之后的 R 状态（未引用槽=链末值）——常量解密
                 // 依赖解释（指令流文件值），不依赖槽位号直传
@@ -886,13 +887,17 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     Some(e) => e.clone(),
                     None => {
                         let li = slot;
-                        let blob = chacha8_xor(&enc.keys[group], [s118, s218, s318], bytes);
+                        let payload18: Vec<u8> = if *c_type == 1 {
+                            let dv: f64 = if bytes[0] != 0 { 1.0 } else { 0.0 };
+                            dv.to_le_bytes().to_vec()
+                        } else { bytes.clone() };
+                        let blob = chacha8_xor(&enc.keys[group], [s118, s218, s318], &payload18);
                         seen.insert((bytes.clone(), fold, rl18), (*c_type, blob.clone(), li));
                         (*c_type, blob, li)
                     }
                 };
                 w.push(tag_map[*c_type as usize]);
-                if *c_type == 2 { w.extend_from_slice(&entry.1); } else { write_string(w, &entry.1); }
+                if *c_type == 3 { write_string(w, &entry.1); } else { w.extend_from_slice(&entry.1); }
             }
             _ => panic!(),
         }
@@ -903,7 +908,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     for _ in 0..d_count18 {
         match rng.random_range(0..5) {
             0 => { w.push(tag_map[0]); } // nil：仅占一个槽号
-            1 => { w.push(tag_map[1]); w.push(rng.random_range(0..=255u8)); } // bool
+            1 => { w.push(tag_map[1]); for _ in 0..8 { w.push(rng.random_range(0..=255u8)); } } // bool：8B 同线长
             _ => { w.push(tag_map[2]); for _ in 0..8 { w.push(rng.random_range(0..=255u8)); } } // num
         }
     }

@@ -484,7 +484,9 @@ pub fn build_consts(
                         d = dsp_name, t3 = three, fds = fds, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
                     format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
                         d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
-                    format!("{d}[{t1}]=function({ddd},ev) return ev[(0X2)] end; ", d = dsp_name, t1 = one, ddd = ddd),
+                    // ③-2：bool 记录与数字同构（{tag,bytes8,li}）——fdn 解密后 ~=0
+                    format!("{d}[{t1}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf}))~={zero} end; ",
+                        d = dsp_name, t1 = one, fdn = fdn, ddd = ddd, ft = ftds, rt = rtds, rf = rfds, zero = zero),
                     format!("{d}[{dd}]=function(ev) return {kobf}..((({dd}*{kdsp}))%4294967296) end; ", d = dsp_name, dd = decoy_dsp, kobf = sc_kobf, kdsp = kdsp_s),
                 ];
                 rng.shuffle(&mut dsp_defs);
@@ -498,8 +500,9 @@ pub fn build_consts(
                         l = ld_name, t3 = three, rs = fn_read_string, ec = var_enc_c, ddl = ddl, tvm3 = tag_map[3] as i64),
                     format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{{tvm2},{bn},pos-1}} end; ",
                         l = ld_name, t2 = two, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm2 = tag_map[2] as i64),
-                    format!("{l}[{t1}]=function({ddl},pos) {ec}[(pos)]={{{tvm1},{rd}()~={zero}}} end; ",
-                        l = ld_name, t1 = one, ec = var_enc_c, rd = fn_read_dec, zero = zero, ddl = ddl, tvm1 = tag_map[1] as i64),
+                    // ③-2：bool 线上 8B 密文（同数字槽）——装载记录带槽号供解密
+                    format!("{l}[{t1}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{{tvm1},{bn},pos-1}} end; ",
+                        l = ld_name, t1 = one, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm1 = tag_map[1] as i64),
                     format!("{l}[{t0}]=function({ddl}) end; ",
                         l = ld_name, t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys), ddl = ddl),
                     format!("{l}[{dd}]=function(_,p2) {ec}[(p2)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}} end; ",
