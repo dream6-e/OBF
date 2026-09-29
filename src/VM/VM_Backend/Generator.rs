@@ -887,14 +887,15 @@ impl Generator {
                 dc_ds, n_dc, fn_bxor2, dl_e);
             // 填充工厂提升到 execute 之外一次编译（hash 级高频调用原型里
             // 逐次 load+concat 是 700x 慢化的病根）；execute 内只做绑定调用。
-            // 两路径都归一成 binder(params)→fill：本工具链 lua5.1 带兼容
-            // `load`（要 reader 函数）→ 字符串源必走 fallback，形态必须一致。
+            // 目标环境（lua5.1 / Roblox 执行器）必有 loadstring or load（用户确认），
+            // 不再保留内联代码兜底：那会把解码逻辑以真代码写进每个产物，静态直读
+            // 即得解码器，抵消流加密的全部收益；编译失败即启动失败，
+            // 解码逻辑从此在产物里只以密文存在。
             block_execute_def.insert_str(0, &format!(
                 "{decl} local {ff}; do local {ok},{fn}=pcall(loadstring or load,{dec}); \
-                 if {ok} and type({fn})==\"function\" then {ff}={fn}() else {ff}=(function({params}) return function() {body} end end) end end; ",
+                 if {ok} and type({fn})==\"function\" then {ff}={fn}() end end; ",
                 decl = st_decl, dec = dec_expr,
-                ff = dc_fn, ok = dc_ok, fn = rng.name(),
-                params = params, body = body));
+                ff = dc_fn, ok = dc_ok, fn = rng.name()));
             block_execute_def.push_str(&format!(
                 "local {ndc}={{}}; local {ds}={{n={c}.{lld},ch=({bx}({kon},{c}.{lld})*{chm}+{chk0})%0X100000000,m1={mk1},m2={mk2},m3={mk3}}}; \
                  local {fill}={fn}({bind}); \
