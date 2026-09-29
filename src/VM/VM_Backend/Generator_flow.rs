@@ -399,7 +399,7 @@ pub fn build_readers(
 pub fn build_consts(
     rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, pj_name: &str, fn_bxor: &str,
     sc_index2: &str, sc_kobf: &str, var_state_flag: &str, var_idx_chunk: &str,
-    var_tbl: &str, var_e: &str, ds: &[String; 4], dn: &[String; 4], fn_read_string: &str,
+    var_tbl: &str, var_e: &str, ds: &[String; 4], dn: &[String; 4], fn_read_string: &str, fn_s_byte: &str,
     fn_a5: &str, fn_read_dec: &str, var_enc_c: &str, var_cache: &str,
     fn_c: &str, pf_consts: &str,
     v_ch_i: &str, v_ch_n: &str, t: &str,
@@ -479,14 +479,25 @@ pub fn build_consts(
                 let (kdsp_s, kmul_s, kadd_s, ksmul_s) = (
                     format!("0X{:X}", k_dsp), format!("0X{:X}", k_mul),
                     format!("0X{:X}", k_add), format!("0X{:X}", k_smul));
+                // ③-3 MAC 参数/名字前置（dsp 闭包与 vmac 助手共用）
+                let (mc1, mc2, mc3, mc4, mc5) = (
+                    rng.obfuscate_num(fc.m1 as i64, 1, &keys), rng.obfuscate_num(fc.m2 as i64, 1, &keys),
+                    rng.obfuscate_num(fc.m3 as i64, 1, &keys), rng.obfuscate_num(fc.m4 as i64, 1, &keys),
+                    rng.obfuscate_num(fc.m5 as i64, 1, &keys));
+                let (vm, vb, vl, vf, vr, vs, vn, vj) = (rng.name(), rng.name(), rng.name(), rng.name(),
+                    rng.name(), rng.name(), rng.name(), rng.name());
+                // ③-3：三分派闭包统一「先验 MAC 后解码」——记录第 4 字段是线上
+                // 校验和；vmac 不过 → nil（篡改密文/槽位/指令流任一都命中）
+                let dsp_mac_pre = format!("local fd=({ft}[ev[(0X3)]] or 0X0)%4294967296; local rl=({rt}[ev[(0X3)]] or {rf}); if {vm}(ev[(0X2)],ev[(0X3)],fd,rl)~=ev[(0X4)] then return nil end; ",
+                    ft = ftds, rt = rtds, rf = rfds, vm = vm);
                 let mut dsp_defs = vec![
-                    format!("{d}[{t3}]=function({ddd},ev) return {fds}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
-                        d = dsp_name, t3 = three, fds = fds, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
-                    format!("{d}[{t2}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf})) end; ",
-                        d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, ft = ftds, rt = rtds, rf = rfds),
+                    format!("{d}[{t3}]=function({ddd},ev) {pre}return {fds}(ev[(0X2)],ev[(0X3)],fd,rl) end; ",
+                        d = dsp_name, t3 = three, fds = fds, ddd = ddd, pre = dsp_mac_pre),
+                    format!("{d}[{t2}]=function({ddd},ev) {pre}return {fdn}(ev[(0X2)],ev[(0X3)],fd,rl) end; ",
+                        d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, pre = dsp_mac_pre),
                     // ③-2：bool 记录与数字同构（{tag,bytes8,li}）——fdn 解密后 ~=0
-                    format!("{d}[{t1}]=function({ddd},ev) return {fdn}(ev[(0X2)],ev[(0X3)],({ft}[ev[(0X3)]] or 0X0)%4294967296,({rt}[ev[(0X3)]] or {rf}))~={zero} end; ",
-                        d = dsp_name, t1 = one, fdn = fdn, ddd = ddd, ft = ftds, rt = rtds, rf = rfds, zero = zero),
+                    format!("{d}[{t1}]=function({ddd},ev) {pre}return {fdn}(ev[(0X2)],ev[(0X3)],fd,rl)~={zero} end; ",
+                        d = dsp_name, t1 = one, fdn = fdn, ddd = ddd, pre = dsp_mac_pre, zero = zero),
                     format!("{d}[{dd}]=function(ev) return {kobf}..((({dd}*{kdsp}))%4294967296) end; ", d = dsp_name, dd = decoy_dsp, kobf = sc_kobf, kdsp = kdsp_s),
                 ];
                 rng.shuffle(&mut dsp_defs);
@@ -496,12 +507,12 @@ pub fn build_consts(
                 // 记录内部标记 = tag_map 同值（与 dsp 键耦合；仅内存态，不落线）；
                 // tag_map[0]（nil/省略）注册空消费句柄（线上 tag 不再恒 0..3）
                 let mut ld_defs = vec![
-                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() {ec}[(pos)]={{{tvm3},bl,pos-1}} end; ",
-                        l = ld_name, t3 = three, rs = fn_read_string, ec = var_enc_c, ddl = ddl, tvm3 = tag_map[3] as i64),
-                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{{tvm2},{bn},pos-1}} end; ",
+                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() local mv={rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000 {ec}[(pos)]={{{tvm3},bl,pos-1,mv}} end; ",
+                        l = ld_name, t3 = three, rs = fn_read_string, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm3 = tag_map[3] as i64),
+                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end local mv={rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000 {ec}[(pos)]={{{tvm2},{bn},pos-1,mv}} end; ",
                         l = ld_name, t2 = two, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm2 = tag_map[2] as i64),
                     // ③-2：bool 线上 8B 密文（同数字槽）——装载记录带槽号供解密
-                    format!("{l}[{t1}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {ec}[(pos)]={{{tvm1},{bn},pos-1}} end; ",
+                    format!("{l}[{t1}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end local mv={rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000 {ec}[(pos)]={{{tvm1},{bn},pos-1,mv}} end; ",
                         l = ld_name, t1 = one, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm1 = tag_map[1] as i64),
                     format!("{l}[{t0}]=function({ddl}) end; ",
                         l = ld_name, t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys), ddl = ddl),
@@ -536,6 +547,14 @@ pub fn build_consts(
                 lua.push_str(&format!(
                     "local {g}={rd}(); local {fds},{fdn}={ss},{sn}; ",
                     g = gname, rd = fn_read_dec, fds = fds, fdn = fdn, ss = sel_s, sn = sel_n));
+                // ③-3 每常量 MAC 校验器（写侧 const_mac18 同式）：
+                // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
+                // ——乘数域均 <2^40，Lua double 全精确；串/表两种 blob 分支取字节
+                lua.push_str(&format!(
+                    "local {vm}=function({vb},{vl},{vf},{vr}) local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%4294967296); {vs}=({bx})({vs},({vf})%4294967296); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if type({vb})=='string' then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%4294967296); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%4294967296); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
+                    vm = vm, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
+                    mc1 = mc1, mc2 = mc2, mc3 = mc3, mc4 = mc4, mc5 = mc5,
+                    bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte));
                 for x in &dsp_defs { lua.push_str(x); }
                 // 缓存前哨：命中（值非 nil）直接短路
                 lua.push_str(&format!(

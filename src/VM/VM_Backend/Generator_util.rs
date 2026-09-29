@@ -52,6 +52,21 @@ pub(super) struct FoldCtx {
     pub r6b: u32, pub p1b: u32, pub p3b: u32,   // B 位引用谓词 pv_b(v)=(rotl32(v,r6b)^p1b)%100<p3b
     pub r6c: u32, pub p1c: u32, pub p3c: u32,   // C 位引用谓词
     pub f1: u32, pub f2: u32,                   // f(pc)=(pc*f1)^f2
+    // ③-3 每常量 MAC 参数（逐 build 随机；读写两侧同式）：
+    // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
+    pub m1: u32, pub m2: u32, pub m3: u32, pub m4: u32, pub m5: u32,
+}
+
+/// ③-3 每常量 MAC：对 (密文块, 槽号, 折叠值, R链值) 的滚动校验和——
+/// 只用加/异或/旋转（Lua double 下全精确：b*m4 ≤ 255*(2^32-1) < 2^40）。
+/// 篡改密文/槽位/指令流（fold、roll 变）任一处都会使校验失败。
+pub(super) fn const_mac18(blob: &[u8], slot: u32, fold: u32, roll: u32, fc: &FoldCtx) -> u32 {
+    let mut s = fc.m1 ^ slot.wrapping_mul(fc.m2) ^ fold ^ roll.rotate_left(fc.m3);
+    for &b in blob {
+        s = s.wrapping_add((b as u32).wrapping_mul(fc.m4));
+        s ^= s.rotate_left(fc.m5);
+    }
+    s
 }
 
 pub(super) fn chacha8_xor(key: &[u32; 8], nonce: [u32; 3], data: &[u8]) -> Vec<u8> {
@@ -898,6 +913,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 };
                 w.push(tag_map[*c_type as usize]);
                 if *c_type == 3 { write_string(w, &entry.1); } else { w.extend_from_slice(&entry.1); }
+                // ③-3 每常量 MAC：密文块后 4B 校验和（密文+槽号+折叠+R链），
+                // 读侧分派闭包先验后解
+                w.extend_from_slice(&const_mac18(&entry.1, slot, fold, rl18, fc18).to_le_bytes());
             }
             _ => panic!(),
         }
@@ -908,8 +926,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     for _ in 0..d_count18 {
         match rng.random_range(0..5) {
             0 => { w.push(tag_map[0]); } // nil：仅占一个槽号
-            1 => { w.push(tag_map[1]); for _ in 0..8 { w.push(rng.random_range(0..=255u8)); } } // bool：8B 同线长
-            _ => { w.push(tag_map[2]); for _ in 0..8 { w.push(rng.random_range(0..=255u8)); } } // num
+            1 => { w.push(tag_map[1]); for _ in 0..12 { w.push(rng.random_range(0..=255u8)); } } // bool：8B+4B MAC 同线长
+            _ => { w.push(tag_map[2]); for _ in 0..12 { w.push(rng.random_range(0..=255u8)); } } // num：8B+4B MAC
         }
     }
 

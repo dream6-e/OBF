@@ -177,6 +177,8 @@ impl Generator {
             r6b: rng.range(1, 17) as u32, p1b: rng.next(), p3b: rng.range(30, 70) as u32,
             r6c: rng.range(1, 17) as u32, p1c: rng.next(), p3c: rng.range(30, 70) as u32,
             f1: rng.next() | 1, f2: rng.next(),
+            m1: rng.next(), m2: rng.next(), m3: rng.range(1, 24) as u32,
+            m4: rng.next() | 1, m5: rng.range(1, 24) as u32,
         };
         // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
         // 从 0..59∪251..255 取互不相同值（避开 60..250 诱饵键区）；写侧推送与
