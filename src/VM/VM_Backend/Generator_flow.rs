@@ -487,39 +487,117 @@ pub fn build_consts(
                 let (vm, vb, vl, vf, vr, vs, vn, vj) = (rng.name(), rng.name(), rng.name(), rng.name(),
                     rng.name(), rng.name(), rng.name(), rng.name());
                 // ③-3：三分派闭包统一「先验 MAC 后解码」——记录第 4 字段是线上
-                // 校验和；vmac 不过 → nil（篡改密文/槽位/指令流任一都命中）
-                let dsp_mac_pre = format!("local fd=({ft}[ev[(0X3)]] or 0X0)%4294967296; local rl=({rt}[ev[(0X3)]] or {rf}); if {vm}(ev[(0X2)],ev[(0X3)],fd,rl)~=ev[(0X4)] then return nil end; ",
-                    ft = ftds, rt = rtds, rf = rfds, vm = vm);
-                let mut dsp_defs = vec![
-                    format!("{d}[{t3}]=function({ddd},ev) {pre}return {fds}(ev[(0X2)],ev[(0X3)],fd,rl) end; ",
-                        d = dsp_name, t3 = three, fds = fds, ddd = ddd, pre = dsp_mac_pre),
-                    format!("{d}[{t2}]=function({ddd},ev) {pre}return {fdn}(ev[(0X2)],ev[(0X3)],fd,rl) end; ",
-                        d = dsp_name, t2 = two, fdn = fdn, ddd = ddd, pre = dsp_mac_pre),
-                    // ③-2：bool 记录与数字同构（{tag,bytes8,li}）——fdn 解密后 ~=0
-                    format!("{d}[{t1}]=function({ddd},ev) {pre}return {fdn}(ev[(0X2)],ev[(0X3)],fd,rl)~={zero} end; ",
-                        d = dsp_name, t1 = one, fdn = fdn, ddd = ddd, pre = dsp_mac_pre, zero = zero),
-                    format!("{d}[{dd}]=function(ev) return {kobf}..((({dd}*{kdsp}))%4294967296) end; ", d = dsp_name, dd = decoy_dsp, kobf = sc_kobf, kdsp = kdsp_s),
-                ];
-                rng.shuffle(&mut dsp_defs);
-                // 读入侧：tag → 装载闭包（定义顺序洗牌）
-                let bn = rng.name();
-                let bj = rng.name();
-                // 记录内部标记 = tag_map 同值（与 dsp 键耦合；仅内存态，不落线）；
-                // tag_map[0]（nil/省略）注册空消费句柄（线上 tag 不再恒 0..3）
-                let mut ld_defs = vec![
-                    format!("{l}[{t3}]=function({ddl},pos) local bl={rs}() local mv={rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000 {ec}[(pos)]={{{tvm3},bl,pos-1,mv}} end; ",
-                        l = ld_name, t3 = three, rs = fn_read_string, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm3 = tag_map[3] as i64),
-                    format!("{l}[{t2}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end local mv={rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000 {ec}[(pos)]={{{tvm2},{bn},pos-1,mv}} end; ",
-                        l = ld_name, t2 = two, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm2 = tag_map[2] as i64),
-                    // ③-2：bool 线上 8B 密文（同数字槽）——装载记录带槽号供解密
-                    format!("{l}[{t1}]=function({ddl},pos) local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end local mv={rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000 {ec}[(pos)]={{{tvm1},{bn},pos-1,mv}} end; ",
-                        l = ld_name, t1 = one, bn = bn, bj = bj, rd = fn_read_dec, ec = var_enc_c, ddl = ddl, tvm1 = tag_map[1] as i64),
-                    format!("{l}[{t0}]=function({ddl}) end; ",
-                        l = ld_name, t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys), ddl = ddl),
-                    format!("{l}[{dd}]=function(_,p2) {ec}[(p2)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}} end; ",
-                        l = ld_name, dd = decoy_ld, ec = var_enc_c, tvm2 = tag_map[2] as i64),
-                ];
-                rng.shuffle(&mut ld_defs);
+                // 校验和；vmac 不过 → nil（篡改密文/槽位/指令流任一都命中）。
+                // ③-4 常量表生成器四异构变体（处理器体共用，结构逐 build 抽签）：
+                //   V0 表直挂：ld[tag]/dsp[tag] 闭包表；
+                //   V1 元方法惰载：底表键=bxor(tag,kk)，__index 运行时反解；
+                //   V2 单闭包 if 链：无表，运行期逐比较分派；
+                //   V3 双数组扫描：tag 值数组+处理器数组，闭包内线性匹配。
+                // V0/V1 = 表调用制（调用点 ld[(t)]/dsp[(ev[1])]）；V2/V3 = 函数制。
+                let ctv = rng.range(0, 4);
+                let table_regime = ctv < 2;
+                // ── dsp 处理器体：fd/rl 局部 + MAC 先验 + 解码表达式（逐支独立名）──
+                let mac_pre = |fdn_: &str, rln_: &str| -> String {
+                    format!("local {fd}=({ft}[ev[(0X3)]] or 0X0)%4294967296; local {rl}=({rt}[ev[(0X3)]] or {rf}); if {vm}(ev[(0X2)],ev[(0X3)],{fd},{rl})~=ev[(0X4)] then return nil end; ",
+                        fd = fdn_, rl = rln_, ft = ftds, rt = rtds, rf = rfds, vm = vm)
+                };
+                let (fd3, rl3) = (rng.name(), rng.name());
+                let (fd2, rl2) = (rng.name(), rng.name());
+                let (fd1, rl1) = (rng.name(), rng.name());
+                let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],ev[(0X3)],{fd},{rl})", pre = mac_pre(&fd3, &rl3), fds = fds, fd = fd3, rl = rl3);
+                let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl})", pre = mac_pre(&fd2, &rl2), fdn = fdn, fd = fd2, rl = rl2);
+                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl})~={zero}", pre = mac_pre(&fd1, &rl1), fdn = fdn, fd = fd1, rl = rl1, zero = zero);
+                let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%4294967296)", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s);
+                // ── ld 处理器体（参数 pos；逐体独立局部名）──
+                let mrv = format!("{rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000", rd = fn_read_dec);
+                let (bn2, bj2) = (rng.name(), rng.name());
+                let (bn1, bj1) = (rng.name(), rng.name());
+                let ld_body3 = format!("local bl={rs}() local mv={mrv} {ec}[(pos)]={{{tvm3},bl,pos-1,mv}}",
+                    rs = fn_read_string, mrv = mrv, ec = var_enc_c, tvm3 = tag_map[3] as i64);
+                let ld_body2 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end local mv={mrv} {ec}[(pos)]={{{tvm2},{bn},pos-1,mv}}",
+                    bn = bn2, bj = bj2, rd = fn_read_dec, mrv = mrv, ec = var_enc_c, tvm2 = tag_map[2] as i64);
+                let ld_body1 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end local mv={mrv} {ec}[(pos)]={{{tvm1},{bn},pos-1,mv}}",
+                    bn = bn1, bj = bj1, rd = fn_read_dec, mrv = mrv, ec = var_enc_c, tvm1 = tag_map[1] as i64);
+                let ld_bodydd = format!("{ec}[(pos)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}}",
+                    ec = var_enc_c, tvm2 = tag_map[2] as i64);
+                let t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys);
+                let ld_tags: Vec<(String, String)> = vec![
+                    (three.clone(), ld_body3), (two.clone(), ld_body2), (one.clone(), ld_body1),
+                    (t0.clone(), String::new()), (format!("{}", decoy_ld), ld_bodydd)];
+                let dsp_tags: Vec<(String, String)> = vec![
+                    (three.clone(), dsp_expr3), (two.clone(), dsp_expr2), (one.clone(), dsp_expr1),
+                    (format!("{}", decoy_dsp), dsp_exprdd)];
+                // ── 按变体组装 ──
+                let mut dsp_defs: Vec<String> = Vec::new();
+                let mut ld_defs: Vec<String> = Vec::new();
+                let mut ct_init: String;
+                match ctv {
+                    0 => {
+                        // V0 表直挂
+                        ct_init = format!("local {dsp},{ld}={{}},{{}}; ", dsp = dsp_name, ld = ld_name);
+                        for (tag, body) in &ld_tags {
+                            ld_defs.push(format!("{l}[{tag}]=function({ddl},pos) {body} end; ",
+                                l = ld_name, tag = tag, ddl = ddl, body = body));
+                        }
+                        for (tag, expr) in &dsp_tags {
+                            dsp_defs.push(format!("{d}[{tag}]=function({ddd},ev) {expr} end; ",
+                                d = dsp_name, tag = tag, ddd = ddd, expr = expr));
+                        }
+                        rng.shuffle(&mut ld_defs); rng.shuffle(&mut dsp_defs);
+                    }
+                    1 => {
+                        // V1 元方法惰载：底表键 = bxor(tag, kk)，__index 反解
+                        let (ld_r, dsp_r, lkk, dkk) = (rng.name(), rng.name(),
+                            format!("0X{:X}", rng.range(0x100, 0xFFFFF)), format!("0X{:X}", rng.range(0x100, 0xFFFFF)));
+                        ct_init = format!("local {ldr},{dspr}={{}},{{}}; local {ld}=setmetatable({{}},{{__index=function(_,k) return {ldr}[({bx})(k,{lkk})] end}}); local {dsp}=setmetatable({{}},{{__index=function(_,k) return {dspr}[({bx})(k,{dkk})] end}}); ",
+                            ldr = ld_r, dspr = dsp_r, ld = ld_name, dsp = dsp_name, bx = fn_bxor, lkk = lkk, dkk = dkk);
+                        for (tag, body) in &ld_tags {
+                            ld_defs.push(format!("{ldr}[({bx})({tag},{kk})]=function({ddl},pos) {body} end; ",
+                                ldr = ld_r, bx = fn_bxor, tag = tag, kk = lkk, ddl = ddl, body = body));
+                        }
+                        for (tag, expr) in &dsp_tags {
+                            dsp_defs.push(format!("{dspr}[({bx})({tag},{kk})]=function({ddd},ev) {expr} end; ",
+                                dspr = dsp_r, bx = fn_bxor, tag = tag, kk = dkk, ddd = ddd, expr = expr));
+                        }
+                        rng.shuffle(&mut ld_defs); rng.shuffle(&mut dsp_defs);
+                    }
+                    2 => {
+                        // V2 单闭包 if 链
+                        let mut arms_ld = String::from("local tt2=tt; ");
+                        for (i, (tag, body)) in ld_tags.iter().enumerate() {
+                            arms_ld.push_str(&format!("{} tt2==({tag}) then {body}", if i == 0 { "if" } else { "elseif" }, tag = tag, body = body));
+                        }
+                        arms_ld.push_str(" end ");
+                        ct_init = format!("local {ld}=function(tt,pos) {arms} end; ", ld = ld_name, arms = arms_ld);
+                        let mut arms_dsp = String::from("local tg=ev[(0X1)]; ");
+                        for (i, (tag, expr)) in dsp_tags.iter().enumerate() {
+                            arms_dsp.push_str(&format!("{} tg==({tag}) then {expr}", if i == 0 { "if" } else { "elseif" }, tag = tag, expr = expr));
+                        }
+                        arms_dsp.push_str(" end ");
+                        ct_init.push_str(&format!("local {dsp}=function(ev) {arms} end; ", dsp = dsp_name, arms = arms_dsp));
+                    }
+                    _ => {
+                        // V3 双数组扫描：tag 值数组 + 处理器数组，线性匹配
+                        let (ldt, ldh, dvt, dvh) = (rng.name(), rng.name(), rng.name(), rng.name());
+                        let mut order: Vec<usize> = (0..ld_tags.len()).collect();
+                        rng.shuffle(&mut order);
+                        let mut tl2: Vec<String> = Vec::new();
+                        let mut hl: Vec<String> = Vec::new();
+                        for &oi in &order { tl2.push(format!("({})", ld_tags[oi].0)); hl.push(format!("function({ddl},pos) {body} end", ddl = ddl, body = ld_tags[oi].1)); }
+                        let mut init = format!("local {ldt}={{{tl}}}; local {ldh}={{{hl}}}; ", ldt = ldt, tl = tl2.join(","), ldh = ldh, hl = hl.join(","));
+                        init.push_str(&format!("local {ld}=function(tt,pos) for z=1,{n} do if {ldt}[z]==tt then local h={ldh}[z] if h then h(0X0,pos) end return end end end; ",
+                            ld = ld_name, n = ld_tags.len(), ldt = ldt, ldh = ldh));
+                        let mut order2: Vec<usize> = (0..dsp_tags.len()).collect();
+                        rng.shuffle(&mut order2);
+                        let mut tl3: Vec<String> = Vec::new();
+                        let mut hd: Vec<String> = Vec::new();
+                        for &oi in &order2 { tl3.push(format!("({})", dsp_tags[oi].0)); hd.push(format!("function({ddd},ev) {expr} end", ddd = ddd, expr = dsp_tags[oi].1)); }
+                        init.push_str(&format!("local {dvt}={{{tl}}}; local {dvh}={{{hd}}}; ", dvt = dvt, tl = tl3.join(","), dvh = dvh, hd = hd.join(",")));
+                        init.push_str(&format!("local {dsp}=function(ev) local tg=ev[(0X1)] for z=1,{n} do if {dvt}[z]==tg then return {dvh}[z](0X1,ev) end end end; ",
+                            dsp = dsp_name, n = dsp_tags.len(), dvt = dvt, dvh = dvh));
+                        ct_init = init;
+                    }
+                }
                 let (nBv, nCv, w2v, w3v, w4v) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
                 // 高危③：明文记忆缓存水位清空——ca 驻留的明文常量按访问计数周期性
                 // 全清（㉑ 同款窗口模型）：纪元内只有热集明文，dump 不再能拿到
@@ -535,13 +613,12 @@ pub fn build_consts(
                     // pairs 遍历直接报错；后备退化为普通表（fail-open）
                     "local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
-                     local {dsp},{ld}={{}},{{}}; local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
+                     local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
                      local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*{kmul}+{kadd})%4294967296 elseif tq=='string' then return {kobf}..((#q*{ksmul})%4294967296) elseif tq=='boolean' then return not q end return q end; ",
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
                     wctr = wctr, pfn = pfn_n, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
                     m1 = rng.name(), m2 = rng.name(),
-                    dsp = dsp_name, ld = ld_name,
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
                     w2_ = w2v, w20 = wk2, w3_ = w3v, w30 = wk3, w4_ = w4v, w40 = wk4);
                 lua.push_str(&format!(
@@ -555,28 +632,38 @@ pub fn build_consts(
                     vm = vm, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
                     mc1 = mc1, mc2 = mc2, mc3 = mc3, mc4 = mc4, mc5 = mc5,
                     bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte));
+                // ③-4 变体化的常量表基建——必须在 vmac 之后（V2/V3 的分派闭包
+                // 体内引用 vmac，词序先于其定义会把 vm 解析成全局）
+                lua.push_str(&ct_init);
                 for x in &dsp_defs { lua.push_str(x); }
                 // 缓存前哨：命中（值非 nil）直接短路
                 lua.push_str(&format!(
                     "local {memo}=function({ddm},{ix}) local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
                     memo = memo_name, ix = var_idx_chunk, ca = var_cache, ddm = ddm));
                 lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
-                lua.push_str(&format!(
+                                // ③-4：记录解码调用点随调用制变体（表制走闭包表，函数制直调）
+                let kbh = if table_regime {
+                    format!("local {h}={dsp}[({ev}[(0X1)])] if not {h} then {ec}[({ix})]=nil return {x_nil1} end local {vv}={h}(0X1,{ev}) return {x_val1},{vv} end; ",
+                        h = h_name, dsp = dsp_name, ev = var_e, ec = var_enc_c, ix = var_idx_chunk, x_nil1 = x_nil1, vv = rng.name(), x_val1 = x_val1)
+                } else {
+                    format!("local {vv}={dsp}({ev}) if {vv}==nil then {ec}[({ix})]=nil return {x_nil1} end return {x_val1},{vv} end; ",
+                        vv = rng.name(), dsp = dsp_name, ev = var_e, ec = var_enc_c, ix = var_idx_chunk, x_nil1 = x_nil1, x_val1 = x_val1)
+                };
+lua.push_str(&format!(
                     "local {hh}={{}}; \
                      {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in pairs({cab}) do {cab}[{wk}]=nil end end; if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
                      {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if type({ev})~='table' then return {x_nil1} end \
-                       local {h}={dsp}[({ev}[(0X1)])] if not {h} then {ec}[({ix})]=nil return {x_nil1} end local {vv}={h}(0X1,{ev}) return {x_val1},{vv} end; \
+                       {kbh}\
                      {hh}[{e_kc}]=function({ix},{aux}) local {pv}={psn} and {pfn}({aux}) or {aux}; {ca}[({ix})]={pv}; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
-                    vv = rng.name(),
                     wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, pv = rng.name(),
                     pfn = pfn_n, psn = psn,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
-                    ev = var_e, h = h_name, dsp = dsp_name, x_nil1 = x_nil1,
-                    x_val1 = x_val1, ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v));
+                    ev = var_e, kbh = kbh, x_nil1 = x_nil1,
+                    ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v));
                 // ㉔ 解码链状态转移四形态化：基形已是键表引用表达式（②），
                 // 追加 ③ 惰性槽 / ④ 委托返回值；函数体开头落转移基建。
                 let (dc_t, dc_s, dc_d) = (rng.name(), rng.name(), rng.name());
@@ -652,12 +739,20 @@ pub fn build_consts(
                     dl = deep10(rng, fn_bxor, chain_delta as i64),
                     chm = deep10(rng, fn_bxor, chain_m as i64),
                     chk0 = deep10(rng, fn_bxor, chain_k0 as i64)));
+                // ③-4：读回循环调用点随调用制变体
+                let rdl = if table_regime {
+                    format!("local {h}={ld}[({t})]; if {h} then if {pj}[({pkC})]=={numC} then else {h}(0X0,{i}) end end end end; ",
+                        h = h_name, ld = ld_name, t = t, pj = pj_name, pkC = pkC, numC = numC, i = v_ch_i)
+                } else {
+                    format!("if {pj}[({pkC})]=={numC} then else {ld}({t},{i}) end end end; ",
+                        pj = pj_name, pkC = pkC, numC = numC, ld = ld_name, t = t, i = v_ch_i)
+                };
                 lua.push_str(&format!(
                     "local {i}=0; local {n}={a5}(); if not(not {pj}[({pk6})]) then {i}={n}; else \
                      while {i}<{n} do {i}={i}+1; local {t}={rd}(); \
-                     local {h}={ld}[({t})]; if {h} then if {pj}[({pkC})]=={numC} then else {h}(0X0,{i}) end end end end; ",
+                     {rdl}",
                     i = v_ch_i, n = v_ch_n, a5 = fn_a5, pj = pj_name, pk6 = pk6,
-                    t = t, rd = fn_read_dec, h = h_name, ld = ld_name, pkC = pkC, numC = numC));
+                    t = t, rd = fn_read_dec, rdl = rdl));
                 lua
 }
 
