@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，187911 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），115278 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，230542 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，193748 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），119135 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，245828 B |
 
 前两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
 
@@ -16,6 +16,9 @@
 池解码器、毒表守卫（§5.11）已做逻辑/数据流打乱；脚本头那段原生 `loadstring` 探测里
 9 个字符串（`getinfo`/`what`/`source`/`getgenv`/`getrenv`/`loadstring`/`load`/`C`/`=[C]`）已 XOR 加密，
 产物里不出现明文。
+冷块指令处理器的调用形态已打散：方法签名（首参名 + 四个指令参数名与顺序）逐块随机，
+调用点六形随机（冒号 / 点调用 / 先取函数再直调），产物里不再有清一色的 `xx:xx(a,b,c,d)`
+可 grep 结构（详见 `项目交接总结.md` 末节）；
 十六进制数字一律写成 `0X` 前缀 + 大写 A-F；ChaCha 的 4 个 sigma 常量不再以字面量出现，
 改成逐产物由随机 key 派生；载荷解码链（bxor/rotr/read_dec/u32/字符串/状态机）已整体换形（§5.13），
 解码器外层（m_main/m_init_map）也已打乱并可反美化（行号校验守卫，§5.14）——产物被拆行格式化后会失效。

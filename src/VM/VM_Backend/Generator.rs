@@ -542,30 +542,45 @@ impl Generator {
                 || code.contains(&format!("{}(", fn_execute));
             if cold {
                 let mut body = code.clone();
+                // ── 方法签名逐块随机化：原先每个冷块都是同一条
+                // `function(self,op,inst_A,inst_B,inst_C)`（产物里 60+ 处一字不差），
+                // 是把「指令处理器」一把 grep 出来的最短路径。这里把首参名与四个
+                // 指令参数的名字、以及在实参表里的先后顺序同时打散——签名、方法体、
+                // 调用点三处共用同一次抽签结果，语义完全不变。
+                let p_self = rng.name();
+                let mut p_src: Vec<&str> = vec!["op", "inst_A", "inst_B", "inst_C"];
+                rng.shuffle(&mut p_src);
+                let p_names: Vec<String> = (0..4).map(|_| rng.name()).collect();
+                for (j, src) in p_src.iter().enumerate() {
+                    body = rename_ident(&body, src, &p_names[j]);
+                }
+                body = rename_ident(&body, "self", &p_self);
+                // 调用点实参 = 打散后的顺序（与形参位置逐位对应）
+                let call_args = p_src.join(",");
                 // 标量状态：槽位表达式就地替换（pc/top 的读写直接落在 VM 对象上）
-                body = rename_ident(&body, &var_pc, &format!("self[{}]", k_pc));
-                body = rename_ident(&body, &var_top, &format!("self[{}]", k_top));
+                body = rename_ident(&body, &var_pc, &format!("{}[{}]", p_self, k_pc));
+                body = rename_ident(&body, &var_top, &format!("{}[{}]", p_self, k_top));
                 // CLOSURE 模板里有字面量 env（内层闭包用），方法表是共享的
                 // 必须走槽位拿当前调用的环境，不能捕获第一次调用的 env
-                body = rename_ident(&body, "env", &format!("self[{}]", k_env));
+                body = rename_ident(&body, "env", &format!("{}[{}]", p_self, k_env));
                 // 取指别名对（别名↔槽位绑定不变；抓取顺序与分组随机）
                 let mut alias_pairs: Vec<(String, String)> = Vec::new();
                 for (old, key, _mutable) in state_fields.iter() {
                     if !uses_ident(&body, old) { continue; }
                     let alias = rng.name();
                     body = rename_ident(&body, old, &alias);
-                    alias_pairs.push((alias, format!("self[{}]", key)));
+                    alias_pairs.push((alias, format!("{}[{}]", p_self, key)));
                 }
                 rng.shuffle(&mut alias_pairs);
                 // ⑱.4 中程读体需要掩码：从掩码槽自取（execute 入口已派生写入）
                 let mut mk_stmt: Option<String> = None;
                 if body.contains(&n_mk1) {
-                    mk_stmt = Some(format!("local {m1},{m2},{m3}=self[{k1}],self[{k2}],self[{k3}];",
+                    mk_stmt = Some(format!("local {m1},{m2},{m3}={s}[{k1}],{s}[{k2}],{s}[{k3}];", s = p_self,
                         m1 = n_mk1, m2 = n_mk2, m3 = n_mk3, k1 = k_mk1, k2 = k_mk2, k3 = k_mk3));
                 }
                 // ㉚：中程读站点改走 DC 缓存——冷块同样自槽位取回同名局部
                 if body.contains(&n_dc) {
-                    let dc_stmt = format!("local {dc}=self[{kd}];", dc = n_dc, kd = k_dc);
+                    let dc_stmt = format!("local {dc}={s}[{kd}];", dc = n_dc, kd = k_dc, s = p_self);
                     mk_stmt = Some(match mk_stmt.take() { Some(x) => x + &dc_stmt, None => dc_stmt });
                 }
                 body = body.replace("{STOREBACK}", "");
@@ -579,10 +594,10 @@ impl Generator {
                 // 32 位 bxor（bit32/回退实现）高位丢失 → 校验值错（obf0/1/2 用 1 从未暴露）
                 let st_obf = rng.obfuscate_num(*st as i64, 1, &keys);
                 match rng.range(0, 4) {
-                    0 => pre.push(format!("if self[{}]~={} then return end;", k_state, st_obf)),
-                    1 => pre.push(format!("if self[{}]-{}~=0 then return end;", k_state, st_obf)),
-                    2 => pre.push(format!("if self[{}]=={} then else return end;", k_state, st_obf)),
-                    _ => pre.push(format!("if not(self[{}]=={}) then return end;", k_state, st_obf)),
+                    0 => pre.push(format!("if {s}[{}]~={} then return end;", k_state, st_obf, s = p_self)),
+                    1 => pre.push(format!("if {s}[{}]-{}~=0 then return end;", k_state, st_obf, s = p_self)),
+                    2 => pre.push(format!("if {s}[{}]=={} then else return end;", k_state, st_obf, s = p_self)),
+                    _ => pre.push(format!("if not({s}[{}]=={}) then return end;", k_state, st_obf, s = p_self)),
                 }
                 let mut ai = 0usize;
                 while ai < alias_pairs.len() {
@@ -599,46 +614,57 @@ impl Generator {
                 text.push_str(&body);
                 // 必须用 `.名字=function` 注册
                 // 成员名统一改名时字符串键不改，两边对不上变 nil。
-                defs.push(format!("{}.{}=function(self,op,inst_A,inst_B,inst_C) {} end;", var_methods, name, text));
+                defs.push(format!("{}.{}=function({},{},{},{},{}) {} end;", var_methods, name,
+                    p_self, p_names[0], p_names[1], p_names[2], p_names[3], text));
                 // 冷路径才付同步代价：进出方法前后各存/取一次 pc 与 top
                 // 并把本块状态号写进槽位（方法入口自校验）。
-                // 叶子打散：三连存乱序/分组 + 状态号常数去指纹 + 调用别名/恢复序随机（0=原版保留）
-                let leaf = if rng.range(0, 4) == 0 {
-                    format!(
-                        "{}[{}]={};{}[{}]={};{}[{}]={};{},{},{}={}:{}(op,inst_A,inst_B,inst_C);{}={}[{}];{}={}[{}]",
-                        var_vm, k_pc, var_pc, var_vm, k_top, var_top, var_vm, k_state, st_lua,
-                        var_r1, var_r2, var_r3, var_vm, name,
-                        var_pc, var_vm, k_pc, var_top, var_vm, k_top
-                    )
-                } else {
-                    let st_o = rng.obfuscate_num(*st as i64, 1, &keys);
-                    let mut sync: Vec<(String, String)> = vec![
-                        (format!("{}[{}]", var_vm, k_pc), var_pc.clone()),
-                        (format!("{}[{}]", var_vm, k_top), var_top.clone()),
-                        (format!("{}[{}]", var_vm, k_state), st_o),
-                    ];
-                    rng.shuffle(&mut sync);
-                    let mut sync_stmts = String::new();
-                    let mut si = 0usize;
-                    while si < sync.len() {
-                        let take = 1 + rng.range(0, sync.len() - si);
-                        let lhs: Vec<String> = sync[si..si + take].iter().map(|(l, _)| l.clone()).collect();
-                        let rhs: Vec<String> = sync[si..si + take].iter().map(|(_, r)| r.clone()).collect();
-                        sync_stmts.push_str(&format!("{}={};", lhs.join(","), rhs.join(",")));
-                        si += take;
+                // 同步语句：三连存乱序/分组 + 状态号常数去指纹（原两形态合流）
+                let st_o = if rng.range(0, 4) == 0 { st_lua.clone() } else { rng.obfuscate_num(*st as i64, 1, &keys) };
+                let mut sync: Vec<(String, String)> = vec![
+                    (format!("{}[{}]", var_vm, k_pc), var_pc.clone()),
+                    (format!("{}[{}]", var_vm, k_top), var_top.clone()),
+                    (format!("{}[{}]", var_vm, k_state), st_o),
+                ];
+                rng.shuffle(&mut sync);
+                let mut sync_stmts = String::new();
+                let mut si = 0usize;
+                while si < sync.len() {
+                    let take = 1 + rng.range(0, sync.len() - si);
+                    let lhs: Vec<String> = sync[si..si + take].iter().map(|(l, _)| l.clone()).collect();
+                    let rhs: Vec<String> = sync[si..si + take].iter().map(|(_, r)| r.clone()).collect();
+                    sync_stmts.push_str(&format!("{}={};", lhs.join(","), rhs.join(",")));
+                    si += take;
+                }
+                // ── 调用形态池：此前 240+ 处清一色 `vm:方法(op,inst_A,inst_B,inst_C)`，
+                // 是产物里最好 grep 的结构。现在六形随机（0/1 保留冒号调用，约 1/3）：
+                // 2/3 走点调用（经原型 __index 同级解析）或先取方法再直调（省掉元表查找，
+                // 比冒号还快）。六形语义完全等价——都只是「把接收者与四个已置换的实参
+                // 交给同一个方法」，冷块入口的状态自校验与符号同步逻辑一概不变。
+                let (rn1, rn2, rn3) = (var_r1.clone(), var_r2.clone(), var_r3.clone());
+                let call = match rng.range(0, 6) {
+                    0 => format!("{},{},{}={}:{}({});", rn1, rn2, rn3, var_vm, name, call_args),
+                    1 => {
+                        let vn = rng.name();
+                        format!("local {}={};{},{},{}={}:{}({});", vn, var_vm, rn1, rn2, rn3, vn, name, call_args)
                     }
-                    // 方法经 __index 解析（裸索引 vm[name]=nil）→ 别名臂只能别 self
-                    let call = if rng.range(0, 2) == 0 {
-                        format!("{},{},{}={}:{}(op,inst_A,inst_B,inst_C);", var_r1, var_r2, var_r3, var_vm, name)
-                    } else {
-                        let vname = rng.name();
-                        format!("local {}={};{},{},{}={}:{}(op,inst_A,inst_B,inst_C);", vname, var_vm, var_r1, var_r2, var_r3, vname, name)
-                    };
-                    let rs_pc = format!("{}={}[{}];", var_pc, var_vm, k_pc);
-                    let rs_top = format!("{}={}[{}];", var_top, var_vm, k_top);
-                    let (ra, rb) = if rng.range(0, 2) == 0 { (rs_pc, rs_top) } else { (rs_top, rs_pc) };
-                    format!("{}{}{}{}", sync_stmts, call, ra, rb)
+                    2 => format!("{},{},{}={}.{}({},{});", rn1, rn2, rn3, var_vm, name, var_vm, call_args),
+                    3 => {
+                        let vn = rng.name();
+                        format!("local {}={};{},{},{}={}.{}({},{});", vn, var_vm, rn1, rn2, rn3, vn, name, vn, call_args)
+                    }
+                    4 => {
+                        let fnv = rng.name();
+                        format!("local {}={}.{};{},{},{}={}({},{});", fnv, var_methods, name, rn1, rn2, rn3, fnv, var_vm, call_args)
+                    }
+                    _ => {
+                        let (vn, fnv) = (rng.name(), rng.name());
+                        format!("local {}={};local {}={}.{};{},{},{}={}({},{});", vn, var_vm, fnv, vn, name, rn1, rn2, rn3, fnv, vn, call_args)
+                    }
                 };
+                let rs_pc = format!("{}={}[{}];", var_pc, var_vm, k_pc);
+                let rs_top = format!("{}={}[{}];", var_top, var_vm, k_top);
+                let (ra, rb) = if rng.range(0, 2) == 0 { (rs_pc, rs_top) } else { (rs_top, rs_pc) };
+                let leaf = format!("{}{}{}{}", sync_stmts, call, ra, rb);
                 for &op in ops.iter() {
                     tree_entries.push((op, leaf.clone()));
                 }
@@ -676,10 +702,14 @@ impl Generator {
         // 静态蜜罐注册（永不路由）：形似真 handler 的假块，逆向分析陷阱
         for &dop in decoy_ops.iter() {
             let (dg, skv) = (rng.name(), rng.name());
+            // 签名随机化与真块一致（诱饵永不路由，只需语法自洽）
+            let (d_self, d_p0, d_p1, d_p2, d_p3) =
+                (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
             let (ha_, hb_) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
             let htaut = format!("(0X{:X}-0X{:X}==0X{:X})", ha_, hb_, ha_ - hb_);
             defs.push(format!(
-                "{mv}.{nm}=function(self,op,inst_A,inst_B,inst_C) local {dg}={bx2}(op,0X{dop:X})%{m32v}; local {skv}=self[{ks}]; {skv}[self[{kt}]+0X1]={dg}; self[{kt}]=self[{kt}]+0X1; {psn}={psn} or {taut} end;",
+                "{mv}.{nm}=function({ds},{dp0},{dp1},{dp2},{dp3}) local {dg}={bx2}({dp0},0X{dop:X})%{m32v}; local {skv}={ds}[{ks}]; {skv}[{ds}[{kt}]+0X1]={dg}; {ds}[{kt}]={ds}[{kt}]+0X1; {psn}={psn} or {taut} end;",
+                ds = d_self, dp0 = d_p0, dp1 = d_p1, dp2 = d_p2, dp3 = d_p3,
                 mv = var_methods, nm = rng.name(), dg = dg, bx2 = fn_bxor2.as_str(),
                 dop = dop, m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng),
                 skv = skv, ks = k_stk, kt = k_top, psn = psn_n, taut = htaut));
