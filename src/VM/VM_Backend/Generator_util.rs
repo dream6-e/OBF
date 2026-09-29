@@ -55,6 +55,7 @@ pub(super) struct FoldCtx {
     // ③-3 每常量 MAC 参数（逐 build 随机；读写两侧同式）：
     // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
     pub m1: u32, pub m2: u32, pub m3: u32, pub m4: u32, pub m5: u32,
+    pub rs18: u32, // ⑤ R 链滚动初值种子（逐构建随机，替代固定 0x2545F491）
 }
 
 /// ③-3 每常量 MAC：对 (密文块, 槽号, 折叠值, R链值) 的滚动校验和——
@@ -707,7 +708,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // r7=rotl7(roll)、roll=(r7^文件魔数)+文件A+(预掩码预交换 b/c 异或和) (mod 2^32)。
     // 读侧 body_consts 扫描同式重算（数组 b/c 经 dcb 已是明文=fb0/fc0，含死槽/builtin）。
     // 第 li 槽密钥用「最后一条引用它的指令之后」的 roll（未引用槽用链末值）。
-    let mut roll18: u32 = 0x2545F491 ^ enc.salts[group];
+    // ⑤ roll 初值逐构建随机（原 0x2545F491 是可识别算法指纹常量）
+    let mut roll18: u32 = fc18.rs18 ^ enc.salts[group];
     let mut roll_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     while i < n_insts {
         let (op, a, b, c) = raw_insts[i];
@@ -1360,20 +1362,6 @@ pub fn poly_hash(s: &str) -> u32 {
 /// 常量算术混淆：同一常量逐次换形态（原值 / (v-a)+a / (v+b)-b），
 /// 让解码/扫描公式不以干净常量清单出现。值域 <2^33，double 精确，
 /// 5.1 与 Luau 行为一致。
-pub fn obf_const(rng: &mut GenRng, v: u64) -> String {
-    let hi = if v > 2 { (v - 1).min(0xFFFF) } else { 1 };
-    let a = rng.range(1, hi as usize + 1) as u64;
-    let b = rng.range(1, 0x10000) as u64;
-    // 链公式的特征乘子永不以裸值出现——它们是解码器家族的指纹常量，
-    // 裸值可被直接 grep 对齐；通用模数/小常量保留自然形态。
-    let distinctive = matches!(v, 0x101 | 0x1001 | 0x45D9 | 0x1_0001 | 0x11);
-    let r = rng.range(0, 3);
-    match (distinctive, r) {
-        (false, 0) => format!("0X{:X}", v),
-        (_, 1) => format!("(0X{:X}+0X{:X})", v - a, a),
-        _ => format!("(0X{:X}-0X{:X})", v + b, b),
-    }
-}
 
 /// 随机取一对可用混合密钥（复用 mix_key：k0 非 0 且密文无 \000）。
 pub fn stream_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
@@ -1463,52 +1451,6 @@ impl ShadowNames {
         let c = self.pool[self.i % self.pool.len()];
         self.i += 1;
         c.to_string()
-    }
-}
-
-/// 焊接缓存：3 张缓存表 + 焊接语句发射器。
-pub(super) struct WeldCache { pub tables: Vec<String>, used: std::collections::HashSet<u32>, dpool: Vec<char>, di: usize }
-impl WeldCache {
-    pub fn new(rng: &mut GenRng) -> Self {
-        Self { tables: vec![rng.name(), rng.name(), rng.name()], used: std::collections::HashSet::new(),
-               // 焊接目标名单独池：与游标机字母池（emkqjwcgzh）完全不相交，
-               // 杜绝同作用域内焊接值被游标遮蔽（cb 混合模数曾因此被除数替换）。
-               dpool: "uvnpdftybl".chars().collect(), di: rng.range(0, 10) }
-    }
-    /// 取下一个焊接目标单字母（循环复用→同字母反复承载不同状态）。
-    pub fn dst(&mut self) -> String {
-        let c = self.dpool[self.di % self.dpool.len()];
-        self.di += 1;
-        c.to_string()
-    }
-    pub fn declare(&self) -> String {
-        format!("local {a},{b},{c}={{}},{{}},{{}}; ", a = self.tables[0], b = self.tables[1], c = self.tables[2])
-    }
-    fn key(&mut self, rng: &mut GenRng) -> u32 {
-        loop {
-            let k = rng.range(0x0200_0000, 0x7FFF_FFFF) as u32;
-            if self.used.insert(k) { return k; }
-        }
-    }
-    /// 焊接语句：`if not T[k] then dst=C+((value)-C); T[k]=dst else dst=(T[k]) end;`
-    /// 三种拼写（两臂换序 / 存储拆出）。C 为校验常数；被缓存值必须是真值（数字）。
-    /// **dst 由调用方按作用域声明并复用**（局部数压到 1——同一字母在同一作用域
-    /// 里反复承载不同状态，命名维度彻底消失；也避开 Lua5.1 单函数 200 局部上限）。
-    pub fn weld(&mut self, rng: &mut GenRng, dst: &str, value: &str) -> String {
-        let d = dst;
-        let k = self.key(rng);
-        let kf = rng.format_num(k as i64);
-        let t = self.tables[rng.range(0, self.tables.len())].clone();
-        let c = rng.range64(0x1000_0000, 0x7FFF_FFFF);
-        let cs = rng.format_num(c);
-        match rng.range(0, 3) {
-            0 => format!("if not {t}[{k}] then {d}={cs}+(({v})-{cs}); {t}[{k}]={d} else {d}=({t}[{k}]) end; ",
-                         d = d, t = t, k = kf, cs = cs, v = value),
-            1 => format!("if {t}[{k}] then {d}=({t}[{k}]) else {d}={cs}+(({v})-{cs}); {t}[{k}]={d} end; ",
-                         d = d, t = t, k = kf, cs = cs, v = value),
-            _ => format!("if not {t}[{k}] then {t}[{k}]={cs}+(({v})-{cs}) end; {d}=({t}[{k}]); ",
-                         d = d, t = t, k = kf, cs = cs, v = value),
-        }
     }
 }
 

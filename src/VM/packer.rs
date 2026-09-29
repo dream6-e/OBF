@@ -703,6 +703,10 @@ impl Packer {
             ControlFlowBuilder::obf_num(3, rng), ControlFlowBuilder::obf_num(rng.range64(100, 999), rng),
             ControlFlowBuilder::obf_num(rng.range64(7, 61), rng), ControlFlowBuilder::obf_num(1, rng));
 
+        // ⑤ 字节权/base86 权重逐构建派生（隐式捕获进模板）
+        let (p2, p3) = (rng.name(), rng.name());
+        let (p2v, p3v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 24));
+        let (w1, w2, w3, w4) = (rng.name(), rng.name(), rng.name(), rng.name());
         let script = format!("
 local function {f_entry}({v_data})
     {probe}
@@ -726,6 +730,7 @@ local function {f_entry}({v_data})
         end,
         {m_next} = function(q, s, r, c, e, v, x, y, z, i, d, m, b, k, B, F)
     B, F = s.byte, s.floor;
+    local {p2}={p2v}; local {p3}={p3v}; local {w1}=86; local {w2}={w1}*86; local {w3}={w2}*86; local {w4}={w3}*86;
     i, d, m, b, k = s.idx, s.data, s.map, s.buf, s.kidx;
     if #b > 0 then
         r = s.remove(b, 1);
@@ -736,19 +741,19 @@ local function {f_entry}({v_data})
     if i > s.len then return nil end;
     e = s.len - i + 1;
     if e >= 5 then
-        v = m[B(d, i)] * 54700816 + m[B(d, i+1)] * 636056 + m[B(d, i+2)] * 7396 + m[B(d, i+3)] * 86 + m[B(d, i+4)];
-        z, y, x = v % 256, F(v / 256) % 256, F(v / 65536) % 256;
-        v = F(v / 16777216);
+        v = m[B(d, i)] * {w4} + m[B(d, i+1)] * {w3} + m[B(d, i+2)] * {w2} + m[B(d, i+3)] * {w1} + m[B(d, i+4)];
+        z, y, x = v % 256, F(v / 256) % 256, F(v / {p2}) % 256;
+        v = F(v / {p3});
         b[1], b[2], b[3], b[4] = v, x, y, z;
         i = i + 5;
     elseif e >= 4 then
-        v = m[B(d, i)] * 636056 + m[B(d, i+1)] * 7396 + m[B(d, i+2)] * 86 + m[B(d, i+3)];
+        v = m[B(d, i)] * {w3} + m[B(d, i+1)] * {w2} + m[B(d, i+2)] * {w1} + m[B(d, i+3)];
         y, x = v % 256, F(v / 256) % 256;
-        v = F(v / 65536);
+        v = F(v / {p2});
         b[1], b[2], b[3] = v, x, y;
         i = i + 4;
     elseif e >= 3 then
-        v = m[B(d, i)] * 7396 + m[B(d, i+1)] * 86 + m[B(d, i+2)];
+        v = m[B(d, i)] * {w2} + m[B(d, i+1)] * {w1} + m[B(d, i+2)];
         x = v % 256;
         v = F(v / 256);
         b[1], b[2] = v, x;

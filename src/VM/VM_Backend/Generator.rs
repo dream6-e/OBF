@@ -53,7 +53,7 @@ impl Generator {
         
         let key_seed_var = rng.name();
         // ㉒② 焊接缓存：三张缓存表随产物生成，供第二/三阶段各站点发射焊接构造。
-        let mut weld = crate::VM::VM_Backend::Generator_util::WeldCache::new(&mut rng);
+        let mut weld = crate::VM::VM_Backend::Generator_kdf::WeldCache::new(&mut rng);
         // ㉓ 统一流：packer 脚本串/探测九件套/守卫散点串共用的一条密钥流（惰性解密）。
         let mut uni = crate::VM::VM_Backend::Generator_util::UniStream::new(&mut rng);
         let mut at = AntiTamper::generate_split(true, &key_seed_var);
@@ -179,6 +179,7 @@ impl Generator {
             f1: rng.next() | 1, f2: rng.next(),
             m1: rng.next(), m2: rng.next(), m3: rng.range(1, 24) as u32,
             m4: rng.next() | 1, m5: rng.range(1, 24) as u32,
+            rs18: rng.next(),
         };
         // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
         // 从 0..59∪251..255 取互不相同值（避开 60..250 诱饵键区）；写侧推送与
@@ -678,9 +679,10 @@ impl Generator {
             let (ha_, hb_) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
             let htaut = format!("(0X{:X}-0X{:X}==0X{:X})", ha_, hb_, ha_ - hb_);
             defs.push(format!(
-                "{mv}.{nm}=function(self,op,inst_A,inst_B,inst_C) local {dg}={bx2}(op,0X{dop:X})%4294967296; local {skv}=self[{ks}]; {skv}[self[{kt}]+0X1]={dg}; self[{kt}]=self[{kt}]+0X1; {psn}={psn} or {taut} end;",
+                "{mv}.{nm}=function(self,op,inst_A,inst_B,inst_C) local {dg}={bx2}(op,0X{dop:X})%{m32v}; local {skv}=self[{ks}]; {skv}[self[{kt}]+0X1]={dg}; self[{kt}]=self[{kt}]+0X1; {psn}={psn} or {taut} end;",
                 mv = var_methods, nm = rng.name(), dg = dg, bx2 = fn_bxor2.as_str(),
-                dop = dop, skv = skv, ks = k_stk, kt = k_top, psn = psn_n, taut = htaut));
+                dop = dop, m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng),
+                skv = skv, ks = k_stk, kt = k_top, psn = psn_n, taut = htaut));
         }
         // ③ 随机代码块分配：注册顺序打乱，分发树按**状态号**（随机大整数）路由
         rng.shuffle(&mut defs);
@@ -828,7 +830,7 @@ impl Generator {
             let dc_family = rng.range(0, 4);
             // 常量混淆器（公共件 obf_const）：同一常量每次出现换一种算术形态，
             // 兜底分支不再是干净的常量清单；加密串路径同样受益。
-            let oc = crate::VM::VM_Backend::Generator_util::obf_const;
+            let oc = crate::VM::VM_Backend::Generator_kdf::obf_const;
             // 填充语句（P 参数：Pa=ops Pb=aa Pc=bb Pd=cc Pe..Pg=mk1..3 Ph=状态 Pi=DC Pj=bx Pk=Δ）
             let mut stmts: Vec<String> = vec![
                 "Ph.n=Ph.n+1;".into(),
@@ -899,11 +901,12 @@ impl Generator {
                 decl = st_decl, dec = dec_expr,
                 ff = dc_fn, ok = dc_ok, fn = rng.name()));
             block_execute_def.push_str(&format!(
-                "local {ndc}={{}}; local {ds}={{n={c}.{lld},ch=({bx}({kon},{c}.{lld})*{chm}+{chk0})%0X100000000,m1={mk1},m2={mk2},m3={mk3}}}; \
+                "local {ndc}={{}}; local {ds}={{n={c}.{lld},ch=({bx}({kon},{c}.{lld})*{chm}+{chk0})%{dcm32},m1={mk1},m2={mk2},m3={mk3}}}; \
                  local {fill}={fn}({bind}); \
                  setmetatable({ndc},{{__index=function({tt},{kk}) while {ds}.n<{kk} do {fill}() end return rawget({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
                 ndc = n_dc, ds = dc_ds, c = "chunk", lld = pf_lld,
                 bx = fn_bxor2.as_str(), kon = n_kon, chm = chm_e, chk0 = chk0_e,
+                dcm32 = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng),
                 mk1 = n_mk1, mk2 = n_mk2, mk3 = n_mk3,
                 fill = dc_fill, fn = dc_fn,
                 bind = bind_args,
@@ -982,7 +985,8 @@ impl Generator {
             // ㉒① thunk 回写环、寄存器键轮换环 → 动态分段数值游标机
             // （execute 作用域内 P 表已建，状态常数走 obfuscate_num 算式化出边）。
             let w2_dst = weld.dst();
-            let w2_stmt = format!("local {};", w2_dst) + &weld.weld(&mut rng, &w2_dst, "4294967296");
+            let w2_mv = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
+            let w2_stmt = format!("local {};", w2_dst) + &weld.weld(&mut rng, &w2_dst, &w2_mv);
             let md_walk = {
                 let (md2, th2) = (md21.clone(), th21.clone());
                 let off = rng.range(0, 100);

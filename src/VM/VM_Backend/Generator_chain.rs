@@ -109,7 +109,7 @@ pub(super) struct ChainIn {
     pub pm_s: [u64; 8],
     pub tag_map18: [u8; 4],
     pub fc18: crate::VM::VM_Backend::Generator_util::FoldCtx,
-    pub weld: crate::VM::VM_Backend::Generator_util::WeldCache,
+    pub weld: crate::VM::VM_Backend::Generator_kdf::WeldCache,
     pub uni: crate::VM::VM_Backend::Generator_util::UniStream,
 }
 
@@ -235,9 +235,13 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             "local {xt}={{}}; {walk} ",
             xt = xor_tbl_var, walk = xor_walk
         ));
+        // ⑤ 字节权 2^16/2^24 逐构建拆分派生（xor32 内局部）
+        let (x16, x24) = (rng.name(), rng.name());
+        let (x16v, x24v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
         block_chacha_setup.push_str(&format!(
-            "local function {xor32}(a,b) local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/65536)%256,math_floor(a/16777216)%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/65536)%256,math_floor(b/16777216)%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*65536+{xt}[a4][b4]*16777216 end; ",
-            xor32 = fn_xor32, xt = xor_tbl_var
+            "local function {xor32}(a,b) local {p2}={p2v}; local {p3}={p3v}; local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/{p2})%256,math_floor(a/{p3})%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/{p2})%256,math_floor(b/{p3})%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*{p2}+{xt}[a4][b4]*{p3} end; ",
+            xor32 = fn_xor32, xt = xor_tbl_var,
+            p2 = x16, p3 = x24, p2v = x16v, p3v = x24v
         ));
         // ㉔ 2^32 逐实例算式化（k-差式=k 恒等 2^32；各站点独立推导不同形）
         let mk_m = |rng: &mut GenRng| -> String {
@@ -351,15 +355,19 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             let mut idxs: Vec<usize> = vec![1, 2, 3, 4, 5, 6, 7, 8];
             for j in (1..idxs.len()).rev() { let k = rng.range(0, j + 1); idxs.swap(j, k); }
             let sig_idx = [idxs[0], idxs[1], idxs[2], idxs[3]];
+            // ⑤ sigma 还原模数逐构建拆分派生
+            let sm32 = rng.name();
+            let sm32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let sigma_lua = (0..4)
                 .map(|i| {
                     let d = sigma[i].wrapping_sub(enc.keys[g][sig_idx[i] - 1]);
-                    format!("(({}+K[{}])%4294967296)", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i])
+                    format!("(({}+K[{}])%{m32})", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i], m32 = sm32)
                 })
                 .collect::<Vec<_>>()
                 .join(",");
             cl.push_str(&format!(
-                "local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
+                "local {sm32}={sm32v}; local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
+                sm32 = sm32, sm32v = sm32v,
                 kn = kname, key_lua = key_lua, sl = slname, salt_lua = salt_lua));
             // ㉒ 簇内 cb 同 boot 域处理：焊接混合模数 + 两条 16 环游标化。
             let gmix_v = mk_m(&mut rng);
@@ -370,15 +378,19 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 let unit = |iv: &str| format!("o[{iv}]=s[{iv}]; ", iv = iv);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
             };
+            // ⑤ u32 拆分字节权逐构建派生
+            let (gp2, gp3) = (rng.name(), rng.name());
+            let (gp2v, gp3v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
             let gs2_walk = {
                 let off = rng.range(0, 100);
                 let me = gmix_e.clone();
-                let unit = |iv: &str| format!("local wq=(s[{iv}]+o[{iv}])%{me}; out[({iv}-1)*4+1]=wq%256; out[({iv}-1)*4+2]=math_floor(wq/256)%256; out[({iv}-1)*4+3]=math_floor(wq/65536)%256; out[({iv}-1)*4+4]=math_floor(wq/16777216)%256; ", me = me, iv = iv);
+                let unit = |iv: &str| format!("local wq=(s[{iv}]+o[{iv}])%{me}; out[({iv}-1)*4+1]=wq%256; out[({iv}-1)*4+2]=math_floor(wq/256)%256; out[({iv}-1)*4+3]=math_floor(wq/{p2})%256; out[({iv}-1)*4+4]=math_floor(wq/{p3})%256; ", me = me, iv = iv, p2 = gp2, p3 = gp3);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
             };
             cl.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; {w1} {rounds} local out={{}}; {w2} return out end; ",
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; local {p2}={p2v}; local {p3}={p3v}; {w1} {rounds} local out={{}}; {w2} return out end; ",
                 cb = cbname, kn = kname, sig = sigma_lua, mixw = gmix_weld, w1 = gs1_walk, w2 = gs2_walk,
+                p2 = gp2, p3 = gp3, p2v = gp2v, p3v = gp3v,
                 rounds = mk_rounds(&mut rng, fn_qr.as_str())));
             // ㉓-A sm 换公式：nonce=[盐^roll^fold, r7^(槽*6+kind), 盐^rotl7(r7)]——
             // layouts 直传退役；roll/fold 由 body_consts 扫描重算后经 dsp 透传
@@ -557,11 +569,13 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
         );
         let body_insts = format!(
             "{st}={nxt}; {tree9} {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
-             local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+0X100000000 end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>=0X80000000 then {w}={w}-0X100000000 end return {w} end; \
+             local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+{m32v} end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>={m31v} then {w}={w}-{m32v} end return {w} end; \
              local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
              while {i} < {n} do {i} = {i} + 1; \
-             local {mv}={a5}() if {mv}<0 then {mv}={mv}+0X100000000 end local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%4294967296,{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%4294967296,{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%4294967296,{kc18}) local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {rd}() end end; ",
+             local {mv}={a5}() if {mv}<0 then {mv}={mv}+{m32v} end local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%{m32v},{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%{m32v},{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%{m32v},{kc18}) local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {rd}() end end; ",
             tree9 = it9(&mut rng, var_state.as_str()),
+            m32v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 32),
+            m31v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 31),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
             i = v_ch_i, n = v_ch_n, cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
@@ -928,15 +942,19 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             let mut idxs: Vec<usize> = vec![1, 2, 3, 4, 5, 6, 7, 8];
             for j in (1..idxs.len()).rev() { let k = rng.range(0, j + 1); idxs.swap(j, k); }
             let sig_idx = [idxs[0], idxs[1], idxs[2], idxs[3]];
+            // ⑤ sigma 还原模数逐构建拆分派生
+            let sm32b = rng.name();
+            let sm32bv = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let sigma_lua = (0..4)
                 .map(|i| {
                     let d = sigma[i].wrapping_sub(bkey[sig_idx[i] - 1]);
-                    format!("(({}+K[{}])%4294967296)", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i])
+                    format!("(({}+K[{}])%{m32})", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i], m32 = sm32b)
                 })
                 .collect::<Vec<_>>()
                 .join(",");
             // ㉘D7 簇头三条声明互无依赖（bp 密文表/kn 键表/sl 盐），洗牌发射
             let mut cluster_decls: Vec<String> = vec![
+                format!("local {m32}={m32v}; ", m32 = sm32b, m32v = sm32bv),
                 format!("local {bp}={{{lits}}}; ", bp = bpt, lits = boot_lits.join(",")),
                 format!("local {kn}={{{key_lua}}}; ", kn = bk, key_lua = key_lua),
                 format!("local {sl}={salt_lua}; ", sl = bs, salt_lua = salt_lua),
@@ -953,15 +971,19 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 let unit = |iv: &str| format!("o[{iv}]=s[{iv}]; ", iv = iv);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
             };
+            // ⑤ u32 拆分字节权逐构建派生
+            let (bp2, bp3) = (rng.name(), rng.name());
+            let (bp2v, bp3v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
             let s2_walk = {
                 let off = rng.range(0, 100);
                 let me = mix_e.clone();
-                let unit = |iv: &str| format!("local wq=(s[{iv}]+o[{iv}])%{me}; out[({iv}-1)*4+1]=wq%256; out[({iv}-1)*4+2]=math_floor(wq/256)%256; out[({iv}-1)*4+3]=math_floor(wq/65536)%256; out[({iv}-1)*4+4]=math_floor(wq/16777216)%256; ", me = me, iv = iv);
+                let unit = |iv: &str| format!("local wq=(s[{iv}]+o[{iv}])%{me}; out[({iv}-1)*4+1]=wq%256; out[({iv}-1)*4+2]=math_floor(wq/256)%256; out[({iv}-1)*4+3]=math_floor(wq/{p2})%256; out[({iv}-1)*4+4]=math_floor(wq/{p3})%256; ", me = me, iv = iv, p2 = bp2, p3 = bp3);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
             };
             out.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; {w1} {rounds} local out={{}}; {w2} return out end; ",
+                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; local {p2}={p2v}; local {p3}={p3v}; {w1} {rounds} local out={{}}; {w2} return out end; ",
                 cb = bcb, kn = bk, sig = sigma_lua, mixw = mix_weld, w1 = s1_walk, w2 = s2_walk,
+                p2 = bp2, p3 = bp3, p2v = bp2v, p3v = bp3v,
                 rounds = mk_rounds(&mut rng, fn_qr.as_str())));
             // ㉒① 64 字节分发环 → 4 态游标机（pos>n 提前出口保留为批内 break）。
             let sm_walk = {

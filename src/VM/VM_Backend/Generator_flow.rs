@@ -203,7 +203,7 @@ pub fn build_readers(
                         1 => {
                             // 双 u16 段拼：lo=b1+b2*W、hi=b3+b4*W，段权 W16
                             let w1 = if rng.range(0, 2) == 0 { "256" } else { "2^8" };
-                            let w2 = if rng.range(0, 2) == 0 { "65536" } else { "2^16" };
+                            let w2 = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 16);
                             let lo = format!("({}+{}*{})", b[0], b[1], w1);
                             let hi = format!("({}+{}*{})", b[2], b[3], w1);
                             if rng.range(0, 2) == 0 { format!("{}+{}*{}", lo, hi, w2) } else { format!("{}*{}+{}", hi, w2, lo) }
@@ -211,8 +211,8 @@ pub fn build_readers(
                         _ => {
                             // 乱序加权和：权重拼写独立、项序洗牌、累加起点换随机零种子
                             let w8 = if rng.range(0, 2) == 0 { "256" } else { "2^8" };
-                            let w16 = if rng.range(0, 2) == 0 { "65536" } else { "2^16" };
-                            let w24 = ["16777216", "2^24", "2^16*256"][rng.range(0, 3)];
+                            let w16 = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 16);
+                            let w24 = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 24);
                             let mut terms = vec![
                                 b[0].to_string(),
                                 format!("{}*{}", b[1], w8),
@@ -367,7 +367,8 @@ pub fn build_readers(
                 }
                 // a10（i32 符号还原）
                 {
-                    let hexp = ["2^31", "2^30*2", "2147483648", "2^16*2^15"][rng.range(0, 4)];
+                    // ⑤ 2^31 拼写池去裸十进制项，换拆分乘积
+                let hexp = ["2^31", "2^30*2", "0X8000*0X10000", "2^16*2^15"][rng.range(0, 4)];
                     let cond = match rng.range(0, 3) {
                         0 => format!("{v}>=2*{h}-{h}", v = v_u32_v, h = v_a10_h),
                         1 => format!("not({v}<{h})", v = v_u32_v, h = v_a10_h),
@@ -486,6 +487,9 @@ pub fn build_consts(
                     rng.obfuscate_num(fc.m5 as i64, 1, &keys));
                 let (vm, vb, vl, vf, vr, vs, vn, vj) = (rng.name(), rng.name(), rng.name(), rng.name(),
                     rng.name(), rng.name(), rng.name(), rng.name());
+                // ⑤ u32 模数 KDF 派生局部（名字先于变体块定义，闭包引用）
+                let m32 = rng.name();
+                let m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(rng);
                 // ③-3：三分派闭包统一「先验 MAC 后解码」——记录第 4 字段是线上
                 // 校验和；vmac 不过 → nil（篡改密文/槽位/指令流任一都命中）。
                 // ③-4 常量表生成器四异构变体（处理器体共用，结构逐 build 抽签）：
@@ -498,8 +502,8 @@ pub fn build_consts(
                 let table_regime = ctv < 2;
                 // ── dsp 处理器体：fd/rl 局部 + MAC 先验 + 解码表达式（逐支独立名）──
                 let mac_pre = |fdn_: &str, rln_: &str| -> String {
-                    format!("local {fd}=({ft}[ev[(0X3)]] or 0X0)%4294967296; local {rl}=({rt}[ev[(0X3)]] or {rf}); if {vm}(ev[(0X2)],ev[(0X3)],{fd},{rl})~=ev[(0X4)] then return nil end; ",
-                        fd = fdn_, rl = rln_, ft = ftds, rt = rtds, rf = rfds, vm = vm)
+                    format!("local {fd}=({ft}[ev[(0X3)]] or 0X0)%{m32}; local {rl}=({rt}[ev[(0X3)]] or {rf}); if {vm}(ev[(0X2)],ev[(0X3)],{fd},{rl})~=ev[(0X4)] then return nil end; ",
+                        fd = fdn_, rl = rln_, ft = ftds, rt = rtds, rf = rfds, vm = vm, m32 = m32)
                 };
                 let (fd3, rl3) = (rng.name(), rng.name());
                 let (fd2, rl2) = (rng.name(), rng.name());
@@ -507,9 +511,11 @@ pub fn build_consts(
                 let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],ev[(0X3)],{fd},{rl})", pre = mac_pre(&fd3, &rl3), fds = fds, fd = fd3, rl = rl3);
                 let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl})", pre = mac_pre(&fd2, &rl2), fdn = fdn, fd = fd2, rl = rl2);
                 let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl})~={zero}", pre = mac_pre(&fd1, &rl1), fdn = fdn, fd = fd1, rl = rl1, zero = zero);
-                let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%4294967296)", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s);
+                let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%{m32})", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s, m32 = m32);
                 // ── ld 处理器体（参数 pos；逐体独立局部名）──
-                let mrv = format!("{rd}()+{rd}()*0X100+{rd}()*0X10000+{rd}()*0X1000000", rd = fn_read_dec);
+                let mrv = format!("{rd}()+{rd}()*0X100+{rd}()*{w16}+{rd}()*{w24}", rd = fn_read_dec,
+                    w16 = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 16),
+                    w24 = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 24));
                 let (bn2, bj2) = (rng.name(), rng.name());
                 let (bn1, bj1) = (rng.name(), rng.name());
                 let ld_body3 = format!("local bl={rs}() local mv={mrv} {ec}[(pos)]={{{tvm3},bl,pos-1,mv}}",
@@ -611,10 +617,11 @@ pub fn build_consts(
                 let mut lua = format!(
                     // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
                     // pairs 遍历直接报错；后备退化为普通表（fail-open）
-                    "local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
+                    "local {m32}={m32v}; local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
                      local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
-                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*{kmul}+{kadd})%4294967296 elseif tq=='string' then return {kobf}..((#q*{ksmul})%4294967296) elseif tq=='boolean' then return not q end return q end; ",
+                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then return {kobf}..((#q*{ksmul})%{m32}) elseif tq=='boolean' then return not q end return q end; ",
+                    m32 = m32, m32v = m32v,
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
                     wctr = wctr, pfn = pfn_n, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
@@ -628,10 +635,10 @@ pub fn build_consts(
                 // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
                 // ——乘数域均 <2^40，Lua double 全精确；串/表两种 blob 分支取字节
                 lua.push_str(&format!(
-                    "local {vm}=function({vb},{vl},{vf},{vr}) local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%4294967296); {vs}=({bx})({vs},({vf})%4294967296); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if type({vb})=='string' then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%4294967296); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%4294967296); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
+                    "local {vm}=function({vb},{vl},{vf},{vr}) local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if type({vb})=='string' then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
                     vm = vm, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
                     mc1 = mc1, mc2 = mc2, mc3 = mc3, mc4 = mc4, mc5 = mc5,
-                    bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte));
+                    bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte, m32 = m32));
                 // ③-4 变体化的常量表基建——必须在 vmac 之后（V2/V3 的分派闭包
                 // 体内引用 vmac，词序先于其定义会把 vm 解析成全局）
                 lua.push_str(&ct_init);
@@ -713,17 +720,18 @@ lua.push_str(&format!(
                     g = gname, s0 = salt_names[0], s1 = salt_names[1], s2 = salt_names[2], s3 = salt_names[3]);
                 // 链公式常量逐位算术混淆（公共件 obf_const）：扫描重放不再以
                 // 干净常量清单暴露解码参数
-                let mut ob1 = |v: u64| crate::VM::VM_Backend::Generator_util::obf_const(rng, v);
+                let mut ob1 = |v: u64| crate::VM::VM_Backend::Generator_kdf::obf_const(rng, v);
                 let (kmz, k100a, k2a, k100b, k100c, k100d, kma, kmb) = (ob1(0x100000000), ob1(0x100), ob1(0x2), ob1(0x100), ob1(0x100), ob1(0x100), ob1(0x100000000), ob1(0x100000000));
                 let (k10001, kmc, kmd, k80a, kme, k45d9, kmf, k80b, kmg) = (ob1(0x10001), ob1(0x100000000), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000), ob1(0x45D9), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000));
                 let (k3, k101, k1001, kmh, kmi, k11, kmj, ks32a, ks32b) = (ob1(0x3), ob1(0x101), ob1(0x1001), ob1(0x100000000), ob1(0x100000000), ob1(0x11), ob1(0x100000000), ob1(0x100000000), ob1(0x100000000));
                 lua.push_str(&format!(
-                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}(0X2545F491,{sal}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%4294967296,0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%4294967296+{bx}({bv}%4294967296,{cv}%4294967296)%4294967296)%4294967296; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
+                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({rs},{sal}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
                     av = rng.name(), ob = rng.name(), bv = rng.name(),
                     cv = rng.name(), fp = rng.name(), sk = rng.name(),
                     c = fn_c, pfo = pf_opcodes, pfa = pf_a_arr, pfb = pf_b_arr, pfc = pf_c_arr,
                     bx = fn_bxor, rot = fn_rotl, ft = ftds, rt = rtds, rf = rfds, sal = sal_sel,
+                    rs = deep10(rng, fn_bxor, fc.rs18 as i64),
                     kmz = kmz, k100a = k100a, k2a = k2a, k100b = k100b, k100c = k100c, k100d = k100d,
                     kma = kma, kmb = kmb, k10001 = k10001, kmc = kmc, kmd = kmd, k80a = k80a,
                     kme = kme, k45d9 = k45d9, kmf = kmf, k80b = k80b, kmg = kmg, k3 = k3,
@@ -732,6 +740,7 @@ lua.push_str(&format!(
                     pb = rng.name(),
                     ma = rng.name(), mb = rng.name(), mc = rng.name(),
                     pld = pf_ld_key, plld = pf_lld_key, pcnt = pf_cnt_key,
+                    m32 = m32,
                     f1 = fc.f1, f2 = fc.f2,
                     rb = fc.r6b, pb1 = fc.p1b, pb3 = fc.p3b,
                     rc = fc.r6c, pc1 = fc.p1c, pc3 = fc.p3c,

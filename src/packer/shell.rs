@@ -759,12 +759,9 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(1, "local R = G[Z(108, 111, 97, 100, 115, 116, 114, 105, 110, 103)] or G[Z(108, 111, 97, 100)];", &mut out);
     line(1, "local V = {};", &mut out);
     line(1, &format!("local D = [=[{alphabet_text}]=];"), &mut out);
-    line(
-        1,
-        "local S = {[0] = 1, 85, 7225, 614125, 52200625};",
-        &mut out,
-    );
-    line(1, "local T = {[0] = 1, 256, 65536, 16777216};", &mut out);
+    // ⑤ base85/字节权重表不裸发大幂常量——逐项乘积链推导
+    line(1, "local S = {[0] = 1}; S[1] = S[0]*85; S[2] = S[1]*85; S[3] = S[2]*85; S[4] = S[3]*85;", &mut out);
+    line(1, "local T = {[0] = 1}; T[1] = T[0]*256; T[2] = T[1]*256; T[3] = T[2]*256;", &mut out);
     // 环境探针：借参考件这块的格式，内容换成本外壳真正需要的前置检查。被 hook 坏的
     // string.char/string.byte 会让整份解码静默错位，而缺 loader（或它不在捕获表里）会在
     // 最后一步才炸——都在这里先死，报错更好读。

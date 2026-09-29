@@ -4,6 +4,7 @@ pub mod Generator_chain;
 pub mod Generator_flow;
 pub mod Generator_unistream;
 pub mod Generator_util;
+pub mod Generator_kdf;
 pub mod Lua_core;
 pub mod Serializer;
 pub mod AntiTamper;

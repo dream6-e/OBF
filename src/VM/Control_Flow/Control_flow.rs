@@ -145,7 +145,7 @@ impl ControlFlowBuilder {
         };
         let mut decl = format!("local {}={{}};local {}={{}};local {}=function(w,u) local z=w%0X2 return u+(z-z) end;", ct, sl, dv);
         // ㉙① 去裸数字：公差除数 dm / 加数 db / 填表循环下界 1 全部混淆算式化
-        decl.push_str(&format!("local {}=({});local {}=(({})%0X10000)*{}+{};local {}=((({}))%{})*2+{};for {}={},{} do {}[{}]={};{}={}+{} end;",
+        decl.push_str(&format!("local {}=({});local {}=(({})%(0X100*0X100))*{}+{};local {}=((({}))%{})*2+{};for {}={},{} do {}[{}]={};{}={}+{} end;",
             sd, seed_src,
             cc, sd, Self::obf_num(k0 as i64, rng), Self::obf_num(k1, rng),
             dd, sd, Self::obf_num(dm as i64, rng), Self::obf_num(db as i64, rng),

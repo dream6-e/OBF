@@ -384,9 +384,10 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         let guard_type = guards_indices[i];
 
         // 每块入口先推进共享状态，并把「实算状态 − 本步应有状态」混进令牌：
+        let st_m32 = { let a = rng.gen_range(8..25); format!("(0X{:X}*0X{:X})", 1u64 << a, 1u64 << (32 - a)) };
         let state_step = format!(
-            "{}=({}*{}+{})%0X100000000;",
-            v_state, v_state, derived_num(step_a[i], &mut rng), derived_num(step_b[i], &mut rng)
+            "{}=({}*{}+{})%{};",
+            v_state, v_state, derived_num(step_a[i], &mut rng), derived_num(step_b[i], &mut rng), st_m32
         );
         let corr = format!("+({}-0X{:X})", v_state, state_at[i + 1]);
         let next_key = derived_num(keys[i + 1], &mut rng);
@@ -495,7 +496,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                              local ok, inf = p(gi, p); \
                              if not ok or type(inf)~={tab_lit} then {} else \
                              local w=inf.what; local h={hp_seed}; \
-                             for idx=1,#w do h=(h*{hp_mult}+string.byte(w,idx)+{hp_add})%4294967296 end; \
+                             for idx=1,#w do h=(h*{hp_mult}+string.byte(w,idx)+{hp_add})%{hm32} end; \
                              if h~={} then {} else {} end end end end\n",
                         v_res, hash_debug, v_res, hash_pcall,
                         next_bad,
@@ -504,6 +505,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                         next_bad,
                         hash_C, next_bad, next_good,
                         tab_lit = sc_tab,
+                        hm32 = { let a = rng.gen_range(8..25); format!("(0X{:X}*0X{:X})", 1u64 << a, 1u64 << (32 - a)) },
                         hp_seed = format!("0X{:X}", hash_params().seed),
                         hp_mult = format!("0X{:X}", hash_params().mult),
                         hp_add = format!("0X{:X}", hash_params().add)
