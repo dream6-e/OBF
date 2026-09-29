@@ -460,13 +460,13 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         // (v-v%d)/d 代 floor、k2*2+k2 代 k2*3，包单次循环+影子计数器。
         let block_dec_helpers = format!(
             "local function {bx}({a},{b}) local {r},{w},{g},{s}=0,1,0,0; \
-             while {g}<({r}-{r})+1 do \
+             while {g}<({r}*0X2-{r})-({r}-0X1) do \
              if {a}<=0 and {b}<=0 then {g}={g}+1 else \
              {s}=(({a}%2)+({b}%2))%2; {r}={r}+{s}*{w}; \
              {a}=({a}-({a}%2))/2; {b}=({b}-({b}%2))/2; {w}={w}+{w}; end end; \
              return {r} end; \
              local function {rt}({x},{n}) local {d},{g},{t}=2^{n},0,0; \
-             while {g}<({t}-{t})+1 do \
+             while {g}<({t}*0X2-{t})-({t}-0X1) do \
              {t}=(({x}*(256/{d}))%256)+(({x}-({x}%{d}))/{d}); {g}={g}+1; end; \
              return {t} end; \
              {rd_scatter} ",
@@ -839,9 +839,10 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         // 「np,md,th,tw,rk,kreg,psn」字面顺序消失；后续按名引用，顺序无语义
         {
             // 注意：此处早于 block_p_def（键表），不能用 obfuscate_num 的键表形态，
-            // 只用纯算式零（大写十六进制）
+            // 只用纯算式零（大写十六进制）。㉚④：零用 x%x 恒零——不再用
+            // (x-x) 同字面量自抵消形态
             let zk = rng.range(0x100, 0xFFFFF);
-            let z_rk = format!("(0X{:X}-0X{:X})", zk, zk);
+            let z_rk = format!("(0X{:X}%0X{:X})", zk, zk);
             let mut decls: Vec<(String, String)> = vec![
                 (np21.clone(), "0".to_string()),
                 (md21.clone(), "{}".to_string()),
@@ -867,10 +868,11 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         out.push_str(&sk_setup);
         at.finish_setup();
         out.push_str(&at.setup);
-        // ㉘D1 key_seed 初值零改算式形态（此处早于键表，纯减法零）
+        // ㉘D1 key_seed 初值零改算式形态（此处早于键表；㉚④：x%x 恒零，
+        // 不再用同字面量自抵消）
         {
             let zk2 = rng.range(0x100, 0xFFFFF);
-            out.push_str(&format!(" local {} = (0X{:X}-0X{:X}); ", key_seed_var, zk2, zk2));
+            out.push_str(&format!(" local {} = (0X{:X}%0X{:X}); ", key_seed_var, zk2, zk2));
         }
         out.push_str(" ");
         // A 解码器前奏打散：五件套不再「库-函数」对齐并列（math.floor,string.char,... 教科书

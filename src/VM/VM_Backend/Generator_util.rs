@@ -105,7 +105,9 @@ impl ControlFlowBuilder {
             return Self::format_num(val, rng);
         }
 
-        let style = rng.range(0, 10);
+        // ㉚④：val==0 时禁走差式——`(x-x)` 是同字面量自抵消的暴露形态；
+        // 零值改走运行时查表分支（真·不可静态折叠）。
+        let style = rng.range(if val == 0 { 4 } else { 0 }, 10);
         if style < 4 {
             let huge = rng.range(0x100, 0x2FFF) as i64;
             let offset = val.wrapping_add(huge);
@@ -1014,7 +1016,8 @@ impl GenRng {
     }
     pub fn obfuscate_num(&mut self, val: i64, depth: usize, keys: &CipherKeys) -> String {
         if depth == 0 { return self.format_num(val); }
-        let style = self.range(0, 10);
+        // ㉚④：val==0 禁走差式——`(x-x)` 同字面量自抵消是暴露形态；零值走查表
+        let style = self.range(if val == 0 { 4 } else { 0 }, 10);
         if style < 4 {
             let huge = self.range64(0x10000000, 0x7FFFFFFF);
             format!("({}-{})", self.obfuscate_num(val.wrapping_add(huge), depth - 1, keys), self.obfuscate_num(huge, depth - 1, keys))

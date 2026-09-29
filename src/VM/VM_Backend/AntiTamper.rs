@@ -26,6 +26,11 @@ impl AntiTamperResult {
 /// 三种写法求值都恰好等于 val，但产物里再也看不到 val 本身，
 /// 同一个常量在不同位置也会被写成不同片段（无法搜索替换）。
 fn derived_num(val: u64, rng: &mut impl Rng) -> String {
+    // ㉚④：val==0 时差式退化成 (b-b) 同字面量自抵消——改 x%x 恒零
+    if val == 0 {
+        let b = rng.gen_range(0x1000u64..0xFF_FFFF);
+        return format!("(0X{:X}%0X{:X})", b, b);
+    }
     match rng.gen_range(0..3) {
         0 => {
             let b = rng.gen_range(0x1000u64..0xFF_FFFF);
@@ -44,14 +49,36 @@ fn derived_num(val: u64, rng: &mut impl Rng) -> String {
     }
 }
 
-/// ㉒族恒等转移式（三款，目标值恒等）：-r+(r+t) / (r-r)+t / (2r-(r+r))+t
+/// ㉒族恒等转移式——㉚④ 去自曝：改非线性乘法折叠链。
+/// 旧形 `(r-r)+t`、`((2r)-(r+r))+t`、`-r+(r+t)` 把目标值 `t` 直接以字面量
+/// （或一眼可还原的形态）暴露在产物里；现在恒等式一律走
+/// `target = q*d + rem` 的乘法折叠，rem 的呈现三种轮换（直加 / 加拆 /
+/// 加减拆）——表达式里没有任何单字面量等于 target，静态读不出状态号。
 fn opq_ident<T: Rng>(rng: &mut T, target: u32) -> String {
-    let bound = (0xFFFFFu32).min(0xFFFFFEu32.saturating_sub(target)).max(0x1000);
-    let r: u32 = rng.gen_range(0x1000..bound);
+    // ㉚④：强制 rem≠0——rem==0 时装扮臂退化成 (f-f) 同值自抵消
+    let mut d: u32 = rng.gen_range(3..0x100);
+    for _ in 0..8 {
+        if target % d != 0 { break; }
+        d = rng.gen_range(3..0x100);
+    }
+    let q = target / d;
+    let rem = target % d;
+    if q == 0 {
+        // 兜底（当前调用方 target ≥ 0X10000，理论不可达）：
+        // 和差拆分同样不让 target 单独成字面量
+        let b: u32 = rng.gen_range(0x1000..0xFFFF);
+        return format!("(0X{:X}-0X{:X})", target + b, b);
+    }
     match rng.gen_range(0..3) {
-        0 => format!("-0X{:X}+0X{:X}", r, r + target),
-        1 => format!("(0X{:X}-0X{:X})+0X{:X}", r, r, target),
-        _ => format!("((2*0X{:X})-(0X{:X}+0X{:X}))+0X{:X}", r, r, r, target),
+        0 => format!("(0X{:X}*0X{:X}+0X{:X})", q, d, rem),
+        1 => {
+            let f: u32 = rng.gen_range(0x100..0x8000);
+            format!("((0X{:X}*0X{:X})+(0X{:X}-0X{:X}))", q, d, rem + f, f)
+        }
+        _ => {
+            let f: u32 = rng.gen_range(0x100..0x8000);
+            format!("((0X{:X}*0X{:X})+0X{:X}-0X{:X})", q, d, f, f - rem)
+        }
     }
 }
 /// 常量伪装：值恒等的随机算式（内层异或循环的 8/2 等）

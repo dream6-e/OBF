@@ -84,17 +84,33 @@ impl ControlFlowBuilder {
         let cap = (0xF0000i64).min(0xFFFFFE - v.abs());
         let r = rng.range64(0x1000, cap.max(0x1002));
         let core = match rng.range(0, 4) {
+            // ㉚④：v==0 时差式/和式都退化成同字面量自抵消——改 x%x 恒零
+            0 if v == 0 => format!("({}%{})", hex(r, rng), hex(r, rng)),
+            1 if v == 0 => format!("({}%{})", hex(r, rng), hex(r, rng)),
             0 => format!("({}-{})", hex(v + r, rng), hex(r, rng)),
             1 => format!("(-{}+{})", hex(r, rng), hex(r + v, rng)),
-            2 => format!("((({})-({}))+{})", hex(r, rng), hex(r, rng), hex(v, rng)),
+            // ㉚④：旧形 ((r)-(r))+v 让 v 裸现——改乘法折叠：
+            // v = q*d + rem，rem 藏进 +(f)-((f)-rem) 拆分（v 可为负/零，
+            // div/rem_euclid 保证 rem≥0；f>rem 恒立）
+            2 => {
+                // ㉚④：rem==0 时 (f)-(f-0) 仍露同值对——强制 rem≠0
+                let d = rng.range64(3, 0x100);
+                let mut d = if v.rem_euclid(d) == 0 { rng.range64(3, 0x100) } else { d };
+                for _ in 0..8 { if v.rem_euclid(d) != 0 { break; } d = rng.range64(3, 0x100); }
+                let q = v.div_euclid(d);
+                let rem = v.rem_euclid(d);
+                let f = rng.range64(0x100, 0x8000);
+                format!("((({}*{})+{})-({}-{}))", hex(q, rng), hex(d, rng), hex(f, rng), hex(f, rng), hex(rem, rng))
+            }
             _ => {
                 let q = rng.range64(3, 25);
                 format!("(({})/({}))", hex(v * q, rng), hex(q, rng))
             }
         };
         if rng.range(0, 2) == 0 { core } else {
+            // ㉚④：外层零项不再用 (r2-r2) 同字面量自抵消——改 x%x 恒零
             let r2 = rng.range64(0x100, 0xF000);
-            format!("({}+({}-{}))", core, hex(r2, rng), hex(r2, rng))
+            format!("({}+({}%{}))", core, hex(r2, rng), hex(r2, rng))
         }
     }
 
@@ -158,7 +174,9 @@ impl ControlFlowBuilder {
             return Self::format_num(val, rng);
         }
 
-        let style = rng.range(0, 10);
+        // ㉚④：val==0 时禁走差式——`(x-x)` 是同字面量自抵消的暴露形态；
+        // 零值改走运行时查表分支（真·不可静态折叠）。
+        let style = rng.range(if val == 0 { 4 } else { 0 }, 10);
         if style < 4 {
             let huge = rng.range(0x100, 0x2FFF) as i64;
             let offset = val.wrapping_add(huge);
@@ -228,10 +246,11 @@ impl ControlFlowBuilder {
                     Self::format_num(ba_mask, rng), Self::format_num(key, rng),
                     comp_op, Self::format_num(mutated_val, rng))
             }
-            _ => format!("{}({}<{} and ({}+{}-{}) or ({}<={} and {} or {})),{}){}{}",
+            // ㉚④：D 族原「var+key-key」零填充是同值自抵消暴露形态——
+            // 改纯 select 链（两支都恒取 var，无算术痕迹）
+            _ => format!("{}({}<{} and {} or ({}<={} and {} or {})),{}){}{}",
                 add_call,
-                jn, var_name,
-                var_name, Self::format_num(key, rng), Self::format_num(key, rng),
+                jn, var_name, var_name,
                 var_name, var_name, var_name, jn,
                 Self::format_num(key, rng),
                 comp_op, Self::format_num(mutated_val, rng))

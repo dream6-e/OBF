@@ -42,15 +42,37 @@ pub fn num_lit(rng: &mut OpcodesRng, v: u32) -> String {
     }
 }
 
-/// ㉒ 恒等转移式：静态上不可读出目标态（-r+(r+t) / (r-r)+t / ((r+r)-r2) 当 r2=2r）
+/// ㉒ 恒等转移式——㉚④ 去自曝：改非线性乘法折叠链。
+/// 旧形 `(r-r)+t`、`((2*r)-(r+r))+t`、`-r+(r+t)` 把目标态 `t` 直接以字面量
+/// 暴露；现在恒等式一律走 `target = q*d + rem` 乘法折叠（rem 呈现三种轮换），
+/// 表达式里没有任何单字面量等于 target。
+/// 数值域约束：压缩管线会截断 >24bit 的十六进制字面量（0X16F6FC9→0XCF6FC9
+/// 级别的损坏），各字面量必须 ≤0xFFFFFF——q ≤ target/3 ≤ 0x355554 ✓，
+/// d/f/rem 均远小于界 ✓。
 pub fn ident(rng: &mut OpcodesRng, target: u32) -> String {
-    // 数值域约束：r 与 r+target 都必须 ≤0xFFFFFE——压缩管线会截断 >24bit 的
-    // 十六进制字面量（0X16F6FC9→0XCF6FC9 级别的损坏），状态链一断机器就死循环
-    let r = rng.next_range(0x1000, (0x7FFFFFusize).min((0xFFFFFE - target) as usize)) as u32;
+    // ㉚④：强制 rem≠0——rem==0 时装扮臂退化成 (f-f)/f-f 同值自抵消
+    let mut d = rng.next_range(3, 0x100) as u32;
+    for _ in 0..8 {
+        if target % d != 0 { break; }
+        d = rng.next_range(3, 0x100) as u32;
+    }
+    let q = target / d;
+    let rem = target % d;
+    if q == 0 {
+        // 兜底（调用方 target 均 ≥0X10000，理论不可达）：和差拆也不让 t 独现
+        let b = rng.next_range(0x1000, 0xFFFF) as u32;
+        return format!("({}-{})", num_lit(rng, target.wrapping_add(b)), num_lit(rng, b));
+    }
     match rng.next_range(0, 3) {
-        0 => format!("-{}+{}", num_lit(rng, r), num_lit(rng, r.wrapping_add(target))),
-        1 => format!("({}-{})+{}", num_lit(rng, r), num_lit(rng, r), num_lit(rng, target)),
-        _ => format!("(({}*{})-({}+{}))+{}", num_lit(rng, 2), num_lit(rng, r), num_lit(rng, r), num_lit(rng, r), num_lit(rng, target)),
+        0 => format!("({}*{}+{})", num_lit(rng, q), num_lit(rng, d), num_lit(rng, rem)),
+        1 => {
+            let f = rng.next_range(0x100, 0x8000) as u32;
+            format!("(({}*{})+({}-{}))", num_lit(rng, q), num_lit(rng, d), num_lit(rng, rem.wrapping_add(f)), num_lit(rng, f))
+        }
+        _ => {
+            let f = rng.next_range(0x100, 0x8000) as u32;
+            format!("(({}*{})+{}-{})", num_lit(rng, q), num_lit(rng, d), num_lit(rng, f), num_lit(rng, f - rem))
+        }
     }
 }
 
