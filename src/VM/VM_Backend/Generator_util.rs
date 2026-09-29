@@ -1300,6 +1300,24 @@ pub fn poly_hash(s: &str) -> u32 {
     h as u32
 }
 
+/// 常量算术混淆：同一常量逐次换形态（原值 / (v-a)+a / (v+b)-b），
+/// 让解码/扫描公式不以干净常量清单出现。值域 <2^33，double 精确，
+/// 5.1 与 Luau 行为一致。
+pub fn obf_const(rng: &mut GenRng, v: u64) -> String {
+    let hi = if v > 2 { (v - 1).min(0xFFFF) } else { 1 };
+    let a = rng.range(1, hi as usize + 1) as u64;
+    let b = rng.range(1, 0x10000) as u64;
+    // 链公式的特征乘子永不以裸值出现——它们是解码器家族的指纹常量，
+    // 裸值可被直接 grep 对齐；通用模数/小常量保留自然形态。
+    let distinctive = matches!(v, 0x101 | 0x1001 | 0x45D9 | 0x1_0001 | 0x11);
+    let r = rng.range(0, 3);
+    match (distinctive, r) {
+        (false, 0) => format!("0X{:X}", v),
+        (_, 1) => format!("(0X{:X}+0X{:X})", v - a, a),
+        _ => format!("(0X{:X}-0X{:X})", v + b, b),
+    }
+}
+
 /// 随机取一对可用混合密钥（复用 mix_key：k0 非 0 且密文无 \000）。
 pub fn stream_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
     mix_key(plain, rng)

@@ -824,15 +824,18 @@ impl Generator {
             let chm_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_m as i64);
             let chk0_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_k0 as i64);
             let dc_family = rng.range(0, 4);
+            // 常量混淆器（公共件 obf_const）：同一常量每次出现换一种算术形态，
+            // 兜底分支不再是干净的常量清单；加密串路径同样受益。
+            let oc = crate::VM::VM_Backend::Generator_util::obf_const;
             // 填充语句（P 参数：Pa=ops Pb=aa Pc=bb Pd=cc Pe..Pg=mk1..3 Ph=状态 Pi=DC Pj=bx Pk=Δ）
             let mut stmts: Vec<String> = vec![
                 "Ph.n=Ph.n+1;".into(),
                 "local Wa=Pa[Ph.n];".into(),
             ];
-            let mut blk_eo = vec!["local Wb=(Ph.ch%0X100)*0X2;".to_string(),
-                              "local Wc=((Ph.ch-(Ph.ch%0X100))/0X100)%0X100;".to_string()];
-            let blk_cc = vec!["local Wd=(Ph.ch*0X10001)%0X100000000;".to_string(),
-                              "local We=(Wd*0X45D9+Ph.ch)%0X100000000;".to_string()];
+            let mut blk_eo = vec![format!("local Wb=(Ph.ch%{})*{};", oc(&mut rng, 0x100), oc(&mut rng, 0x2)),
+                              format!("local Wc=((Ph.ch-(Ph.ch%{}))/{})%{};", oc(&mut rng, 0x100), oc(&mut rng, 0x100), oc(&mut rng, 0x100))];
+            let blk_cc = vec![format!("local Wd=(Ph.ch*{})%{};", oc(&mut rng, 0x10001), oc(&mut rng, 0x100000000)),
+                              format!("local We=(Wd*{}+Ph.ch)%{};", oc(&mut rng, 0x45D9), oc(&mut rng, 0x100000000))];
             // 注意：Wd→We 有依赖，blk_cc 不可内部洗牌；仅 EO/CA 对可换序
             rng.shuffle(&mut blk_eo);
             let mut blocks: Vec<Vec<String>> = if dc_family == 2 || dc_family == 3 {
@@ -841,25 +844,25 @@ impl Generator {
             if rng.range(0, 2) == 0 { blocks.reverse(); }
             for blk in &blocks { stmts.extend(blk.iter().cloned()); }
             let mut g_dec: Vec<String> = vec![
-                if dc_family == 3 { "local Wf=(Wa-(Ph.ch%0X100)*0X2)%0X100000000;".into() } else { "local Wf=(Wa-Wb)%0X100000000;".into() },
-                if dc_family == 3 { "local Wg=(Pj(Pb[Ph.n],Ph.m1)-((Ph.ch-(Ph.ch%0X100))/0X100)%0X100)%0X100000000;".into() } else { "local Wg=(Pj(Pb[Ph.n],Ph.m1)-Wc)%0X100000000;".into() },
-                "local Wh=Pj(Pj(Pc[Ph.n],Ph.m2)%0X100000000,Wd) if Wh>=0X80000000 then Wh=Wh-0X100000000 end;".into(),
-                "local Wi=Pj(Pj(Pd[Ph.n],Ph.m3)%0X100000000,We) if Wi>=0X80000000 then Wi=Wi-0X100000000 end;".into(),
+                if dc_family == 3 { format!("local Wf=(Wa-(Ph.ch%{})*{})%{};", oc(&mut rng, 0x100), oc(&mut rng, 0x2), oc(&mut rng, 0x100000000)) } else { format!("local Wf=(Wa-Wb)%{};", oc(&mut rng, 0x100000000)) },
+                if dc_family == 3 { format!("local Wg=(Pj(Pb[Ph.n],Ph.m1)-((Ph.ch-(Ph.ch%{}))/{})%{})%{};", oc(&mut rng, 0x100), oc(&mut rng, 0x100), oc(&mut rng, 0x100), oc(&mut rng, 0x100000000)) } else { format!("local Wg=(Pj(Pb[Ph.n],Ph.m1)-Wc)%{};", oc(&mut rng, 0x100000000)) },
+                format!("local Wh=Pj(Pj(Pc[Ph.n],Ph.m2)%{},Wd) if Wh>={} then Wh=Wh-{} end;", oc(&mut rng, 0x100000000), oc(&mut rng, 0x80000000), oc(&mut rng, 0x100000000)).into(),
+                format!("local Wi=Pj(Pj(Pd[Ph.n],Ph.m3)%{},We) if Wi>={} then Wi=Wi-{} end;", oc(&mut rng, 0x100000000), oc(&mut rng, 0x80000000), oc(&mut rng, 0x100000000)).into(),
             ];
             rng.shuffle(&mut g_dec);
             stmts.extend(g_dec);
             let upd = if std::env::var("OBF_NOCHAIN").is_ok() {
                 "Ph.ch=0;".to_string()
             } else if dc_family == 1 {
-                "local Wx=(Ph.ch*0X3+(Wf-Pk)*0X101+Wg*0X1001)%0X100000000; Ph.ch=(Wx+Wh%0X100000000+(Wi%0X100000000)*0X11)%0X100000000;".to_string()
+                format!("local Wx=(Ph.ch*{}+(Wf-Pk)*{}+Wg*{})%{}; Ph.ch=(Wx+Wh%{}+(Wi%{})*{})%{};", oc(&mut rng, 0x3), oc(&mut rng, 0x101), oc(&mut rng, 0x1001), oc(&mut rng, 0x100000000), oc(&mut rng, 0x100000000), oc(&mut rng, 0x100000000), oc(&mut rng, 0x11), oc(&mut rng, 0x100000000))
             } else {
-                "Ph.ch=(Ph.ch*0X3+(Wf-Pk)*0X101+Wg*0X1001+Wh%0X100000000+(Wi%0X100000000)*0X11)%0X100000000;".to_string()
+                format!("Ph.ch=(Ph.ch*{}+(Wf-Pk)*{}+Wg*{}+Wh%{}+(Wi%{})*{})%{};", oc(&mut rng, 0x3), oc(&mut rng, 0x101), oc(&mut rng, 0x1001), oc(&mut rng, 0x100000000), oc(&mut rng, 0x100000000), oc(&mut rng, 0x11), oc(&mut rng, 0x100000000))
             };
             // 尾部三语句：upd（链推进）必须用「奇偶交换前」的 Wh/Wi（=线上 fb0/fc0，
             // 与写侧 ch_step 同序）；Wj 与两者无依赖。洗牌只允许 upd 先于 swap 的
             // 三种安全排列——曾经全洗牌把 swap 排到 upd 前→链漂移→错叶崩溃。
             let wj_stmt = "local Wj=Wg-(Wf-Pk);".to_string();
-            let swap_stmt = "if Wf%0X2~=0 then Wh,Wi=Wi,Wh end;".to_string();
+            let swap_stmt = format!("if Wf%{}~=0 then Wh,Wi=Wi,Wh end;", oc(&mut rng, 0x2));
             let g_tail: Vec<String> = match rng.range(0, 3) {
                 0 => vec![upd.clone(), wj_stmt, swap_stmt],
                 1 => vec![upd.clone(), swap_stmt, wj_stmt],
@@ -869,11 +872,16 @@ impl Generator {
             stmts.push("rawset(Pi,Ph.n,{Wf,Wj,Wh,Wi});".into());
             let body = stmts.join(" ");
             let params = "Pa,Pb,Pc,Pd,Ph,Pi,Pj,Pk";
-            // 拼接源=柯里包裹+语句片段：chunk 返回「绑定参数后的填充闭包工厂」
-            let mut frag_list: Vec<String> = vec![format!("\"return function({}) return function() \"", params)];
-            frag_list.extend(stmts.iter().map(|x| format!("\"{}\"", x)));
-            frag_list.push("\" end end\"".to_string());
-            let frags = frag_list.join(",");
+            // 填充源=柯里包裹+语句序列：chunk 返回「绑定参数后的填充闭包工厂」。
+            // 源码**不以明文出现在产物里**：整串走流加密（位置相关双字节混合，
+            // 密文以 \ddd 转义字面量存进随机键表，解码器匿名挂表），调用点只剩
+            // `T[dk](T[ck],T[kk])`——解码公式/常量在文本层面不可读。
+            let full_src = format!("return function({}) return function() {} end end", params, body);
+            let st_name = rng.name();
+            let mut st = crate::VM::VM_Backend::Generator_util::StreamTable::new(st_name);
+            let (sk0, sk1) = crate::VM::VM_Backend::Generator_util::stream_key(&full_src, &mut rng);
+            let dec_expr = st.call(&full_src, sk0, sk1);
+            let st_decl = st.emit();
             let bind_args = format!("{},{},{},{},{},{},{},{}",
                 var_opcodes, var_a_arr, var_b_arr, var_c_arr,
                 dc_ds, n_dc, fn_bxor2, dl_e);
@@ -882,9 +890,10 @@ impl Generator {
             // 两路径都归一成 binder(params)→fill：本工具链 lua5.1 带兼容
             // `load`（要 reader 函数）→ 字符串源必走 fallback，形态必须一致。
             block_execute_def.insert_str(0, &format!(
-                "local {ff}; do local {ok},{fn}=pcall(loadstring or load,table.concat({{{frags}}})); \
+                "{decl} local {ff}; do local {ok},{fn}=pcall(loadstring or load,{dec}); \
                  if {ok} and type({fn})==\"function\" then {ff}={fn}() else {ff}=(function({params}) return function() {body} end end) end end; ",
-                ff = dc_fn, ok = dc_ok, fn = rng.name(), frags = frags,
+                decl = st_decl, dec = dec_expr,
+                ff = dc_fn, ok = dc_ok, fn = rng.name(),
                 params = params, body = body));
             block_execute_def.push_str(&format!(
                 "local {ndc}={{}}; local {ds}={{n={c}.{lld},ch=({bx}({kon},{c}.{lld})*{chm}+{chk0})%0X100000000,m1={mk1},m2={mk2},m3={mk3}}}; \
