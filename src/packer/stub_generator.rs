@@ -292,11 +292,15 @@ impl StubGenerator {
         let mut uni_rng = GenRng::new(seed as u64);
         let mut uni = UniStream::new(&mut uni_rng);
         let probe = loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut uni, &mut uni_rng);
+        // ④E：加载器不以标识符落盘——探测结果优先，取不到再从环境表按
+        // 运行期还原的名字取；产物里没有 `loadstring` / `load` 两个词。
+        let (ld_setup, ld_var) = crate::VM::VM_Backend::Generator_util::loader_lookup(
+            &mut uni, &mut uni_rng, Some(&v_pload), true);
         let sc_def = uni.emit_prelude(&mut uni_rng);
         format!("
 return (function(...)
-    {sc_def}{probe}
-    local {f_load}=function(c) local f;if not(f) then return ({v_pload} or loadstring or load)(c) else return {{}} end;end
+    {sc_def}{probe}{lds}
+    local {f_load}=function(c) local f;if not(f) then return ({ld})(c) else return {{}} end;end
     local {f_pcall}=function(r) local c,v=3,type;if v(c)==\"string\" then return error(r) else return pcall(r) end;end
     local {f_char}=function(...) return string.char(...) end
     local {f_byte} = function(...) local k,g=3.0,0X0;local ui=k+g;if ui < k-g then return math.floor(...) elseif ui==k-g then return string.byte(...) end;end
@@ -363,7 +367,7 @@ return (function(...)
     return {v_entry}([=[{payload}]=], ...)
 end)(...)
 ",
-        f_load=f_load, f_pcall=f_pcall, v_pload=v_pload, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
+        f_load=f_load, f_pcall=f_pcall, lds=ld_setup, ld=ld_var, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
         v_entry=v_entry, v_data=v_data, v_q=v_q, m_bxor=m_bxor, v_s=v_s, v_a=v_a, v_b=v_b, m_bxor_body=m_bxor_body, m_next=m_next,
         m_next_body=m_next_body, m_init_map=m_init_map, m_init_map_body=m_init_map_body, m_init_insts=m_init_insts,
         m_init_insts_body=m_init_insts_body, m_init_handlers=m_init_handlers, m_init_handlers_body=m_init_handlers_body,

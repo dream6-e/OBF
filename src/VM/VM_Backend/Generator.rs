@@ -935,14 +935,19 @@ impl Generator {
                 dc_ds, n_dc, fn_bxor2, dl_e);
             // 填充工厂提升到 execute 之外一次编译（hash 级高频调用原型里
             // 逐次 load+concat 是 700x 慢化的病根）；execute 内只做绑定调用。
-            // 目标环境（lua5.1 / Roblox 执行器）必有 loadstring or load（用户确认），
+            // 目标环境（lua5.1 / Roblox 执行器）必有加载器（用户确认），
             // 不再保留内联代码兜底：那会把解码逻辑以真代码写进每个产物，静态直读
             // 即得解码器，抵消流加密的全部收益；编译失败即启动失败，
             // 解码逻辑从此在产物里只以密文存在。
+            // ④E：加载器**不以标识符出现**——"loadstring"/"load" 走统一流（数字密文），
+            // 运行期才解回名字并从环境表取用；调用点只剩一个局部名，产物里既无
+            // `loadstring` / `load` 两个词，也无「X or Y 取加载器」的可 grep 算子对。
+            let (ld_setup, ld_var) =
+                crate::VM::VM_Backend::Generator_util::loader_lookup(&mut uni, &mut rng, None, true);
             block_execute_def.insert_str(0, &format!(
-                "{decl} local {ff}; do local {ok},{fn}=pcall(loadstring or load,{dec}); \
+                "{decl}{lds} local {ff}; do local {ok},{fn}=pcall({ld},{dec}); \
                  if {ok} and type({fn})==\"function\" then {ff}={fn}() end end; ",
-                decl = st_decl, dec = dec_expr,
+                decl = st_decl, lds = ld_setup, ld = ld_var, dec = dec_expr,
                 ff = dc_fn, ok = dc_ok, fn = rng.name()));
             block_execute_def.push_str(&format!(
                 "local {ndc}={{}}; local {ds}={{n={c}.{lld},ch=({bx}({kon},{c}.{lld})*{chm}+{chk0})%{dcm32},m1={mk1},m2={mk2},m3={mk3}}}; \

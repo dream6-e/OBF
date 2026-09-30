@@ -1110,12 +1110,50 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
     out
 }
 
+/// ④E：**加载器取用不再有标识符**——产物里不出现 `loadstring` / `load` 这两个词，
+/// 也不出现 `X or Y` 这种「一眼就是取加载器」的算子对。
+///
+/// 做法：两个名字（"loadstring"、"load"）登记进统一流，以**数字密文**落盘，
+/// 运行期才解回字符串；再从环境表按名字取用。环境表沿用产物他处的同一式
+/// `(getfenv and getfenv() or _ENV or _G)`（lua5.1 / luau / Roblox 执行器都适用）。
+///
+/// 返回 `(前置语句, 变量名)`：语句里落下取自环境表的加载器（取不到就是 nil，
+/// 调用点自然失败，与旧式 `loadstring or load` 同为 nil 的行为一致）。
+/// `pre` 给定时优先使用该表达式（例如探测结果 `v_pload`），取不到才回落到环境表。
+pub fn loader_lookup(
+    uni: &mut UniStream, rng: &mut GenRng, pre: Option<&str>, decls: bool,
+) -> (String, String) {
+    let id_ls = uni.register("loadstring");
+    let id_ld = uni.register("load");
+    let (st_ls, ex_ls) = uni.fetch(rng, id_ls);
+    let (st_ld, ex_ld) = uni.fetch(rng, id_ld);
+    // decls=false：变量由调用方在更外层声明（值在运行期才赋）——用于必须保持
+    // 「先声明、后定义」顺序的场景（如壳内 f_load 前的 env 变量）
+    let (v_ls, v_ld, v_env, v_ldr) = (rng.name(), rng.name(), rng.name(), rng.name());
+    let head = if decls {
+        format!("local {ls},{ld}; ", ls = v_ls, ld = v_ld)
+    } else {
+        String::new()
+    };
+    let pick = match pre {
+        Some(p) => format!("{p} or {env}[{ls}] or {env}[{ld}]", p = p, env = v_env, ls = v_ls, ld = v_ld),
+        None => format!("{env}[{ls}] or {env}[{ld}]", env = v_env, ls = v_ls, ld = v_ld),
+    };
+    let stmts = format!(
+        "{head}local {env}=(getfenv and getfenv() or _ENV or _G); {s1}{s2}{ls}={e1}; {ld}={e2}; local {ldr}={pick}; ",
+        head = head, env = v_env, s1 = st_ls, s2 = st_ld,
+        ls = v_ls, ld = v_ld, e1 = ex_ls, e2 = ex_ld, ldr = v_ldr, pick = pick);
+    (stmts, v_ldr)
+}
+
 /// 生成「只认原生 C 函数」的 loadstring 探测代码（防执行器/沙盒把 loadstring
 /// 换成 Lua 钩子）。三个标识符由调用方从各自的命名池里取：
 /// `nat` = isNative、`getf` = 取用函数、`pl` = 最终使用的 loadstring 变量。
 ///
-/// 语义：按 `loadstring` → `getrenv()['loadstring']` → `getrenv()['load']` → `load`
-/// 的顺序找**原生**的那一个；一个原生都没有时退回第一个可用的函数
+/// 语义：按「当前环境 `loadstring`」→ `getrenv()['loadstring']` → `getrenv()['load']`
+/// →「当前环境 `load`」的顺序找**原生**的那一个；一个原生都没有时退回第一个可用的函数。
+/// 四个候选全部按**运行期还原的名字**从环境表取用（`loadstring`/`load` 两个标识符
+/// 不在产物里出现，名字经统一流以数字密文落盘、运行期才解出）
 /// （保证产物在完全没有原生候选的环境里还能跑；要改成「找不到就失败」，
 /// 把最后那句 `return alt` 换成 `return nil` 即可）。
 ///
@@ -1196,7 +1234,7 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream
             local {ge} = {g}[{k7}]; \
             local {env} = {g}; \
             if type({ge}) == {sc_f} then {env} = {ge}() or {g}; end; \
-            local {list} = {{ loadstring, {env}[{k8}], {env}[{k9}], load }}; \
+            local {list} = {{ {g}[{k8}], {env}[{k8}], {env}[{k9}], {g}[{k9}] }}; \
             local {alt}, {i} = nil, 0; \
             local {n} = #{list}; \
             while {i} < {n} do \
