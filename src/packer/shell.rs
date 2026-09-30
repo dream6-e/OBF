@@ -791,6 +791,31 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     );
     line(2, "end;", &mut out);
     line(2, "if L == 0 and not (R and Y) then L = 2; end;", &mut out);
+    // 行号自检（防顶插、防拆行）：整份成品外壳被压成**一行**，外壳自己定义的函数
+    // 必然落在第 1 行；探针函数故意访问 nil 的下标，pcall 回来的错误消息里会带
+    // 「chunk名:行号: 」。有人在文件最顶端插行（或把外壳拆成多行）→ 行号变 2、3…
+    // → L=3，由下面同一条 `G.error()` 通路收尾（与 e1/e2 一样是自然失败，
+    // 不输出任何东西、不留「检测到篡改」字样）。宿主若不报行号则放行（fail-open）。
+    line(2, "local F = function() local vf; return vf.x end;", &mut out);
+    line(2, "local hf, ef = G.pcall(F);", &mut out);
+    line(2, "local qf, bf = G.string.find, G.string.byte;", &mut out);
+    // 从消息里取「最后一处 冒号+数字串」（= 报错行号），与 1 比：外壳只有一行，
+    // 不符就是被顶插过（插几行都算）。取不到行号（宿主不报位置）就放行。
+    line(2, "if qf and bf and W(ef) == \"string\" then", &mut out);
+    line(3, "local cf, nf = 0, nil;", &mut out);
+    line(3, "repeat", &mut out);
+    line(4, "local tf = qf(ef, Z(0X3A), cf + 1, true);", &mut out);
+    line(4, "if not tf then break; end;", &mut out);
+    line(4, "local sf, mf = tf + 1, 0;", &mut out);
+    line(4, "while true do", &mut out);
+    line(5, "local df = bf(ef, sf);", &mut out);
+    line(5, "if df and df > 0X2F and df < 0X3A then mf = mf * 0XA + (df - 0X30) sf = sf + 1 else break; end;", &mut out);
+    line(4, "end;", &mut out);
+    line(4, "if sf > tf + 1 then nf = mf; end;", &mut out);
+    line(4, "cf = tf;", &mut out);
+    line(3, "until false;", &mut out);
+    line(3, "if nf and nf ~= 0X1 then L = 3; end;", &mut out);
+    line(2, "end;", &mut out);
     line(1, "end;", &mut out);
     // 探针失败按 `L` 分档：e1 = `string.byte`/`string.char` 往返被 hook 坏，e2 = 没有 loader 或没有 unpack。
     line(
