@@ -16,7 +16,7 @@ pub(crate) static DBG_ARITH: bool = true;
 // GenRng 继续从这里 re-export，保持 crate 内既有的引用路径不变。
 pub use super::Generator_util::{CipherKeys, GenRng};
 use super::Generator_util::{
-    build_opcode_tree, chacha8_xor, rename_ident, rewrite_chunk, scan_max_stack,
+    build_opcode_tree, rename_ident, rewrite_chunk, scan_max_stack,
     scan_setglobal_targets, scan_used_opcodes, uses_ident, write_string, PayloadReader,
 };
 
@@ -126,20 +126,34 @@ impl Generator {
         // ⑰ 常量按原型分组内联加密：每组独立 key/salt/nonce 布局/kind；
         // 密文直接写进各原型常量节，中央 gs/gn 密文表废除
         const CG: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
+        // 第 3 项 D：**单根派生**——另起一条原生流（Native Stream）取 32 字节密钥流
+        // 折成 K0（8 字），四组密钥/盐/kind 与 boot 的那套全部由 K0 经 KDF 现算：
+        // 产物里不再有「一组 8 个密钥字」的独立材料，只剩这一份 token 化的根，
+        // 而推导过程在运行期才发生（静态读者要先复刻 Lua 的异或表/旋转语义）。
+        let nat_k0 = crate::VM::VM_Backend::Generator_native::Native::new(&mut rng);
+        let k0_seeds: Vec<u8> = (0..16).map(|_| rng.range(0, 256) as u8).collect();
+        let k0 = crate::VM::VM_Backend::Generator_chacha::native_root(&nat_k0, &k0_seeds);
         let mut chacha_keys: Vec<[u32; 8]> = Vec::with_capacity(CG);
-        for _ in 0..CG { let mut row = [0u32; 8]; for v in row.iter_mut() { *v = rng.next(); } chacha_keys.push(row); }
         let mut chacha_salts: Vec<u32> = Vec::with_capacity(CG);
-        for _ in 0..CG { chacha_salts.push(rng.next()); }
+        let mut kstr: Vec<u32> = Vec::with_capacity(CG);
+        let mut knum: Vec<u32> = Vec::with_capacity(CG);
+        for g in 0..CG as u32 {
+            let gk = crate::VM::VM_Backend::Generator_chacha::group_keys(&k0, g);
+            chacha_keys.push(gk.key);
+            chacha_salts.push(gk.salt);
+            kstr.push(gk.kstr);
+            knum.push(gk.knum);
+        }
         let mut nonce_layouts: Vec<[usize; 3]> = Vec::with_capacity(CG);
         for _ in 0..CG {
             let mut ly = [0usize, 1, 2];
             for j in (1..3).rev() { let k = rng.range(0, j + 1); ly.swap(j, k); }
             nonce_layouts.push(ly);
         }
-        let mut kstr: Vec<u32> = Vec::with_capacity(CG);
-        let mut knum: Vec<u32> = Vec::with_capacity(CG);
-        for _ in 0..CG { kstr.push(rng.next()); knum.push(rng.next()); }
-        let enc = crate::VM::VM_Backend::Generator_util::EncCtx { keys: chacha_keys.clone(), salts: chacha_salts.clone(), layouts: nonce_layouts.clone(), kstr, knum };
+        // 第 2 项：逐簇 ChaCha 状态布局（全状态置换 / 轮数 8·10·12 / counter 步进）
+        let chacha_layout: Vec<crate::VM::VM_Backend::Generator_chacha::ChaChaLayout> =
+            (0..CG).map(|_| crate::VM::VM_Backend::Generator_chacha::ChaChaLayout::new(&mut rng)).collect();
+        let enc = crate::VM::VM_Backend::Generator_util::EncCtx { keys: chacha_keys.clone(), salts: chacha_salts.clone(), layouts: nonce_layouts.clone(), kstr, knum, layout: chacha_layout, root: k0 };
         let root_group = rng.range(0, CG);
         // ⑮ 指令格式改版：线上 op 字段不再是 8 万段别名，而是逐别名随机 32 位魔数；
         // 派发树在魔数空间二分（阈值=魔数），与操作类别的数值区间彻底解耦
@@ -1064,7 +1078,7 @@ impl Generator {
 
         // ChaCha 的 4 个 sigma 常量（"expand 32-byte k"）不以字面量出现在产物里；
         // ⑯ 每组独立派生：sigma_i=(d_i+K_g[idx_i])%2^32，idx 是每组自己的 [1..8] 洗牌排列
-        let sigma: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
+        let sigma: [u32; 4] = crate::VM::VM_Backend::Generator_chacha::SIGMA;
 
 
         // phase 2 已原样搬至 Generator_chain.rs（README 单文件 ≤ 80 KB 规则）。

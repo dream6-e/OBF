@@ -5,46 +5,9 @@ use rand::{rng, Rng, SeedableRng};
 use rand::rngs::StdRng;
 use crate::compiler::instructions::{OpArgMask, OpCode, OpMode};
 
-fn chacha_qr(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
-    s[a] = s[a].wrapping_add(s[b]); s[d] ^= s[a]; s[d] = s[d].rotate_left(16);
-    s[c] = s[c].wrapping_add(s[d]); s[b] ^= s[c]; s[b] = s[b].rotate_left(12);
-    s[a] = s[a].wrapping_add(s[b]); s[d] ^= s[a]; s[d] = s[d].rotate_left(8);
-    s[c] = s[c].wrapping_add(s[d]); s[b] ^= s[c]; s[b] = s[b].rotate_left(7);
-}
-
-fn chacha8_block(key: &[u32; 8], nonce: [u32; 3], counter: u32) -> [u8; 64] {
-    let mut s: [u32; 16] = [
-        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
-        key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
-        counter, nonce[0], nonce[1], nonce[2],
-    ];
-    let orig = s;
-    for _ in 0..4 {
-        chacha_qr(&mut s, 0, 4, 8, 12);
-        chacha_qr(&mut s, 1, 5, 9, 13);
-        chacha_qr(&mut s, 2, 6, 10, 14);
-        chacha_qr(&mut s, 3, 7, 11, 15);
-        chacha_qr(&mut s, 0, 5, 10, 15);
-        chacha_qr(&mut s, 1, 6, 11, 12);
-        chacha_qr(&mut s, 2, 7, 8, 13);
-        chacha_qr(&mut s, 3, 4, 9, 14);
-    }
-    for i in 0..16 { s[i] = s[i].wrapping_add(orig[i]); }
-    let mut out = [0u8; 64];
-    for i in 0..16 { out[i * 4..i * 4 + 4].copy_from_slice(&s[i].to_le_bytes()); }
-    out
-}
-
-fn chacha8_keystream(key: &[u32; 8], nonce: [u32; 3], n_bytes: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(n_bytes + 64);
-    let mut counter = 0u32;
-    while out.len() < n_bytes {
-        out.extend_from_slice(&chacha8_block(key, nonce, counter));
-        counter = counter.wrapping_add(1);
-    }
-    out.truncate(n_bytes);
-    out
-}
+// ChaCha8 内核与状态布局已拆至 Generator_chacha.rs（守单文件 80 KB 上限）：
+// 第 2 项起内核带「全状态置换 + counter 步进 + 轮数」三参数，读写两侧同参。
+use super::Generator_chacha::{ChaChaLayout, SIGMA as CHACHA_SIGMA, stream_xor as chacha_xor_layout};
 
 /// #3 常量密钥混入引用折叠：逐产物随机参数（谓词/f 函数常数），
 /// Rust 写侧与 Lua body_consts 扫描同式重算 F_li=Σf(pc)
@@ -70,11 +33,6 @@ pub(super) fn const_mac18(blob: &[u8], slot: u32, fold: u32, roll: u32, fc: &Fol
     s
 }
 
-pub(super) fn chacha8_xor(key: &[u32; 8], nonce: [u32; 3], data: &[u8]) -> Vec<u8> {
-    let ks = chacha8_keystream(key, nonce, data.len());
-    data.iter().zip(ks.iter()).map(|(b, k)| b ^ k).collect()
-}
-
 /// ⑰ 常量按原型分组内联加密：每组独立 key/salt/nonce 布局/kind。
 /// 密文块直接写进各原型的常量节——产物里不再存在整张中央密文表，
 /// 恢复一组参数也只能解「用了这一组的那些原型」的常量。
@@ -86,6 +44,12 @@ pub(super) struct EncCtx {
     pub layouts: Vec<[usize; 3]>,
     pub kstr: Vec<u32>,
     pub knum: Vec<u32>,
+    /// 第 2 项：每簇的 ChaCha 状态布局（全状态置换 ρ / 轮数 / counter 步进）——
+    /// 读写两侧同参；产物侧的摆位与元组由 Generator_chain 按此发射
+    pub layout: Vec<ChaChaLayout>,
+    /// 第 3 项 D：单根 K0（8 字）——四组与 boot 的密钥/盐/kind 全部由它 KDF 现算；
+    /// 它本身取自原生流（Native Stream），产物里以 token 掩码形态落一份
+    pub root: [u32; 8],
 }
 
 pub struct CipherKeys {
@@ -908,7 +872,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             let dv: f64 = if bytes[0] != 0 { 1.0 } else { 0.0 };
                             dv.to_le_bytes().to_vec()
                         } else { bytes.clone() };
-                        let blob = chacha8_xor(&enc.keys[group], [s118, s218, s318], &payload18);
+                        let blob = chacha_xor_layout(&enc.keys[group], [s118, s218, s318], &payload18, &enc.layout[group]);
                         seen.insert((bytes.clone(), fold, rl18), (*c_type, blob.clone(), li));
                         (*c_type, blob, li)
                     }

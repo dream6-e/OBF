@@ -185,6 +185,75 @@ pub fn key_tokens(rng: &mut GenRng, keys: &CipherKeys, words: &[u32; 8], h: &str
     }
 }
 
+/// 第 3 项 D：**KDF 的 Lua 侧发射**（与 `Generator_chacha::derive_word` 逐位同式）。
+///
+/// `kdf(x,g,w)`：x 先与组号绑定的常数异或（走 32 位异或实现），两次算术旋转后再
+/// 异或，取高低 16 位各乘一个小常数（乘积 ≤ 2^34，double 精确）归约到 2^32，
+/// 最后按字序号再异或。所有中间量 < 2^53，与 Rust 侧同结果。
+pub fn kdf_fn_decl(rng: &mut GenRng, keys: &CipherKeys, kdf: &str, xor32: &str, rot: &str, m32: &str) -> String {
+    let (lo, t, lo2, hi2, a, b, c, y, k1, k2) =
+        (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    format!(
+        "local function {kdf}(x,g,w) local {lo}=x%0X10000; local {t}={xor32}(x,({k1}*(g+0X1))%{m32}); \
+         {t}={xor32}({rot}({t},0XD),{rot}({t},0X7)); \
+         local {lo2}={t}%0X10000; local {hi2}=({t}-{lo2})/0X10000; \
+         local {a}=0X1F3A5+g*0X9E37; local {b}=0X2C1B3+g*0X4F17; local {c}=0X13F7*(g+0X1); \
+         local {y}=({lo2}*{a}+{hi2}*{b}+{c})%{m32}; \
+         return {xor32}({y},({k2}*(w+0X1))%{m32}) end; ",
+        kdf = kdf, xor32 = xor32, rot = rot, m32 = m32,
+        lo = lo, t = t, lo2 = lo2, hi2 = hi2, a = a, b = b, c = c, y = y,
+        k1 = rng.obfuscate_num(0x9E37_79B9u32 as i64, 1, keys),
+        k2 = rng.obfuscate_num(0x85EB_CA6Bu32 as i64, 1, keys))
+}
+
+/// 第 3 项 D：单根 K0 的 token 化运输（与 `key_tokens` 同机制，但只发射一次）。
+/// `fetch[i]` 即 K0 第 i 个字（1-based）的取用表达式。
+pub fn root_tokens(rng: &mut GenRng, keys: &CipherKeys, root: &[u32; 8], h: &str) -> KeyTokens {
+    key_tokens(rng, keys, root, h)
+}
+
+/// 第 3 项 D：一簇的派生块——由根 K0 现算本组 8 个密钥字 + 盐 + 两个 kind。
+/// 输出：`kw[i]` 为第 i 个密钥字（i = 1..8）、`salt`/`knum`/`kstr` 三个标量，
+/// 都是运行期 KDF 值，产物里没有任何一组密钥以数据形态出现。
+pub struct DerivedGroup {
+    pub decl: String,
+    pub kw: String,
+    pub fetch: Vec<String>,
+    pub salt: String,
+    pub knum: String,
+    pub kstr: String,
+}
+
+pub fn derive_group(rng: &mut GenRng, keys: &CipherKeys, kdf: &str, root_fetch: &[String], g: usize) -> DerivedGroup {
+    let kw = rng.name();
+    let ge = rng.format_num(g as i64);
+    // 8 个密钥字：发射顺序洗牌、下标数字算式化（读不出「第几个字配哪个槽」）
+    let mut idx: Vec<usize> = (1..=8).collect();
+    rng.shuffle(&mut idx);
+    let mut decl = format!("local {kw}={{}}; ", kw = kw);
+    for i in idx {
+        decl.push_str(&format!(
+            "{kw}[{ni}]={kdf}({root},{g},{ni}); ",
+            kw = kw, ni = rng.obfuscate_num(i as i64, 1, keys), kdf = kdf,
+            root = root_fetch[i - 1], g = ge));
+    }
+    // 三个标量严格照 `Generator_chacha::group_keys` 的规格：盐=根[0]/w9、
+    // kstr=根[1]/w10、knum=根[2]/w11（发射顺序洗牌，但取用点与值不变）
+    let salt = rng.name();
+    let knum = rng.name();
+    let kstr = rng.name();
+    let mut scal: Vec<(String, u32, usize)> =
+        vec![(salt.clone(), 9, 0), (knum.clone(), 11, 2), (kstr.clone(), 10, 1)];
+    rng.shuffle(&mut scal);
+    for (nm, w, ri) in scal {
+        decl.push_str(&format!(
+            "local {nm}={kdf}({root},{g},{w}); ",
+            nm = nm, kdf = kdf, root = root_fetch[ri], g = ge, w = rng.obfuscate_num(w as i64, 1, keys)));
+    }
+    let fetch = (1..=8).map(|i| format!("{}[{}]", kw, rng.obfuscate_num(i as i64, 1, keys))).collect();
+    DerivedGroup { decl, kw, fetch, salt, knum, kstr }
+}
+
 /// ⑰ 每簇一个自包含簇：`local a,b,c; do … end;` —— 簇内声明（含 token 表、
 /// 游标机局部）随块结束释放，壳函数活动局部数不被撑爆（lua5.1 单函数 200 上限），
 /// 簇外的取用点（解密器等）以 upvalue 捕获。

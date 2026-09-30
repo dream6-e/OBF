@@ -779,39 +779,127 @@ pub fn build_header(
     format!("local {}, {} = {}, {}; local {} = ([=[{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}-{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, rng.obfuscate_num(6i64, 1, &keys), var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3)
 }
 
-/// 数字解码器（IEEE754 重组）—— 拆出；2^(-1074)/2^(exp-1075) 浮点语义勿动
+/// 数值解码器（ChaCha 链式解密后按 IEEE-754 还原 double）—— 拆出。
+/// 第 3 项 C 起：异或与分块链式解锁都在解密器里（上一块明文喂下一块 counter），
+/// 本函数只吃**已解明文**的 8 个字节表。四型异构变体（形态池，逐簇抽两型 +
+/// 运行期按宿主指纹选路）：字节取用（while/for/repeat、正序/逆序）、尾数装配
+/// （显式求和 / 乘累加 / 权重表 / 反序取字节再求和）、符号与阶码算式、特值分派
+/// （if-elseif / 早返回 / thunk 表）各不相同，逐位等价（IEEE 语义由构造保证）。
 #[allow(clippy::too_many_arguments)]
 pub fn build_decnum(
-    fn_dec_num: &str, fn_chacha_stream: &str, kind_num: &str, vb: &str, xt: &str,
+    rng: &mut GenRng,
+    form: usize,
+    fn_dec_num: &str, pl: &str, kind_num: &str, vb: &str,
     v_sign: &str, v_exp: &str, v_mant: &str, f64parts: String,
-    v_num_ks: &str, v_num_i: &str, v_num_g: &str, fd: &str, rl: &str,
+    v_num_i: &str, v_num_g: &str, fd: &str, rl: &str,
 ) -> String {
-    format!(
-            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {ks}={fn_chacha_stream}(pool_idx,{kind_num},8,{fd},{rl}); \
+    match form {
+        0 => format!(
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
              local {vb}, {i}, {g} = {{}}, 0, 0; \
-             while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {xt}[v_enc[{i}]][{ks}[{i}]] end; \
+             while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {plv}[{i}] end; \
              local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
              local {v_exp} = ({vb}[8] % 128) * 8 * 2 + (({vb}[7] - ({vb}[7] % 16)) / 16); \
              local {v_mant} = {f64parts}; \
              if {v_exp} == 2047 then return {v_mant} == 0 and {v_sign} * (1/0) or (0/0) \
              elseif {v_exp} == 0 then return {v_sign} * {v_mant} * (2^(-1074)) \
              else return {v_sign} * ({v_mant} + 2^52) * (2^({v_exp} - 1075)) end end; ",
-            i = v_num_i, g = v_num_g, ks = v_num_ks
-        )
+            i = v_num_i, g = v_num_g, plv = rng.name()
+        ),
+        1 => format!(
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
+             local {vb}={{}} for {i}=0X1,0X8 do {vb}[{i}]={plv}[{i}] end; \
+             local {i}=0X6; local {v_mant}={vb}[0X7]%0X10; \
+             while {i}>=0X1 do {v_mant}={v_mant}*0X100+{vb}[{i}]; {i}={i}-0X1 end; \
+             local {v_sign}=(-1)^(({vb}[0X8]-{vb}[0X8]%0X80)/0X80); \
+             local {v_exp}=({vb}[0X8]%0X80)*0X10+({vb}[0X7]-{vb}[0X7]%0X10)/0X10; \
+             if {v_exp}==0X7FF then if {v_mant}==0X0 then return {v_sign}*(1/0) end return 0/0 end; \
+             if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
+             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
+            i = v_num_i, vb = vb, plv = rng.name()
+        ),
+        2 => {
+            let w = rng.name();
+            format!(
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
+             local {vb}, {i} = {{}}, 0; \
+             repeat {i}={i}+0X1; {vb}[{i}]={plv}[{i}] until {i}>=0X8; \
+             local {v_mant}=({vb}[0X7]%0X10)*2^48; \
+             local {w}={{2^40,2^32,2^24,2^16,2^8,1}}; \
+             for {i}=0X6,0X1,-0X1 do {v_mant}={v_mant}+{vb}[{i}]*{w}[0X7-{i}] end; \
+             local {v_sign}=1-2*(({vb}[0X8]-{vb}[0X8]%0X80)/0X80); \
+             local {v_exp}=({vb}[0X8]%0X80)*0X10+({vb}[0X7]-{vb}[0X7]%0X10)/0X10; \
+             if {v_exp}==0X7FF then return {v_mant}==0 and {v_sign}*(1/0) or (0/0) end; \
+             if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
+             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
+            i = v_num_i, vb = vb, plv = rng.name(), w = w
+            )
+        }
+        _ => {
+            let sp = rng.name();
+            let fx = rng.name();
+            format!(
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
+             local {vb}={{}}; local {i}=0X8; \
+             while {i}>0X0 do {vb}[{i}]={plv}[{i}]; {i}={i}-0X1 end; \
+             local {v_mant}=({vb}[7]%0X10)*2^48+{vb}[6]*2^40+{vb}[5]*2^32+{vb}[4]*2^24+{vb}[3]*2^16+{vb}[2]*2^8+{vb}[1]; \
+             local {v_sign}=1-2*(({vb}[8]-{vb}[8]%0X80)/0X80); \
+             local {v_exp}=({vb}[8]%0X80)*0X8; {v_exp}={v_exp}*0X2+({vb}[7]-{vb}[7]%0X10)/0X10; \
+             local {sp}={{[0X7FF]=function() return ({v_mant}==0X0) and {v_sign}*(1/0) or (0/0) end,[0X0]=function() return {v_sign}*{v_mant}*2^(-1074) end}}; \
+             local {fx}={sp}[{v_exp}]; if {fx} then return {fx}() end; \
+             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
+            i = v_num_i, vb = vb, plv = rng.name(), sp = sp, fx = fx
+            )
+        }
+    }
 }
 
-/// 字符串解码器（ChaCha 流异或逐字节）—— 拆出
+/// 字符串解码器 —— 拆出。第 3 项 C 起：链式解密在解密器里做，本函数吃**已解
+/// 明文**的字节表并拼字符串。四型异构变体（形态池，逐簇抽两型 + 运行期按宿主
+/// 指纹选路）：累积方式（表+concat / 逆序 `..` 右折叠 / 4 字节分块拼接 / 数值表
+/// 两趟就地转字符）与取用/回写顺序各不相同，输出逐字节相同。
 #[allow(clippy::too_many_arguments)]
 pub fn build_decstr(
-    rng: &mut GenRng, fn_dec_str: &str, fn_chacha_stream: &str, kind_str: &str, xt: &str,
-    fn_s_byte: &str, v_str_ks: &str, v_str_s: &str, v_str_i: &str, v_str_g: &str, fd: &str, rl: &str,
+    rng: &mut GenRng, form: usize, fn_dec_str: &str, pl: &str, kind_str: &str,
+    v_str_s: &str, v_str_i: &str, v_str_g: &str, fd: &str, rl: &str,
 ) -> String {
-    format!(
-            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {n}=#{e}; local {ks}={fn_chacha_stream}({p},{kind_str},{n},{fd},{rl}); \
+    match form {
+        0 => format!(
+            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
              local {s}, {i}, {g} = {{}}, 0, 0; \
-             while {i} < {n} do {i} = {i} + 1; {s}[{i}] = string_char({xt}[{fn_s_byte}({e},{i})][{ks}[{i}]]) end; \
+             while {i} < {n} do {i} = {i} + 1; {s}[{i}] = string_char({plv}[{i}]) end; \
              return table_concat({s}) end; ",
-            e = rng.name(), p = rng.name(), n = rng.name(),
-            ks = v_str_ks, s = v_str_s, i = v_str_i, g = v_str_g
-        )
+            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            s = v_str_s, i = v_str_i, g = v_str_g
+        ),
+        1 => format!(
+            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
+             local {s}=\"\" local {i}={n}; \
+             while {i}>0 do {s}=string_char({plv}[{i}])..{s}; {i}={i}-1 end; \
+             return {s} end; ",
+            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            s = v_str_s, i = v_str_i
+        ),
+        2 => {
+            let t = rng.name();
+            format!(
+            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
+             local {s}={{}} local {i}=0; \
+             while {i}+0X4<={n} do {s}[#{s}+0X1]=string_char({plv}[{i}+0X1],{plv}[{i}+0X2],{plv}[{i}+0X3],{plv}[{i}+0X4]); {i}={i}+0X4 end; \
+             local {t}=\"\" while {i}<{n} do {i}={i}+0X1; {t}={t}..string_char({plv}[{i}]) end; \
+             return table_concat({s})..{t} end; ",
+            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            s = v_str_s, i = v_str_i, t = t
+            )
+        }
+        _ => format!(
+            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
+             local {s}={{}} local {i}=0; \
+             while {i}<{n} do {i}={i}+0X1; {s}[{i}]={plv}[{i}] end; \
+             local {g}=0 while {g}<{n} do {g}={g}+0X1; {s}[{g}]=string_char({s}[{g}]) end; \
+             return table_concat({s},\"\",0X1,{n}) end; ",
+            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            s = v_str_s, i = v_str_i, g = v_str_g
+        ),
+    }
 }
