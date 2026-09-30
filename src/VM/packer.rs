@@ -531,25 +531,37 @@ impl Packer {
             kb.push(keys.len());
         }
 
+        // ㉓.7 密钥分片/字母表/数字表**不再以字节表落盘**（原来 1/3 概率发
+        // `s.char(49,50,…)`、其余发 \\ddd 转义字面量）：整片登记进统一流，
+        // 落盘只有密文数字，取用点是惰性解密表达式（首访解密、其后缓存直通）。
+        // 语句收集到 map_fetch_stmts，统一落在 m_init_map 的方法体开头（语句位置）。
+        let mut map_fetch_stmts = String::new();
+        let mut mk_part = |rng: &mut GenRng,
+                           uni: &mut crate::VM::VM_Backend::Generator_util::UniStream,
+                           plain: &[u8]|
+         -> String {
+            // 1/3 概率倒序存放：取用点用 s.reverse 还原，形态不齐整
+            let rev = rng.range(0, 3) == 0;
+            let mut b = plain.to_vec();
+            if rev {
+                b.reverse();
+            }
+            let id = uni.register_bytes(&b);
+            let (st, ex) = uni.fetch(rng, id);
+            map_fetch_stmts.push_str(&st);
+            if rev {
+                format!("s.reverse({})", ex)
+            } else {
+                ex
+            }
+        };
         let mut key_parts_exprs = Vec::new();
         let num_actual_key_parts = kb.len() - 1;
         for i in 0..num_actual_key_parts {
             let start = kb[i];
             let end = kb[i + 1];
             let part_bytes = &keys[start..end];
-            let method = rng.range(0, 2);
-            let expr = match method {
-                0 => {
-                    let mut char_args = String::new();
-                    for (idx, b) in part_bytes.iter().enumerate() {
-                        if idx > 0 { char_args.push(','); }
-                        char_args.push_str(&b.to_string());
-                    }
-                    format!("s.char({})", char_args)
-                }
-                _ => format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(part_bytes))
-            };
-            key_parts_exprs.push(expr);
+            key_parts_exprs.push(mk_part(rng, uni, part_bytes));
         }
         let combined_key_expr = key_parts_exprs.join(",");
 
@@ -581,45 +593,9 @@ impl Packer {
             let end = boundaries[i + 1];
             let part_chars = &chars[start..end];
             let part_digs = &dig_bytes[start..end];
-            let method = rng.range(0, 3);
-            let (expr, dexpr) = match method {
-                0 => {
-                    let mut rev_chars = part_chars.to_vec();
-                    rev_chars.reverse();
-                    let mut safe_str = String::new();
-                    for c in rev_chars {
-                        match c {
-                            '\\' => safe_str.push_str("\\\\"),
-                            '"' => safe_str.push_str("\\\""),
-                            '\'' => safe_str.push_str("\\'"),
-                            '\n' => safe_str.push_str("\\n"),
-                            '\r' => safe_str.push_str("\\r"),
-                            _ => safe_str.push(c),
-                        }
-                    }
-                    let mut rev_digs = part_digs.to_vec();
-                    rev_digs.reverse();
-                    (format!("s.reverse(\"{}\")", safe_str),
-                     format!("s.reverse(\"{}\")", crate::VM::VM_Backend::Generator_util::lua_mixed(&rev_digs)))
-                }
-                1 => {
-                    let mut char_args = String::new();
-                    for (idx, c) in part_chars.iter().enumerate() {
-                        if idx > 0 { char_args.push(','); }
-                        char_args.push_str(&(*c as u8).to_string());
-                    }
-                    let mut dig_args = String::new();
-                    for (idx, d) in part_digs.iter().enumerate() {
-                        if idx > 0 { dig_args.push(','); }
-                        dig_args.push_str(&d.to_string());
-                    }
-                    (format!("s.char({})", char_args), format!("s.char({})", dig_args))
-                }
-                _ => (format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(&part_chars.iter().map(|&c| c as u8).collect::<Vec<u8>>())),
-                      format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(part_digs)))
-            };
-            parts_exprs.push(expr);
-            digs_exprs.push(dexpr);
+            let cb: Vec<u8> = part_chars.iter().map(|&c| c as u8).collect();
+            parts_exprs.push(mk_part(rng, uni, &cb));
+            digs_exprs.push(mk_part(rng, uni, part_digs));
         }
         
         let combined_alpha_expr = parts_exprs.join(",");
@@ -758,6 +734,7 @@ local function {f_entry}({v_data})
     return q:{m_next}(s);
 end,
         {m_init_map} = function(q, s, parts, alpha, i, kparts, kstr, dparts, digs)
+            {map_fetch_stmts}
             parts = {{{combined_alpha_expr}}};
             alpha = \"\";
             i = 0;

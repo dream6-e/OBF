@@ -8,12 +8,13 @@
 //! - 每字节密钥 = 两条 LCG 状态 + 位置 + 前一密文字节 混合后查 S-box，
 //!   没有闭式密钥流公式，也没有固定周期；
 //! - **运行期指纹**（`tostring(function() end)` 的地址串、`collectgarbage("count")`、
-//!   `pcall(error)` 的消息串）只用于两处：
+//!   宿主原生报错文本）只用于两处：
 //!   ① 选择**等价**的代码形态（不同 Lua 宿主走不同分支，解出的明文完全一致）；
 //!   ② 参与自抵消混入（`+h-h`），让运行期中间值逐宿主/逐次运行都不同。
 //!   因此不同 Lua 版本 / Roblox 执行器 / 不同次运行都能正确解密，
 //!   但想用 Python 复现，必须先把 Lua 的 tostring/collectgarbage/pcall 语义
-//!   逐位实现出来。
+//!   与宿主报错文本格式逐位实现出来。
+//!   指纹代码里不出现任何字符串常量（类型名/选项名/探针消息全部运行期取用）。
 //!
 //! 数学必须与生成的 Lua 逐位一致：范围全部 < 2^53，double 精确。
 
@@ -139,9 +140,19 @@ pub struct NState {
     pub prev: u64,
 }
 
-/// 运行期指纹：只用 Lua 侧存在、Python 侧需要完整复刻宿主语义的量。
+/// 运行期指纹：三路宿主熵（函数地址串 / GC 计数 / 宿主原生报错文本）折叠成 h。
 /// 返回 (前置代码, 变量名)。指纹只进「等价分支选择」与「自抵消混入」，
 /// 不参与明文运算——换宿主只换路径，不换结果。
+///
+/// **不落任何字符串常量**：既没有 `string.char(字节表)`，也没有类型名字面量。
+/// - 类型名比对走 `type(tostring(0X0))`（求值结果就是宿主自己给出的 "string"）；
+/// - `collectgarbage` 的选项名在运行期从宿主串里现取字符拼出
+///   （`tostring(function()end)` 形如 "function: 0x…"，c/o/u/n/t 的字节位在这里固定，
+///   宿主给什么串就取什么字符，取不出就整路跳过）；
+/// - 第三路不再自造消息，直接用宿主自己的索引/调用/算术/连接错误文本（逐宿主不同）。
+/// 三路都 fail-open：某一路在宿主上取不到就跳过，汇编出的 h 只影响等价选路，
+/// 两种选路逐位同结果，所以跳过不影响可解性；想让 Python 侧算 h，仍必须把
+/// tostring/collectgarbage/pcall 与错误消息格式逐位复刻出来。
 pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
     let h = rng.name();
     let ok = rng.name();
@@ -149,46 +160,67 @@ pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
     let i = rng.name();
     let okc = rng.name();
     let c = rng.name();
-    let m = rng.name();
     let mok = rng.name();
+    let m = rng.name();
+    let q = rng.name();
+    let j = rng.name();
     let hm = format!("0X{:X}", NMOD);
     let (r1, r2, r3) = (rng.range64(3, 0x1_0000), rng.range64(3, 0x1_0000), rng.range64(3, 0x1_0000));
     let (p1, p2, p3) = (rng.format_num(r1), rng.format_num(r2), rng.format_num(r3));
-    // 零字符串字面量：类型名与库参数一律用 string.char(数字) 现拼
-    let ch = |rng: &mut GenRng, s: &str| -> String {
-        let mut parts: Vec<String> = Vec::new();
-        for b in s.bytes() {
-            let f = rng.format_num(b as i64);
-            parts.push(f);
-        }
-        format!("string.char({})", parts.join(","))
+    // 恒等数字算式（差式）：位置下标与错误探针的实参都不出现裸小常量
+    let xnum = |rng: &mut GenRng, v: u32| -> String {
+        let k = rng.range(0x20, 0xFFFF) as u32;
+        format!("(0X{:X}-0X{:X})", v + k, k)
     };
-    let tstr = ch(rng, "string");
-    let tcnt = ch(rng, "count");
-    let terr = ch(rng, "x");
+    // 类型名比较臂池：三种写法求值都是宿主给出的 "string"（值不同、语义同）
+    let tstr = |rng: &mut GenRng| -> String {
+        match rng.range(0, 3) {
+            0 => "type(tostring(0X0))".to_string(),
+            1 => "type(tostring({}))".to_string(),
+            _ => "type(tostring(true))".to_string(),
+        }
+    };
+    // "count" 的五个字符在宿主串 "function: 0x…" 里的字节位：c=4 o=7 u=2 n=8/3 t=5
+    // （n 有两处，逐产物随机挑一处，取用点看不出固定模板）
+    let n_idx = if rng.range(0, 2) == 0 { 8 } else { 3 };
+    let sub = |rng: &mut GenRng, idx: u32| -> String {
+        format!("string.sub({v},{a},{a})", v = v, a = xnum(rng, idx))
+    };
+    let opt = [4u32, 7, 2, n_idx, 5]
+        .iter()
+        .map(|&ix| sub(rng, ix))
+        .collect::<Vec<_>>()
+        .join("..");
+    // 第三路错误族池：索引 / 调用 / 算术 / 连接——宿主报错文本各不相同
+    let o1 = xnum(rng, 1);
+    let err_body = match rng.range(0, 4) {
+        0 => format!("local {q}; return {q}[{o}]", q = q, o = o1),
+        1 => format!("local {q}; return {q}({o})", q = q, o = o1),
+        2 => format!("local {q}; return {q}+{o}", q = q, o = o1),
+        _ => format!("local {q}; return {q}..{o}", q = q, o = o1),
+    };
+    let (t1, t3) = (tstr(rng), tstr(rng));
+    // 第一路/第三路的折叠循环逐产物换形态（for 递增 / while 递增）
+    let loop3 = if rng.range(0, 2) == 0 {
+        format!("for {j}=0X1,#{m} do {h}=({h}*{p3}+string.byte({m},{j}))%{hm} end; ",
+                j = j, m = m, h = h, p3 = p3, hm = hm)
+    } else {
+        format!("local {j}=0X0; while {j}<#{m} do {j}={j}+0X1; {h}=({h}*{p3}+string.byte({m},{j}))%{hm} end; ",
+                j = j, m = m, h = h, p3 = p3, hm = hm)
+    };
     let src = format!(
         "local {h}=0X0; do \
            local {ok},{v}=pcall(function() return tostring(function() end) end); \
-           if {ok} and type({v})==type({tstr}) then for {i}=0X1,#{v} do {h}=({h}*{p1}+string.byte({v},{i}))%{hm} end end; \
-           local {okc},{c}=pcall(collectgarbage,{tcnt}); \
-           if {okc} and type({c})==type(0X0) then {h}=({h}*{p2}+math.floor({c}))%{hm} end; \
-           local {mok},{m}=pcall(function() error({terr}) end); \
-           if type({m})==type({tstr}) then for {i}=0X1,#{m} do {h}=({h}*{p3}+string.byte({m},{i}))%{hm} end end; \
+           if {ok} and type({v})=={t1} then for {i}=0X1,#{v} do {h}=({h}*{p1}+string.byte({v},{i}))%{hm} end; \
+              local {okc},{c}=pcall(collectgarbage,{opt}); \
+              if {okc} and type({c})==type(0X0) then {h}=({h}*{p2}+math.floor({c}))%{hm} end; end; \
+           local {mok},{m}=pcall(function() {eb} end); \
+           if type({m})=={t3} then {l3} end; \
          end; ",
-        h = h,
-        ok = ok,
-        v = v,
-        i = i,
-        okc = okc,
-        c = c,
-        mok = mok,
-        m = m,
-        p1 = p1,
-        p2 = p2,
-        p3 = p3,
-        hm = hm,
-        tstr = tstr,
-        tcnt = tcnt
+        h = h, ok = ok, v = v, t1 = t1,
+        i = i, p1 = p1, hm = hm,
+        okc = okc, c = c, opt = opt, p2 = p2,
+        mok = mok, m = m, eb = err_body, t3 = t3, l3 = loop3
     );
     (src, h)
 }

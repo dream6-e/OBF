@@ -149,6 +149,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         "type".into(), "tonumber".into(), "table".into(), "number".into(), "function".into(),
         // 行号守卫（反美化）用到的字符串，一个都不留在明文里
         "S".into(), "l".into(), "linedefined".into(), "currentline".into(),
+        // sethook 的调用掩码：原先以 string.char(99) 字面量出现，改走池取用
+        "c".into(),
         ":(%d+)[:\r\n ]".into(),
         // ③ 陷阱门用：setmetatable(__index 元表陷阱)。凡 poly_hash 查池的串必须在此
         // 登记过，否则查表得 nil → 构造器 [nil]=… 直接「table index is nil」。
@@ -451,6 +453,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                     let hash_sethook = poly_hash("sethook");
                     let hash_gethook = poly_hash("gethook");
                     let hash_info = poly_hash("info");
+                    let hash_c_mask = poly_hash("c");
                     // Luau Roblox 自适应：如果没有 sethook，探测 info（Luau特征），符合则放行
                     check_code = format!(
                         "local d={}({}); local p={}({}); \
@@ -461,7 +464,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                          else \
                              local ok, h = p(gh); \
                              if not ok then {} else \
-                             local c = 0; local ok2 = p(sh, function() c=c+1 end, string.char(99)); \
+                             local c = 0; local ok2 = p(sh, function() c=c+1 end, {}({})); \
                              if not ok2 then {} else \
                              local function tmp() end; tmp(); p(sh); \
                              if c < 1 then {} else {} end end end end end\n",
@@ -470,6 +473,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                         v_dec, hash_sethook, v_dec, hash_gethook,
                         v_dec, hash_info, next_good, next_bad,
                         next_bad,
+                        v_dec, hash_c_mask,
                         next_bad,
                         next_bad, next_good
                     );

@@ -62,7 +62,11 @@ impl UniStream {
     /// 逐字节：步进→取键流→加密→**把明文反馈进状态**。解第 j+1 字节必须先有
     /// 第 j 字节的明文——不存在可直写的线性密钥流公式。
     pub fn register(&mut self, plain: &str) -> usize {
-        let b = plain.as_bytes();
+        self.register_bytes(plain.as_bytes())
+    }
+    /// 同上，但吃原始字节（字母表/数字映射表里有 0XFF 这类非 UTF-8 字节）。
+    pub fn register_bytes(&mut self, plain: &[u8]) -> usize {
+        let b = plain;
         let off = self.enc.len();
         // 起始状态 = 种子表折叠值 + 偏移混合；再走 d_rounds 步推导
         // （与运行期机器里 warmup 段逐位一致）

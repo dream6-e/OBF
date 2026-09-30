@@ -756,9 +756,23 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     // loader 名必须**运行期**拼出来：`is_rename_barrier` 里有 `load`/`loadstring`，而
     // `static_string` 连字面量拼接都会解析（`G["load".."string"]` 一样被当成反射名）。
     // 与 VM 把 `debug`/`loadstring` 当参数穿过审计捕获的做法同源，顺带让成品里查不到这两个词。
-    line(1, "local R = G[Z(108, 111, 97, 100, 115, 116, 114, 105, 110, 103)] or G[Z(108, 111, 97, 100)];", &mut out);
     line(1, "local V = {};", &mut out);
     line(1, &format!("local D = [=[{alphabet_text}]=];"), &mut out);
+    // loader 名不落字节表：字母表 D 在运行期就摆在那里（85 枚符号的全集），
+    // 逐字符在 D 里定位后由 Q/Z 取字符拼名——产物里既没有 "loadstring"/"load"
+    // 这两个词，也没有一串「108,111,97,…」这样的明码数字。
+    let loader_pos = |name: &str| -> String {
+        name.bytes()
+            .map(|b| match alphabet.iter().position(|&c| c == b) {
+                // z85 全集含全部小写字母：正常都走这一支
+                Some(at) => format!("Q(D,{},{})", at + 1, at + 1),
+                // 兜底：换用别的字母表且缺字符时退回字节值（Z 的实参），不让生成器 panic
+                None => format!("{}", b),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    line(1, &format!("local R = G[Z({})] or G[Z({})];", loader_pos("loadstring"), loader_pos("load")), &mut out);
     // ⑤ base85/字节权重表不裸发大幂常量——逐项乘积链推导
     line(1, "local S = {[0] = 1}; S[1] = S[0]*85; S[2] = S[1]*85; S[3] = S[2]*85; S[4] = S[3]*85;", &mut out);
     line(1, "local T = {[0] = 1}; T[1] = T[0]*256; T[2] = T[1]*256; T[3] = T[2]*256;", &mut out);
@@ -892,7 +906,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
         "local ok, f = G.pcall(R, N);",
         &mut out,
     );
-    line(1, "u(ok and f and W(f) == string.char(102,117,110,99,116,105,111,110));", &mut out);
+    line(1, "u(ok and f and W(f) == W(function() end));", &mut out);
     line(1, "return f(...);", &mut out);
     out.push_str("end)(...);\n");
     out
