@@ -149,7 +149,10 @@ pub struct NState {
 /// - `collectgarbage` 的选项名在运行期从宿主串里现取字符拼出
 ///   （`tostring(function()end)` 形如 "function: 0x…"，c/o/u/n/t 的字节位在这里固定，
 ///   宿主给什么串就取什么字符，取不出就整路跳过）；
-/// - 第三路不再自造消息，直接用宿主自己的索引/调用/算术/连接错误文本（逐宿主不同）。
+/// - 第三路不再自造消息，直接用宿主自己的索引/调用/算术/连接错误文本（逐宿主不同）；
+/// - 块内库成员按**调用点个数**决定形态：超过两次的统一 local 化（逐产物随机
+///   局部名、分条声明、顺序洗牌），取用点只出现局部名，`string.sub(` 不再排成一列；
+///   只有一两次调用的（string.byte/math.floor）保持直呼，不凭空多出绑定。
 /// 三路都 fail-open：某一路在宿主上取不到就跳过，汇编出的 h 只影响等价选路，
 /// 两种选路逐位同结果，所以跳过不影响可解性；想让 Python 侧算 h，仍必须把
 /// tostring/collectgarbage/pcall 与错误消息格式逐位复刻出来。
@@ -175,16 +178,16 @@ pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
     // 类型名比较臂池：三种写法求值都是宿主给出的 "string"（值不同、语义同）
     let tstr = |rng: &mut GenRng| -> String {
         match rng.range(0, 3) {
-            0 => "type(tostring(0X0))".to_string(),
-            1 => "type(tostring({}))".to_string(),
-            _ => "type(tostring(true))".to_string(),
+            0 => "@TYPE@(@TSTR@(0X0))".to_string(),
+            1 => "@TYPE@(@TSTR@({}))".to_string(),
+            _ => "@TYPE@(@TSTR@(true))".to_string(),
         }
     };
     // "count" 的五个字符在宿主串 "function: 0x…" 里的字节位：c=4 o=7 u=2 n=8/3 t=5
     // （n 有两处，逐产物随机挑一处，取用点看不出固定模板）
     let n_idx = if rng.range(0, 2) == 0 { 8 } else { 3 };
     let sub = |rng: &mut GenRng, idx: u32| -> String {
-        format!("string.sub({v},{a},{a})", v = v, a = xnum(rng, idx))
+        format!("@SUB@({v},{a},{a})", v = v, a = xnum(rng, idx))
     };
     let opt = [4u32, 7, 2, n_idx, 5]
         .iter()
@@ -202,26 +205,49 @@ pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
     let (t1, t3) = (tstr(rng), tstr(rng));
     // 第一路/第三路的折叠循环逐产物换形态（for 递增 / while 递增）
     let loop3 = if rng.range(0, 2) == 0 {
-        format!("for {j}=0X1,#{m} do {h}=({h}*{p3}+string.byte({m},{j}))%{hm} end; ",
+        format!("for {j}=0X1,#{m} do {h}=({h}*{p3}+@BYTE@({m},{j}))%{hm} end; ",
                 j = j, m = m, h = h, p3 = p3, hm = hm)
     } else {
-        format!("local {j}=0X0; while {j}<#{m} do {j}={j}+0X1; {h}=({h}*{p3}+string.byte({m},{j}))%{hm} end; ",
+        format!("local {j}=0X0; while {j}<#{m} do {j}={j}+0X1; {h}=({h}*{p3}+@BYTE@({m},{j}))%{hm} end; ",
                 j = j, m = m, h = h, p3 = p3, hm = hm)
     };
-    let src = format!(
-        "local {h}=0X0; do \
-           local {ok},{v}=pcall(function() return tostring(function() end) end); \
-           if {ok} and type({v})=={t1} then for {i}=0X1,#{v} do {h}=({h}*{p1}+string.byte({v},{i}))%{hm} end; \
-              local {okc},{c}=pcall(collectgarbage,{opt}); \
-              if {okc} and type({c})==type(0X0) then {h}=({h}*{p2}+math.floor({c}))%{hm} end; end; \
-           local {mok},{m}=pcall(function() {eb} end); \
-           if type({m})=={t3} then {l3} end; \
+    // 库成员先全部写成占位符，装配完按**调用点个数**决定形态：超过两次的
+    // 统一 local 化（逐产物随机局部名，声明散在同一 do 块开头、顺序洗牌），
+    // 取用点只出现局部名——不再把 `string.sub(` 一字排开写五遍；不超过两次的
+    // 保持直呼，免得为省一两处反而多出一个显眼的绑定。
+    let mut src = format!(
+        "local {h}=0X0; do @ALIAS@local {ok},{v}=@PCALL@(function() return @TSTR@(function() end) end); \
+           if {ok} and @TYPE@({v})=={t1} then for {i}=0X1,#{v} do {h}=({h}*{p1}+@BYTE@({v},{i}))%{hm} end; \
+              local {okc},{c}=@PCALL@(collectgarbage,{opt}); \
+              if {okc} and @TYPE@({c})==@TYPE@(0X0) then {h}=({h}*{p2}+@FLOOR@({c}))%{hm} end; end; \
+           local {mok},{m}=@PCALL@(function() {eb} end); \
+           if @TYPE@({m})=={t3} then {l3} end; \
          end; ",
         h = h, ok = ok, v = v, t1 = t1,
         i = i, p1 = p1, hm = hm,
         okc = okc, c = c, opt = opt, p2 = p2,
         mok = mok, m = m, eb = err_body, t3 = t3, l3 = loop3
     );
+    let mut aliases: Vec<(String, &str)> = Vec::new();
+    for (marker, lib) in [
+        ("@SUB@", "string.sub"),
+        ("@TYPE@", "type"),
+        ("@PCALL@", "pcall"),
+        ("@BYTE@", "string.byte"),
+        ("@FLOOR@", "math.floor"),
+        ("@TSTR@", "tostring"),
+    ] {
+        if src.matches(marker).count() > 2 {
+            let a = rng.name();
+            aliases.push((a.clone(), lib));
+            src = src.replace(marker, &a);
+        } else {
+            src = src.replace(marker, lib);
+        }
+    }
+    rng.shuffle(&mut aliases);
+    let alias_decl: String = aliases.iter().map(|(a, lib)| format!("local {}={}; ", a, lib)).collect();
+    let src = src.replace("@ALIAS@", &alias_decl);
     (src, h)
 }
 

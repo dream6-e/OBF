@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，211912 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），127810 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，258532 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，210421 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），128533 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，254472 B |
 
 前两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
 
@@ -24,7 +24,8 @@
 常量（类型名走 `type(tostring(0X0))`，`collectgarbage` 的选项名在运行期从宿主串里按位取字符
 拼出，第三路直接用宿主原生报错文本）；解码器的密钥分片/字母表/数字映射表整体并进统一流
 （落盘只有密文数字，取用点是惰性解密表达式）；MB 外壳的 loader 名从运行期字母表里逐字符取用
-拼出（产物里既没有 `loadstring` 这个词，也没有那串明码数字）。产物里 `string.char` 只剩
+拼出（产物里既没有 `loadstring` 这个词，也没有那串明码数字）；块内库成员调用点超过两次的
+统一 local 化（声明散在块首、顺序洗牌），取用点只出现随机局部名。产物里 `string.char` 只剩
 「表达式 → 字节」的既有用法（解码器逐字节还原），不再有可直接读出内容的数字列表。
 载荷解密链与统一流（UniStream）已换代成**原生流**（§5.17）：16 字节种子不再当密钥用，
 而是运行期折叠后**现场构造 S-box**（Fisher-Yates，构造路径由运行期指纹选路），
