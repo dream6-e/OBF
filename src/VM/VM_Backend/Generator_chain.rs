@@ -211,6 +211,11 @@ pub(super) fn build_chain(x: ChainIn) -> String {
     #[allow(dead_code)]
     const CG: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
         let mut block_chacha_setup = String::new();
+        // ② 运行期指纹：ChaCha 密钥装配的「等价选路开关」——装配循环与状态构造
+        // 各在两条逐位等价的形态间按指纹选路。换宿主只换路径、不换密钥；静态读者
+        // 连「哪些数配成一对、按什么顺序装配」都读不出（要读得先仿真宿主语义）。
+        let (fp_src, h_var) = crate::VM::VM_Backend::Generator_native::emit_fingerprint(&mut rng);
+        block_chacha_setup.push_str(&fp_src);
         // ㉒① XOR 表构建（256×256）→ 双层数值游标机：外层扫行（8 态×32 行），
         // 内层扫列（8 态×32 列）。经典双重 for 消失，只剩 while true + if G==K
         // 的扁平化游走（行游标名固定 av，供内层文本引用；列表格名 rw 双字母
@@ -345,30 +350,44 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let mut dn_names: [String; CG] = std::array::from_fn(|_| String::new());
         let mut salt_names: [String; CG] = std::array::from_fn(|_| String::new());
         for g in 0..CG {
-            let mut cl = String::new();
-            let kname = rng.name();
-            let slname = rng.name();
+            // ② 密钥 token 化：产物里不再出现「一组 8 个密钥字」的数值形态——
+            // 每个字拆成 (X=真值^掩码, 掩码) 两个算式分表落盘，真值在运行期由
+            // P 表里的异或实现现算（那张表本身也是运行期建起来的）；装配循环按
+            // 运行期指纹在 for/while 两条等价形态间选路。
+            // ① sigma 还原与密钥**解耦**：本组只用独立随机数还原，不拿密钥字做
+            // 锚点（旧式 ((sigma-K[j])%2^32) 会让任意读者直接反算出 4 个密钥字）。
+            let toks = crate::VM::VM_Backend::Generator_kdf::key_tokens(&mut rng, &keys, &enc.keys[g], &h_var);
+            let (salt_decl, slname) = crate::VM::VM_Backend::Generator_kdf::token_value(&mut rng, &keys, enc.salts[g], &toks.op, &h_var);
+            let (knum_decl, knum_var) = crate::VM::VM_Backend::Generator_kdf::token_value(&mut rng, &keys, enc.knum[g], &toks.op, &h_var);
+            let (kstr_decl, kstr_var) = crate::VM::VM_Backend::Generator_kdf::token_value(&mut rng, &keys, enc.kstr[g], &toks.op, &h_var);
             let sname = rng.name();
             let cbname = rng.name();
-            let key_lua = (0..8).map(|i| rng.obfuscate_num(enc.keys[g][i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
-            let salt_lua = rng.obfuscate_num(enc.salts[g] as i64, 1, &keys);
-            let mut idxs: Vec<usize> = vec![1, 2, 3, 4, 5, 6, 7, 8];
-            for j in (1..idxs.len()).rev() { let k = rng.range(0, j + 1); idxs.swap(j, k); }
-            let sig_idx = [idxs[0], idxs[1], idxs[2], idxs[3]];
+            // 簇外可见的三个出口（簇体落在 do…end 里，壳函数活动局部数不膨胀）
+            let out_ds = rng.name();
+            let out_dn = rng.name();
+            let out_sl = rng.name();
+            let mut cl = String::new();
             // ⑤ sigma 还原模数逐构建拆分派生
             let sm32 = rng.name();
             let sm32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let sigma_lua = (0..4)
                 .map(|i| {
-                    let d = sigma[i].wrapping_sub(enc.keys[g][sig_idx[i] - 1]);
-                    format!("(({}+K[{}])%{m32})", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i], m32 = sm32)
+                    let r = rng.next();
+                    let d = sigma[i].wrapping_sub(r);
+                    format!("(({}+{})%{m32})", rng.obfuscate_num(d as i64, 1, &keys), rng.obfuscate_num(r as i64, 1, &keys), m32 = sm32)
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            cl.push_str(&format!(
-                "local {sm32}={sm32v}; local {kn}={{{key_lua}}}; local {sl}={salt_lua}; ",
-                sm32 = sm32, sm32v = sm32v,
-                kn = kname, key_lua = key_lua, sl = slname, salt_lua = salt_lua));
+            let key_fetch = toks.fetch.join(",");
+            cl.push_str(&toks.decl);
+            cl.push_str(&salt_decl);
+            cl.push_str(&knum_decl);
+            cl.push_str(&kstr_decl);
+            cl.push_str(&format!("local {sm32}={sm32v}; ", sm32 = sm32, sm32v = sm32v));
+            // 状态模板：指纹选路的第二支用它整表拷贝（省 8 次算式求值），两支同结果
+            let tm = rng.name();
+            cl.push_str(&format!("local {tm}={{{sig},{kf},0X0,0X0,0X0,0X0}}; ",
+                tm = tm, sig = sigma_lua, kf = key_fetch));
             // ㉒ 簇内 cb 同 boot 域处理：焊接混合模数 + 两条 16 环游标化。
             let gmix_v = mk_m(&mut rng);
             let gmix_e = weld.dst();
@@ -388,9 +407,9 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
             };
             cl.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; local {p2}={p2v}; local {p3}={p3v}; {w1} {rounds} local out={{}}; {w2} return out end; ",
-                cb = cbname, kn = kname, sig = sigma_lua, mixw = gmix_weld, w1 = gs1_walk, w2 = gs2_walk,
-                p2 = gp2, p3 = gp3, p2v = gp2v, p3v = gp3v,
+                "local function {cb}(n1,n2,n3,ctr) {mixw} local s; if ({h}%0X3)==0X0 then s={{{sig},{kf},ctr,n1,n2,n3}} else s={{}}; for {ti}=0X1,0X10 do s[{ti}]={tm}[{ti}] end; s[0XD]=ctr; s[0XE]=n1; s[0XF]=n2; s[0X10]=n3 end; local o={{}}; local {p2}={p2v}; local {p3}={p3v}; {w1} {rounds} local out={{}}; {w2} return out end; ",
+                cb = cbname, mixw = gmix_weld, h = h_var, sig = sigma_lua, kf = key_fetch, tm = tm, ti = rng.name(),
+                w1 = gs1_walk, w2 = gs2_walk, p2 = gp2, p3 = gp3, p2v = gp2v, p3v = gp3v,
                 rounds = mk_rounds(&mut rng, fn_qr.as_str())));
             // ㉓-A sm 换公式：nonce=[盐^roll^fold, r7^(槽*6+kind), 盐^rotl7(r7)]——
             // layouts 直传退役；roll/fold 由 body_consts 扫描重算后经 dsp 透传
@@ -403,31 +422,42 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             cl.push_str(&format!(
                 "local function {sm}(pool_idx,kind,n,fold,rl) local out={{}}; local ctr=0; local pos=1; local {r7v}={rot}(rl or 0X0,0X7); while pos<=n do local blk={cb}({bx}({bx}({sl},rl or 0X0),fold or 0X0), {bx}({r7v},pool_idx*0X6+kind), {bx}({sl},{rot}({r7v},0X7)), ctr); {w64} ctr=ctr+1 end; return out end; ",
                 sm = sname, cb = cbname, sl = salt_v18, bx = fn_bxor.as_str(), rot = fn_rotl32.as_str(), r7v = rng.name(), w64 = gsm_walk));
-            // 组专属解码器：kind 常量内嵌（每组不同随机值），下标参数=节内槽位号
+            // 组专属解码器：kind 常量内嵌（每组不同随机值，同样是运行期现算的 token）
             let (vb, vs, ve, vm) = (rng.name(), rng.name(), rng.name(), rng.name());
-            let mut f64_parts = vec![format!("({vb}[7]%16)*2^48", vb = vb), format!("({vb}[6]*2^40)", vb = vb), format!("({vb}[5]*2^32)", vb = vb), format!("({vb}[4]*2^24)", vb = vb), format!("({vb}[3]*2^16)", vb = vb), format!("({vb}[2]*2^8)", vb = vb), format!("{vb}[1]", vb = vb)];
+            let mut f64_parts = vec![
+                format!("({vb}[7]%16)*2^48", vb = vb), format!("({vb}[6]*2^40)", vb = vb),
+                format!("({vb}[5]*2^32)", vb = vb), format!("({vb}[4]*2^24)", vb = vb),
+                format!("({vb}[3]*2^16)", vb = vb), format!("({vb}[2]*2^8)", vb = vb),
+                format!("{vb}[1]", vb = vb),
+            ];
             rng.shuffle(&mut f64_parts);
             let (v_num_i, v_num_g, v_num_ks) = (rng.name(), rng.name(), rng.name());
             let dname = rng.name();
             let fd18n = rng.name();
             let rl18n = rng.name();
             cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decnum(
-                dname.as_str(), sname.as_str(), rng.obfuscate_num(enc.knum[g] as i64, 1, &keys).as_str(), vb.as_str(),
+                dname.as_str(), sname.as_str(), knum_var.as_str(), vb.as_str(),
                 xor_tbl_var.as_str(), vs.as_str(), ve.as_str(), vm.as_str(), f64_parts.join("+"),
                 v_num_ks.as_str(), v_num_i.as_str(), v_num_g.as_str(), fd18n.as_str(), rl18n.as_str()));
-            salt_names[g] = slname.clone();
-            dn_names[g] = dname;
             let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
             let sname_d = rng.name();
             let fd18s = rng.name();
             let rl18s = rng.name();
-            let kstr_lit = rng.obfuscate_num(enc.kstr[g] as i64, 1, &keys);
             cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
-                &mut rng, sname_d.as_str(), sname.as_str(), kstr_lit.as_str(),
+                &mut rng, sname_d.as_str(), sname.as_str(), kstr_var.as_str(),
                 xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
                 v_str_i.as_str(), v_str_g.as_str(), fd18s.as_str(), rl18s.as_str()));
-            ds_names[g] = sname_d;
-            clusters.push(cl);
+            // 装配辅料用毕销毁（X/掩码/槽位表/异或实现），出口赋给簇外可见名
+            cl.push_str(&crate::VM::VM_Backend::Generator_kdf::dispose_stmt(&mut rng, &toks.aux));
+            cl.push_str(&format!("{o1}={d1}; {o2}={d2}; {o3}={sl2}; ",
+                o1 = out_dn, d1 = dname, o2 = out_ds, d2 = sname_d, o3 = out_sl, sl2 = slname));
+            // 整簇落在 do…end：簇内的表/闭包/临时名随块结束释放（lua5.1 单函数
+            // 200 局部上限），簇外的解码器与盐以 upvalue 捕获
+            clusters.push(crate::VM::VM_Backend::Generator_kdf::cluster_scope(
+                &[out_dn.clone(), out_ds.clone(), out_sl.clone()], &cl));
+            salt_names[g] = out_sl;
+            dn_names[g] = out_dn;
+            ds_names[g] = out_ds;
         }
         // 簇落位洗牌：1 个进 chacha_setup 尾部，其余 3 个作为独立 parts 插在
         // chacha_setup 之后、decode_chunk 之前（词法作用域先行，落位随机）
@@ -937,30 +967,38 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 boot_lits.push(format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(&blob)));
             }
             let (bk, bs, bcb, bsm, bdec, bpt) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-            let key_lua = (0..8).map(|i| rng.obfuscate_num(bkey[i] as i64, 1, &keys)).collect::<Vec<_>>().join(",");
-            let salt_lua = rng.obfuscate_num(bsalt as i64, 1, &keys);
-            let mut idxs: Vec<usize> = vec![1, 2, 3, 4, 5, 6, 7, 8];
-            for j in (1..idxs.len()).rev() { let k = rng.range(0, j + 1); idxs.swap(j, k); }
-            let sig_idx = [idxs[0], idxs[1], idxs[2], idxs[3]];
-            // ⑤ sigma 还原模数逐构建拆分派生
+            // ② 内建名簇同样走 token 化：密钥/盐都不以数值形态落盘（自己的 X/掩码分表）
+            let btoks = crate::VM::VM_Backend::Generator_kdf::key_tokens(&mut rng, &keys, &bkey, &h_var);
+            let salt_decl_b = crate::VM::VM_Backend::Generator_kdf::token_value_as(&mut rng, &keys, bsalt, &btoks.op, &h_var, &bs);
+            // ① sigma 还原与密钥解耦（只由本簇独立随机数还原，无密钥锚点）
             let sm32b = rng.name();
             let sm32bv = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let sigma_lua = (0..4)
                 .map(|i| {
-                    let d = sigma[i].wrapping_sub(bkey[sig_idx[i] - 1]);
-                    format!("(({}+K[{}])%{m32})", rng.obfuscate_num(d as i64, 1, &keys), sig_idx[i], m32 = sm32b)
+                    let r = rng.next();
+                    let d = sigma[i].wrapping_sub(r);
+                    format!("(({}+{})%{m32})", rng.obfuscate_num(d as i64, 1, &keys), rng.obfuscate_num(r as i64, 1, &keys), m32 = sm32b)
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            // ㉘D7 簇头三条声明互无依赖（bp 密文表/kn 键表/sl 盐），洗牌发射
+            let bkey_fetch = btoks.fetch.join(",");
+            let btm = rng.name();
+            // ㉘D7 簇头声明互无依赖者洗牌发射（密钥 token 声明与盐有先后依赖，合并为一条）
             let mut cluster_decls: Vec<String> = vec![
                 format!("local {m32}={m32v}; ", m32 = sm32b, m32v = sm32bv),
                 format!("local {bp}={{{lits}}}; ", bp = bpt, lits = boot_lits.join(",")),
-                format!("local {kn}={{{key_lua}}}; ", kn = bk, key_lua = key_lua),
-                format!("local {sl}={salt_lua}; ", sl = bs, salt_lua = salt_lua),
+                btoks.decl.clone(),
+                salt_decl_b,
             ];
+            let (kd_a, kd_b) = (cluster_decls[2].clone(), cluster_decls[3].clone());
+            cluster_decls.truncate(2);
             rng.shuffle(&mut cluster_decls);
+            cluster_decls.push(kd_a);
+            cluster_decls.push(kd_b);
             for d in &cluster_decls { out.push_str(d); }
+            // 状态模板（指纹选路第二支整表拷贝）——必须在 sm32/密钥 token 声明之后
+            out.push_str(&format!("local {tm}={{{sig},{kf},0X0,0X0,0X0,0X0}}; ",
+                tm = btm, sig = sigma_lua, kf = bkey_fetch));
             // ㉒② 焊接混合模数（cb 每 64 字节块重入——第二次起逻辑无分支）；
             // ㉒① 两条 16 环 → 4 态游标机（块内局部名 wq 双字母避开遮蔽池）。
             let mix_m_v = mk_m(&mut rng);
@@ -981,8 +1019,8 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
             };
             out.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) local K={kn}; {mixw} local s={{{sig},K[1],K[2],K[3],K[4],K[5],K[6],K[7],K[8],ctr,n1,n2,n3}}; local o={{}}; local {p2}={p2v}; local {p3}={p3v}; {w1} {rounds} local out={{}}; {w2} return out end; ",
-                cb = bcb, kn = bk, sig = sigma_lua, mixw = mix_weld, w1 = s1_walk, w2 = s2_walk,
+                "local function {cb}(n1,n2,n3,ctr) {mixw} local s; if ({h}%0X3)==0X0 then s={{{sig},{kf},ctr,n1,n2,n3}} else s={{}}; for {ti}=0X1,0X10 do s[{ti}]={tm}[{ti}] end; s[0XD]=ctr; s[0XE]=n1; s[0XF]=n2; s[0X10]=n3 end; local o={{}}; local {p2}={p2v}; local {p3}={p3v}; {w1} {rounds} local out={{}}; {w2} return out end; ",
+                cb = bcb, h = h_var, sig = sigma_lua, kf = bkey_fetch, tm = btm, ti = rng.name(), mixw = mix_weld, w1 = s1_walk, w2 = s2_walk,
                 p2 = bp2, p3 = bp3, p2v = bp2v, p3v = bp3v,
                 rounds = mk_rounds(&mut rng, fn_qr.as_str())));
             // ㉒① 64 字节分发环 → 4 态游标机（pos>n 提前出口保留为批内 break）。
@@ -997,7 +1035,8 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
             let (v_str_i, v_str_g, v_str_ks, v_str_s) = (rng.name(), rng.name(), rng.name(), rng.name());
             let fd18b = rng.name(); // 哑形参：boot 域 bsm 是 3 参，fold/rl 实参多余即弃
             let rl18b = rng.name();
-            let bkind_lit = rng.obfuscate_num(bkind as i64, 1, &keys);
+            let (bkind_decl, bkind_lit) = crate::VM::VM_Backend::Generator_kdf::token_value(&mut rng, &keys, bkind, &btoks.op, &h_var);
+            out.push_str(&bkind_decl);
             out.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
                 &mut rng, bdec.as_str(), bsm.as_str(), bkind_lit.as_str(),
                 xor_tbl_var.as_str(), fn_s_byte.as_str(), v_str_ks.as_str(), v_str_s.as_str(),
@@ -1041,6 +1080,11 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 reg = var_builtin_reg, g1 = g1, g2 = g2, g3 = g3,
                 bk = bk, bs = bs, bcb = bcb, bsm = bsm, bdec = bdec, bpt = bpt,
                 h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5, h6 = h6));
+            // ② 内建名簇的 token 辅料（X/掩码/槽位表/异或实现/状态模板/kind）同样用毕销毁
+            let mut boot_aux = btoks.aux.clone();
+            boot_aux.push(btm.clone());
+            boot_aux.push(bkind_lit.clone());
+            out.push_str(&crate::VM::VM_Backend::Generator_kdf::dispose_stmt(&mut rng, &boot_aux));
         }
         // ㉑ thunk 快照：密文 thunk 常驻，明文可随时写回回收
         // ㉒① thunk 快照环 → 动态分段游标机（上界=运行期原型数，P 表在作用域）。
