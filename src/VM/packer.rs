@@ -60,13 +60,21 @@ impl Packer {
         }
         let (alpha_str, alpha_perm) = Self::generate_alphabet();
 
+        // 原生流（Native Stream）：16 字节种子只在运行期参与「折叠 + S-box 现场构造」，
+        // 密钥流 = 双 LCG 状态 + 位置 + 前一密文字节 混合后查运行期 S-box。
+        // 每段各自起一条流（位置从 0 起），周期不再固定 16 字节。
+        let nat = crate::VM::VM_Backend::Generator_native::Native::new(vm_rng);
+        let n_sbox = nat.sbox(&keys);
+
         let sandbox = generate_sandbox("kryvex");
         let compressed_sb = Self::encode_stream(sandbox.payload.as_bytes());
-        let encrypted_sb = Self::xor_stream_with_keys(&compressed_sb, &keys);
+        let (encrypted_sb, _) = nat.encrypt(&keys, &n_sbox, &compressed_sb);
         let b86_sb = Self::base86_encode_with_alpha(&encrypted_sb, &alpha_str, &alpha_perm);
 
+        // 第二段单起一条流：解码器 stage2 会重放内核初始化——若续用第一段的收尾
+        // 状态，两段之间任一字节的偏差都会让后续整条流错位（第一段未必吃满字节）。
         let compressed_main = Self::encode_stream(input);
-        let encrypted_main = Self::xor_stream_with_keys(&compressed_main, &keys);
+        let (encrypted_main, _) = nat.encrypt(&keys, &n_sbox, &compressed_main);
         let b86_main = Self::base86_encode_with_alpha(&encrypted_main, &alpha_str, &alpha_perm);
 
         // 判据①修复：'~' 分隔符废除——载荷是连续一段，sb/main 边界由
@@ -74,7 +82,7 @@ impl Packer {
         let split_pos = b86_sb.len();
         let lua_payload = format!("{}{}", b86_sb, b86_main);
 
-        let (decoder_script, entry_func) = Self::build_decoder(&keys, &alpha_str, &alpha_perm, split_pos, vm_rng, uni);
+        let (decoder_script, entry_func) = Self::build_decoder(&keys, &nat, &alpha_str, &alpha_perm, split_pos, vm_rng, uni);
         (lua_payload, decoder_script, entry_func)
     }
 
@@ -189,14 +197,6 @@ impl Packer {
         output
     }
 
-    fn xor_stream_with_keys(input: &[u8], keys: &[u8]) -> Vec<u8> {
-        let mut output = Vec::new();
-        for (i, &b) in input.iter().enumerate() {
-            output.push(b ^ keys[i % 16]);
-        }
-        output
-    }
-
     /// 反混淆判据①修复：旧字母表 86 字符，载荷字符集 = 86 + 分隔符 '~' = 恰好 87
     /// （「87 差 1」），一次集合比对就锁定编码与字母表。现在：
     /// - 91 个安全可见字符（剔除 [ ] ~ ：长字符串定界 `]=]` 相关字符不用）取 86+K（K=3..5）；
@@ -289,7 +289,13 @@ impl Packer {
         encoded
     }
 
-    fn build_decoder(keys: &[u8], alphabet: &str, perm: &[usize], split_pos: usize, rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream) -> (String, String) {
+    fn build_decoder(keys: &[u8], nat: &crate::VM::VM_Backend::Generator_native::Native, alphabet: &str, perm: &[usize], split_pos: usize, rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream) -> (String, String) {
+        // 原生流（Native Stream）解密内核：运行期指纹 + 现场构造 S-box + 每字节步进，
+        // 闭包按 upvalue 捕获状态——密钥材料不以数据形态出现在产物里。
+        let kern = crate::VM::VM_Backend::Generator_native::emit_decrypt_kernel(rng, nat, "pack");
+        let kern_decl = kern.decl.clone();
+        let kern_init_fn = kern.init_fn.clone();
+        let kern_step = kern.step.clone();
         let f_entry = rng.name();
         let v_data = rng.name();
         // 只用原生 loadstring：执行器/沙盒常把 loadstring 换成 Lua 钩子，
@@ -298,7 +304,6 @@ impl Packer {
         let f_getls = rng.name();
         let v_pload = rng.name();
 
-        let m_bxor = rng.name();
         let m_next = rng.name();
         let m_init_map = rng.name();
         let m_init_insts = rng.name();
@@ -673,7 +678,6 @@ impl Packer {
         // 直接写最终随机名会导致该处字段漏改、运行时对不上。
         let mut pk_s2: Vec<String> = vec![
             "s.idx = 1".to_string(),
-            "s.kidx = 0".to_string(),
             "s.buf = {}".to_string(),
             "s.res = {}".to_string(),
             format!("s.pc = {}", pc_ref(rng, 0)),
@@ -688,6 +692,7 @@ impl Packer {
             "s.r_vals = {}".to_string(),
             "s.r_len = 0".to_string(),
             "s.tail_flg = false".to_string(),
+            format!("{}(s.k)", kern_init_fn), // 第二段从头起流（第一段未必吃满字节）
         ];
         rng.shuffle(&mut pk_s2);
         let pk_s2_assigns = pk_s2.join(" ");
@@ -711,31 +716,15 @@ impl Packer {
 local function {f_entry}({v_data})
     {probe}
     {pc_infra}
+    {kern_decl}
     return ({{
-        {m_bxor} = function(q, s, a, b, ra, rb, p, c, rra, rrb, k_bxor)
-            k_bxor = a * 256 + b;
-            local to=0 and true;
-            if s.memo[k_bxor] then return s.memo[k_bxor] end;
-            ra, rb, p, c = a, b, 1, 0;
-            while to do
-                if ra > 0 or rb > 0 then
-                    rra, rrb = ra % 2, rb % 2;
-                    if rra ~= rrb then c = c + p end;
-                    ra, rb, p = s.floor((ra - rra) / 2), s.floor((rb - rrb) / 2), p * 2;
-                else break end;
-            end;
-            s.memo[k_bxor] = c;
-            local function hg(dr, ...) repeat return c or nil until dr end;local df=hg(true)
-            return df;
-        end,
         {m_next} = function(q, s, r, c, e, v, x, y, z, i, d, m, b, k, B, F)
     B, F = s.byte, s.floor;
     local {p2}={p2v}; local {p3}={p3v}; local {w1}=86; local {w2}={w1}*86; local {w3}={w2}*86; local {w4}={w3}*86;
     i, d, m, b, k = s.idx, s.data, s.map, s.buf, s.kidx;
     if #b > 0 then
         r = s.remove(b, 1);
-        c = q:{m_bxor}(s, r, s.k[k + 1]);
-        s.kidx = (k + 1) % 16;
+        c = {kern_step}(r);
         return c;
     end;
     if i > s.len then return nil end;
@@ -785,6 +774,7 @@ end,
             while i < {num_actual_key_parts} do i = i + 1; kstr = kstr .. kparts[i]; end;
             i = 0;
             while i < #kstr do i = i + 1; s.k[i] = s.byte(kstr, i); end;
+            {kern_init_fn}(s.k);
         end,
         {m_init_insts} = function(q, s, st)
             {init_insts_loop}
