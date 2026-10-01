@@ -201,10 +201,12 @@ impl<'a> OpcodeBuilder<'a> {
         let c = &self.cfg.consts;
         let s = &self.cfg.stk;
         
-        self.pre_statements.push_str(&format!(
-            "if {}>127 then {}={}[{}-127] else {}={}[{}] end; ",
-            val, rk_var, c, val, rk_var, s, val
-        ));
+        let resolver = if self.rng.next_range(0, 2) == 0 {
+            format!("if {v}>127 then {r}={c}[{v}-127] else {r}={s}[{v}] end; ", v=val,r=rk_var,c=c,s=s)
+        } else {
+            format!("if {v}<128 then {r}={s}[{v}] else {r}={c}[{v}-127] end; ", v=val,r=rk_var,c=c,s=s)
+        };
+        self.pre_statements.push_str(&resolver);
         
         rk_var.to_string()
     }

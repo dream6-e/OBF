@@ -5,15 +5,18 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut add = OpcodeBuilder::new(m[12].clone(), cfg, rng);
     let add_b = add.rk(3); let add_c = add.rk(4); let add_a = add.raw_inst(2);
-    out.push_str(&add.build(&format!("{{STK}}[{}] = {} + {}", add_a, add_b, add_c)));
+    let add_body = if add.rng.next_range(0, 2) == 0 { format!("{{STK}}[{add_a}] = {add_b} + {add_c}") } else { let x=add.rng.name(); let y=add.rng.name(); format!("local {x}, {y} = {add_b}, {add_c}; {{STK}}[{add_a}] = {x} + {y}") };
+    out.push_str(&add.build(&add_body));
 
     let mut sub = OpcodeBuilder::new(m[13].clone(), cfg, rng);
     let sub_b = sub.rk(3); let sub_c = sub.rk(4); let sub_a = sub.raw_inst(2);
-    out.push_str(&sub.build(&format!("{{STK}}[{}] = {} - {}", sub_a, sub_b, sub_c)));
+    let sub_body = if sub.rng.next_range(0, 2) == 0 { format!("{{STK}}[{sub_a}] = {sub_b} - {sub_c}") } else { let x=sub.rng.name(); let y=sub.rng.name(); format!("local {x}, {y} = {sub_b}, {sub_c}; {{STK}}[{sub_a}] = {x} - {y}") };
+    out.push_str(&sub.build(&sub_body));
 
     let mut mul = OpcodeBuilder::new(m[14].clone(), cfg, rng);
     let mul_b = mul.rk(3); let mul_c = mul.rk(4); let mul_a = mul.raw_inst(2);
-    out.push_str(&mul.build(&format!("{{STK}}[{}] = {} * {}", mul_a, mul_b, mul_c)));
+    let mul_body = if mul.rng.next_range(0, 2) == 0 { format!("{{STK}}[{mul_a}] = {mul_b} * {mul_c}") } else { let x=mul.rng.name(); let y=mul.rng.name(); format!("local {x}, {y} = {mul_b}, {mul_c}; {{STK}}[{mul_a}] = {x} * {y}") };
+    out.push_str(&mul.build(&mul_body));
 
     let mut div = OpcodeBuilder::new(m[15].clone(), cfg, rng);
     let div_b = div.rk(3); let div_c = div.rk(4); let div_a = div.raw_inst(2);

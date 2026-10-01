@@ -20,7 +20,13 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let gt_b = gettable.reg(3);
     let gt_c = gettable.rk(4);
     let gt_a = gettable.raw_inst(2);
-    out.push_str(&gettable.build(&format!("{{STK}}[{}] = {}[{}]", gt_a, gt_b, gt_c)));
+    let gt_body = if gettable.rng.next_range(0, 2) == 0 {
+        format!("{{STK}}[{gt_a}] = {gt_b}[{gt_c}]")
+    } else {
+        let t = gettable.rng.name(); let k = gettable.rng.name();
+        format!("local {t}, {k} = {gt_b}, {gt_c}; {{STK}}[{gt_a}] = {t}[{k}]")
+    };
+    out.push_str(&gettable.build(&gt_body));
 
     let mut setglobal = OpcodeBuilder::new(m[7].clone(), cfg, rng);
     let sg_b = setglobal.raw_inst(3);
@@ -39,7 +45,13 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let st_b = settable.rk(3);
     let st_c = settable.rk(4);
     let st_a = settable.raw_inst(2);
-    out.push_str(&settable.build(&format!("{{STK}}[{}] [{}] = {}", st_a, st_b, st_c)));
+    let st_body = if settable.rng.next_range(0, 2) == 0 {
+        format!("{{STK}}[{st_a}][{st_b}] = {st_c}")
+    } else {
+        let t = settable.rng.name(); let k = settable.rng.name(); let v = settable.rng.name();
+        format!("local {t}, {k}, {v} = {{STK}}[{st_a}], {st_b}, {st_c}; {t}[{k}] = {v}")
+    };
+    out.push_str(&settable.build(&st_body));
 
     let mut newtable = OpcodeBuilder::new(m[10].clone(), cfg, rng);
     let nt_a = newtable.raw_inst(2);

@@ -14,15 +14,18 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut eq = OpcodeBuilder::new(m[23].clone(), cfg, rng);
     let eq_b = eq.rk(3); let eq_c = eq.rk(4); let eq_a = eq.raw_inst(2);
-    out.push_str(&eq.build(&format!("if ({} == {}) ~= ({} ~= 0) then {{PC}} = {{PC}} + 1 end", eq_b, eq_c, eq_a)));
+    let eq_body = if eq.rng.next_range(0, 2) == 0 { format!("if ({eq_b} == {eq_c}) ~= ({eq_a} ~= 0) then {{PC}} = {{PC}} + 1 end") } else { format!("if ({eq_b} == {eq_c}) == ({eq_a} == 0) then {{PC}} = {{PC}} + 1 end") };
+    out.push_str(&eq.build(&eq_body));
 
     let mut lt = OpcodeBuilder::new(m[24].clone(), cfg, rng);
     let lt_b = lt.rk(3); let lt_c = lt.rk(4); let lt_a = lt.raw_inst(2);
-    out.push_str(&lt.build(&format!("if ({} < {}) ~= ({} ~= 0) then {{PC}} = {{PC}} + 1 end", lt_b, lt_c, lt_a)));
+    let lt_body = if lt.rng.next_range(0, 2) == 0 { format!("if ({lt_b} < {lt_c}) ~= ({lt_a} ~= 0) then {{PC}} = {{PC}} + 1 end") } else { format!("if ({lt_b} < {lt_c}) == ({lt_a} == 0) then {{PC}} = {{PC}} + 1 end") };
+    out.push_str(&lt.build(&lt_body));
 
     let mut le = OpcodeBuilder::new(m[25].clone(), cfg, rng);
     let le_b = le.rk(3); let le_c = le.rk(4); let le_a = le.raw_inst(2);
-    out.push_str(&le.build(&format!("if ({} <= {}) ~= ({} ~= 0) then {{PC}} = {{PC}} + 1 end", le_b, le_c, le_a)));
+    let le_body = if le.rng.next_range(0, 2) == 0 { format!("if ({le_b} <= {le_c}) ~= ({le_a} ~= 0) then {{PC}} = {{PC}} + 1 end") } else { format!("if ({le_b} <= {le_c}) == ({le_a} == 0) then {{PC}} = {{PC}} + 1 end") };
+    out.push_str(&le.build(&le_body));
 
     let mut test = OpcodeBuilder::new(m[26].clone(), cfg, rng);
     let test_a = test.reg(2); let test_c = test.raw_inst(4);

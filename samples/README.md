@@ -4,11 +4,11 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，223218 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），132672 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，265570 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，217,705 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），134,395 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，269,801 B |
 
-前两个都用 `toolchains/bin/lua5.1` 跑过，stdout 与原文件逐字节一致（19 行）。
+前两个都通过 `luac5.1 -p` 与 `luau-compile --binary`，并在 `lua5.1`、`luau` 下运行验证；stdout 与原文件逐字节一致（19 行）。
 
 产物现在是 Luraph 风格（见 `项目交接总结.md` §5.9）：单层 `while true do` 驱动、
 每个指令块是一个随机名方法、调用点全是 `self:随机名(...)`、状态存在 `self[随机大整数]`
