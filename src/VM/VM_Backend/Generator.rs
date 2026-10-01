@@ -50,6 +50,8 @@ impl Generator {
         let pf_protos = rng.name();
         let pf_open_ups = rng.name();
         let pf_vn = rng.name();
+        let pf_builtin_view = rng.name();
+        let pf_builtin_mask = rng.name();
         
         let key_seed_var = rng.name();
         // ㉒② 焊接缓存：三张缓存表随产物生成，供第二/三阶段各站点发射焊接构造。
@@ -314,6 +316,7 @@ impl Generator {
         
         let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng, &mut uni);
         let var_junk = rng.name(); let var_vc = rng.name(); let var_builtin_reg = rng.name();
+        let var_builtin_view = rng.name(); let var_builtin_mask = rng.name(); let var_builtin_i = rng.name(); let var_builtin_xor = rng.name();
         let block_packer_vars = format!("local {}, {}, {}; ", var_junk, var_vc, var_builtin_reg);
 
         let fn_execute = "execute";
@@ -346,11 +349,31 @@ impl Generator {
         let fn_ret0 = rng.name();
         let fn_ret1 = rng.name();
         let fn_ret2 = rng.name();
-        let var_methods = rng.name(); // 共享方法表（所有调用共用一个）
-        let var_proto = rng.name();   // 状态对象的元表（__index → 方法表）
+        let var_methods = rng.name(); // 首个方法分发表
+        let method_shard_count = rng.range(3, 6);
+        let mut method_shards = vec![var_methods.clone()];
+        for _ in 1..method_shard_count { method_shards.push(rng.name()); }
+        let var_proto = rng.name();   // 状态对象的元表（__index → 分发表链）
+        let ret_shards = [rng.range(0, method_shard_count), rng.range(0, method_shard_count), rng.range(0, method_shard_count)];
         let mut block_execute_def = String::new();
+        let (sk, sk_setup) = rng.slot_key_block(25);
+        let k_pc = sk[0].clone(); let k_stk = sk[1].clone(); let k_top = sk[2].clone();
+        let k_ops = sk[3].clone(); let k_aa = sk[4].clone(); let k_bb = sk[5].clone(); let k_cc = sk[6].clone();
+        // ⑱.4 掩码槽键：execute 入口派生后写槽，冷块（CLOSURE 等）中程读自取——
+        // 必须走 slot_key_block 池；裸 rng.name() 键不在池里=运行时 nil 键（前车之鉴）
+        let k_mk1 = sk[20].clone(); let k_mk2 = sk[21].clone(); let k_mk3 = sk[22].clone();
+        let k_dc = sk[23].clone(); // ㉚ DC 缓存表槽位（冷块中程读自取）
+        let k_bmask = sk[24].clone(); // 每个原型独立的内建表 XOR 掩码
+        // 中危刀1 密钥分驻：kp/pb/cnt 不入 chunk 表也不入 VM 槽（嵌套闭包交错会串），
+        // 存弱键注册表 KREG（键=chunk 表）——与被掩码数组异表分驻，重解原型自动回收
+        let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
+        let k_upv = sk[9].clone(); let k_env = sk[10].clone();
+        let k_va = sk[11].clone(); let k_valen = sk[12].clone();
+        let k_vc = sk[13].clone(); let k_breg = sk[14].clone();
+        let k_state = sk[15].clone(); let k_mode = sk[16].clone();
+        let k_retv = sk[17].clone(); let k_retf = sk[18].clone(); let k_rett = sk[19].clone();
         
-        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: var_builtin_reg.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
+        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: format!("self[{}]", k_breg), builtin_mask: format!("self[{}]", k_bmask), builtin_bxor: fn_bxor2.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
         let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
 
         
@@ -474,7 +497,7 @@ impl Generator {
         }
 
         // 去重 + 分配随机方法名 / 随机状态号
-        let mut blocks: Vec<(Vec<u32>, String, String, u32)> = Vec::new();
+        let mut blocks: Vec<(Vec<u32>, String, String, u32, usize)> = Vec::new();
         let mut used_states: Vec<u32> = Vec::new();
         for (ops, code) in parsed {
             if let Some(b) = blocks.iter_mut().find(|b| b.1 == code) { b.0.extend(ops); continue; }
@@ -483,7 +506,8 @@ impl Generator {
                 let v = rng.range(0x0100_0000, 0x7FFF_0000) as u32;
                 if !used_states.contains(&v) { used_states.push(v); break v; }
             };
-            blocks.push((ops, code, name, st));
+            let shard = rng.range(0, method_shard_count);
+            blocks.push((ops, code, name, st, shard));
         }
 
         // ① 方法化 + ② 数据流打乱
@@ -491,21 +515,6 @@ impl Generator {
         // 每个块的局部别名逐块新取，同一个逻辑变量跨块看到的不是同一个名字
         // ④ 槽位号不再写死在产物里
         // `GenRng::slot_key_block`）。这里拿到的全是**局部名字**，插值进 Lua 源码
-        let (sk, sk_setup) = rng.slot_key_block(24);
-        let k_pc = sk[0].clone(); let k_stk = sk[1].clone(); let k_top = sk[2].clone();
-        let k_ops = sk[3].clone(); let k_aa = sk[4].clone(); let k_bb = sk[5].clone(); let k_cc = sk[6].clone();
-        // ⑱.4 掩码槽键：execute 入口派生后写槽，冷块（CLOSURE 等）中程读自取——
-        // 必须走 slot_key_block 池；裸 rng.name() 键不在池里=运行时 nil 键（前车之鉴）
-        let k_mk1 = sk[20].clone(); let k_mk2 = sk[21].clone(); let k_mk3 = sk[22].clone();
-        let k_dc = sk[23].clone(); // ㉚ DC 缓存表槽位（冷块中程读自取）
-        // 中危刀1 密钥分驻：kp/pb/cnt 不入 chunk 表也不入 VM 槽（嵌套闭包交错会串），
-        // 存弱键注册表 KREG（键=chunk 表）——与被掩码数组异表分驻，重解原型自动回收
-        let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
-        let k_upv = sk[9].clone(); let k_env = sk[10].clone();
-        let k_va = sk[11].clone(); let k_valen = sk[12].clone();
-        let k_vc = sk[13].clone(); let k_breg = sk[14].clone();
-        let k_state = sk[15].clone(); let k_mode = sk[16].clone();
-        let k_retv = sk[17].clone(); let k_retf = sk[18].clone(); let k_rett = sk[19].clone();
 
         // 表类状态按块取一次（表是引用，不需要写回）
         // 直接把槽位表达式替换进块体 —— 就地读写，不依赖出口写回
@@ -529,13 +538,15 @@ impl Generator {
         let mut tree_entries: Vec<(u32, String)> = Vec::new();
         // 热块内联时要用的状态名 → 槽位号（驱动里声明成局部变量）
         let mut hot_locals: Vec<(String, String)> = Vec::new();
-        for (ops, code, name, st) in blocks.iter() {
+        for (ops, code, name, st, method_shard) in blocks.iter() {
             let st_lua = rng.format_num(*st as i64);
             // 预算：热路径（算术/比较/跳转/栈与表存取）保留**内联**，冷路径
             // （调用/返回/闭包/全局/上值/内建）才提升成方法。全量方法化会把每条
             // 指令都变成一次 Lua 函数调用 —— 实测慢 5.6 倍，超出预算
             let cold = uses_ident(code, &var_vc)
                 || uses_ident(code, &var_builtin_reg)
+                || code.contains(&format!("self[{}]", k_breg))
+                || code.contains(&format!("self[{}]", k_bmask))
                 || uses_ident(code, &var_env)
                 || uses_ident(code, &var_protos)
                 || uses_ident(code, &var_varargs)
@@ -616,7 +627,7 @@ impl Generator {
                 text.push_str(&body);
                 // 必须用 `.名字=function` 注册
                 // 成员名统一改名时字符串键不改，两边对不上变 nil。
-                defs.push(format!("{}.{}=function({},{},{},{},{}) {} end;", var_methods, name,
+                defs.push(format!("{}.{}=function({},{},{},{},{}) {} end;", method_shards[*method_shard], name,
                     p_self, p_names[0], p_names[1], p_names[2], p_names[3], text));
                 // 冷路径才付同步代价：进出方法前后各存/取一次 pc 与 top
                 // 并把本块状态号写进槽位（方法入口自校验）。
@@ -656,11 +667,11 @@ impl Generator {
                     }
                     4 => {
                         let fnv = rng.name();
-                        format!("local {}={}.{};{},{},{}={}({},{});", fnv, var_methods, name, rn1, rn2, rn3, fnv, var_vm, call_args)
+                        format!("local {}={}.{};{},{},{}={}({},{});", fnv, method_shards[*method_shard], name, rn1, rn2, rn3, fnv, var_vm, call_args)
                     }
                     _ => {
                         let (vn, fnv) = (rng.name(), rng.name());
-                        format!("local {}={};local {}={}.{};{},{},{}={}({},{});", vn, var_vm, fnv, vn, name, rn1, rn2, rn3, fnv, vn, call_args)
+                        format!("local {}={};local {}={}.{};{},{},{}={}({},{});", vn, var_vm, fnv, method_shards[*method_shard], name, rn1, rn2, rn3, fnv, vn, call_args)
                     }
                 };
                 let rs_pc = format!("{}={}[{}];", var_pc, var_vm, k_pc);
@@ -709,10 +720,11 @@ impl Generator {
                 (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
             let (ha_, hb_) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
             let htaut = format!("(0X{:X}-0X{:X}==0X{:X})", ha_, hb_, ha_ - hb_);
+            let d_shard = rng.range(0, method_shard_count);
             defs.push(format!(
                 "{mv}.{nm}=function({ds},{dp0},{dp1},{dp2},{dp3}) local {dg}={bx2}({dp0},0X{dop:X})%{m32v}; local {skv}={ds}[{ks}]; {skv}[{ds}[{kt}]+0X1]={dg}; {ds}[{kt}]={ds}[{kt}]+0X1; {psn}={psn} or {taut} end;",
                 ds = d_self, dp0 = d_p0, dp1 = d_p1, dp2 = d_p2, dp3 = d_p3,
-                mv = var_methods, nm = rng.name(), dg = dg, bx2 = fn_bxor2.as_str(),
+                mv = method_shards[d_shard], nm = rng.name(), dg = dg, bx2 = fn_bxor2.as_str(),
                 dop = dop, m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng),
                 skv = skv, ks = k_stk, kt = k_top, psn = psn_n, taut = htaut));
         }
@@ -740,22 +752,31 @@ impl Generator {
         block_methods.push_str(&hash_stmt);
         block_methods.push_str(&format!("local {} = function(...) return {}[{}]({}, ...) end; ", var_get_count, var_s, hex_select_idx, hash_expr));
         block_methods.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{{}={}(...),...}} end; ", pf_vn, var_get_count));
-        block_methods.push_str(&format!("local {}={{}};local {}={{}};", var_methods, var_proto));
+        let shard_names = method_shards.join(",");
+        let shard_tables = vec!["{}"; method_shard_count].join(",");
+        block_methods.push_str(&format!("local {}={};local {}={{}};", shard_names, shard_tables, var_proto));
         for d in defs.iter() { block_methods.push_str(d); block_methods.push(' '); }
         let (idx_stmt, idx_expr) = {
             let id = uni.register("__index");
             uni.fetch(&mut rng, id)
         };
         block_methods.push_str(&idx_stmt);
-        block_methods.push_str(&format!("{}[{}]={};", var_proto, idx_expr, var_methods));
+        let mut method_order: Vec<usize> = (0..method_shard_count).collect();
+        rng.shuffle(&mut method_order);
+        for pair in method_order.windows(2) {
+            block_methods.push_str(&format!("setmetatable({},{{[{}]={}}});", method_shards[pair[0]], idx_expr, method_shards[pair[1]]));
+        }
+        block_methods.push_str(&format!("{}[{}]={};", var_proto, idx_expr, method_shards[method_order[0]]));
 
         block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
         block_execute_def.push_str(&format!("local {} = setmetatable({{}}, {}); ", var_vm, var_proto));
+        let builtin_count = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len();
+        block_execute_def.push_str(&format!("local {bxv}={bx};local {bm}=chunk.{cbm};local {bv}=chunk.{cbv};if not {bv} then {bm}={bxv}({bxv}(chunk.{lld},chunk.{nups}),chunk.{ms})%0X40;{bv}={{}};for {bi}=0,{last} do {bv}[{bxv}({bi},{bm})+1]={src}[{bi}+1] end;chunk.{cbm}={bm};chunk.{cbv}={bv};end;", bxv=var_builtin_xor, bm=var_builtin_mask, bv=var_builtin_view, cbm=pf_builtin_mask, cbv=pf_builtin_view, bx=fn_bxor2, lld=pf_lld, nups=pf_nups, ms=pf_maxstack, bi=var_builtin_i, last=builtin_count-1, src=var_builtin_reg));
         block_execute_def.push_str(&format!("{}[{}]={}.{}+{};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, "chunk", pf_lld, obf1, var_vm, k_stk, var_vm, k_top, obf0));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_ops, pf_opcodes, var_vm, k_aa, pf_a_arr, var_vm, k_bb, pf_b_arr, var_vm, k_cc, pf_c_arr));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_consts, pf_consts, var_vm, k_protos, pf_protos));
-        block_execute_def.push_str(&format!("{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};", var_vm, k_upv, var_vm, k_env, var_vm, k_vc, var_vc, var_vm, k_breg, var_builtin_reg));
+        block_execute_def.push_str(&format!("{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};{}[{}]={};", var_vm, k_upv, var_vm, k_env, var_vm, k_vc, var_vc, var_vm, k_breg, var_builtin_view, var_vm, k_bmask, var_builtin_mask));
         block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1+chunk.{}] = {}[{}](_,...) end; ", pf_numparams, var_vm, k_stk, pf_maxstack, var_s, hex_select_idx));
         block_execute_def.push_str(&format!("local {} = {} - chunk.{}; local {} = {{{}[{}](chunk.{} + 1, ...)}}; ", var_varargs_len, var_L, pf_numparams, var_varargs, var_s, hex_select_idx, pf_numparams));
         block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};", var_vm, k_va, var_varargs, var_vm, k_valen, var_varargs_len));
@@ -769,13 +790,14 @@ impl Generator {
             block_execute_def.push_str(&format!("local {};{}={};", names.join(","), names.join(","), vals.join(",")));
         }
         // 返回钩子也是方法（挂在共享方法表上），块里用 `:` 调
-        block_methods.push_str(&format!("{}.{}=function(self)self[{}]={};return true end;", var_methods, fn_ret0, k_mode, obf0));
-        block_methods.push_str(&format!("{}.{}=function(self,v)self[{}]={};self[{}]=v;return true end;", var_methods, fn_ret1, k_mode, obf1, k_retv));
-        block_methods.push_str(&format!("{}.{}=function(self,t,f,l)self[{}]={};self[{}]=t;self[{}]=f;self[{}]=l;return true end;", var_methods, fn_ret2, k_mode, obf2, k_retv, k_retf, k_rett));
+        block_methods.push_str(&format!("{}.{}=function(self)self[{}]={};return true end;", method_shards[ret_shards[0]], fn_ret0, k_mode, obf0));
+        block_methods.push_str(&format!("{}.{}=function(self,v)self[{}]={};self[{}]=v;return true end;", method_shards[ret_shards[1]], fn_ret1, k_mode, obf1, k_retv));
+        block_methods.push_str(&format!("{}.{}=function(self,t,f,l)self[{}]={};self[{}]=t;self[{}]=f;self[{}]=l;return true end;", method_shards[ret_shards[2]], fn_ret2, k_mode, obf2, k_retv, k_retf, k_rett));
         // ㉚：RET 别名等价挂接（方法表同一函数体多入口名）
         for (ret_base, ret_pool) in &ret_alias_map {
             for al in ret_pool.iter().skip(1) {
-                block_methods.push_str(&format!("{}.{}={}.{};", var_methods, al, var_methods, ret_base));
+                let ret_index = if ret_base == &fn_ret0 { 0 } else if ret_base == &fn_ret1 { 1 } else { 2 };
+                block_methods.push_str(&format!("{}.{}={}.{};", method_shards[ret_shards[ret_index]], al, method_shards[ret_shards[ret_index]], ret_base));
             }
         }
 

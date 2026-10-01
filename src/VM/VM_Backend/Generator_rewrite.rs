@@ -386,7 +386,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
                             let a_enc = (a2 as u32).wrapping_add(mag);
                             let key = remap_rk(c2);
-                            let (fb0, fc0) = if mag % 2 == 1 { (key, b2) } else { (b2, key) };
+                            let slot_value = slot_perm[slot] as u32;
+                            // Handler 的逻辑 B=槽号、逻辑 C=表键；奇数魔数在写侧预交换。
+                            let (fb0, fc0) = if mag % 2 == 1 { (key, slot_value) } else { (slot_value, key) };
                             let (eo18, ca18, cb18, cc18) = ch_split(chain18);
                             let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
                             let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
@@ -426,7 +428,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
                             let a_enc = (a as u32).wrapping_add(mag);
                             let b1e = remap_bx(b1); // ③ 槽位洗牌：常量下标同步置换
-                            let (fb0, fc0) = if mag % 2 == 1 { (b1e, 0u32) } else { (0u32, b1e) };
+                            let slot_value = slot_perm[slot] as u32;
+                            // Handler 的逻辑 B=槽号、逻辑 C=常量索引；奇数魔数在写侧预交换。
+                            let (fb0, fc0) = if mag % 2 == 1 { (b1e, slot_value) } else { (slot_value, b1e) };
                             let (eo18, ca18, cb18, cc18) = ch_split(chain18);
                             let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
                             let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
@@ -440,7 +444,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             fused_count += 1;
                             pc18 += 1;
                             let r718 = roll18.rotate_left(7);
-                            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(b1e);
+                            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
                             chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
                             if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
                             if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
@@ -464,12 +468,14 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
                 let mag_file = g18 ^ kp18;
                 w.extend_from_slice(&mag_file.to_le_bytes()); w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                w.extend_from_slice(&(((0u32 ^ cb18) ^ (g18 ^ ki1)) ^ kb).to_le_bytes()); w.extend_from_slice(&(((0u32 ^ cc18) ^ (g18 ^ ki2)) ^ kc).to_le_bytes());
+                let slot_value = slot_perm[*slot] as u32;
+                let (fb0, fc0) = if mag % 2 == 1 { (0u32, slot_value) } else { (slot_value, 0u32) };
+                w.extend_from_slice(&(((fb0 ^ cb18) ^ (g18 ^ ki1)) ^ kb).to_le_bytes()); w.extend_from_slice(&(((fc0 ^ cc18) ^ (g18 ^ ki2)) ^ kc).to_le_bytes());
                 inst_junk(w, mag_file, rng);
-                pc18 += 1; // builtin 的 B/C 解码后恒为 0，不参与折叠/引用
+                pc18 += 1; // 槽号 <128，不会被常量折叠扫描识别
                 let r718 = roll18.rotate_left(7);
-                roll18 = (r718 ^ mag).wrapping_add(a_enc); // b/c 贡献 0
-                chain18 = ch_step(chain18, mag, a_enc, 0, 0);
+                roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+                chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
                 i += 1;
                 continue;
             }
