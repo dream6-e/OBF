@@ -7,6 +7,9 @@ pub struct ScopeResolver {
     next_id: usize,
     pub var_alloc: HashMap<VarId, usize>,
     pub var_usage: HashMap<VarId, usize>,
+    pub var_scopes: HashMap<VarId, usize>,
+    pub scope_parents: Vec<Option<usize>>,
+    scope_stack: Vec<usize>,
 }
 
 impl ScopeResolver {
@@ -17,15 +20,23 @@ impl ScopeResolver {
             next_id: 1,
             var_alloc: HashMap::new(),
             var_usage: HashMap::new(),
+            var_scopes: HashMap::new(),
+            scope_parents: vec![None],
+            scope_stack: vec![0],
         }
     }
 
     pub fn enter_scope(&mut self) {
+        let parent = *self.scope_stack.last().expect("scope stack must not be empty");
+        let id = self.scope_parents.len();
+        self.scope_parents.push(Some(parent));
+        self.scope_stack.push(id);
         self.scopes.push(HashMap::new());
         self.scope_var_counts.push(0);
     }
 
     pub fn exit_scope(&mut self) {
+        self.scope_stack.pop();
         self.scopes.pop();
         self.scope_var_counts.pop();
     }
@@ -37,6 +48,7 @@ impl ScopeResolver {
         let active_vars: usize = self.scope_var_counts.iter().sum();
         self.var_alloc.insert(id, active_vars);
         self.var_usage.insert(id, 0);
+        self.var_scopes.insert(id, *self.scope_stack.last().expect("scope stack must not be empty"));
         
         if let Some(count) = self.scope_var_counts.last_mut() {
             *count += 1;

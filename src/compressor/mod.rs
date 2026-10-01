@@ -7,7 +7,7 @@ pub mod codegen;
 pub mod renamer;
 pub mod packer;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use rand::{rng, Rng, seq::SliceRandom};
 use crate::compiler::error::{LuaError, LuaResult, SyntaxError, set_active_source};
 use ast::VarId;
@@ -41,7 +41,6 @@ impl Compressor {
         root_block.resolve(&mut resolver);
         
         let ren = renamer::Renamer::new();
-        let mut mapping = HashMap::new();
         
         let mut rng = rng();
         let mut wave1 = Vec::with_capacity(26);
@@ -60,63 +59,151 @@ impl Compressor {
         let mut single_letters = wave1;
         single_letters.extend(wave2);
         let base = single_letters.len();
-        
-        // 每个被用到的变量独占一个名字，按使用次数降序分配（用得多的拿短名）。
-        //
-        // 旧写法是「声明时活跃变量数相同的变量共用一个名字」，那个启发式不成立：
-        // 两个可以同时存活的变量会拿到同一个名字，后声明的把前一个遮蔽掉，运行时读到
-        // nil（attempt to perform arithmetic on field 'xx' (a nil value)），产物随机损坏。
-        // 排序必须用 VarId 兜底 —— 数据来自 HashMap，只按 usage 排的话相等项的顺序
-        // 取决于 HashMap 的随机遍历序，等于又给产物掺进一层随机性。
-        let mut used_vars: Vec<(ast::VarId, usize)> = resolver
+
+        // 一个名字只在可能发生词法遮蔽的作用域链中保持唯一；不相交的兄弟作用域可复用。
+        // 旧的“活跃变量数相同即重名”启发式会让仍存活的外层绑定被遮蔽，导致运行期读到 nil。
+        let mut used_vars: Vec<(VarId, usize)> = resolver
             .var_usage
             .iter()
             .filter(|&(_, &usage)| usage > 0)
             .map(|(&id, &usage)| (id, usage))
             .collect();
-        used_vars.sort_by(|a, b| b.1.cmp(&a.1).then((a.0).0.cmp(&(b.0).0)));
-
-        let mut name_index: HashMap<ast::VarId, usize> = HashMap::new();
-        for (opt_idx, &(id, _)) in used_vars.iter().enumerate() {
-            name_index.insert(id, opt_idx);
-        }
-
-        let required_names = used_vars.len();
-        let mut valid_names = Vec::new();
-        let mut name_counter = 0;
-        
-        while valid_names.len() < required_names {
-            let mut n = name_counter;
-            let mut candidate = String::new();
-            loop {
-                candidate.push(single_letters[n % base]);
-                n /= base;
-                if n == 0 { break; }
+        let mut scope_depths = vec![0usize; resolver.scope_parents.len()];
+        for scope in 1..scope_depths.len() {
+            if let Some(parent) = resolver.scope_parents[scope] {
+                scope_depths[scope] = scope_depths[parent] + 1;
             }
-            let candidate: String = candidate.chars().rev().collect();
-            name_counter += 1;
-            if ren.is_keyword(&candidate) || ren.is_safe_global(&candidate) { continue; }
-            valid_names.push(candidate);
         }
-        
-        for (id, _alloc_idx) in resolver.var_alloc {
-            let usage = resolver.var_usage.get(&id).copied().unwrap_or(0);
+        used_vars.sort_by(|a, b| {
+            let scope_a = resolver.var_scopes.get(&a.0).copied().unwrap_or(0);
+            let scope_b = resolver.var_scopes.get(&b.0).copied().unwrap_or(0);
+            scope_depths[scope_a].cmp(&scope_depths[scope_b])
+                .then(b.1.cmp(&a.1))
+                .then(a.0.0.cmp(&b.0.0))
+        });
+
+        // 候选池：52 个单字母名 + 52×52 个双字母名，严格只使用字母。
+        let mut valid_names: Vec<String> = single_letters
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        for first in &single_letters {
+            for second in &single_letters {
+                valid_names.push(format!("{}{}", first, second));
+            }
+        }
+        valid_names.retain(|name| !ren.is_keyword(name) && !ren.is_safe_global(name));
+
+        let mut names_by_scope: Vec<HashSet<String>> =
+            (0..resolver.scope_parents.len()).map(|_| HashSet::new()).collect();
+        let mut mapping: HashMap<VarId, String> = HashMap::new();
+        for (&id, &usage) in &resolver.var_usage {
             if usage == 0 {
                 mapping.insert(id, "_".to_string());
-            } else if let Some(&opt_idx) = name_index.get(&id) {
-                mapping.insert(id, valid_names[opt_idx].clone());
             }
         }
-        
+
+        let mut fallback_index = 0usize;
+        for (id, _) in used_vars {
+            let scope = resolver.var_scopes.get(&id).copied().unwrap_or(0);
+            let mut blocked = HashSet::new();
+            let mut parent = resolver.scope_parents[scope];
+            while let Some(parent_scope) = parent {
+                blocked.extend(names_by_scope[parent_scope].iter().cloned());
+                parent = resolver.scope_parents[parent_scope];
+            }
+
+            let name = if let Some(name) = valid_names.iter()
+                .find(|name| !blocked.contains(*name) && !names_by_scope[scope].contains(*name))
+                .cloned()
+            {
+                name
+            } else {
+                loop {
+                    let mut n = fallback_index;
+                    let mut candidate = String::new();
+                    loop {
+                        candidate.push(single_letters[n % base]);
+                        n /= base;
+                        if n == 0 { break; }
+                    }
+                    candidate = candidate.chars().rev().collect();
+                    fallback_index += 1;
+                    if !ren.is_keyword(&candidate) && !ren.is_safe_global(&candidate)
+                        && !blocked.contains(&candidate) && !names_by_scope[scope].contains(&candidate)
+                    {
+                        break candidate;
+                    }
+                }
+            };
+            names_by_scope[scope].insert(name.clone());
+            mapping.insert(id, name);
+        }
+
+        let reserved_local_names = mapping.values().cloned().collect();
         let ctx = codegen::CodegenContext {
             mapping,
             shuffled_chars: single_letters,
-            map_string_start_idx: name_counter,
+            map_string_start_idx: fallback_index,
+            reserved_local_names,
         };
         
         let mut gen_tokens = Vec::new();
         root_block.to_tokens(&ctx, &mut gen_tokens);
         
         Ok(packer::Packer::pack(gen_tokens))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::Compressor;
+
+    fn declared_names(source: &str) -> Vec<String> {
+        let output = Compressor::compress(source).expect("compressor should accept test source");
+        output
+            .split("local ")
+            .skip(1)
+            .map(|declaration| {
+                declaration
+                    .split('=')
+                    .next()
+                    .unwrap()
+                    .split(',')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn used_local_names_fit_in_two_characters() {
+        let names = declared_names("local descriptive_name=1;return descriptive_name");
+        assert_eq!(names.len(), 1);
+        assert!(names[0].len() <= 2, "generated local name was {:?}", names[0]);
+    }
+
+    #[test]
+    fn sibling_scopes_can_reuse_short_names() {
+        let names = declared_names(
+            "do local alpha=1;print(alpha) end;do local beta=2;print(beta) end",
+        );
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], names[1]);
+    }
+
+    #[test]
+    fn nested_scopes_do_not_shadow_mapped_locals() {
+        let names = declared_names(
+            "local outer=1;do local inner=2;print(outer,inner) end;return outer",
+        );
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
+    }
+
+    #[test]
+    fn unused_local_uses_single_character_placeholder() {
+        let names = declared_names("local unused=1;return 7");
+        assert_eq!(names, vec!["_".to_string()]);
     }
 }

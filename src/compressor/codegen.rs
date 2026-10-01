@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
 use super::token::{Token, TokenType};
 use super::ast::{Block, LastStmt, Stmt, Expr, PrefixExpr, Var, Call, LocalVar, TableField, VarId};
@@ -259,6 +259,7 @@ pub struct CodegenContext {
     pub mapping: HashMap<VarId, String>,
     pub shuffled_chars: Vec<char>,
     pub map_string_start_idx: usize,
+    pub reserved_local_names: HashSet<String>,
 }
 
 impl CodegenContext {
@@ -305,7 +306,10 @@ impl CodegenContext {
                     }
                 }
                 let cand: String = mapped_name.chars().rev().collect();
-                if !is_reserved_name(&cand) && !is_lua_keyword(&cand) {
+                if !is_reserved_name(&cand)
+                    && !is_lua_keyword(&cand)
+                    && !self.reserved_local_names.contains(&cand)
+                {
                     break cand;
                 }
                 index += 1;
@@ -547,14 +551,7 @@ impl LocalVar {
             ctx.map_string(&self.name)
         };
 
-        if mapped_name == "_" {
-            mapped_name = if self.id != VarId(0) {
-                ctx.map_string(&format!("_UNUSED_VAR_{}", self.id.0))
-            } else {
-                ctx.map_string("_UNUSED_GLOBAL_")
-            };
-        }
-
+        // 未使用的 VarId 被映射为 `_`；保留这个一字符占位名，避免全局映射器扩成长名。
         tokens.push(Token { text: mapped_name, token_type: TokenType::Identifier });
     }
 }
