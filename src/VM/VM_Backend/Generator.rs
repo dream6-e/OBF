@@ -900,12 +900,15 @@ impl Generator {
             block_execute_def.insert_str(0, &factory_prefix);
             block_execute_def.push_str(&init_dc_stmt);
         }
+        let dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng);
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）
             block_execute_def.push_str("while true do break end end ");
         } else {
+            block_execute_def.push_str(&dispatch_state.setup);
             block_execute_def.push_str("while true do ");
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "true"));
+            block_execute_def.push_str(&dispatch_state.guard);
 
             // ㉚ 目标①：取指改走 DC 缓存（元表前向填充=结构解码；单条公式全解作废）。
             // 条目={mag+Δ, a, B, C}（链偏移撤销+奇偶交换都在填充内完成）；
@@ -920,9 +923,11 @@ impl Generator {
             }
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
             block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
+            block_execute_def.push_str(&format!("local {}=op+{};", dispatch_state.route_op, dispatch_state.bias));
 
             block_execute_def.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
-            block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, "op", &keys, &mut rng));
+            block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, &dispatch_state.route_op, &dispatch_state.bias, &keys, &mut rng));
+            block_execute_def.push_str(&dispatch_state.update);
             block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
             // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
             // 活跃闭包持有明文引用不受影响；未来 CLOSURE 经 type(p)=='function' 重解

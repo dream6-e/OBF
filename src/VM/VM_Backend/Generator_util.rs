@@ -192,6 +192,93 @@ impl ControlFlowBuilder {
         }
     }
 
+    /// 将运行期累加器偏移并入 opcode BST 的变量与阈值；整数平移保持排序，
+    /// 因而树路由语义不变。累加器本身由 build_dispatch_state 在每条指令后推进，
+    /// 下一轮先校验推进结果，删去推进语句会在进入 opcode 分发前失败。
+    pub fn generate_biased_opaque_predicate(
+        val: i64,
+        var_name: &str,
+        bias: &str,
+        comp_op: &str,
+        keys: &CipherKeys,
+        rng: &mut GenRng,
+    ) -> String {
+        let is_le = comp_op == "<=";
+        let strict = rng.range(0, 2) == 0;
+        let target = val + if (is_le && strict) || (!is_le && !strict) { 1 } else { 0 };
+        let target_expr = format!(
+            "({}+{})",
+            Self::obfuscate_num_depth(target, 1, keys, rng),
+            bias
+        );
+        let junk = Self::format_num(rng.range(0x10, 0xFFFF) as i64, rng);
+        let ka = rng.range(0x10, 0x7FFF) as i64;
+        let kb = ka + rng.range(1, 0x7FF) as i64;
+        let (ka_s, kb_s) = (Self::format_num(ka, rng), Self::format_num(kb, rng));
+        let x = match rng.range(0, 6) {
+            0 => var_name.to_string(),
+            1 => format!("({v} and {v} or {j})", v = var_name, j = junk),
+            2 => format!("({a}~={b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = junk),
+            3 => format!("({v}>=0X0 and {v} or {j})", v = var_name, j = junk),
+            4 => format!("(not(not {v}) and {v} or {j})", v = var_name, j = junk),
+            _ => format!("({a}<{b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = junk),
+        };
+        let (lhs, rhs, mut op) = match rng.range(0, 6) {
+            0 => {
+                let k = rng.range(0x10, 0xFFF) as i64;
+                let ks = Self::format_num(k, rng);
+                let add = format!("{}[{}][{}]", keys.tbl_p,
+                    Self::format_num(keys.grp1 as i64, rng),
+                    Self::format_num(keys.key_add as i64, rng));
+                (format!("{}({}, {})", add, x, ks), format!("({}+{})", target_expr, ks),
+                    if is_le { if strict { "<" } else { "<=" } } else if strict { ">" } else { ">=" })
+            }
+            1 => {
+                let k1 = rng.range(0x20, 0xFFF) as i64;
+                let k2 = rng.range(0x10, 0x7FF) as i64;
+                let (a, b) = (Self::format_num(k1, rng), Self::format_num(k2, rng));
+                let lhs = format!("(({}+{})-{})", x, a, b);
+                let rhs = format!("({}-{})", target_expr, b);
+                (lhs, rhs,
+                    if is_le { if strict { "<" } else { "<=" } } else if strict { ">" } else { ">=" })
+            }
+            2 => {
+                let k = rng.range(0x100, 0xFFFF) as i64;
+                let ks = Self::format_num(k, rng);
+                let reverse = if is_le { if strict { ">" } else { ">=" } } else if strict { "<" } else { "<=" };
+                (format!("({}-{})", ks, x), format!("({}-{})", ks, target_expr), reverse)
+            }
+            3 => {
+                let scale = [2i64, 3, 5, 7][rng.range(0, 4)];
+                let k = rng.range(0x10, 0xFFF) as i64;
+                let (ss, ks) = (Self::format_num(scale, rng), Self::format_num(k, rng));
+                (format!("({}*{}+{})", x, ss, ks),
+                    format!("({}*{}+{})", target_expr, ss, ks),
+                    if is_le { if strict { "<" } else { "<=" } } else if strict { ">" } else { ">=" })
+            }
+            4 => {
+                let k = rng.range(0x100, 0x7FFF) as i64;
+                let ks = Self::format_num(k, rng);
+                (format!("({}-({}-{}))", x, target_expr, ks), ks,
+                    if is_le { if strict { "<" } else { "<=" } } else if strict { ">" } else { ">=" })
+            }
+            _ => {
+                let scale = [2i64, 3, 4, 5][rng.range(0, 4)];
+                let k = rng.range(0x100, 0xFFFF) as i64;
+                let (ss, ks) = (Self::format_num(scale, rng), Self::format_num(k, rng));
+                let reverse = if is_le { if strict { ">" } else { ">=" } } else if strict { "<" } else { "<=" };
+                (format!("({}-{}*{})", ks, x, ss),
+                    format!("({}-{}*{})", ks, target_expr, ss), reverse)
+            }
+        };
+        if rng.range(0, 2) == 0 {
+            op = match op { "<" => ">", "<=" => ">=", ">" => "<", _ => "<=" };
+            format!("{}{}{}", rhs, op, lhs)
+        } else {
+            format!("{}{}{}", lhs, op, rhs)
+        }
+    }
+
     pub fn build_fast_router(
         var_pc: &str,
         var_insts: &str,
@@ -549,7 +636,44 @@ impl GenRng {
     }
 }
 
-pub(super) fn build_opcode_tree(handlers: &[(u32, String)], min_idx: usize, max_idx: usize, var_op: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
+pub(super) struct DispatchState {
+    pub setup: String,
+    pub guard: String,
+    pub bias: String,
+    pub route_op: String,
+    pub update: String,
+}
+
+/// 每次 opcode 分发都有状态偏移；两份独立滚动值相互校验，令累加器更新成为
+/// 下一条指令路由的先决条件。删去 `acc` 更新会在下次分发前触发 guard。
+pub(super) fn build_dispatch_state(rng: &mut GenRng) -> DispatchState {
+    let (acc, check, bias, mask, mul, ca, cb, cc, modulus, route_op) = (
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+    );
+    let seed = rng.range64(0x1000, 0xFFFF_FFFF);
+    let seed_lit = rng.format_num(seed);
+    let mask_v = rng.range64(0x4000, 0x1_0000);
+    let mul_v = rng.range64(0x31, 0x100) | 1;
+    let (ca_v, cb_v, cc_v) = (
+        rng.range64(3, 0x40), rng.range64(3, 0x40), rng.range64(3, 0x40),
+    );
+    let setup = format!(
+        "local {acc},{check},{bias},{mul},{ca},{cb},{cc},{modulus},{mask}={seed},{seed},0,{mul_v},{ca_v},{cb_v},{cc_v},0X100000000,{mask_v};",
+        acc=acc, check=check, bias=bias, mul=mul, ca=ca, cb=cb, cc=cc,
+        modulus=modulus, mask=mask, seed=seed_lit, mul_v=mul_v, ca_v=ca_v,
+        cb_v=cb_v, cc_v=cc_v, mask_v=mask_v,
+    );
+    let guard = format!("if {acc}~={check} then return end;{bias}={acc}%{mask};", acc=acc, check=check, bias=bias, mask=mask);
+    let route = route_op.clone();
+    let update = format!(
+        "{check}=({acc}*{mul}+op+inst_A*{ca}+inst_B*{cb}+inst_C*{cc})%{modulus};{acc}=({acc}*{mul}+inst_C*{cc}+inst_B*{cb}+inst_A*{ca}+op)%{modulus};",
+        check=check, acc=acc, mul=mul, ca=ca, cb=cb, cc=cc, modulus=modulus,
+    );
+    DispatchState { setup, guard, bias, route_op: route, update }
+}
+
+pub(super) fn build_opcode_tree(handlers: &[(u32, String)], min_idx: usize, max_idx: usize, var_op: &str, bias: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
     if min_idx == max_idx { return handlers[min_idx].1.clone(); }
     // 改进项二：1) 间隙随机枢轴（pivot 取自 [handlers[cut].0, handlers[cut+1].0 - 1] 开区间内部，
     // 节点比较常数不再等于任何真实 opcode 魔数）；2) 二叉/三叉混合 + 切分点随机抖动 + 三路顺序翻转。
@@ -567,23 +691,23 @@ pub(super) fn build_opcode_tree(handlers: &[(u32, String)], min_idx: usize, max_
         if cut1 >= min_idx && cut1 < cut2 && cut2 < max_idx {
             let p1 = pivot_at(cut1, rng);
             let p2 = pivot_at(cut2, rng);
-            let left = build_opcode_tree(handlers, min_idx, cut1, var_op, keys, rng);
-            let mid_b = build_opcode_tree(handlers, cut1 + 1, cut2, var_op, keys, rng);
-            let right = build_opcode_tree(handlers, cut2 + 1, max_idx, var_op, keys, rng);
+            let left = build_opcode_tree(handlers, min_idx, cut1, var_op, bias, keys, rng);
+            let mid_b = build_opcode_tree(handlers, cut1 + 1, cut2, var_op, bias, keys, rng);
+            let right = build_opcode_tree(handlers, cut2 + 1, max_idx, var_op, bias, keys, rng);
             return match rng.range(0, 3) {
                 0 => {
-                    let c1 = ControlFlowBuilder::generate_opaque_predicate(p1, var_op, "<=", keys, rng);
-                    let c2 = ControlFlowBuilder::generate_opaque_predicate(p2, var_op, "<=", keys, rng);
+                    let c1 = ControlFlowBuilder::generate_biased_opaque_predicate(p1 as i64, var_op, bias, "<=", keys, rng);
+                    let c2 = ControlFlowBuilder::generate_biased_opaque_predicate(p2 as i64, var_op, bias, "<=", keys, rng);
                     format!("if {} then {} elseif {} then {} else {} end ", c1, left, c2, mid_b, right)
                 }
                 1 => {
-                    let c1 = ControlFlowBuilder::generate_opaque_predicate(p2, var_op, ">", keys, rng);
-                    let c2 = ControlFlowBuilder::generate_opaque_predicate(p1, var_op, ">", keys, rng);
+                    let c1 = ControlFlowBuilder::generate_biased_opaque_predicate(p2 as i64, var_op, bias, ">", keys, rng);
+                    let c2 = ControlFlowBuilder::generate_biased_opaque_predicate(p1 as i64, var_op, bias, ">", keys, rng);
                     format!("if {} then {} elseif {} then {} else {} end ", c1, right, c2, mid_b, left)
                 }
                 _ => {
-                    let c1 = ControlFlowBuilder::generate_opaque_predicate(p1, var_op, "<=", keys, rng);
-                    let c2 = ControlFlowBuilder::generate_opaque_predicate(p2, var_op, ">", keys, rng);
+                    let c1 = ControlFlowBuilder::generate_biased_opaque_predicate(p1 as i64, var_op, bias, "<=", keys, rng);
+                    let c2 = ControlFlowBuilder::generate_biased_opaque_predicate(p2 as i64, var_op, bias, ">", keys, rng);
                     format!("if {} then {} elseif {} then {} else {} end ", c1, left, c2, right, mid_b)
                 }
             };
@@ -597,14 +721,14 @@ pub(super) fn build_opcode_tree(handlers: &[(u32, String)], min_idx: usize, max_
         (min_idx + max_idx) / 2
     };
     let piv = pivot_at(mid, rng);
-    let left = build_opcode_tree(handlers, min_idx, mid, var_op, keys, rng);
-    let right = build_opcode_tree(handlers, mid + 1, max_idx, var_op, keys, rng);
+    let left = build_opcode_tree(handlers, min_idx, mid, var_op, bias, keys, rng);
+    let right = build_opcode_tree(handlers, mid + 1, max_idx, var_op, bias, keys, rng);
     let direction = rng.range(0, 2) == 0;
     if direction {
-        let cond = ControlFlowBuilder::generate_opaque_predicate(piv, var_op, "<=", keys, rng);
+        let cond = ControlFlowBuilder::generate_biased_opaque_predicate(piv, var_op, bias, "<=", keys, rng);
         format!("if {} then {} else {} end ", cond, left, right)
     } else {
-        let cond = ControlFlowBuilder::generate_opaque_predicate(piv, var_op, ">", keys, rng);
+        let cond = ControlFlowBuilder::generate_biased_opaque_predicate(piv, var_op, bias, ">", keys, rng);
         format!("if {} then {} else {} end ", cond, right, left)
     }
 }

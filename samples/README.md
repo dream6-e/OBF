@@ -4,11 +4,13 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，223,367 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），110,324 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，270,795 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，229,923 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），113,866 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，284,402 B |
 
 前两个都通过 `luac5.1 -p` 与 `luau-compile --binary`，并在 `lua5.1`、`luau` 下运行验证；stdout 与原文件逐字节一致（19 行）。
+
+**运行期状态链绑定**（见 `项目交接总结.md` 改进项六）：每条 handler 按解码后的 opcode 与三个操作数推进累加器，下一轮先校验影子状态，并将累加器派生偏移共同加入 opcode 和 BST 枢轴；删去状态推进会在后续指令分发前触发静默失败。
 
 产物现在是 Luraph 风格（见 `项目交接总结.md` §5.9）：单层 `while true do` 驱动、
 每个指令块是一个随机名方法、调用点全是 `self:随机名(...)`、状态存在 `self[随机大整数]`
