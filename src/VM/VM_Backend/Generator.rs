@@ -862,104 +862,33 @@ impl Generator {
         block_execute_def.push_str(&format!(
             "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; {c}.{cnt}=nil end; {deriv} ",
             kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18, deriv = deriv));
-        // ㉚ 目标①：指令解码结构代码化——DC 缓存表 + 元表前向填充 + load() 片段
-        // 拼接（四选一模板族）。链偏移 (EO,CA,CB,CC) 由链状态逐条推进，填充即解码；
-        // 链种子与写侧/扫描同式：(bxor(kon,lld)*chm+chk0)%2^32；Δ 折进 op 域。
+        // 改进项一：指令惰性解码器改为原生 Lua 闭包内联（彻底消除 loadstring/StreamTable 源码级暴露），
+        // 状态表 5 个字段名（原 .n/.ch/.m1/.m2/.m3）全量随机化，内层 3 态+1 诱饵态平坦化分发。
+        let (ds_n, ds_ch, ds_m1, ds_m2, ds_m3) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         {
-            let dc_fr = rng.name(); let dc_ok = rng.name();
-            let dc_fn = rng.name(); let dc_fill = rng.name();
-            let dl_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_delta as i64);
-            let chm_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_m as i64);
-            let chk0_e = crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor2.as_str(), chain_k0 as i64);
-            let dc_family = rng.range(0, 4);
-            // 常量混淆器（公共件 obf_const）：同一常量每次出现换一种算术形态，
-            // 兜底分支不再是干净的常量清单；加密串路径同样受益。
-            let oc = crate::VM::VM_Backend::Generator_kdf::obf_const;
-            // 填充语句（P 参数：Pa=ops Pb=aa Pc=bb Pd=cc Pe..Pg=mk1..3 Ph=状态 Pi=DC Pj=bx Pk=Δ）
-            let mut stmts: Vec<String> = vec![
-                "Ph.n=Ph.n+1;".into(),
-                "local Wa=Pa[Ph.n];".into(),
-            ];
-            let mut blk_eo = vec![format!("local Wb=(Ph.ch%{})*{};", oc(&mut rng, 0x100), oc(&mut rng, 0x2)),
-                              format!("local Wc=((Ph.ch-(Ph.ch%{}))/{})%{};", oc(&mut rng, 0x100), oc(&mut rng, 0x100), oc(&mut rng, 0x100))];
-            let blk_cc = vec![format!("local Wd=(Ph.ch*{})%{};", oc(&mut rng, 0x10001), oc(&mut rng, 0x100000000)),
-                              format!("local We=(Wd*{}+Ph.ch)%{};", oc(&mut rng, 0x45D9), oc(&mut rng, 0x100000000))];
-            // 注意：Wd→We 有依赖，blk_cc 不可内部洗牌；仅 EO/CA 对可换序
-            rng.shuffle(&mut blk_eo);
-            let mut blocks: Vec<Vec<String>> = if dc_family == 2 || dc_family == 3 {
-                vec![blk_cc, blk_eo]
-            } else { vec![blk_eo, blk_cc] };
-            if rng.range(0, 2) == 0 { blocks.reverse(); }
-            for blk in &blocks { stmts.extend(blk.iter().cloned()); }
-            let mut g_dec: Vec<String> = vec![
-                if dc_family == 3 { format!("local Wf=(Wa-(Ph.ch%{})*{})%{};", oc(&mut rng, 0x100), oc(&mut rng, 0x2), oc(&mut rng, 0x100000000)) } else { format!("local Wf=(Wa-Wb)%{};", oc(&mut rng, 0x100000000)) },
-                if dc_family == 3 { format!("local Wg=(Pj(Pb[Ph.n],Ph.m1)-((Ph.ch-(Ph.ch%{}))/{})%{})%{};", oc(&mut rng, 0x100), oc(&mut rng, 0x100), oc(&mut rng, 0x100), oc(&mut rng, 0x100000000)) } else { format!("local Wg=(Pj(Pb[Ph.n],Ph.m1)-Wc)%{};", oc(&mut rng, 0x100000000)) },
-                format!("local Wh=Pj(Pj(Pc[Ph.n],Ph.m2)%{},Wd) if Wh>={} then Wh=Wh-{} end;", oc(&mut rng, 0x100000000), oc(&mut rng, 0x80000000), oc(&mut rng, 0x100000000)).into(),
-                format!("local Wi=Pj(Pj(Pd[Ph.n],Ph.m3)%{},We) if Wi>={} then Wi=Wi-{} end;", oc(&mut rng, 0x100000000), oc(&mut rng, 0x80000000), oc(&mut rng, 0x100000000)).into(),
-            ];
-            rng.shuffle(&mut g_dec);
-            stmts.extend(g_dec);
-            let upd = if std::env::var("OBF_NOCHAIN").is_ok() {
-                "Ph.ch=0;".to_string()
-            } else if dc_family == 1 {
-                format!("local Wx=(Ph.ch*{}+(Wf-Pk)*{}+Wg*{})%{}; Ph.ch=(Wx+Wh%{}+(Wi%{})*{})%{};", oc(&mut rng, 0x3), oc(&mut rng, 0x101), oc(&mut rng, 0x1001), oc(&mut rng, 0x100000000), oc(&mut rng, 0x100000000), oc(&mut rng, 0x100000000), oc(&mut rng, 0x11), oc(&mut rng, 0x100000000))
-            } else {
-                format!("Ph.ch=(Ph.ch*{}+(Wf-Pk)*{}+Wg*{}+Wh%{}+(Wi%{})*{})%{};", oc(&mut rng, 0x3), oc(&mut rng, 0x101), oc(&mut rng, 0x1001), oc(&mut rng, 0x100000000), oc(&mut rng, 0x100000000), oc(&mut rng, 0x11), oc(&mut rng, 0x100000000))
-            };
-            // 尾部三语句：upd（链推进）必须用「奇偶交换前」的 Wh/Wi（=线上 fb0/fc0，
-            // 与写侧 ch_step 同序）；Wj 与两者无依赖。洗牌只允许 upd 先于 swap 的
-            // 三种安全排列——曾经全洗牌把 swap 排到 upd 前→链漂移→错叶崩溃。
-            let wj_stmt = "local Wj=Wg-(Wf-Pk);".to_string();
-            let swap_stmt = format!("if Wf%{}~=0 then Wh,Wi=Wi,Wh end;", oc(&mut rng, 0x2));
-            let g_tail: Vec<String> = match rng.range(0, 3) {
-                0 => vec![upd.clone(), wj_stmt, swap_stmt],
-                1 => vec![upd.clone(), swap_stmt, wj_stmt],
-                _ => vec![wj_stmt, upd.clone(), swap_stmt],
-            };
-            stmts.extend(g_tail);
-            stmts.push("rawset(Pi,Ph.n,{Wf,Wj,Wh,Wi});".into());
-            let body = stmts.join(" ");
-            let params = "Pa,Pb,Pc,Pd,Ph,Pi,Pj,Pk";
-            // 填充源=柯里包裹+语句序列：chunk 返回「绑定参数后的填充闭包工厂」。
-            // 源码**不以明文出现在产物里**：整串走流加密（位置相关双字节混合，
-            // 密文以 \ddd 转义字面量存进随机键表，解码器匿名挂表），调用点只剩
-            // `T[dk](T[ck],T[kk])`——解码公式/常量在文本层面不可读。
-            let full_src = format!("return function({}) return function() {} end end", params, body);
-            let st_name = rng.name();
-            let mut st = crate::VM::VM_Backend::Generator_util::StreamTable::new(st_name);
-            let (sk0, sk1) = crate::VM::VM_Backend::Generator_util::stream_key(&full_src, &mut rng);
-            let dec_expr = st.call(&full_src, sk0, sk1);
-            let st_decl = st.emit();
-            let bind_args = format!("{},{},{},{},{},{},{},{}",
-                var_opcodes, var_a_arr, var_b_arr, var_c_arr,
-                dc_ds, n_dc, fn_bxor2, dl_e);
-            // 填充工厂提升到 execute 之外一次编译（hash 级高频调用原型里
-            // 逐次 load+concat 是 700x 慢化的病根）；execute 内只做绑定调用。
-            // 目标环境（lua5.1 / Roblox 执行器）必有加载器（用户确认），
-            // 不再保留内联代码兜底：那会把解码逻辑以真代码写进每个产物，静态直读
-            // 即得解码器，抵消流加密的全部收益；编译失败即启动失败，
-            // 解码逻辑从此在产物里只以密文存在。
-            // ④E：加载器**不以标识符出现**——"loadstring"/"load" 走统一流（数字密文），
-            // 运行期才解回名字并从环境表取用；调用点只剩一个局部名，产物里既无
-            // `loadstring` / `load` 两个词，也无「X or Y 取加载器」的可 grep 算子对。
-            let (ld_setup, ld_var) =
-                crate::VM::VM_Backend::Generator_util::loader_lookup(&mut uni, &mut rng, None, true);
-            block_execute_def.insert_str(0, &format!(
-                "{decl}{lds} local {ff}; do local {ok},{fn}=pcall({ld},{dec}); \
-                 if {ok} and type({fn})==\"function\" then {ff}={fn}() end end; ",
-                decl = st_decl, lds = ld_setup, ld = ld_var, dec = dec_expr,
-                ff = dc_fn, ok = dc_ok, fn = rng.name()));
-            block_execute_def.push_str(&format!(
-                "local {ndc}={{}}; local {ds}={{n={c}.{lld},ch=({bx}({kon},{c}.{lld})*{chm}+{chk0})%{dcm32},m1={mk1},m2={mk2},m3={mk3}}}; \
-                 local {fill}={fn}({bind}); \
-                 setmetatable({ndc},{{__index=function({tt},{kk}) while {ds}.n<{kk} do {fill}() end return rawget({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
-                ndc = n_dc, ds = dc_ds, c = "chunk", lld = pf_lld,
-                bx = fn_bxor2.as_str(), kon = n_kon, chm = chm_e, chk0 = chk0_e,
-                dcm32 = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng),
-                mk1 = n_mk1, mk2 = n_mk2, mk3 = n_mk3,
-                fill = dc_fill, fn = dc_fn,
-                bind = bind_args,
-                tt = rng.name(), kk = rng.name(), vm = var_vm, kdc = k_dc));
+            let (factory_prefix, init_dc_stmt) = crate::VM::VM_Backend::Generator_util::build_inst_decoder_lua(
+                &mut rng,
+                fn_bxor2.as_str(),
+                chain_delta,
+                chain_m,
+                chain_k0,
+                var_opcodes.as_str(),
+                var_a_arr.as_str(),
+                var_b_arr.as_str(),
+                var_c_arr.as_str(),
+                dc_ds.as_str(),
+                n_dc.as_str(),
+                pf_lld.as_str(),
+                n_kon.as_str(),
+                n_mk1.as_str(),
+                n_mk2.as_str(),
+                n_mk3.as_str(),
+                var_vm.as_str(),
+                k_dc.as_str(),
+                (ds_n.as_str(), ds_ch.as_str(), ds_m1.as_str(), ds_m2.as_str(), ds_m3.as_str()),
+            );
+            block_execute_def.insert_str(0, &factory_prefix);
+            block_execute_def.push_str(&init_dc_stmt);
         }
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）
@@ -1023,12 +952,12 @@ impl Generator {
                     format!("{}[{}]={};", var_vm, k_mk3, nc_n),
                 ];
                 rng.shuffle(&mut stmts);
-                // ㉚：DC 填充从状态表读掩码——换钥后把新钥同步进 ds，
+                // ㉚：DC 填充从状态表读掩码——换钥后把新钥同步进 ds（使用随机化字段名），
                 // 否则后续填充用旧钥解新掩码数组→垃圾条目。
-                format!("{}[{}][1]={}; {}{}{} {},{},{}={},{},{}; {}.m1={}; {}.m2={}; {}.m3={}; ",
+                format!("{}[{}][1]={}; {}{}{} {},{},{}={},{},{}; {}.{}={}; {}.{}={}; {}.{}={}; ",
                     kreg_n, "chunk", nk1_n, stmts[0], stmts[1], stmts[2],
                     n_mk1, n_mk2, n_mk3, na_n, nb_n, nc_n,
-                    dc_ds, na_n, dc_ds, nb_n, dc_ds, nc_n)
+                    dc_ds, ds_m1, na_n, dc_ds, ds_m2, nb_n, dc_ds, ds_m3, nc_n)
             };
             // ㉒② 焊接 2^32 模数（execute 换钥分支每次重走——第二次起逻辑无分支）；
             // ㉒① thunk 回写环、寄存器键轮换环 → 动态分段数值游标机

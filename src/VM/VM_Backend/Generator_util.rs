@@ -1,56 +1,11 @@
-//! Generator 的底层工具层：ChaCha8、数值/控制流混淆、随机名池、
-//! 载荷读写与重写。从 Generator.rs 拆出（原文件 69 KB，超过可维护范围）。
+//! Generator 的底层工具层：数值/控制流混淆、随机名池、流表与游标机。
+//! 载荷读写与字节码重写已拆至 Generator_rewrite.rs（守单文件 80 KB 上限）。
 use std::collections::HashSet;
 use rand::{rng, Rng, SeedableRng};
 use rand::rngs::StdRng;
-use crate::compiler::instructions::{OpArgMask, OpCode, OpMode};
 
-// ChaCha8 内核与状态布局已拆至 Generator_chacha.rs（守单文件 80 KB 上限）：
-// 第 2 项起内核带「全状态置换 + counter 步进 + 轮数」三参数，读写两侧同参。
-use super::Generator_chacha::{ChaChaLayout, SIGMA as CHACHA_SIGMA, stream_xor as chacha_xor_layout};
-
-/// #3 常量密钥混入引用折叠：逐产物随机参数（谓词/f 函数常数），
-/// Rust 写侧与 Lua body_consts 扫描同式重算 F_li=Σf(pc)
-pub(super) struct FoldCtx {
-    pub r6b: u32, pub p1b: u32, pub p3b: u32,   // B 位引用谓词 pv_b(v)=(rotl32(v,r6b)^p1b)%100<p3b
-    pub r6c: u32, pub p1c: u32, pub p3c: u32,   // C 位引用谓词
-    pub f1: u32, pub f2: u32,                   // f(pc)=(pc*f1)^f2
-    // ③-3 每常量 MAC 参数（逐 build 随机；读写两侧同式）：
-    // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
-    pub m1: u32, pub m2: u32, pub m3: u32, pub m4: u32, pub m5: u32,
-    pub rs18: u32, // ⑤ R 链滚动初值种子（逐构建随机，替代固定 0x2545F491）
-}
-
-/// ③-3 每常量 MAC：对 (密文块, 槽号, 折叠值, R链值) 的滚动校验和——
-/// 只用加/异或/旋转（Lua double 下全精确：b*m4 ≤ 255*(2^32-1) < 2^40）。
-/// 篡改密文/槽位/指令流（fold、roll 变）任一处都会使校验失败。
-pub(super) fn const_mac18(blob: &[u8], slot: u32, fold: u32, roll: u32, fc: &FoldCtx) -> u32 {
-    let mut s = fc.m1 ^ slot.wrapping_mul(fc.m2) ^ fold ^ roll.rotate_left(fc.m3);
-    for &b in blob {
-        s = s.wrapping_add((b as u32).wrapping_mul(fc.m4));
-        s ^= s.rotate_left(fc.m5);
-    }
-    s
-}
-
-/// ⑰ 常量按原型分组内联加密：每组独立 key/salt/nonce 布局/kind。
-/// 密文块直接写进各原型的常量节——产物里不再存在整张中央密文表，
-/// 恢复一组参数也只能解「用了这一组的那些原型」的常量。
-pub(super) const CONST_GROUPS: usize = 4;
-
-pub(super) struct EncCtx {
-    pub keys: Vec<[u32; 8]>,
-    pub salts: Vec<u32>,
-    pub layouts: Vec<[usize; 3]>,
-    pub kstr: Vec<u32>,
-    pub knum: Vec<u32>,
-    /// 第 2 项：每簇的 ChaCha 状态布局（全状态置换 ρ / 轮数 / counter 步进）——
-    /// 读写两侧同参；产物侧的摆位与元组由 Generator_chain 按此发射
-    pub layout: Vec<ChaChaLayout>,
-    /// 第 3 项 D：单根 K0（8 字）——四组与 boot 的密钥/盐/kind 全部由它 KDF 现算；
-    /// 它本身取自原生流（Native Stream），产物里以 token 掩码形态落一份
-    pub root: [u32; 8],
-}
+pub use super::Generator_rewrite::{loader_lookup, loadstring_probe_lua};
+pub(super) use super::Generator_rewrite::*;
 
 pub struct CipherKeys {
     pub grp1: u64,
@@ -119,20 +74,122 @@ impl ControlFlowBuilder {
     }
 
     pub fn generate_opaque_predicate(val: i64, var_name: &str, comp_op: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
-        let key = rng.range(0x10, 0xFFF) as i64;
-        let mutated_val = val.wrapping_add(key);
-        format!("{}[{}][{}]({}<={} and {} or {},{}){}{}", 
-            keys.tbl_p,
-            Self::format_num(keys.grp1 as i64, rng),
-            Self::format_num(keys.key_add as i64, rng),
-            var_name, 
-            var_name, 
-            var_name, 
-            Self::format_num(rng.range(0, 0xFFFF) as i64, rng), 
-            Self::format_num(key, rng), 
-            comp_op,
-            Self::format_num(mutated_val, rng)
-        )
+        // 改进项二：彻底消除「R<=R and R or J」单一正则锚点与固定 c[g1][add](X,K)<=M 模板。
+        // 1) 变量恒等包装池（8 形态随机，R<=R 恒真式徹底退役）：
+        //    0=裸变量  1=(R and R or J)  2=(K1~=K2 and R or J)  3=(K1==K2 and J or R)
+        //    4=(R>=0X0 and R or J)  5=(R~=R and J or R)  6=(not(not R) and R or J)  7=(K1<K2 and R or J)
+        let jn = Self::format_num(rng.range(0x10, 0xFFFF) as i64, rng);
+        let ka = rng.range(0x10, 0x7FFF) as i64;
+        let kb = ka + rng.range(0x1, 0x7FF) as i64;
+        let ka_s = Self::format_num(ka, rng);
+        let kb_s = Self::format_num(kb, rng);
+        let x_expr = match rng.range(0, 8) {
+            0 => var_name.to_string(),
+            1 => format!("({v} and {v} or {j})", v = var_name, j = jn),
+            2 => format!("({a}~={b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
+            3 => format!("({a}=={b} and {j} or {v})", a = ka_s, b = kb_s, j = jn, v = var_name),
+            4 => format!("({v}>=0X0 and {v} or {j})", v = var_name, j = jn),
+            5 => format!("({v}~={v} and {j} or {v})", v = var_name, j = jn),
+            6 => format!("(not(not {v}) and {v} or {j})", v = var_name, j = jn),
+            _ => format!("({a}<{b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
+        };
+
+        // 2) 严格/非严格边界随机转换（整数域 X<=V ⇔ X<V+1；X>V ⇔ X>=V+1）
+        let is_le = comp_op == "<=";
+        let use_strict = rng.range(0, 2) == 0;
+        let swap_sides = rng.range(0, 2) == 0;
+        let t_val = if use_strict { val.wrapping_add(1) } else { val };
+
+        let g1 = Self::format_num(keys.grp1 as i64, rng);
+        let kadd = Self::format_num(keys.key_add as i64, rng);
+        let add_call = format!("{}[{}][{}](", keys.tbl_p, g1, kadd);
+
+        // 3) 六族异构代数变换（含正系数平移/双偏移/反号镜像/仿射缩放/阈值左折）：
+        //    反号镜像族（K - X）使变量系数为负，不等号方向与阈值同步翻转，打破静态方向判定。
+        let (lhs_x, rhs_t, eff_le, eff_strict) = match rng.range(0, 6) {
+            0 => {
+                let k = rng.range(0x10, 0xFFF) as i64;
+                let ks = Self::format_num(k, rng);
+                let lx = if rng.range(0, 2) == 0 {
+                    format!("{add}{x},{k})", add = add_call, x = x_expr, k = ks)
+                } else {
+                    format!("{add}{k},{x})", add = add_call, x = x_expr, k = ks)
+                };
+                (lx, Self::format_num(t_val.wrapping_add(k), rng), is_le, use_strict)
+            }
+            1 => {
+                let k1 = rng.range(0x20, 0xFFF) as i64;
+                let k2 = rng.range(0x10, 0x7FF) as i64;
+                let (k1s, k2s) = (Self::format_num(k1, rng), Self::format_num(k2, rng));
+                let lx = if rng.range(0, 2) == 0 {
+                    format!("({add}{x},{k1})-{k2})", add = add_call, x = x_expr, k1 = k1s, k2 = k2s)
+                } else {
+                    format!("(({x}-{k2})+{k1})", x = x_expr, k1 = k1s, k2 = k2s)
+                };
+                (lx, Self::format_num(t_val.wrapping_add(k1).wrapping_sub(k2), rng), is_le, use_strict)
+            }
+            2 => {
+                let r = rng.range(0x100, 0xFFFF) as i64;
+                let k = t_val.wrapping_add(r);
+                let ks = Self::format_num(k, rng);
+                let lx = if rng.range(0, 2) == 0 {
+                    format!("({k}-{x})", k = ks, x = x_expr)
+                } else {
+                    format!("{add}{k},-{x})", add = add_call, k = ks, x = x_expr)
+                };
+                (lx, Self::format_num(r, rng), !is_le, !use_strict)
+            }
+            3 => {
+                let s = [2i64, 3, 5, 7][rng.range(0, 4)];
+                let k = rng.range(0x10, 0xFFF) as i64;
+                let (ss, ks) = (Self::format_num(s, rng), Self::format_num(k, rng));
+                let lx = if rng.range(0, 2) == 0 {
+                    format!("{add}{x}*{s},{k})", add = add_call, x = x_expr, s = ss, k = ks)
+                } else {
+                    format!("({x}*{s}+{k})", x = x_expr, s = ss, k = ks)
+                };
+                (lx, Self::format_num(t_val.wrapping_mul(s).wrapping_add(k), rng), is_le, use_strict)
+            }
+            4 => {
+                let k = rng.range(0x100, 0x7FFF) as i64;
+                let ks = Self::format_num(k, rng);
+                let lx = if t_val >= k {
+                    let d = Self::format_num(t_val - k, rng);
+                    format!("({x}-{d})", x = x_expr, d = d)
+                } else {
+                    let d = Self::format_num(k - t_val, rng);
+                    format!("{add}{x},{d})", add = add_call, x = x_expr, d = d)
+                };
+                (lx, ks, is_le, use_strict)
+            }
+            _ => {
+                let s = [2i64, 3, 4, 5][rng.range(0, 4)];
+                let r = rng.range(0x100, 0xFFFF) as i64;
+                let k = t_val.wrapping_mul(s).wrapping_add(r);
+                let (ks, ss) = (Self::format_num(k, rng), Self::format_num(s, rng));
+                let lx = format!("({k}-{x}*{s})", k = ks, x = x_expr, s = ss);
+                (lx, Self::format_num(r, rng), !is_le, !use_strict)
+            }
+        };
+
+        // 4) 左右操作数随机换位（LHS <op> RHS vs RHS <rev_op> LHS）
+        if !swap_sides {
+            let op_str = match (eff_le, eff_strict) {
+                (true, false) => "<=",
+                (true, true) => "<",
+                (false, false) => ">",
+                (false, true) => ">=",
+            };
+            format!("{}{}{}", lhs_x, op_str, rhs_t)
+        } else {
+            let op_str = match (eff_le, eff_strict) {
+                (true, false) => ">=",
+                (true, true) => ">",
+                (false, false) => "<",
+                (false, true) => "<=",
+            };
+            format!("{}{}{}", rhs_t, op_str, lhs_x)
+        }
     }
 
     pub fn build_fast_router(
@@ -371,565 +428,6 @@ impl ControlFlowBuilder {
     }
 }
 
-pub(super) struct PayloadReader<'a> { pub(super) data: &'a [u8], pub(super) pos: usize }
-
-impl<'a> PayloadReader<'a> {
-    pub(super) fn read_u8(&mut self) -> u8 { let b = self.data[self.pos]; self.pos += 1; b }
-    pub(super) fn read_u32(&mut self) -> u32 { let b = &self.data[self.pos..self.pos+4]; self.pos += 4; u32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
-    pub(super) fn read_u64(&mut self) -> u64 { let b = &self.data[self.pos..self.pos+8]; self.pos += 8; u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) }
-    pub(super) fn read_bytes(&mut self, len: usize) -> &'a [u8] { let b = &self.data[self.pos..self.pos+len]; self.pos += len; b }
-    pub(super) fn read_string(&mut self) -> &'a [u8] { let len = self.read_u32(); self.read_bytes(len as usize) }
-}
-
-pub(super) fn write_string(w: &mut Vec<u8>, s: &[u8]) { w.extend_from_slice(&(s.len() as u32).to_le_bytes()); w.extend_from_slice(s); }
-
-pub(super) fn scan_used_opcodes(r: &mut PayloadReader, used_ops: &mut HashSet<u8>) {
-    let name_len = r.read_u32();
-    r.read_bytes(name_len as usize);
-    r.read_u32(); r.read_u32(); r.read_u8(); r.read_u8(); r.read_u8(); r.read_u8();
-    let inst_count = r.read_u32();
-    for _ in 0..inst_count {
-        used_ops.insert(r.read_u8());
-        r.read_u8(); r.read_u32(); r.read_u32();
-    }
-    let const_count = r.read_u32();
-    for _ in 0..const_count {
-        let c_type = r.read_u8();
-        match c_type {
-            0 => {}
-            1 => { r.read_u8(); }
-            2 => { r.read_u64(); }
-            3 => { let s_len = r.read_u32(); r.read_bytes(s_len as usize); }
-            _ => panic!(),
-        }
-    }
-    let p_count = r.read_u32();
-    for _ in 0..p_count { scan_used_opcodes(r, used_ops); }
-    let l_count = r.read_u32();
-    r.read_bytes((l_count * 4) as usize);
-    let loc_count = r.read_u32();
-    for _ in 0..loc_count { let s_len = r.read_u32(); r.read_bytes(s_len as usize); r.read_u32(); r.read_u32(); }
-    let upv_count = r.read_u32();
-    for _ in 0..upv_count { let s_len = r.read_u32(); r.read_bytes(s_len as usize); }
-}
-
-/// 扫描所有原型的最大 max_stack（判据③修复用：全局寄存器平移量 G 的上限
-/// 由它决定——平移后寄存器必须仍在 <128 的 RK 边界内）。
-pub(super) fn scan_max_stack(r: &mut PayloadReader, out: &mut u8) {
-    let name_len = r.read_u32();
-    r.read_bytes(name_len as usize);
-    r.read_u32(); r.read_u32(); r.read_u8(); r.read_u8(); r.read_u8();
-    let ms = r.read_u8();
-    if ms > *out { *out = ms; }
-    let inst_count = r.read_u32();
-    for _ in 0..inst_count {
-        r.read_u8(); r.read_u8(); r.read_u32(); r.read_u32();
-    }
-    let const_count = r.read_u32();
-    for _ in 0..const_count {
-        let c_type = r.read_u8();
-        match c_type {
-            0 => {}
-            1 => { r.read_u8(); }
-            2 => { r.read_u64(); }
-            3 => { let s_len = r.read_u32(); r.read_bytes(s_len as usize); }
-            _ => panic!(),
-        }
-    }
-    let p_count = r.read_u32();
-    for _ in 0..p_count { scan_max_stack(r, out); }
-    let l_count = r.read_u32();
-    r.read_bytes((l_count * 4) as usize);
-    let loc_count = r.read_u32();
-    for _ in 0..loc_count { let s_len = r.read_u32(); r.read_bytes(s_len as usize); r.read_u32(); r.read_u32(); }
-    let upv_count = r.read_u32();
-    for _ in 0..upv_count { let s_len = r.read_u32(); r.read_bytes(s_len as usize); }
-}
-
-pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSet<Vec<u8>>, setglobal_op: u8) {
-    r.read_string();
-    r.read_u32(); r.read_u32();
-    r.read_u8(); r.read_u8(); r.read_u8(); r.read_u8();
-    let inst_count = r.read_u32();
-    let mut raw_insts: Vec<(u8, u8, u32, u32)> = Vec::with_capacity(inst_count as usize);
-    for _ in 0..inst_count {
-        let op = r.read_u8(); let a = r.read_u8(); let b = r.read_u32(); let c = r.read_u32();
-        raw_insts.push((op, a, b, c));
-    }
-    let const_count = r.read_u32();
-    let mut local_consts: Vec<Option<Vec<u8>>> = Vec::with_capacity(const_count as usize);
-    for _ in 0..const_count {
-        let c_type = r.read_u8();
-        match c_type {
-            0 => local_consts.push(None),
-            1 => { r.read_u8(); local_consts.push(None); }
-            2 => { r.read_u64(); local_consts.push(None); }
-            3 => { local_consts.push(Some(r.read_string().to_vec())); }
-            _ => panic!(),
-        }
-    }
-    for (op, _a, b, _c) in &raw_insts {
-        if *op == setglobal_op {
-            if let Some(Some(s)) = local_consts.get(*b as usize) {
-                targets.insert(s.clone());
-            }
-        }
-    }
-    let p_count = r.read_u32();
-    for _ in 0..p_count { scan_setglobal_targets(r, targets, setglobal_op); }
-    let l_count = r.read_u32();
-    r.read_bytes((l_count * 4) as usize);
-    let loc_count = r.read_u32();
-    for _ in 0..loc_count { r.read_string(); r.read_u32(); r.read_u32(); }
-    let upv_count = r.read_u32();
-    for _ in 0..upv_count { r.read_string(); }
-}
-
-// 反混淆判据②修复：每条线上指令尾部挂 0..3 个随机垃圾字节，数量编码在线上魔数
-// 高 2 位（mag 取值 0x0100_0000..0x7FFF_0000，kp18 ≤ 0x02FF_FFFF 不碰高位，
-// 所以 (mag^kp18)>>29 与 mag>>29 一致，读写两侧同式）。「每条恰好 16B、
-// N 条 ×16 精确对齐」的游标特征消失；垃圾字节随滚动密钥流一起加密。
-fn inst_junk(w: &mut Vec<u8>, mag_file: u32, rng: &mut StdRng) {
-    let jn = (mag_file >> 29) & 3;
-    for _ in 0..jn { w.push(rng.random_range(0..256u32) as u8); }
-}
-
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], gshift: u8, delta: u32, ch_m: u64, ch_k0: u64) -> Vec<(usize, u32)> {
-    // ② 元数据剥离：chunk 名/lines/locals/upvalue 名在 VM 端零消费者
-    // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
-    // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
-    // ⑱.3 每原型随机参数：kp18=本原型线上 op 异或键（二级重映射，跨原型同全局码
-    // 线上值不同）、pb18=pc↔槽仿射偏移（槽=pc+pb，随机死槽；所有 pc 运算皆相对=零模板改动）。
-    // 两值写入 ② 剥离后的 linedefined/numparams 两空槽（随机数，无源信息）。
-    let kp18: u32 = rng.random_range(1..0x2000000u32) | 0x0100_0000;
-    let pb18: u32 = rng.random_range(4..=64u32);
-    // ㉚ 链式编码状态：种子=(kp18^pb18)*ch_m+ch_k0（与 Lua 扫描/解码器同式）；
-    // 每条指令发射前取 (EO,CA,CB,CC)，发射后用本条逻辑值推进——单条公式全解作废
-    let nochain18 = std::env::var("OBF_NOCHAIN").is_ok();
-    let mut chain18: u64 = (((kp18 ^ pb18) as u64).wrapping_mul(ch_m).wrapping_add(ch_k0)) % 0x1_0000_0000;
-    #[allow(clippy::type_complexity)]
-    let ch_split = |ch: u64| -> (u32, u32, u32, u32) {
-        if std::env::var("OBF_NOCHAIN").is_ok() { return (0, 0, 0, 0); }
-        let eo = ((ch % 0x100) * 2) as u32;
-        let ca = ((ch / 0x100) % 0x100) as u32;
-        let cb = ((ch.wrapping_mul(0x1_0001)) % 0x1_0000_0000) as u32;
-        let cc = (((cb as u64).wrapping_mul(0x45D9) + ch) % 0x1_0000_0000) as u32;
-        (eo, ca, cb, cc)
-    };
-    // 注：推进项用逻辑魔数（不含 Δ——扫描读侧撤销 EO 后手里只有 mag）
-    let ch_step = |ch: u64, mag: u32, a: u32, fb0: u32, fc0: u32| -> u64 {
-        if std::env::var("OBF_NOCHAIN").is_ok() { return 0; }
-        (ch * 3 + (mag as u64) * 0x101 + (a as u64) * 0x1001
-            + fb0 as u64 + (fc0 as u64) * 0x11) % 0x1_0000_0000
-    };
-    let _ = nochain18;
-    let _ = r.read_string(); write_string(w, b"");
-    let _ = r.read_u32(); let _ = r.read_u32();
-    w.extend_from_slice(&kp18.to_le_bytes()); w.extend_from_slice(&pb18.to_le_bytes());
-    w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
-    let max_stack = r.read_u8();
-    w.push(max_stack.saturating_add(gshift));
-    let inst_count = r.read_u32();
-    let mut raw_insts: Vec<(u8, u8, u32, u32)> = Vec::with_capacity(inst_count as usize);
-    for _ in 0..inst_count {
-        let op = r.read_u8(); let a = r.read_u8(); let b = r.read_u32(); let c = r.read_u32();
-        raw_insts.push((op, a, b, c));
-    }
-    let const_count = r.read_u32();
-    let mut local_consts: Vec<(u8, Vec<u8>)> = Vec::with_capacity(const_count as usize);
-    for _ in 0..const_count {
-        let c_type = r.read_u8();
-        match c_type {
-            0 => local_consts.push((0, Vec::new())),
-            1 => { let b = r.read_u8(); local_consts.push((1, vec![b])); }
-            2 => { let n = r.read_u64(); local_consts.push((2, n.to_le_bytes().to_vec())); }
-            3 => { let s = r.read_string().to_vec(); local_consts.push((3, s)); }
-            _ => panic!(),
-        }
-    }
-
-    const BITRK: u32 = 128;
-    // 反混淆判据③修复（寄存器平移）：全原型统一平移 G（Generator::build 扫描
-    // 最大 maxstack 后钉死，保证平移后寄存器仍 <128 的 RK 边界）。A 恒为寄存器；
-    // IABC 的 B/C 按操作码模式表平移（R=寄存器、K=RK 且 <128 才是寄存器）。
-    // 语义不变：调用实参/多返回/上值绑定引用的全是同一平移量；解码后 A 集合不再
-    // 锚定 0（配合尾部死指令，也不再是恰好铺满的稠密区间）。
-    if gshift != 0 {
-        for (op, a, b, c) in raw_insts.iter_mut() {
-            let real_op = OpCode::from_u8(inverse_opcode_map[*op as usize]);
-            // Eq/Lt/Le 的 A 域是「期望比较结果」旗标（0/1），不是寄存器——不平移
-            // （模板：if (rk_b == rk_c) ~= (inst_A ~= 0) then pc+=1）
-            let a_is_flag = matches!(real_op, Some(OpCode::Eq) | Some(OpCode::Lt) | Some(OpCode::Le));
-            if !a_is_flag {
-                *a = (*a as u32 + gshift as u32) as u8;
-            }
-            if let Some(real_op) = real_op {
-                if real_op.mode() == OpMode::IABC {
-                    match real_op.b_mode() {
-                        OpArgMask::R => *b += gshift as u32,
-                        OpArgMask::K => if *b < BITRK { *b += gshift as u32; },
-                        _ => {}
-                    }
-                    match real_op.c_mode() {
-                        OpArgMask::R => *c += gshift as u32,
-                        OpArgMask::K => if *c < BITRK { *c += gshift as u32; },
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    let mut referenced_elsewhere: HashSet<usize> = HashSet::new();
-    for (op, _a, b, c) in &raw_insts {
-        if *op == getglobal_op || *op == getglobalstr_op { continue; }
-        if let Some(real_op) = OpCode::from_u8(inverse_opcode_map[*op as usize]) {
-            let is_bx = matches!(real_op.mode(), OpMode::IABx);
-            if is_bx {
-                if real_op.b_mode() == OpArgMask::K && (*b as usize) < local_consts.len() {
-                    referenced_elsewhere.insert(*b as usize);
-                }
-            } else {
-                if real_op.b_mode() == OpArgMask::K && *b >= BITRK {
-                    referenced_elsewhere.insert((*b - BITRK) as usize);
-                }
-                if real_op.c_mode() == OpArgMask::K && *c >= BITRK {
-                    referenced_elsewhere.insert((*c - BITRK) as usize);
-                }
-            }
-        }
-    }
-
-    let mut builtin_rewrite: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    let mut omit_const: HashSet<usize> = HashSet::new();
-    for (idx, (ctype, bytes)) in local_consts.iter().enumerate() {
-        if *ctype == 3 {
-            if let Some(slot) = crate::VM::Opcodes::builtins::BUILTIN_NAMES.iter().position(|n| n.as_bytes() == bytes.as_slice()) {
-                if !setglobal_targets.contains(bytes) {
-                    builtin_rewrite.insert(idx, slot);
-                    if !referenced_elsewhere.contains(&idx) {
-                        omit_const.insert(idx);
-                    }
-                }
-            }
-        }
-    }
-
-    // ③ 槽位 PRP 洗牌：常量的落盘槽位过一遍随机置换——落盘常量表第 s 槽
-    // 放原常量 inv[s]，指令侧 RK/IABx-K 引用同步重映射为 perm[idx]。读侧
-    // 一切（折叠扫描、R 链、解密 nonce、建表）都以「线上操作数值/落盘槽号」
-    // 为准逐式重放，与写侧对同一置换对称——读侧零改动。
-    let mut cperm: Vec<u32> = (0..const_count).collect();
-    for pi in (1..cperm.len()).rev() {
-        let pj = rng.random_range(0..=pi);
-        cperm.swap(pi, pj);
-    }
-    let remap_rk = |v: u32| -> u32 {
-        if v >= BITRK && (v - BITRK) < const_count { BITRK + cperm[(v - BITRK) as usize] } else { v }
-    };
-    let remap_bx = |v: u32| -> u32 { if v < const_count { cperm[v as usize] } else { v } };
-
-    // ---- 融合前的准备：算出所有可能成为跳转目标的 pc ----
-    //
-    // 融合会把三条指令压成一条，handler 里 `pc += 2` 跳过两个死槽。死槽本身
-    // 仍然占位（所以其余跳转偏移一个都不用改），但前提是**绝不能有控制流
-    // 直接落进死槽**。两类来源都要排除：
-    //   1. 相对跳转的目标：pc 在取指时已经自增过 1，所以目标是 (i + 1 + sBx)
-    //   2. 条件跳下一条的指令（Eq/Lt/Le/Test/TestSet/TForLoop），目标是 i + 1
-    const REL_JUMP_OPS: &[u8] = &[22, 31, 32, 48, 81, 82, 83, 84]; // Jmp ForLoop ForPrep TForPrep JmpIf JmpIfNot JmpEq JmpNe
-    const SKIP_NEXT_OPS: &[u8] = &[23, 24, 25, 26, 27, 33];        // Eq Lt Le Test TestSet TForLoop
-    const NO_FALLTHROUGH_OPS: &[u8] = &[29, 30, 85, 86, 87];       // TailCall Return Return0 Return1 Return2
-    let mut jump_targets: HashSet<usize> = HashSet::new();
-    for (i, (op, _a, b, _c)) in raw_insts.iter().enumerate() {
-        let real = inverse_opcode_map[*op as usize];
-        if REL_JUMP_OPS.contains(&real) {
-            let t = i as i64 + 1 + *b as i32 as i64;
-            if t >= 0 {
-                jump_targets.insert(t as usize);
-            }
-        }
-        if SKIP_NEXT_OPS.contains(&real) {
-            jump_targets.insert(i + 1);
-        }
-    }
-
-    // 反混淆判据③续（死指令）：真实指令流末尾（最后一条 RETURN 之后，永不执行）
-    // 追加少量死指令，A 域取高于活跃寄存器区的随机值——解码后的 A 集合不再是
-    // 「恰好铺满 0..maxstack」的干净区间。dead_count 先于循环抽签（inst_count 写头要用）。
-    let dead_count: usize = rng.random_range(2..=std::cmp::min(24, 4 + raw_insts.len() / 18).max(4));
-    w.extend_from_slice(&(inst_count + dead_count as u32).to_le_bytes());
-    let n_insts = raw_insts.len();
-    let mut i = 0usize;
-    let mut fused_count = 0usize;
-    // #3 折叠扫描状态：pc18=已写出指令数（1-based，与 Lua 数组下标一致）；
-    // fold_map[li] = Σ f(pc)（对判定为引用本常量槽的指令求和）
-    let mut fold_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let mut pc18: u32 = 0;
-    let fc_f = |pc: u32| -> u32 { pc.wrapping_mul(fc18.f1) ^ fc18.f2 };
-    // 谓词用 xor（32 位域同构，避免 Rust wrapping mod 2^32 与 Lua 直接 %100 不同余）
-    let fc_pb = |v: u32| -> bool { (v.rotate_left(fc18.r6b) ^ fc18.p1b) % 100 < fc18.p3b };
-    let fc_pc = |v: u32| -> bool { (v.rotate_left(fc18.r6c) ^ fc18.p1c) % 100 < fc18.p3c };
-    // ㉓-A R 链（指令流滚动状态）：roll 初值=0x2545F491^盐；逐记录
-    // r7=rotl7(roll)、roll=(r7^文件魔数)+文件A+(预掩码预交换 b/c 异或和) (mod 2^32)。
-    // 读侧 body_consts 扫描同式重算（数组 b/c 经 dcb 已是明文=fb0/fc0，含死槽/builtin）。
-    // 第 li 槽密钥用「最后一条引用它的指令之后」的 roll（未引用槽用链末值）。
-    // ⑤ roll 初值逐构建随机（原 0x2545F491 是可识别算法指纹常量）
-    let mut roll18: u32 = fc18.rs18 ^ enc.salts[group];
-    let mut roll_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    while i < n_insts {
-        let (op, a, b, c) = raw_insts[i];
-
-        // ---- SuperOperator: builtin-load + LoadK + Call(B=2, C=1) -> 1 条 ----
-        if (op == getglobal_op || op == getglobalstr_op)
-            && i + 2 < n_insts
-            && !jump_targets.contains(&(i + 1))
-            && !jump_targets.contains(&(i + 2))
-        {
-            // i == 0 是函数入口，没有前驱指令，控制流只能从这里开始，天然安全；
-            // i > 0 则要求前一条指令一定会顺序落入本条（不会跳走、不会跳过本条）。
-            let prev_falls_through = if i == 0 {
-                true
-            } else {
-                let prev_real = inverse_opcode_map[raw_insts[i - 1].0 as usize];
-                !SKIP_NEXT_OPS.contains(&prev_real)
-                    && !REL_JUMP_OPS.contains(&prev_real)
-                    && !NO_FALLTHROUGH_OPS.contains(&prev_real)
-            };
-            if prev_falls_through {
-                if let Some(&slot) = builtin_rewrite.get(&(b as usize)) {
-                    let (op1, a1, b1, _c1) = raw_insts[i + 1];
-                    let (op2, a2, b2, c2) = raw_insts[i + 2];
-                    let is_loadk = inverse_opcode_map[op1 as usize] == 1 && a1 as u32 == a as u32 + 1;
-                    let is_call_1arg_0ret =
-                        inverse_opcode_map[op2 as usize] == 28 && a2 == a && b2 == 2 && c2 == 1;
-                    // 常量必须没被 omit_const 抹掉，否则 CONSTS[b1+1] 会取错
-                    let const_alive = !omit_const.contains(&(b1 as usize));
-                    if is_loadk && is_call_1arg_0ret && const_alive {
-                        // 必须和 builtin-load 一样过 slot_perm：handler 是按
-                        // fused_map[perm[名字下标]] 注册的，指令侧要用同一个下标。
-                        let fused_vals = fused_map.get(slot_perm[slot]).map(|v| v.as_slice()).unwrap_or(&[]);
-                        if !fused_vals.is_empty() {
-                            let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
-                            // ⑮ 线格式：op=魔数、A=(a+魔数) u32、(B,C) 按魔数奇偶预交换
-                            let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                            let a_enc = (a as u32).wrapping_add(mag);
-                            let b1e = remap_bx(b1); // ③ 槽位洗牌：常量下标同步置换
-                            let (fb0, fc0) = if mag % 2 == 1 { (b1e, 0u32) } else { (0u32, b1e) };
-                            let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                            let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                            let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-                            let mag_file = g18 ^ kp18;
-                            w.extend_from_slice(&mag_file.to_le_bytes());
-                            w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                            w.extend_from_slice(&fb.to_le_bytes());
-                            w.extend_from_slice(&fc.to_le_bytes()); // 常量下标搬进 C
-                            inst_junk(w, mag_file, rng);
-                            fused_used.insert(slot_perm[slot]);
-                            fused_count += 1;
-                            pc18 += 1;
-                            let r718 = roll18.rotate_left(7);
-                            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(b1e);
-                            chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                            if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
-                            if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
-                            i += 1; // i+1 / i+2 照常写出，成为永不执行的死槽
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        if op == getglobal_op || op == getglobalstr_op {
-            if let Some(slot) = builtin_rewrite.get(&(b as usize)) {
-                let op_index = crate::VM::Opcodes::builtins::BUILTIN_OP_BASE + slot_perm[*slot];
-                let mapped_vals = builtin_map.get(op_index).map(|v| v.as_slice()).unwrap_or(&[]);
-                let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op_index as u32 };
-                let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                let a_enc = (a as u32).wrapping_add(mag);
-                let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                let mag_file = g18 ^ kp18;
-                w.extend_from_slice(&mag_file.to_le_bytes()); w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                w.extend_from_slice(&(((0u32 ^ cb18) ^ (g18 ^ ki1)) ^ kb).to_le_bytes()); w.extend_from_slice(&(((0u32 ^ cc18) ^ (g18 ^ ki2)) ^ kc).to_le_bytes());
-                inst_junk(w, mag_file, rng);
-                pc18 += 1; // builtin 的 B/C 解码后恒为 0，不参与折叠/引用
-                let r718 = roll18.rotate_left(7);
-                roll18 = (r718 ^ mag).wrapping_add(a_enc); // b/c 贡献 0
-                chain18 = ch_step(chain18, mag, a_enc, 0, 0);
-                i += 1;
-                continue;
-            }
-        }
-        let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
-        let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 };
-        let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-        let a_enc = (a as u32).wrapping_add(mag);
-        // ③ 槽位洗牌：K 域操作数按模式重映射（RK→perm，IABx-K→perm）；
-        // 寄存器/跳转域不动
-        let real_op18 = OpCode::from_u8(inverse_opcode_map[op as usize]);
-        let (be18, ce18) = match real_op18 {
-            Some(ro) if ro.mode() == OpMode::IABC => (
-                if ro.b_mode() == OpArgMask::K { remap_rk(b) } else { b },
-                if ro.c_mode() == OpArgMask::K { remap_rk(c) } else { c }),
-            Some(ro) if ro.mode() == OpMode::IABx && ro.b_mode() == OpArgMask::K => (remap_bx(b), c),
-            _ => (b, c),
-        };
-        let (fb0, fc0) = if mag % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
-        let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-        let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-        let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-        let mag_file = g18 ^ kp18;
-        w.extend_from_slice(&mag_file.to_le_bytes()); w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
-        inst_junk(w, mag_file, rng);
-        pc18 += 1;
-        let r718 = roll18.rotate_left(7);
-        roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-        chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-        if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
-        if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
-        i += 1;
-    }
-
-    // 反混淆判据③续：死指令本体。排在真实指令流之后（最后一条 RETURN 之后，
-    // 任何跳转目标都 ≤ 原指令数，控制流不可能进入）；魔数取自本表真实别名，
-    // A 域取高于活跃寄存器区的随机值（<128，不碰 RK 常量域），B/C 取 <128 的
-    // 寄存器态值（解码后 <128 ⇒ 永不被折叠扫描当成常量引用）。R 链照常推进
-    // （读侧 body_consts 扫描会重放全部数组项，含死指令），折叠表不受污染。
-    {
-        let mut alias_mags: Vec<u32> = Vec::new();
-        for lst in mapped_opcodes.iter() {
-            if let Some(&v0) = lst.first() {
-                alias_mags.push(op_magic.get(&v0).copied().unwrap_or(v0));
-            }
-        }
-        if alias_mags.is_empty() { alias_mags.push(0x0123_4567); }
-        let lo = (max_stack as u32 + gshift as u32 + 1).min(120);
-        for _ in 0..dead_count {
-            let mag = alias_mags[rng.random_range(0..alias_mags.len())];
-            let a_dead = rng.random_range(lo..128u32);
-            let b_dead = rng.random_range(0..128u32);
-            let c_dead = rng.random_range(0..128u32);
-            let a_enc = a_dead.wrapping_add(mag);
-            let (fb0, fc0) = if mag % 2 == 1 { (c_dead, b_dead) } else { (b_dead, c_dead) };
-            let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-            let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-            let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-            let mag_file = g18 ^ kp18;
-            w.extend_from_slice(&mag_file.to_le_bytes());
-            w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-            w.extend_from_slice(&fb.to_le_bytes());
-            w.extend_from_slice(&fc.to_le_bytes());
-            inst_junk(w, mag_file, rng);
-            pc18 += 1;
-            let r718 = roll18.rotate_left(7);
-            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-            chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-        }
-    }
-    // ⑰ 组字节先行（组=本原型的参数组下标），然后逐条内联密文：
-    // 字符串=tag+长度前缀密文；数字=tag+8B 密文。nonce 的池下标改用
-    // **节内槽位号**（与 Lua 侧 pos-1 一致）；同值复用同一 (blob,li)。
-    w.push(group as u8);
-    // ㉓-C 死常量：每原型追加随机个诱饵槽（nil/bool/num 混排，blob=随机字节——
-    // 惰性解码下诱饵永不被访问即永不解密），常量槽数量/节尺寸不再对应真实使用。
-    // 诱饵槽排在真实槽之后，指令的 RK 引用不可能到达（li<真实数），无副作用。
-    let d_count18: u32 = rng.random_range(0..=1 + (const_count as usize).min(24) as u32);
-    w.extend_from_slice(&((const_count + d_count18).to_le_bytes()));
-    // ③ 槽位洗牌落盘：第 slot 槽写原常量 inv_perm[slot]；nonce/折叠键仍用
-    // 槽位号（=指令侧重映射后的操作数值，读写两侧同式）
-    let mut inv_perm: Vec<usize> = vec![0; const_count as usize];
-    for (oi, &ppos) in cperm.iter().enumerate() { inv_perm[ppos as usize] = oi; }
-    let mut slot: u32 = 0;
-    let mut seen: std::collections::HashMap<(Vec<u8>, u32, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
-    for pos in 0..const_count as usize {
-        let idx = inv_perm[pos];
-        let (c_type, bytes) = &local_consts[idx];
-        if omit_const.contains(&idx) {
-            w.push(tag_map[0]); // ㉓-B 省略槽 tag 逐 build 随机
-            slot += 1;
-            continue;
-        }
-        match c_type {
-            0 => { w.push(tag_map[0]); }
-            // ③-2 统一加密：bool 不再裸字节——按 0.0/1.0 双精度走 knum 加密
-            // 管线（8B 密文），线上形态与数字槽完全一致
-            1 | 2 | 3 => {
-                // #3 折叠 + ㉓-A R 链混入：nonce=[盐^roll^F, r7^(槽*6+kind), 盐^rotl7(r7)]
-                // roll=最后引用本槽指令之后的 R 状态（未引用槽=链末值）——常量解密
-                // 依赖解释（指令流文件值），不依赖槽位号直传
-                let fold = fold_map.get(&slot).copied().unwrap_or(0u32);
-                let rl18 = roll_map.get(&slot).copied().unwrap_or(roll18);
-                let r7l18 = rl18.rotate_left(7);
-                let kind = if *c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
-                let s118 = enc.salts[group] ^ rl18 ^ fold;
-                let s218 = r7l18 ^ slot.wrapping_mul(6).wrapping_add(kind);
-                let s318 = enc.salts[group] ^ r7l18.rotate_left(7);
-                let entry = match seen.get(&(bytes.clone(), fold, rl18)) {
-                    Some(e) => e.clone(),
-                    None => {
-                        let li = slot;
-                        let payload18: Vec<u8> = if *c_type == 1 {
-                            let dv: f64 = if bytes[0] != 0 { 1.0 } else { 0.0 };
-                            dv.to_le_bytes().to_vec()
-                        } else { bytes.clone() };
-                        let blob = chacha_xor_layout(&enc.keys[group], [s118, s218, s318], &payload18, &enc.layout[group]);
-                        seen.insert((bytes.clone(), fold, rl18), (*c_type, blob.clone(), li));
-                        (*c_type, blob, li)
-                    }
-                };
-                w.push(tag_map[*c_type as usize]);
-                if *c_type == 3 { write_string(w, &entry.1); } else { w.extend_from_slice(&entry.1); }
-                // ③-3 每常量 MAC：密文块后 4B 校验和（密文+槽号+折叠+R链），
-                // 读侧分派闭包先验后解
-                w.extend_from_slice(&const_mac18(&entry.1, slot, fold, rl18, fc18).to_le_bytes());
-            }
-            _ => panic!(),
-        }
-        slot += 1;
-    }
-
-    // ㉓-C 诱饵槽发射（排在真实槽后；blob 随机字节即可——永不解密）
-    for _ in 0..d_count18 {
-        match rng.random_range(0..5) {
-            0 => { w.push(tag_map[0]); } // nil：仅占一个槽号
-            1 => { w.push(tag_map[1]); for _ in 0..12 { w.push(rng.random_range(0..=255u8)); } } // bool：8B+4B MAC 同线长
-            _ => { w.push(tag_map[2]); for _ in 0..12 { w.push(rng.random_range(0..=255u8)); } } // num：8B+4B MAC
-        }
-    }
-
-    let p_count = r.read_u32();
-    w.extend_from_slice(&p_count.to_le_bytes());
-    // ⑱.2 尺寸前缀掩码：ln 站点收集（本层 w 内绝对偏移, 层内 1-based 序号），
-    // 子层站点偏移经 child_base 换算合并——根调用者拿到全量先序站点表
-    let mut proto_sites: Vec<(usize, u32)> = Vec::new();
-    let mut pidx18: u32 = 0;
-    for _ in 0..p_count {
-        // ⑱ 惰性原型：每个子块加 u32 长度前缀，Lua 侧 body_protos 按长跳过、
-        // CLOSURE 首调才递归解码——整棵原型树不再一次性展开成明文
-        pidx18 += 1;
-        let mut child: Vec<u8> = Vec::new();
-        let g2 = rng.random_range(0..CONST_GROUPS);
-        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, gshift, delta, ch_m, ch_k0);
-        let ln_off = w.len();
-        w.extend_from_slice(&(child.len() as u32).to_le_bytes());
-        let child_base = w.len();
-        w.extend_from_slice(&child);
-        proto_sites.push((ln_off, pidx18));
-        for (so, si) in sub_sites { proto_sites.push((so + child_base, si)); }
-    }
-    // ② 元数据剥离（续）：lines/locals/upvalue 名只消费不落盘
-    let l_count = r.read_u32();
-    w.extend_from_slice(&0u32.to_le_bytes());
-    r.read_bytes((l_count * 4) as usize);
-    let loc_count = r.read_u32();
-    w.extend_from_slice(&0u32.to_le_bytes());
-    for _ in 0..loc_count { let _ = r.read_string(); let _ = r.read_u32(); let _ = r.read_u32(); }
-    let upv_count = r.read_u32();
-    w.extend_from_slice(&0u32.to_le_bytes());
-    for _ in 0..upv_count { let _ = r.read_string(); }
-    proto_sites
-}
-
 pub struct GenRng { used: HashSet<String>, slots: Vec<i64> }
 
 impl GenRng {
@@ -1053,17 +551,253 @@ impl GenRng {
 
 pub(super) fn build_opcode_tree(handlers: &[(u32, String)], min_idx: usize, max_idx: usize, var_op: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
     if min_idx == max_idx { return handlers[min_idx].1.clone(); }
-    let mid = (min_idx + max_idx) / 2;
+    // 改进项二：1) 间隙随机枢轴（pivot 取自 [handlers[cut].0, handlers[cut+1].0 - 1] 开区间内部，
+    // 节点比较常数不再等于任何真实 opcode 魔数）；2) 二叉/三叉混合 + 切分点随机抖动 + 三路顺序翻转。
+    let pivot_at = |cut: usize, rng: &mut GenRng| -> i64 {
+        let lo = handlers[cut].0 as i64;
+        let hi = handlers[cut + 1].0 as i64;
+        if hi > lo + 1 { lo + rng.range64(0, hi - lo) } else { lo }
+    };
+    let span = max_idx - min_idx + 1;
+    if span >= 6 && rng.range(0, 3) == 0 {
+        let third = span / 3;
+        let cut1 = min_idx + third.saturating_sub(1) + rng.range(0, 2);
+        let rem = max_idx - cut1;
+        let cut2 = cut1 + (rem / 2).max(1);
+        if cut1 >= min_idx && cut1 < cut2 && cut2 < max_idx {
+            let p1 = pivot_at(cut1, rng);
+            let p2 = pivot_at(cut2, rng);
+            let left = build_opcode_tree(handlers, min_idx, cut1, var_op, keys, rng);
+            let mid_b = build_opcode_tree(handlers, cut1 + 1, cut2, var_op, keys, rng);
+            let right = build_opcode_tree(handlers, cut2 + 1, max_idx, var_op, keys, rng);
+            return match rng.range(0, 3) {
+                0 => {
+                    let c1 = ControlFlowBuilder::generate_opaque_predicate(p1, var_op, "<=", keys, rng);
+                    let c2 = ControlFlowBuilder::generate_opaque_predicate(p2, var_op, "<=", keys, rng);
+                    format!("if {} then {} elseif {} then {} else {} end ", c1, left, c2, mid_b, right)
+                }
+                1 => {
+                    let c1 = ControlFlowBuilder::generate_opaque_predicate(p2, var_op, ">", keys, rng);
+                    let c2 = ControlFlowBuilder::generate_opaque_predicate(p1, var_op, ">", keys, rng);
+                    format!("if {} then {} elseif {} then {} else {} end ", c1, right, c2, mid_b, left)
+                }
+                _ => {
+                    let c1 = ControlFlowBuilder::generate_opaque_predicate(p1, var_op, "<=", keys, rng);
+                    let c2 = ControlFlowBuilder::generate_opaque_predicate(p2, var_op, ">", keys, rng);
+                    format!("if {} then {} elseif {} then {} else {} end ", c1, left, c2, right, mid_b)
+                }
+            };
+        }
+    }
+    let mid = if span >= 4 && rng.range(0, 2) == 0 {
+        let base = (min_idx + max_idx) / 2;
+        let jitter = rng.range(0, 3) as isize - 1;
+        ((base as isize + jitter).clamp(min_idx as isize, (max_idx - 1) as isize)) as usize
+    } else {
+        (min_idx + max_idx) / 2
+    };
+    let piv = pivot_at(mid, rng);
     let left = build_opcode_tree(handlers, min_idx, mid, var_op, keys, rng);
     let right = build_opcode_tree(handlers, mid + 1, max_idx, var_op, keys, rng);
     let direction = rng.range(0, 2) == 0;
     if direction {
-        let cond = ControlFlowBuilder::generate_opaque_predicate(handlers[mid].0 as i64, var_op, "<=", keys, rng);
+        let cond = ControlFlowBuilder::generate_opaque_predicate(piv, var_op, "<=", keys, rng);
         format!("if {} then {} else {} end ", cond, left, right)
     } else {
-        let cond = ControlFlowBuilder::generate_opaque_predicate(handlers[mid].0 as i64, var_op, ">", keys, rng);
+        let cond = ControlFlowBuilder::generate_opaque_predicate(piv, var_op, ">", keys, rng);
         format!("if {} then {} else {} end ", cond, right, left)
     }
+}
+
+/// 改进项一：原生 Lua 闭包内联的指令惰性解码器（彻底废除 `loadstring`/`load` + `StreamTable` 源码级暴露）。
+/// - 10 个核心常数（0x100/0x2/0x10001/0x45D9/2^32/2^31/0x3/0x101/0x1001/0x11）提升至外层 IIFE
+///   并以 `deep10` 位异或链/KDF 派生+乱序声明，内层热闭包内零字面量魔数；
+/// - 8 个绑定形参（Pa..Pk）按随机排列洗牌，调用点同步按同排列传参；
+/// - 状态表 `dc_ds` 的 5 个字段名（原固定 `.n/.ch/.m1/.m2/.m3`）全量随机化；
+/// - 内层填充闭包采用 3 态 + 1 诱饵态的平坦化 `while` 状态机分发（状态分支乱序）。
+pub(super) fn build_inst_decoder_lua(
+    rng: &mut GenRng,
+    fn_bxor2: &str,
+    chain_delta: u32,
+    chain_m: u64,
+    chain_k0: u64,
+    var_opcodes: &str,
+    var_a_arr: &str,
+    var_b_arr: &str,
+    var_c_arr: &str,
+    dc_ds: &str,
+    n_dc: &str,
+    pf_lld: &str,
+    n_kon: &str,
+    n_mk1: &str,
+    n_mk2: &str,
+    n_mk3: &str,
+    var_vm: &str,
+    k_dc: &str,
+    ds_fields: (&str, &str, &str, &str, &str),
+) -> (String, String) {
+    let (ds_n, ds_ch, ds_m1, ds_m2, ds_m3) = ds_fields;
+    let dc_fn = rng.name();
+    let dc_fill = rng.name();
+    let dl_e = crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, chain_delta as i64);
+    let chm_e = crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, chain_m as i64);
+    let chk0_e = crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, chain_k0 as i64);
+    let dc_family = rng.range(0, 4);
+
+    // 外层 IIFE 常量局部名（全部经 deep10/kdf_pow2 一次求值，内层零字面量）
+    let (c_100, c_2, c_10001, c_45d9, c_m32, c_m31, c_3, c_101, c_1001, c_11) = (
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+    );
+    let mut const_decls = vec![
+        format!("local {}={};", c_100, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x100)),
+        format!("local {}={};", c_2, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x2)),
+        format!("local {}={};", c_10001, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x10001)),
+        format!("local {}={};", c_45d9, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x45D9)),
+        format!("local {}={};", c_m32, crate::VM::VM_Backend::Generator_kdf::kdf_m32(rng)),
+        format!("local {}={};", c_m31, crate::VM::VM_Backend::Generator_kdf::kdf_pow2(rng, 31)),
+        format!("local {}={};", c_3, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x3)),
+        format!("local {}={};", c_101, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x101)),
+        format!("local {}={};", c_1001, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x1001)),
+        format!("local {}={};", c_11, crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0x11)),
+    ];
+    rng.shuffle(&mut const_decls);
+
+    // 8 个绑定形参名与调用实参同排列洗牌
+    let (p_a, p_b, p_c, p_d, p_h, p_i, p_j, p_k) = (
+        rng.name(), rng.name(), rng.name(), rng.name(),
+        rng.name(), rng.name(), rng.name(), rng.name(),
+    );
+    let raw_params = [&p_a, &p_b, &p_c, &p_d, &p_h, &p_i, &p_j, &p_k];
+    let raw_args = [
+        var_opcodes.to_string(), var_a_arr.to_string(), var_b_arr.to_string(), var_c_arr.to_string(),
+        dc_ds.to_string(), n_dc.to_string(), fn_bxor2.to_string(), dl_e,
+    ];
+    let mut perm: Vec<usize> = (0..8).collect();
+    rng.shuffle(&mut perm);
+    let params_str = perm.iter().map(|&i| raw_params[i].as_str()).collect::<Vec<_>>().join(",");
+    let bind_args = perm.iter().map(|&i| raw_args[i].as_str()).collect::<Vec<_>>().join(",");
+
+    // 内层闭包局部工作变量（在 while 外统一声明，跨状态共享）
+    let (w_a, w_b, w_c, w_d, w_e, w_f, w_g, w_h, w_i, w_j, w_x) = (
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+    );
+
+    // State 0: 推进游标 n + 读取 Wa + 计算 Wb/Wc/Wd/We
+    let mut blk_eo = vec![
+        format!("{wb}=({ph}.{ch}%{c100})*{c2};", wb = w_b, ph = p_h, ch = ds_ch, c100 = c_100, c2 = c_2),
+        format!("{wc}=(({ph}.{ch}-({ph}.{ch}%{c100}))/{c100})%{c100};", wc = w_c, ph = p_h, ch = ds_ch, c100 = c_100),
+    ];
+    let blk_cc = vec![
+        format!("{wd}=({ph}.{ch}*{c10001})%{cm32};", wd = w_d, ph = p_h, ch = ds_ch, c10001 = c_10001, cm32 = c_m32),
+        format!("{we}=({wd}*{c45d9}+{ph}.{ch})%{cm32};", we = w_e, wd = w_d, ph = p_h, ch = ds_ch, c45d9 = c_45d9, cm32 = c_m32),
+    ];
+    rng.shuffle(&mut blk_eo);
+    let mut blocks: Vec<Vec<String>> = if dc_family == 2 || dc_family == 3 {
+        vec![blk_cc, blk_eo]
+    } else {
+        vec![blk_eo, blk_cc]
+    };
+    if rng.range(0, 2) == 0 { blocks.reverse(); }
+    let mut st0_stmts = vec![
+        format!("{ph}.{fn_}={ph}.{fn_}+0X1;", ph = p_h, fn_ = ds_n),
+        format!("{wa}={pa}[{ph}.{fn_}];", wa = w_a, pa = p_a, ph = p_h, fn_ = ds_n),
+    ];
+    for blk in &blocks { st0_stmts.extend(blk.iter().cloned()); }
+
+    // State 1: 四路字段解掩码 Wf/Wg/Wh/Wi（顺序洗牌）
+    let mut st1_stmts: Vec<String> = vec![
+        if dc_family == 3 {
+            format!("{wf}=({wa}-({ph}.{ch}%{c100})*{c2})%{cm32};", wf = w_f, wa = w_a, ph = p_h, ch = ds_ch, c100 = c_100, c2 = c_2, cm32 = c_m32)
+        } else {
+            format!("{wf}=({wa}-{wb})%{cm32};", wf = w_f, wa = w_a, wb = w_b, cm32 = c_m32)
+        },
+        if dc_family == 3 {
+            format!("{wg}=({pj}({pb}[{ph}.{fn_}],{ph}.{m1})-(({ph}.{ch}-({ph}.{ch}%{c100}))/{c100})%{c100})%{cm32};",
+                wg = w_g, pj = p_j, pb = p_b, ph = p_h, fn_ = ds_n, m1 = ds_m1, ch = ds_ch, c100 = c_100, cm32 = c_m32)
+        } else {
+            format!("{wg}=({pj}({pb}[{ph}.{fn_}],{ph}.{m1})-{wc})%{cm32};",
+                wg = w_g, pj = p_j, pb = p_b, ph = p_h, fn_ = ds_n, m1 = ds_m1, wc = w_c, cm32 = c_m32)
+        },
+        format!("{wh}={pj}({pj}({pc}[{ph}.{fn_}],{ph}.{m2})%{cm32},{wd}); if {wh}>={cm31} then {wh}={wh}-{cm32} end;",
+            wh = w_h, pj = p_j, pc = p_c, ph = p_h, fn_ = ds_n, m2 = ds_m2, cm32 = c_m32, wd = w_d, cm31 = c_m31),
+        format!("{wi}={pj}({pj}({pd}[{ph}.{fn_}],{ph}.{m3})%{cm32},{we}); if {wi}>={cm31} then {wi}={wi}-{cm32} end;",
+            wi = w_i, pj = p_j, pd = p_d, ph = p_h, fn_ = ds_n, m3 = ds_m3, cm32 = c_m32, we = w_e, cm31 = c_m31),
+    ];
+    rng.shuffle(&mut st1_stmts);
+
+    // State 2: 滚动链状态推进 + Wj + 奇偶交换 + rawset 写回
+    let upd = if std::env::var("OBF_NOCHAIN").is_ok() {
+        format!("{ph}.{ch}=0X0;", ph = p_h, ch = ds_ch)
+    } else if dc_family == 1 {
+        format!("{wx}=({ph}.{ch}*{c3}+({wf}-{pk})*{c101}+{wg}*{c1001})%{cm32}; {ph}.{ch}=({wx}+{wh}%{cm32}+({wi}%{cm32})*{c11})%{cm32};",
+            wx = w_x, ph = p_h, ch = ds_ch, c3 = c_3, wf = w_f, pk = p_k, c101 = c_101, wg = w_g, c1001 = c_1001, cm32 = c_m32, wh = w_h, wi = w_i, c11 = c_11)
+    } else {
+        format!("{ph}.{ch}=({ph}.{ch}*{c3}+({wf}-{pk})*{c101}+{wg}*{c1001}+{wh}%{cm32}+({wi}%{cm32})*{c11})%{cm32};",
+            ph = p_h, ch = ds_ch, c3 = c_3, wf = w_f, pk = p_k, c101 = c_101, wg = w_g, c1001 = c_1001, wh = w_h, cm32 = c_m32, wi = w_i, c11 = c_11)
+    };
+    let wj_stmt = format!("{wj}={wg}-({wf}-{pk});", wj = w_j, wg = w_g, wf = w_f, pk = p_k);
+    let swap_stmt = format!("if {wf}%{c2}~=0X0 then {wh},{wi}={wi},{wh} end;", wf = w_f, c2 = c_2, wh = w_h, wi = w_i);
+    let mut st2_stmts: Vec<String> = match rng.range(0, 3) {
+        0 => vec![upd, wj_stmt, swap_stmt],
+        1 => vec![upd, swap_stmt, wj_stmt],
+        _ => vec![wj_stmt, upd, swap_stmt],
+    };
+    st2_stmts.push(format!("rawset({pi},{ph}.{fn_},{{{wf},{wj},{wh},{wi}}});",
+        pi = p_i, ph = p_h, fn_ = ds_n, wf = w_f, wj = w_j, wh = w_h, wi = w_i));
+
+    // 3 态 + 1 诱饵态的平坦化状态机
+    let st_var = rng.name();
+    let s_vals = rng.distinct(5, 0x100, 0x7FFF);
+    let (s0, s1, s2, s_decoy, s_done) = (
+        s_vals[0] as i64, s_vals[1] as i64, s_vals[2] as i64, s_vals[3] as i64, s_vals[4] as i64,
+    );
+    let oc = crate::VM::VM_Backend::Generator_kdf::obf_const;
+    let b0 = format!("{} {}={};", st0_stmts.join(" "), st_var, oc(rng, s1 as u64));
+    let b1 = format!("{} {}={};", st1_stmts.join(" "), st_var, oc(rng, s2 as u64));
+    let b2 = format!("{} {}={};", st2_stmts.join(" "), st_var, oc(rng, s_done as u64));
+    let b_dec = format!("{wx}={pj}({wa} or 0X0,{pk}); {st}={sd};",
+        wx = w_x, pj = p_j, wa = w_a, pk = p_k, st = st_var, sd = oc(rng, s_done as u64));
+    let mut branches = vec![(s0, b0), (s1, b1), (s2, b2), (s_decoy, b_dec)];
+    rng.shuffle(&mut branches);
+
+    let mut fsm = format!(
+        "local {wa},{wb},{wc},{wd},{we},{wf},{wg},{wh},{wi},{wj},{wx}; local {st}={s0_init}; while {st}~={sd_chk} do ",
+        wa = w_a, wb = w_b, wc = w_c, wd = w_d, we = w_e, wf = w_f, wg = w_g, wh = w_h, wi = w_i, wj = w_j, wx = w_x,
+        st = st_var, s0_init = oc(rng, s0 as u64), sd_chk = oc(rng, s_done as u64),
+    );
+    for (idx, (sv, bbody)) in branches.iter().enumerate() {
+        let kw = if idx == 0 { "if" } else { "elseif" };
+        fsm.push_str(&format!("{} {}=={} then {} ", kw, st_var, oc(rng, *sv as u64), bbody));
+    }
+    fsm.push_str("end end");
+
+    let factory_prefix = format!(
+        "local {ff}=(function() {cdecls} return function({params}) return function() {fsm} end end end)(); ",
+        ff = dc_fn, cdecls = const_decls.join(" "), params = params_str, fsm = fsm,
+    );
+
+    // 状态表字段初始化顺序同样洗牌
+    let mut ds_inits = vec![
+        format!("{fn_}={c}.{lld}", fn_ = ds_n, c = "chunk", lld = pf_lld),
+        format!("{ch}=({bx}({kon},{c}.{lld})*{chm}+{chk0})%{dcm32}",
+            ch = ds_ch, bx = fn_bxor2, kon = n_kon, c = "chunk", lld = pf_lld, chm = chm_e, chk0 = chk0_e,
+            dcm32 = crate::VM::VM_Backend::Generator_kdf::kdf_m32(rng)),
+        format!("{m1}={mk1}", m1 = ds_m1, mk1 = n_mk1),
+        format!("{m2}={mk2}", m2 = ds_m2, mk2 = n_mk2),
+        format!("{m3}={mk3}", m3 = ds_m3, mk3 = n_mk3),
+    ];
+    rng.shuffle(&mut ds_inits);
+
+    let init_dc_stmt = format!(
+        "local {ndc}={{}}; local {ds}={{{inits}}}; local {fill}={fn_}({bind}); \
+         setmetatable({ndc},{{__index=function({tt},{kk}) while {ds}.{dsn}<{kk} do {fill}() end return rawget({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
+        ndc = n_dc, ds = dc_ds, inits = ds_inits.join(","),
+        fill = dc_fill, fn_ = dc_fn, bind = bind_args,
+        tt = rng.name(), kk = rng.name(), dsn = ds_n, vm = var_vm, kdc = k_dc,
+    );
+    (factory_prefix, init_dc_stmt)
 }
 
 
@@ -1108,153 +842,6 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
         }
     }
     out
-}
-
-/// ④E：**加载器取用不再有标识符**——产物里不出现 `loadstring` / `load` 这两个词，
-/// 也不出现 `X or Y` 这种「一眼就是取加载器」的算子对。
-///
-/// 做法：两个名字（"loadstring"、"load"）登记进统一流，以**数字密文**落盘，
-/// 运行期才解回字符串；再从环境表按名字取用。环境表沿用产物他处的同一式
-/// `(getfenv and getfenv() or _ENV or _G)`（lua5.1 / luau / Roblox 执行器都适用）。
-///
-/// 返回 `(前置语句, 变量名)`：语句里落下取自环境表的加载器（取不到就是 nil，
-/// 调用点自然失败，与旧式 `loadstring or load` 同为 nil 的行为一致）。
-/// `pre` 给定时优先使用该表达式（例如探测结果 `v_pload`），取不到才回落到环境表。
-pub fn loader_lookup(
-    uni: &mut UniStream, rng: &mut GenRng, pre: Option<&str>, decls: bool,
-) -> (String, String) {
-    let id_ls = uni.register("loadstring");
-    let id_ld = uni.register("load");
-    let (st_ls, ex_ls) = uni.fetch(rng, id_ls);
-    let (st_ld, ex_ld) = uni.fetch(rng, id_ld);
-    // decls=false：变量由调用方在更外层声明（值在运行期才赋）——用于必须保持
-    // 「先声明、后定义」顺序的场景（如壳内 f_load 前的 env 变量）
-    let (v_ls, v_ld, v_env, v_ldr) = (rng.name(), rng.name(), rng.name(), rng.name());
-    let head = if decls {
-        format!("local {ls},{ld}; ", ls = v_ls, ld = v_ld)
-    } else {
-        String::new()
-    };
-    let pick = match pre {
-        Some(p) => format!("{p} or {env}[{ls}] or {env}[{ld}]", p = p, env = v_env, ls = v_ls, ld = v_ld),
-        None => format!("{env}[{ls}] or {env}[{ld}]", env = v_env, ls = v_ls, ld = v_ld),
-    };
-    let stmts = format!(
-        "{head}local {env}=(getfenv and getfenv() or _ENV or _G); {s1}{s2}{ls}={e1}; {ld}={e2}; local {ldr}={pick}; ",
-        head = head, env = v_env, s1 = st_ls, s2 = st_ld,
-        ls = v_ls, ld = v_ld, e1 = ex_ls, e2 = ex_ld, ldr = v_ldr, pick = pick);
-    (stmts, v_ldr)
-}
-
-/// 生成「只认原生 C 函数」的 loadstring 探测代码（防执行器/沙盒把 loadstring
-/// 换成 Lua 钩子）。三个标识符由调用方从各自的命名池里取：
-/// `nat` = isNative、`getf` = 取用函数、`pl` = 最终使用的 loadstring 变量。
-///
-/// 语义：按「当前环境 `loadstring`」→ `getrenv()['loadstring']` → `getrenv()['load']`
-/// →「当前环境 `load`」的顺序找**原生**的那一个；一个原生都没有时退回第一个可用的函数。
-/// 四个候选全部按**运行期还原的名字**从环境表取用（`loadstring`/`load` 两个标识符
-/// 不在产物里出现，名字经统一流以数字密文落盘、运行期才解出）
-/// （保证产物在完全没有原生候选的环境里还能跑；要改成「找不到就失败」，
-/// 把最后那句 `return alt` 换成 `return nil` 即可）。
-///
-/// 线性逻辑/数据流同样打乱：定位到原生候选后用改下标的方式跳出循环
-/// （而不是 return），末尾再用影子变量返回。
-///
-/// 注意一（改名器）：这段代码会进 VM 文本、过一遍压缩器的**成员改名器**，
-/// 所以 `debug.getinfo` / `info.what` / `info.source` 一律写成**字符串键**，
-/// 绝不能写成点访问 —— 改名器只改 `.名字`/`:名字`，字符串键不动；
-/// 写点访问会被改成随机名，探测永远走兜底分支、形同虚设。
-///
-/// 注意二（明文）：字符串键留在产物里本身也是特征（`['getinfo']`、`'=[C]'`
-/// 一眼就是「原生函数探测」），所以下面 9 个字符串**全部 XOR 加密**，
-/// 以 `"\ddd\ddd…"` 十进制转义字面量出现，运行时用纯算术异或解回来
-/// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
-/// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
-/// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
-pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream, rng: &mut GenRng) -> String {
-    // ── 要隐藏的字符串（九件套 + 三个类型名）全并入统一流（㉓）──
-    const PLAIN: [&str; 9] = [
-        "getinfo",    // info 表的键
-        "what",       // 判定是否为原生函数
-        "C",          // what 的值
-        "source",     // 源名
-        "=[C]",       // 原生函数的 source 形状
-        "getgenv",    // 执行器环境表键
-        "getrenv",    // 执行器环境表键
-        "loadstring", // 候选名
-        "load",       // 候选名
-    ];
-    // 逐串登记进统一流；取用在各函数体内**惰性**发生：第一次走进才解密，
-    // 其后命中缓存直通（共享串第二次解码逻辑上无分支）。密文纯数字，零字面量。
-    let mut ids: Vec<usize> = Vec::with_capacity(PLAIN.len() + 3);
-    for ptxt in PLAIN.iter() { ids.push(uni.register(ptxt)); }
-    let id_s = uni.register("S");
-    let id_table = uni.register("table");
-    let id_function = uni.register("function");
-    let mut exprs: Vec<String> = Vec::new();
-    let mut stmts: Vec<String> = Vec::new();
-    for &id in ids.iter() {
-        let (st, ex) = uni.fetch(rng, id);
-        stmts.push(st); exprs.push(ex);
-    }
-    let (st_s, ex_s) = uni.fetch(rng, id_s);
-    let (st_table, ex_table) = uni.fetch(rng, id_table);
-    let (st_fn, ex_fn) = uni.fetch(rng, id_function);
-
-    let v_d = rng.name(); let v_gi = rng.name();
-    let v_ok = rng.name(); let v_inf = rng.name();
-    // nat：用到 getinfo/what/C/source/=[C]/S/table/function
-    let nat_stmts = format!("{}{}{}{}{}{}{}{}",
-        stmts[0], stmts[1], stmts[2], stmts[3], stmts[4], st_s, st_table, st_fn);
-    let nat_body = format!(
-        "local function {nat}({f}) \
-            local {d} = debug; {stms} \
-            if type({d}) ~= {sc_t} then return true end; \
-            local {gi} = {d}[{k1}]; \
-            if type({gi}) ~= {sc_f} then return true end; \
-            local {ok}, {inf} = pcall({gi}, {f}, {sc_s}); \
-            if not {ok} or type({inf}) ~= {sc_t} then return true end; \
-            return {inf}[{k2}] == {k3} and {inf}[{k4}] == {k5}; \
-        end; ",
-        nat = nat, f = rng.name(), d = v_d, stms = nat_stmts,
-        sc_t = ex_table, sc_f = ex_fn, sc_s = ex_s,
-        gi = v_gi, k1 = exprs[0], ok = v_ok, inf = v_inf,
-        k2 = exprs[1], k3 = exprs[2], k4 = exprs[3], k5 = exprs[4]);
-
-    // getf：用到 getgenv/getrenv/loadstring/load/function（table/function 命中缓存）
-    let (v_g, v_gg, v_ge, v_env2) = (rng.name(), rng.name(), rng.name(), rng.name());
-    let (v_list, v_alt, v_i2, v_n2, v_f2, v_t2) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-    let getf_stmts = format!("{}{}{}{}{}{}{}",
-        stmts[5], stmts[6], stmts[7], stmts[8], st_fn, st_table, st_s);
-    let getf_body = format!(
-        "local function {getf}() \
-            local {g} = (getfenv and getfenv()) or _G; {stms} \
-            local {gg} = {g}[{k6}]; \
-            if type({gg}) == {sc_f} then {g} = {gg}() or {g}; end; \
-            local {ge} = {g}[{k7}]; \
-            local {env} = {g}; \
-            if type({ge}) == {sc_f} then {env} = {ge}() or {g}; end; \
-            local {list} = {{ {g}[{k8}], {env}[{k8}], {env}[{k9}], {g}[{k9}] }}; \
-            local {alt}, {i} = nil, 0; \
-            local {n} = #{list}; \
-            while {i} < {n} do \
-                {i} = {i} + 1; \
-                local {f} = {list}[{i}]; \
-                local {t} = type({f}); \
-                if {t} == {sc_f} then \
-                    if {nat}({f}) and {alt} == nil then {alt} = {f}; {i} = {n}; end; \
-                    if {alt} == nil then {alt} = {f}; end; \
-                end; \
-            end; \
-            return {alt}; \
-        end; \
-        local {pl} = {getf}();\n",
-        getf = getf, g = v_g, stms = getf_stmts,
-        gg = v_gg, k6 = exprs[5], sc_f = ex_fn, ge = v_ge, k7 = exprs[6],
-        env = v_env2, list = v_list, k8 = exprs[7], k9 = exprs[8],
-        alt = v_alt, i = v_i2, n = v_n2, f = v_f2, t = v_t2,
-        nat = nat, pl = pl);
-    format!("{}{}", nat_body, getf_body)
 }
 
 /// 把明文按密钥异或后写成 Lua 的 `\ddd` 十进制转义字符串字面量。

@@ -208,52 +208,97 @@ impl ControlFlowBuilder {
     }
 
     fn generate_opaque_predicate(val: i64, var_name: &str, comp_op: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
-        // ── 谓词池（多样化 ⑤）：四族不透明谓词，按节点随机抽取——
-        // 全部恒等于「(var) <op> val」：
-        //   A 加法式（原版）：(a<=a and a or j)+k <op> v+k
-        //   B 双差式：a-(a and a or j)+k2 <op> v+k2（sel 恒真→减自身=0，平移抵消）
-        //   C 按位族：BA(a,0XFFFF) 截低 16 位（路由值 0..27 恒等）
-        //   D 交换式：(j>a and j or (a<=a and a)) 恒取 a
-        let fam = rng.range(0, 4);
-        let key = rng.range(0x10, 0xFFF) as i64;
-        let mutated_val = val.wrapping_add(key);
-        let jn = Self::format_num(rng.range(0, 0xFFFF) as i64, rng);
+        // 改进项二：与 Generator_util::ControlFlowBuilder::generate_opaque_predicate 同步，
+        // 彻底消除「R<=R and R or J」单一锚点，混用 8 种变量恒等包装 + 6 族异构代数变换 + 严格/非严格/换边。
+        let jn = Self::format_num(rng.range(0x10, 0xFFFF) as i64, rng);
+        let ka = rng.range(0x10, 0x7FFF) as i64;
+        let kb = ka + rng.range(0x1, 0x7FF) as i64;
+        let (ka_s, kb_s) = (Self::format_num(ka, rng), Self::format_num(kb, rng));
+        let x_expr = match rng.range(0, 8) {
+            0 => var_name.to_string(),
+            1 => format!("({v} and {v} or {j})", v = var_name, j = jn),
+            2 => format!("({a}~={b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
+            3 => format!("({a}=={b} and {j} or {v})", a = ka_s, b = kb_s, j = jn, v = var_name),
+            4 => format!("({v}>=0X0 and {v} or {j})", v = var_name, j = jn),
+            5 => format!("({v}~={v} and {j} or {v})", v = var_name, j = jn),
+            6 => format!("(not(not {v}) and {v} or {j})", v = var_name, j = jn),
+            _ => format!("({a}<{b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
+        };
+        let is_le = comp_op == "<=";
+        let use_strict = rng.range(0, 2) == 0;
+        let swap_sides = rng.range(0, 2) == 0;
+        let t_val = if use_strict { val.wrapping_add(1) } else { val };
         let g1 = Self::format_num(keys.grp1 as i64, rng);
         let kadd = Self::format_num(keys.key_add as i64, rng);
         let kba = Self::format_num(keys.key_ba as i64, rng);
         let add_call = format!("{}[{}][{}](", keys.tbl_p, g1, kadd);
-        match fam {
-            0 => format!("{}[{}][{}]({}<={} and {} or {},{}){}{}",
-                keys.tbl_p, g1, kadd,
-                var_name, var_name, var_name, jn,
-                Self::format_num(key, rng), comp_op, Self::format_num(mutated_val, rng)),
+        let (lhs_x, rhs_t, eff_le, eff_strict) = match rng.range(0, 6) {
+            0 => {
+                let k = rng.range(0x10, 0xFFF) as i64;
+                let ks = Self::format_num(k, rng);
+                let lx = if rng.range(0, 2) == 0 {
+                    format!("{add}{x},{k})", add = add_call, x = x_expr, k = ks)
+                } else {
+                    format!("{add}{k},{x})", add = add_call, x = x_expr, k = ks)
+                };
+                (lx, Self::format_num(t_val.wrapping_add(k), rng), is_le, use_strict)
+            }
             1 => {
-                let k2 = rng.range(0x10, 0xFFF) as i64;
-                // 双差式：add(V,k2)-(k2 and k2 or 0) ≡ V（add 两参数齐全）
-                format!("{}{},{})-({} and {} or {}){}{}",
-                    add_call,
-                    var_name, Self::format_num(k2, rng),
-                    Self::format_num(k2, rng), Self::format_num(k2, rng), Self::format_num(0, rng),
-                    comp_op, Self::format_num(val, rng))
+                let k1 = rng.range(0x20, 0xFFF) as i64;
+                let k2 = rng.range(0x10, 0x7FF) as i64;
+                let (k1s, k2s) = (Self::format_num(k1, rng), Self::format_num(k2, rng));
+                let lx = if rng.range(0, 2) == 0 {
+                    format!("({add}{x},{k1})-{k2})", add = add_call, x = x_expr, k1 = k1s, k2 = k2s)
+                } else {
+                    format!("(({x}-{k2})+{k1})", x = x_expr, k1 = k1s, k2 = k2s)
+                };
+                (lx, Self::format_num(t_val.wrapping_add(k1).wrapping_sub(k2), rng), is_le, use_strict)
             }
             2 => {
-                // 按位族：band(V,低16位全1掩码)+key ≡ V+key（掩码随 build 随机化避免定值指纹）
-                let ba_mask = 0xFFFF + (rng.range(0, 0x10) as i64) * 0x10000;
-                format!("{}[{}][{}]({}[{}][{}]({}<={} and {} or {},{}),{}){}{}",
-                    keys.tbl_p, g1, kadd,
-                    keys.tbl_p, g1, kba,
-                    var_name, var_name, var_name, jn,
-                    Self::format_num(ba_mask, rng), Self::format_num(key, rng),
-                    comp_op, Self::format_num(mutated_val, rng))
+                let r = rng.range(0x100, 0xFFFF) as i64;
+                let k = t_val.wrapping_add(r);
+                let ks = Self::format_num(k, rng);
+                let lx = format!("({k}-{x})", k = ks, x = x_expr);
+                (lx, Self::format_num(r, rng), !is_le, !use_strict)
             }
-            // ㉚④：D 族原「var+key-key」零填充是同值自抵消暴露形态——
-            // 改纯 select 链（两支都恒取 var，无算术痕迹）
-            _ => format!("{}({}<{} and {} or ({}<={} and {} or {})),{}){}{}",
-                add_call,
-                jn, var_name, var_name,
-                var_name, var_name, var_name, jn,
-                Self::format_num(key, rng),
-                comp_op, Self::format_num(mutated_val, rng))
+            3 => {
+                let ba_mask = 0xFFFF + (rng.range(0, 0x10) as i64) * 0x10000;
+                let k = rng.range(0x10, 0xFFF) as i64;
+                let lx = format!("{add}{p}[{g1}][{kba}]({x},{m}),{k})",
+                    add = add_call, p = keys.tbl_p, g1 = g1, kba = kba, x = x_expr,
+                    m = Self::format_num(ba_mask, rng), k = Self::format_num(k, rng));
+                (lx, Self::format_num(t_val.wrapping_add(k), rng), is_le, use_strict)
+            }
+            4 => {
+                let s = [2i64, 3, 5, 7][rng.range(0, 4)];
+                let k = rng.range(0x10, 0xFFF) as i64;
+                let lx = format!("({x}*{s}+{k})", x = x_expr, s = Self::format_num(s, rng), k = Self::format_num(k, rng));
+                (lx, Self::format_num(t_val.wrapping_mul(s).wrapping_add(k), rng), is_le, use_strict)
+            }
+            _ => {
+                let s = [2i64, 3, 4, 5][rng.range(0, 4)];
+                let r = rng.range(0x100, 0xFFFF) as i64;
+                let k = t_val.wrapping_mul(s).wrapping_add(r);
+                let lx = format!("({k}-{x}*{s})", k = Self::format_num(k, rng), x = x_expr, s = Self::format_num(s, rng));
+                (lx, Self::format_num(r, rng), !is_le, !use_strict)
+            }
+        };
+        if !swap_sides {
+            let op_str = match (eff_le, eff_strict) {
+                (true, false) => "<=",
+                (true, true) => "<",
+                (false, false) => ">",
+                (false, true) => ">=",
+            };
+            format!("{}{}{}", lhs_x, op_str, rhs_t)
+        } else {
+            let op_str = match (eff_le, eff_strict) {
+                (true, false) => ">=",
+                (true, true) => ">",
+                (false, false) => "<",
+                (false, true) => "<=",
+            };
+            format!("{}{}{}", rhs_t, op_str, lhs_x)
         }
     }
 

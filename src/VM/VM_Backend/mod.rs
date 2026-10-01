@@ -1,9 +1,11 @@
 pub mod Context;
 pub mod Generator;
 pub mod Generator_chain;
+pub mod Generator_chain_tail;
 pub mod Generator_flow;
 pub mod Generator_unistream;
 pub mod Generator_util;
+pub mod Generator_rewrite;
 pub mod Generator_kdf;
 pub mod Generator_native;
 pub mod Generator_chacha;
