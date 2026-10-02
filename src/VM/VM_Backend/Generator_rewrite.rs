@@ -720,7 +720,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let l_count = r.read_u32();
     // ③ 汇总校验：lines 槽写「计数 1 + 4B 聚合值」（读侧 debug 态读回、与常量态累计值比对）
     w.extend_from_slice(&1u32.to_le_bytes());
-    w.extend_from_slice(&agg18.to_le_bytes());
+    // 目标一② 层间耦合：整函数汇总值再与「本原型 payload 明文头部字段」混一项
+    // （kp18/pb18 = 读侧 chunk.pf_ld/pf_lld 承载的两个值，只以密文形态存在于 payload）。
+    // 读侧在挂载 aggf 时同式混入相同分量 ⇒ 比对恒成立；但校验值本身不再能脱离
+    // 层间数据独立验证：改任一层的头部字段、只解一半管线都得不到一致的汇总值。
+    let mix18: u32 = kp18 ^ pb18.rotate_left(7);
+    w.extend_from_slice(&(agg18 ^ mix18).to_le_bytes());
     r.read_bytes((l_count * 4) as usize);
     let loc_count = r.read_u32();
     w.extend_from_slice(&0u32.to_le_bytes());

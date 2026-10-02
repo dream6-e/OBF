@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，229,923 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），113,866 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，284,402 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，229,998 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），113,442 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，290,149 B |
 
 前两个都通过 `luac5.1 -p` 与 `luau-compile --binary`，并在 `lua5.1`、`luau` 下运行验证；stdout 与原文件逐字节一致（19 行）。
 

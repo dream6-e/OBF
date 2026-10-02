@@ -804,10 +804,15 @@ lua.push_str(&format!(
                     i = v_ch_i, n = v_ch_n, a5 = fn_a5, pj = pj_name, pk6 = pk6,
                     t = t, rd = fn_read_dec, rdl = rdl));
                 // ③ 收尾：聚合值 + 投毒闭包挂到本次解码的 chunk 表（debug 态比对后调用）
+                // 目标一② 层间耦合（读侧）：汇总值挂载前与本原型明文头部字段同式混入
+                // （写侧落盘值 = agg18 ^ (kp18 ^ rotl(pb18,7))）；诱饵槽仍走 `or 0X0`。
+                let mx_expr = format!("{bx}({c}.{pld},{rot}({c}.{plld},0X7))",
+                    bx = fn_bxor, c = fn_c, pld = pf_ld_key, plld = pf_lld_key, rot = fn_rotl);
                 let (pk, pv) = (rng.name(), rng.name());
                 lua.push_str(&format!(
-                    "{c}.{aggf}={agg}; {c}.{pf}=function() for {k},{v} in pairs({ecb}) do if type({v})=='table' then {v}[0X3]=({v}[0X3]*0X7+0X3)%{m32} end end end; ",
-                    c = fn_c, aggf = agg_field, agg = agg_name, pf = poison_fn,
+                    "{c}.{aggf}=({bx})({agg},{mx}); {c}.{pf}=function() for {k},{v} in pairs({ecb}) do if type({v})=='table' then {v}[0X3]=({v}[0X3]*0X7+0X3)%{m32} end end end; ",
+                    c = fn_c, aggf = agg_field, agg = agg_name, pf = poison_fn, mx = mx_expr,
+                    bx = fn_bxor,
                     k = pk, v = pv, ecb = ecb_n, m32 = m32));
                 // 返回值：常量态代码 + 汇总值字段名 + 投毒闭包字段名（debug 态用）
                 (lua, agg_field, poison_fn)
