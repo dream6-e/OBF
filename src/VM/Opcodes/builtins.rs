@@ -57,7 +57,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng, perm: 
 /// GETTABLE(A,B,C)+CALL(A,1,1)（零参点调用）。后两族与 builtin 槽位无关，
 /// 各占一个额外索引（`FUSED_OP_COUNT - 2` / `FUSED_OP_COUNT - 1`）。
 pub const FUSED_OP_BASE: usize = TOTAL_OPCODES;
-pub const FUSED_OP_COUNT: usize = BUILTIN_NAMES.len() * 2 + 2;
+pub const FUSED_OP_COUNT: usize = BUILTIN_NAMES.len() * 2 + 3;
 
 /// 仅为本产物中实际触发融合的槽位生成 handler，避免扩张 BST 分发树。
 pub fn generate_fused(
@@ -131,6 +131,33 @@ pub fn generate_fused(
             "{{STK}}[{a}] = {tab}[{key}]; for {fj}={a}+{two}, {{TOP}} do {{STK}}[{fj}]=nil end; zm({{STK}}[{a}]()); {{STK}}[{a}]=nil; {{PC}} = {{PC}} + {one}",
             a=a, tab=tab, key=key, fj=fj, one=one, two=two
         )));
+    }
+    // 族五：GETTABLE(A,B,C) + EQ(cond, A, RK) —— 取字段 + 比较（目标二第 2 条）。
+    // 线上布局：A=打包值（低 8 位=目标寄存器、次 9 位=比较另一侧的 RK、次 1 位=EQ 的
+    // 条件位、高位=gap 即「比较记录相对本记录的条数」，总计 26 位，双精度整数运算精确）；
+    // B=表寄存器；C=键 RK。语义与原两条逐位等价：写回 STK[A]、按
+    // (v==other)~=(cond~=0) 决定落在原 EQ 之后那条 JMP 上（照常执行它）还是越过它。
+    let family5 = n_builtins * 2 + 2;
+    if used.contains(&family5) && !m[family5].is_empty() {
+        let mut h = OpcodeBuilder::new(m[family5].clone(), cfg, rng);
+        let tab = h.reg(3);
+        let key = h.rk(4);
+        let pa = h.raw_inst(2);
+        let a_names: Vec<String> = (0..6).map(|_| h.rng.name()).collect();
+        let (v, dr, rkv, cd, gp, ot) = (a_names[0].clone(), a_names[1].clone(), a_names[2].clone(), a_names[3].clone(), a_names[4].clone(), a_names[5].clone());
+        let (r1, r2) = (h.rng.name(), h.rng.name());
+        let (c256, c512, c127) = (super::ident(h.rng, 0x100), super::ident(h.rng, 0x200), super::ident(h.rng, 0x7F));
+        let (c2, c17, c18) = (super::ident(h.rng, 2), super::ident(h.rng, 0x20000), super::ident(h.rng, 0x40000));
+        let one = super::ident(h.rng, 1);
+        out.push_str(&h.build(&format!(
+            "local {v}={tab}[{key}]; local {dr}={pai}%{c256}; local {r1}={pai}-{dr}; \
+             local {rkv}=({r1}/{c256})%{c512}; local {r2}={r1}-{rkv}*{c256}; \
+             local {cd}=({r2}/{c17})%{c2}; local {gp}=({r2}-{cd}*{c17})/{c18}; \
+             local {ot}; if {rkv}>{c127} then {ot}={{CONSTS}}[{rkv}-{c127}] else {ot}={{STK}}[{rkv}] end; \
+             {{STK}}[{dr}]={v}; \
+             if (({v}=={ot})~=({cd}~=0X0)) then {{PC}}={{PC}}+{gp}+{one} else {{PC}}={{PC}}+{gp} end",
+            v = v, tab = tab, key = key, dr = dr, r1 = r1, rkv = rkv, r2 = r2, cd = cd, gp = gp, ot = ot,
+            pai = pa, c256 = c256, c512 = c512, c127 = c127, c2 = c2, c17 = c17, c18 = c18, one = one)));
     }
     out
 }

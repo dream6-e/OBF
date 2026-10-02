@@ -340,6 +340,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let n_insts = raw_insts.len();
     let mut i = 0usize;
     let mut fused_count = 0usize;
+    // 族五专用：冻结窗口内不做族一~族四融合。handler 按「本记录 → 比较记录」的
+    // **记录条数**跳转，只有该区间内一条不折叠，写侧算出的 gap 才与运行期一致。
+    let mut freeze_until: usize = 0;
+    // 已被前面融合吞成死槽的记录：族二的第二个槽是 GETTABLE，族五必须跳过它
+    // （否则会把「内建取字段」当成表的取字段再取一遍，写坏目标寄存器）。
+    let mut fused_dead: HashSet<usize> = HashSet::new();
     // #3 折叠扫描状态：pc18=已写出指令数（1-based，与 Lua 数组下标一致）；
     // fold_map[li] = Σ f(pc)（对判定为引用本常量槽的指令求和）
     let mut fold_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
@@ -361,6 +367,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         // ---- SuperOperator: builtin-load + LoadK + Call(B=2, C=1) -> 1 条 ----
         if (op == getglobal_op || op == getglobalstr_op)
             && i + 1 < n_insts
+            && i >= freeze_until
             && !jump_targets.contains(&(i + 1))
         {
             // i == 0 是函数入口，没有前驱指令，控制流只能从这里开始，天然安全；
@@ -406,6 +413,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
                             if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
                             if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+                            fused_dead.insert(i + 1);
+                            fused_dead.insert(i + 2);
                             i += 1;
                             continue;
                         }
@@ -448,6 +457,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                             chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
                             if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
                             if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+                            fused_dead.insert(i + 1);
+                            fused_dead.insert(i + 2);
                             i += 1; // i+1 / i+2 照常写出，成为永不执行的死槽
                             continue;
                         }
@@ -487,7 +498,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         // 按同式换回）；与族一/族二共用同一条 CALL 收尾约定（1 返回值、丢弃结果）。
         {
             let real_prev = inverse_opcode_map[op as usize];
-            let fam: Option<usize> = if real_prev == 11 && i + 1 < n_insts {
+            let fam: Option<usize> = if i < freeze_until { None } else if real_prev == 11 && i + 1 < n_insts {
                 let (op2, a2, b2, c2) = raw_insts[i + 1];
                 if inverse_opcode_map[op2 as usize] == 28 && a2 == a && b2 == 2 && c2 == 1 {
                     Some(crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2)
@@ -541,8 +552,87 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
                         if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
                         if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+                        fused_dead.insert(i + 1);
                         i += 1; // 被融合的那条 CALL 照常写出，成为永不执行的死槽
                         continue;
+                    }
+                }
+            }
+        }
+        // ---- SuperOperator 族五：取字段 + 比较（目标二第 2 条）----
+        // 形状：GETTABLE(A,B,C) 紧跟 EQ(cond, A, RK_other)，再跟 JMP。序列化器会把基本块
+        // 打乱：两者可能紧邻，也可能被别的块隔开、由重排器插入的桥接 JMP 直指比较块。
+        // 两种形态都融合，用 gap 记住「比较记录相对本记录的条数」（族五冻结窗口保证该
+        // 区间内不再发生别的折叠，条数在写侧与运行期严格一致）。
+        // 融合后：A = 打包(dest | RK_other<<8 | cond<<17 | gap<<18)，B = 表寄存器，
+        // C = 键 RK；EQ 与其后的 JMP 照旧留在流里——handler 算出 (v==other)~=(cond~=0)，
+        // 为真则越过那条 JMP，否则落在它上面照常执行，等价于原来两条指令。
+        {
+            let real5 = inverse_opcode_map[op as usize];
+            if real5 == 6 && i >= freeze_until && !fused_dead.contains(&i) && i + 1 < n_insts {
+                // 比较记录位置 j：紧邻（gap=1），或桥接 JMP 直指（gap=j-i）
+                let mut cand: Option<(usize, u32)> = None;
+                let (op1, _a1, b1, _c1) = raw_insts[i + 1];
+                if inverse_opcode_map[op1 as usize] == 23 && !jump_targets.contains(&(i + 1)) && i + 2 < n_insts {
+                    cand = Some((i + 1, 1));
+                } else if inverse_opcode_map[op1 as usize] == 22 {
+                    let t = (i + 2) as i64 + b1 as i32 as i64;
+                    if t >= (i + 2) as i64 && t - i as i64 <= 255 && (t as usize) + 1 < n_insts {
+                        if inverse_opcode_map[raw_insts[t as usize].0 as usize] == 23 {
+                            cand = Some((t as usize, (t - i as i64) as u32));
+                        }
+                    }
+                }
+                if let Some((j, gap)) = cand {
+                    let (_eq_op, eq_a, eq_b, eq_c) = raw_insts[j];
+                    let is_jmp_after = inverse_opcode_map[raw_insts[j + 1].0 as usize] == 22;
+                    // EQ 的某一侧必须是本条的 A（否则比较的不是刚取的字段，不能融合）
+                    let other_raw = if eq_b == a as u32 { Some(eq_c) } else if eq_c == a as u32 { Some(eq_b) } else { None };
+                    let cond = eq_a.min(1) as u32;
+                    if is_jmp_after {
+                        if let Some(oth_raw) = other_raw {
+                            // B 是寄存器域（GETTABLE.b_mode=REG）、C 是 RK：常量域照旧洗牌映射
+                            let c_alive = c < BITRK || !omit_const.contains(&((c - BITRK) as usize));
+                            let oth = if oth_raw >= BITRK {
+                                let oi = (oth_raw - BITRK) as usize;
+                                if omit_const.contains(&oi) { None } else { Some(remap_rk(oth_raw)) }
+                            } else { Some(oth_raw) };
+                            let fused_vals = fused_map.get(crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 2)
+                                .map(|v| v.as_slice()).unwrap_or(&[]);
+                            if let (true, Some(oth)) = (c_alive, oth) {
+                                if !fused_vals.is_empty() {
+                                    let packed: u32 = (a as u32) | ((oth & 0x1FF) << 8)
+                                        | ((cond & 1) << 17) | ((gap & 0xFF) << 18);
+                                    let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
+                                    let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
+                                    let a_enc = packed.wrapping_add(mag);
+                                    let ce18 = remap_rk(c);
+                                    let (fb0, fc0) = if mag % 2 == 1 { (ce18, b) } else { (b, ce18) };
+                                    let (eo18, ca18, cb18, cc18) = ch_split(chain18);
+                                    let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+                                    let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
+                                    let mag_file = g18 ^ kp18;
+                                    w.extend_from_slice(&mag_file.to_le_bytes());
+                                    w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
+                                    w.extend_from_slice(&fb.to_le_bytes());
+                                    w.extend_from_slice(&fc.to_le_bytes());
+                                    inst_junk(w, mag_file, rng);
+                                    fused_used.insert(crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 2);
+                                    fused_count += 1;
+                                    pc18 += 1;
+                                    let r718 = roll18.rotate_left(7);
+                                    roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+                                    chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
+                                    if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
+                                    if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+                                    // 冻结到比较 JMP 之后；比较记录本体作为死槽照常写出
+                                    freeze_until = (j + 2).max(freeze_until);
+                                    fused_dead.insert(j);
+                                    i += 1;
+                                    continue;
+                                }
+                            }
+                        }
                     }
                 }
             }
