@@ -92,6 +92,7 @@ pub fn build_scatter(
     v_rd_o: &str, v_rd_g: &str, v_rd_e: &str, v_rd_c1: &str, v_rd_c2: &str,
     v_rd_c3: &str, v_rd_c4: &str, v_rd_c5: &str,
     sc_add: u8, sc_rot_in: u32, sc_add_k1: u8, sc_mul_k2: u8, sc_rot_k2: u32, sc_rot_k4: u32,
+    var_whiten: &str, whiten_mul_s: &str, whiten_add_s: &str, var_cursor: &str,
 ) -> String {                // ──⑥ 滚动读取器打散
                 // 真实顺序只在键名/调度表
                 // 循环壳与假出口逐产物随机 —— 静态读产物看不出解密链
@@ -170,10 +171,22 @@ pub fn build_scatter(
                 let fake = if inc.is_empty() { String::new() } else {
                     format!("if {g}>{big} then {g}={sl} end; ", g = v_rd_c3, big = big, sl = sl)
                 };
+                // ㉛ 载荷白化步：位置相关掩码，密钥=根 KDF 派生（运行期才有）。
+                // 位置取 a3() 调用前的游标（=该字节在载荷里的 1-based 下标），
+                // 与 Rust 侧 whiten_byte(seed, pos) 逐位同式；upds 用的是链值
+                // （白化后的明文），与写侧 orig 一致——顺序不能颠倒。
+                let wq = rng.name();
+                // 模数 2^31-1（Lehmer）：以 (0X80000000-0X1) 算式拼写，无指数字面量
+                let wmod = format!("(0X{:X}-0X1)", 0x80000000u64);
+                let (wmul, wadd) = (whiten_mul_s, whiten_add_s);
+                let whiten_step = format!(
+                    "{cur}={cur}+0X1 local {wq}={cur} {wq}=({seed}+({wq}*{mul}))%{mod}; {wq}=({wq}*{mul}+{add})%{mod}; {wq}=({wq}*{mul}+0X1)%{mod}; {o}={bx}({o},{wq}%256); ",
+                    wq = wq, cur = var_cursor, seed = var_whiten, mul = wmul, mod = wmod, add = wadd,
+                    o = v_rd_o, bx = fn_bxor);
                 lua.push_str(&format!(
-                    "local function {rd}() local {o}=0; {open}local {raw}={a3}() {chain}{upds}{fake}{inc}{close}return {o} end; ",
+                    "local function {rd}() local {o}=0; {open}local {raw}={a3}() {chain}{whiten}{upds}{fake}{inc}{close}return {o} end; ",
                     rd = fn_read_dec, o = v_rd_o, open = open, raw = v_rd_e, a3 = fn_a3,
-                    chain = chain, upds = upds, fake = fake, inc = inc, close = close
+                    chain = chain, whiten = whiten_step, upds = upds, fake = fake, inc = inc, close = close
                 ));
                 lua
 }
@@ -771,12 +784,12 @@ pub fn build_header(
     rng: &mut GenRng, keys: &CipherKeys, fn_s_byte: &str, fn_s_sub: &str, var_raw_p: &str,
     payload_str: &str, var_chk: &str, var_idx: &str, var_junk: &str, var_b: &str, var_tamper: &str,
     var_vc: &str, var_p: &str, var_a2: &str, entry_func: &str, fn_a3: &str, x: &str,
-    fn_lit: &str, mode_lit: &str, k_lit: &str,
+    fn_lit: &str, mode_lit: &str, k_lit: &str, var_whiten: &str, var_whiten_pos: &str,
 ) -> String {
     // ㉓-D 去 KRYVEX 包裹标记（水印注释保留）：raw_p 直接是载荷本体；
     // 校验和循环照旧消费前 6 字节（原标记长度），读取偏移相应 -6。
     // D18_OFF 必须等于被移除标记 "KRYVEX" 的长度。
-    format!("local {}, {} = {}, {}; local {} = ([=[{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}-{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, rng.obfuscate_num(6i64, 1, &keys), var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3)
+    format!("local {}, {} = {}, {}; local {} = ([=[{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}-{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); local {wk}=0X0; local {wp}=0X4; ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, rng.obfuscate_num(6i64, 1, &keys), var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3, wk = var_whiten, wp = var_whiten_pos)
 }
 
 /// 数值解码器（ChaCha 链式解密后按 IEEE-754 还原 double）—— 拆出。

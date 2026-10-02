@@ -43,6 +43,10 @@ pub(super) struct ChainIn {
     pub pf_protos: String,
     pub psn_n: String,
     pub var_a2: String,
+    pub var_whiten: String,
+    pub var_whiten_pos: String,
+    pub whiten_mul: u64,
+    pub whiten_add: u64,
     pub var_b: String,
     pub var_builtin_reg: String,
     pub var_chk: String,
@@ -159,6 +163,10 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         pf_protos,
         psn_n,
         var_a2,
+        var_whiten,
+        var_whiten_pos,
+        whiten_mul,
+        whiten_add,
         var_b,
         var_builtin_reg,
         var_chk,
@@ -330,6 +338,18 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let kdf_m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
         block_chacha_setup.push_str(&crate::VM::VM_Backend::Generator_kdf::kdf_fn_decl(
             &mut rng, &keys, kdf_name.as_str(), fn_xor32.as_str(), fn_rotl32.as_str(), kdf_m32v.as_str()));
+        // ㉛ 载荷白化种子：kdf(根字, 专用组号, 字序号) —— 与 Rust 侧
+        // `Generator::whiten_byte` 的 seed 同式同值。读者侧 read_dec 以
+        // (seed, 位置) 现算掩码字节，故产物里落不下任何白化参数：
+        // 要还原载荷结构，必须先装出根 K0（另一层）再复刻 KDF。
+        {
+            let wg = rng.obfuscate_num(crate::VM::VM_Backend::Generator::WHITEN_GROUP as i64, 1, &keys);
+            let ww = rng.obfuscate_num(crate::VM::VM_Backend::Generator::WHITEN_WORD as i64, 1, &keys);
+            // 与 Rust 侧 `w % 2147483646 + 1` 同式：模 2^31-2 后 +1（避开 0 不动点）
+            let wmod = rng.obfuscate_num(2147483646i64, 1, &keys);
+            let seed = format!("{kdf}({root},{g},{w})", kdf = kdf_name, root = root_fetch[3], g = wg, w = ww);
+            block_chacha_setup.push_str(&format!("{wk}=({seed}%{m})+0X1; ", wk = var_whiten, seed = seed, m = wmod));
+        }
         let m_qr1 = mk_m(&mut rng); let m_qr2 = mk_m(&mut rng);
         let x32 = fn_xor32.as_str(); let rt = fn_rotl32.as_str();
         let mk_qr = |rng: &mut GenRng,
@@ -664,8 +684,11 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
             var_chk.as_str(), var_idx.as_str(), var_junk.as_str(), var_b.as_str(), var_tamper.as_str(),
             var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
-            sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str());
+            sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str(), var_whiten.as_str(), var_whiten_pos.as_str());
         let block_dec_header = format!("{fun_stmt}{mode_stmt}{k_stmt}") + &block_dec_header;
+        // ㉛ 白化参数（逐构建随机）的产物侧拼写——read_dec 内每字节现算掩码用
+        let rng_whiten_mul_s = rng.obfuscate_num(whiten_mul as i64, 1, &keys);
+        let rng_whiten_add_s = rng.obfuscate_num(whiten_add as i64, 1, &keys);
         // ── 解码链（第 6 项：解密逻辑打乱）──
         // 冷路径一次性函数，放心打乱形态。
         let (v_bx_a, v_bx_b, v_bx_r, v_bx_w, v_bx_g, v_bx_s) =
@@ -702,7 +725,8 @@ rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
                 &v_bx_a, &v_bx_b, &v_bx_r, &v_bx_w, &v_bx_g, &v_bx_s,
                 &v_rt_x, &v_rt_n, &v_rt_d, &v_rt_g, &v_rt_t,
                 &v_rd_o, &v_rd_g, &v_rd_e, &v_rd_c1, &v_rd_c2, &v_rd_c3, &v_rd_c4, &v_rd_c5,
-                sc_add, sc_rot_in, sc_add_k1, sc_mul_k2, sc_rot_k2, sc_rot_k4)
+                sc_add, sc_rot_in, sc_add_k1, sc_mul_k2, sc_rot_k2, sc_rot_k4, var_whiten.as_str(),
+                &rng_whiten_mul_s, &rng_whiten_add_s, &var_whiten_pos)
         );
         let (kt_name, pj_name) = (rng.name(), rng.name());
         let kc = crate::VM::VM_Backend::Generator_flow::build_k(&mut rng, kt_name.as_str());
@@ -752,6 +776,10 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             pf_protos,
             psn_n,
             var_a2,
+            var_whiten,
+            var_whiten_pos,
+            whiten_mul,
+            whiten_add,
             var_b,
             var_builtin_reg,
             var_chk,

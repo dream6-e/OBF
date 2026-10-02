@@ -23,6 +23,20 @@ use super::Generator_util::{
 
 pub struct Generator { ctx: VmContext }
 
+/// ㉛ 载荷白化层的专用派生组号/字序号（不与四组常量簇、boot 簇（0..CG）冲突）。
+pub(super) const WHITEN_GROUP: usize = 0x5A;
+pub(super) const WHITEN_WORD: u32 = 7;
+/// ㉛ 位置相关白化掩码（Rust 侧与产物内 Lua 侧逐位同式）：
+/// t=(seed+pos*mul)%(2^31-1)；再两次 Lehmer 步进（*mul+add、*mul+1）；取 t%256。
+/// mul/add 逐构建随机；所有中间量 < 2^52，Lua double 与 u64 同样精确。
+pub(super) fn whiten_byte(seed: u64, pos: u64, mul: u64, add: u64) -> u8 {
+    const MOD: u64 = 2147483647;
+    let mut t = (seed + pos.wrapping_mul(mul)) % MOD;
+    t = (t.wrapping_mul(mul).wrapping_add(add)) % MOD;
+    t = (t.wrapping_mul(mul).wrapping_add(1)) % MOD;
+    (t % 256) as u8
+}
+
 impl Generator {
     pub fn new(ctx: VmContext) -> Self { Self { ctx } }
 
@@ -54,6 +68,9 @@ impl Generator {
         let pf_builtin_mask = rng.name();
         
         let key_seed_var = rng.name();
+        // ㉛ 载荷白化层状态名（KDF 耦合的整段掩码；声明在解头，赋值在根派生之后）
+        let var_whiten = rng.name();
+        let var_whiten_pos = rng.name();
         // ㉒② 焊接缓存：三张缓存表随产物生成，供第二/三阶段各站点发射焊接构造。
         let mut weld = crate::VM::VM_Backend::Generator_kdf::WeldCache::new(&mut rng);
         // ㉓ 统一流：packer 脚本串/探测九件套/守卫散点串共用的一条密钥流（惰性解密）。
@@ -226,6 +243,16 @@ impl Generator {
         let pm_s: [u64; 8] = [rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64];
         for (off, _) in proto_sites_root.iter_mut() { *off += 4; }
         proto_sites_root.sort_by_key(|e| e.0);
+        // ㉛ 白化种子：kdf(根字, 专用组号, 字序号)——与 Lua 侧同一式（Generator_chain
+        // 发射同一取值的 kdf 调用），产物里不落任何白化参数，只有运行期装出的根能重算。
+        let whiten_seed: u64 = {
+            let w = crate::VM::VM_Backend::Generator_chacha::derive_word(
+                enc.root[3], WHITEN_GROUP as u32, WHITEN_WORD) as u64;
+            w % 2147483646 + 1
+        };
+        // 乘法器/加数逐构建随机（奇数乘法器；乘积仍 < 2^45，double 精确）
+        let whiten_mul: u64 = (rng.range(0x1001, 0x100000) as u64) | 1;
+        let whiten_add: u64 = rng.range(0x1000000, 0x7FFF_FFFF) as u64;
         let pm_g = |x: u8, y: u8, r: u32, sv: u8| (x ^ y).rotate_left(r).wrapping_add(sv);
         let pm_sb = |i: u64, j: usize| -> u8 { (i.wrapping_mul(pm_s[j * 2]).wrapping_add(pm_s[j * 2 + 1]) & 0xFF) as u8 };
         let mut pm_cur: Option<(usize, [u8; 4])> = None;
@@ -240,6 +267,10 @@ impl Generator {
                 pm_i += 1;
             }
             if let Some((sp, mb)) = pm_cur { if pos < sp + 4 { *b ^= mb[pos - sp]; } }
+            // ㉛ 载荷白化层（目标一之一）：种子 4 字节之外整段再叠一道**位置相关**掩码，
+            // 密钥材料来自根 K0 的 KDF 派生（运行期才装得出来）——静态读者即便复刻了
+            // 外层滚动流，解开的也只是白化后的随机字节，字段顺序/零/小整数全部不可读。
+            *b ^= whiten_byte(whiten_seed, (pos + 1) as u64, whiten_mul, whiten_add);
             let orig = *b;
             *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(sc_add);
             k1 = k1.wrapping_add(orig).rotate_left(sc_rot_in).wrapping_add(sc_add_k1);
@@ -1033,6 +1064,10 @@ impl Generator {
         // phase 2 已原样搬至 Generator_chain.rs（README 单文件 ≤ 80 KB 规则）。
         Generator_chain::build_chain(Generator_chain::ChainIn {
             rng, at, keys, enc, builtin_slot_perm, sigma,
+            var_whiten,
+            var_whiten_pos,
+            whiten_mul,
+            whiten_add,
             fn_a3, fn_bxor, fn_c, fn_decode_chunk, fn_s_byte, fn_s_sub, pf_a_arr, pf_b_arr, pf_c_arr, pf_is_vararg,
             pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, var_a2,
             var_b, var_builtin_reg, var_chk, var_idx, var_junk, var_p, var_raw_p, var_tamper, var_vc, np21,
