@@ -172,15 +172,18 @@ fn inst_junk(w: &mut Vec<u8>, mag_file: u32, rng: &mut StdRng) {
     for _ in 0..jn { w.push(rng.random_range(0..256u32) as u8); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64) -> Vec<(usize, u32)> {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) -> Vec<(usize, u32)> {
     // ② 元数据剥离：chunk 名/lines/locals/upvalue 名在 VM 端零消费者
     // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
     // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
     // ⑱.3 每原型随机参数：kp18=本原型线上 op 异或键（二级重映射，跨原型同全局码
     // 线上值不同）、pb18=pc↔槽仿射偏移（槽=pc+pb，随机死槽；所有 pc 运算皆相对=零模板改动）。
+    // 目标二③（第二部分，共享指令空间）：pb18 不再是本原型自取的小偏移，而是调用方
+    // 游标分配的**全文件共用指令空间基址**——整棵原型树的记录落在同一段下标区间里、
+    // 段间留随机死槽，读侧所有原型共用同一批数组、入口只切换 pc 基址（跳转全相对）。
     // 两值写入 ② 剥离后的 linedefined/numparams 两空槽（随机数，无源信息）。
     let kp18: u32 = rng.random_range(1..0x2000000u32) | 0x0100_0000;
-    let pb18: u32 = rng.random_range(4..=64u32);
+    let pb18: u32 = *alloc18;
     // ㉚ 链式编码状态：种子=(kp18^pb18)*ch_m+ch_k0（与 Lua 扫描/解码器同式）；
     // 每条指令发射前取 (EO,CA,CB,CC)，发射后用本条逻辑值推进——单条公式全解作废
     let nochain18 = std::env::var("OBF_NOCHAIN").is_ok();
@@ -336,6 +339,13 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // 追加少量死指令，A 域取高于活跃寄存器区的随机值——解码后的 A 集合不再是
     // 「恰好铺满 0..maxstack」的干净区间。dead_count 先于循环抽签（inst_count 写头要用）。
     let dead_count: usize = rng.random_range(2..=std::cmp::min(24, 4 + raw_insts.len() / 18).max(4));
+    // 目标二③（第二部分）：本原型的记录段是 [pb18+1, pb18+inst_count+dead_count]，
+    // 游标推到段尾再留一段随机死槽——下一个原型（先序遍历）的基址必落在其后，
+    // 所有原型的段在共用空间里互不重叠。
+    *alloc18 = pb18
+        .wrapping_add(inst_count)
+        .wrapping_add(dead_count as u32)
+        .wrapping_add(rng.random_range(1..=64u32));
     w.extend_from_slice(&(inst_count + dead_count as u32).to_le_bytes());
     let n_insts = raw_insts.len();
     let mut i = 0usize;
@@ -798,7 +808,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         pidx18 += 1;
         let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0);
+        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0, alloc18);
         // 目标二③（函数边界模糊化，第一部分）：长度前缀计入随机尾部填充，
         // 每个原型块尾部追加 0..16 字节随机诱饵——长度不再等于内容长度，边界处
         // 出现的是指令样随机字节。读侧只按长度跳过（body_protos），无需同步改动；

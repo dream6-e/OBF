@@ -214,7 +214,10 @@ impl Generator {
             tag_pool18.swap(k18, last18);
             tag_pool18.pop();
         }
-        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0);
+        // 目标二③（第二部分）：全文件共用指令空间基址游标——根原型从一个小随机基址
+        // 起步，每个原型（先序遍历）分到一段互不重叠的记录区间，段间留随机死槽。
+        let mut alloc18: u32 = rng.range(4, 64) as u32;
+        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -900,8 +903,10 @@ impl Generator {
                     ma = n_mk1, mb = n_mk2, mc = n_mk3, o1 = ord[0], o2 = ord[1], o3 = ord[2])
             }
         };
+        // 目标二③（第二部分）：chunk.{cnt} 不再在读侧入口抹掉——DC 惰性填充用它
+        // 与 pf_lld 一起算本原型记录段的上界（越界 pc 不再走进邻接原型的记录）。
         block_execute_def.push_str(&format!(
-            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; {c}.{cnt}=nil end; {deriv} ",
+            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; end; {deriv} ",
             kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18, deriv = deriv));
         // 改进项一：指令惰性解码器改为原生 Lua 闭包内联（彻底消除 loadstring/StreamTable 源码级暴露），
         // 状态表 5 个字段名（原 .n/.ch/.m1/.m2/.m3）全量随机化，内层 3 态+1 诱饵态平坦化分发。
@@ -926,6 +931,7 @@ impl Generator {
                 n_mk3.as_str(),
                 var_vm.as_str(),
                 k_dc.as_str(),
+                pf_cnt18.as_str(),
                 (ds_n.as_str(), ds_ch.as_str(), ds_m1.as_str(), ds_m2.as_str(), ds_m3.as_str()),
             );
             block_execute_def.insert_str(0, &factory_prefix);

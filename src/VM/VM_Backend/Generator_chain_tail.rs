@@ -220,8 +220,27 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki1 as i64),
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki2 as i64),
         );
+        // 目标二③（第二部分，共享指令空间）：所有原型共用同一批指令数组——它们是
+        // 解码器的持久 upvalue（跨 thunk 调用存活），每个原型只占其中一段互不重叠的
+        // 下标区间（基址 = payload 头 pf_lld，先序分配、段间随机死槽）。静态读者再也
+        // 不能靠「一个数组 = 一个函数」划边界；运行期入口把 pc 切到本原型基址，
+        // 相对跳转与记录条数语义不变。
+        // 注册表挂在既有的弱键长存表上（数字键，**零新增局部**——payload 顶层局部数
+        // 已接近 Lua 的 200 上限，多一枚都可能让整份产物编译失败）：首次取用时惰性
+        // 建 4 张表，此后所有原型共用同一批数组。
+        let sh_key_v = rng.range(0x10000, 0xFFFFFFF) as i64;
+        let sh_key = rng.obfuscate_num(sh_key_v, 1, &keys);
+        let mut sh_idx: Vec<usize> = (1..=4).collect();
+        rng.shuffle(&mut sh_idx);
+        let sh_get = format!(
+            "{kr}[{k}]={kr}[{k}] or {{{{}},{{}},{{}},{{}}}}; ",
+            kr = kreg_n, k = sh_key);
+        let sh_arrs: Vec<&String> = vec![&pf_opcodes, &pf_a_arr, &pf_b_arr, &pf_c_arr];
+        let sh_assign: String = sh_arrs.iter().zip(sh_idx.iter())
+            .map(|(f, i)| format!("{c}.{f}={kr}[{k}][{i}]; ", c = fn_c, f = f, kr = kreg_n, k = sh_key, i = i))
+            .collect();
         let body_insts = format!(
-            "{st}={nxt}; {tree9} {c}.{pf_opcodes}={{}}; {c}.{pf_a_arr}={{}}; {c}.{pf_b_arr}={{}}; {c}.{pf_c_arr}={{}}; \
+            "{st}={nxt}; {tree9} {sh_get}{sh_assign} \
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+{m32v} end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>={m31v} then {w}={w}-{m32v} end return {w} end; \
              local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
              while {i} < {n} do {i} = {i} + 1; \
@@ -231,6 +250,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             m31v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 31),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
+            sh_assign = sh_assign, sh_get = sh_get,
             i = v_ch_i, n = v_ch_n, cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
             pb = rng.name(), ka = rng.name(), kb18 = rng.name(), kc18 = rng.name(),
             pf_ld = pf_ld, pf_lld = pf_lld,

@@ -758,6 +758,7 @@ pub(super) fn build_inst_decoder_lua(
     n_mk3: &str,
     var_vm: &str,
     k_dc: &str,
+    pf_cnt: &str,
     ds_fields: (&str, &str, &str, &str, &str),
 ) -> (String, String) {
     let (ds_n, ds_ch, ds_m1, ds_m2, ds_m3) = ds_fields;
@@ -914,12 +915,18 @@ pub(super) fn build_inst_decoder_lua(
     ];
     rng.shuffle(&mut ds_inits);
 
+    // 目标二③（第二部分）：填充加「本原型记录段上界」守卫——所有原型共用同一条
+    // 指令空间，越界的 pc 若不管，就会被惰性填充接着解出**下一个函数**的记录；
+    // 上界（pf_lld + 记录条数）由入口一次性算出，越界即取到 nil、在取指处报错，
+    // 与旧版「各自一张表」的越界行为逐位一致。
+    let end_v = rng.name();
     let init_dc_stmt = format!(
-        "local {ndc}={{}}; local {ds}={{{inits}}}; local {fill}={fn_}({bind}); \
-         setmetatable({ndc},{{__index=function({tt},{kk}) while {ds}.{dsn}<{kk} do {fill}() end return rawget({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
+        "local {ndc}={{}}; local {ds}={{{inits}}}; local {fill}={fn_}({bind}); local {ende}={c}.{lld}+{c}.{cnt}; \
+         setmetatable({ndc},{{__index=function({tt},{kk}) while {ds}.{dsn}<{kk} and {ds}.{dsn}<{ende} do {fill}() end return rawget({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
         ndc = n_dc, ds = dc_ds, inits = ds_inits.join(","),
         fill = dc_fill, fn_ = dc_fn, bind = bind_args,
         tt = rng.name(), kk = rng.name(), dsn = ds_n, vm = var_vm, kdc = k_dc,
+        ende = end_v, c = "chunk", lld = pf_lld, cnt = pf_cnt,
     );
     (factory_prefix, init_dc_stmt)
 }
