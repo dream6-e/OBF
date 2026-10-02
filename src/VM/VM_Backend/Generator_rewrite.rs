@@ -709,10 +709,16 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
         let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0);
+        // 目标二③（函数边界模糊化，第一部分）：长度前缀计入随机尾部填充，
+        // 每个原型块尾部追加 0..16 字节随机诱饵——长度不再等于内容长度，边界处
+        // 出现的是指令样随机字节。读侧只按长度跳过（body_protos），无需同步改动；
+        // 子块内站点偏移基于 child_base，不受尾部填充影响。
+        let pad18 = rng.random_range(0..=16usize);
         let ln_off = w.len();
-        w.extend_from_slice(&(child.len() as u32).to_le_bytes());
+        w.extend_from_slice(&((child.len() + pad18) as u32).to_le_bytes());
         let child_base = w.len();
         w.extend_from_slice(&child);
+        for _ in 0..pad18 { w.push(rng.random_range(0..=255u8)); }
         proto_sites.push((ln_off, pidx18));
         for (so, si) in sub_sites { proto_sites.push((so + child_base, si)); }
     }
