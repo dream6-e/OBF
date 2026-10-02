@@ -480,6 +480,73 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 continue;
             }
         }
+        // ---- SuperOperator 族三/四：取字段 + 调用（目标二第 2 条）----
+        // 族三：SELF(A,B,C) + CALL(A,2,1) —— 零参方法调用（`o:m()` 形态）
+        // 族四：GETTABLE(A,B,C) + CALL(A,1,1) —— 零参点调用（`t.f()` 形态）
+        // 两者的逻辑布局都一样（B=表、C=键），线上按魔数奇偶预交换（DC 惰性解码器
+        // 按同式换回）；与族一/族二共用同一条 CALL 收尾约定（1 返回值、丢弃结果）。
+        {
+            let real_prev = inverse_opcode_map[op as usize];
+            let fam: Option<usize> = if real_prev == 11 && i + 1 < n_insts {
+                let (op2, a2, b2, c2) = raw_insts[i + 1];
+                if inverse_opcode_map[op2 as usize] == 28 && a2 == a && b2 == 2 && c2 == 1 {
+                    Some(crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2)
+                } else { None }
+            } else if real_prev == 6 && i + 1 < n_insts {
+                let (op2, a2, b2, c2) = raw_insts[i + 1];
+                if inverse_opcode_map[op2 as usize] == 28 && a2 == a && b2 == 1 && c2 == 1 {
+                    Some(crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 1)
+                } else { None }
+            } else { None };
+            let skip_here = if i + 1 >= n_insts { true } else { jump_targets.contains(&(i + 1)) };
+            let prev_falls_through = if i == 0 {
+                true
+            } else {
+                let prev_real = inverse_opcode_map[raw_insts[i - 1].0 as usize];
+                !SKIP_NEXT_OPS.contains(&prev_real)
+                    && !REL_JUMP_OPS.contains(&prev_real)
+                    && !NO_FALLTHROUGH_OPS.contains(&prev_real)
+            };
+            if let Some(fidx) = fam {
+                if !skip_here && prev_falls_through {
+                    let b_alive = b < BITRK || !omit_const.contains(&((b - BITRK) as usize));
+                    let c_alive = c < BITRK || !omit_const.contains(&((c - BITRK) as usize));
+                    let fused_vals = fused_map.get(fidx).map(|v| v.as_slice()).unwrap_or(&[]);
+                    if b_alive && c_alive && !fused_vals.is_empty() {
+                        let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
+                        let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
+                        let a_enc = (a as u32).wrapping_add(mag);
+                        let real_op18 = OpCode::from_u8(inverse_opcode_map[op as usize]);
+                        let (be18, ce18) = match real_op18 {
+                            Some(ro) if ro.mode() == OpMode::IABC => (
+                                if ro.b_mode() == OpArgMask::K { remap_rk(b) } else { b },
+                                if ro.c_mode() == OpArgMask::K { remap_rk(c) } else { c }),
+                            _ => (b, c),
+                        };
+                        let (fb0, fc0) = if mag % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
+                        let (eo18, ca18, cb18, cc18) = ch_split(chain18);
+                        let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+                        let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
+                        let mag_file = g18 ^ kp18;
+                        w.extend_from_slice(&mag_file.to_le_bytes());
+                        w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
+                        w.extend_from_slice(&fb.to_le_bytes());
+                        w.extend_from_slice(&fc.to_le_bytes());
+                        inst_junk(w, mag_file, rng);
+                        fused_used.insert(fidx);
+                        fused_count += 1;
+                        pc18 += 1;
+                        let r718 = roll18.rotate_left(7);
+                        roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+                        chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
+                        if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
+                        if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+                        i += 1; // 被融合的那条 CALL 照常写出，成为永不执行的死槽
+                        continue;
+                    }
+                }
+            }
+        }
         let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
         let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 };
         let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);

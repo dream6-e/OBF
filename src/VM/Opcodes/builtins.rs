@@ -52,9 +52,12 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng, perm: 
     out
 }
 
-/// 融合指令分两族：builtin-load + LOADK + CALL 三合一，以及 builtin-load + GETTABLE 二合一。
+/// 融合指令分五族：builtin-load + LOADK + CALL 三合一、builtin-load + GETTABLE 二合一，
+/// 以及目标二新增的「取字段 + 调用」两族：SELF(A,B,C)+CALL(A,2,1)（零参方法调用）与
+/// GETTABLE(A,B,C)+CALL(A,1,1)（零参点调用）。后两族与 builtin 槽位无关，
+/// 各占一个额外索引（`FUSED_OP_COUNT - 2` / `FUSED_OP_COUNT - 1`）。
 pub const FUSED_OP_BASE: usize = TOTAL_OPCODES;
-pub const FUSED_OP_COUNT: usize = BUILTIN_NAMES.len() * 2;
+pub const FUSED_OP_COUNT: usize = BUILTIN_NAMES.len() * 2 + 2;
 
 /// 仅为本产物中实际触发融合的槽位生成 handler，避免扩张 BST 分发树。
 pub fn generate_fused(
@@ -94,6 +97,40 @@ pub fn generate_fused(
                 bv=bv,s1=s1,a=a,key=key,one=one
             )));
         }
+    }
+    // 族三：SELF(A,B,C) + CALL(A,2,1) —— 零参方法调用（取字段 + 调用二合一）。
+    // 语义布局与 GETTABLE 一致：逻辑 B=表、逻辑 C=键；写侧按魔数奇偶预交换，
+    // DC 惰性解码器按同一奇偶换回（与族一/族二同一机制）。
+    let family3 = n_builtins * 2;
+    if used.contains(&family3) && !m[family3].is_empty() {
+        let mut h = OpcodeBuilder::new(m[family3].clone(), cfg, rng);
+        let a = h.raw_inst(2);
+        let tab = h.rk(3);
+        let key = h.rk(4);
+        let fv = h.rng.name();
+        let sv = h.rng.name();
+        let fj = h.rng.name();
+        let one = super::ident(h.rng, 1);
+        let two = super::ident(h.rng, 2);
+        out.push_str(&h.build(&format!(
+            "local {fv} = {tab}[{key}]; local {sv} = {tab}; {{STK}}[{a}] = {fv}; {{STK}}[{a}+{one}] = {sv}; for {fj}={a}+{two}, {{TOP}} do {{STK}}[{fj}]=nil end; zm({fv}({sv})); {{STK}}[{a}]=nil; {{PC}} = {{PC}} + {one}",
+            fv=fv, sv=sv, tab=tab, key=key, a=a, fj=fj, one=one, two=two
+        )));
+    }
+    // 族四：GETTABLE(A,B,C) + CALL(A,1,1) —— 零参点调用（取字段 + 调用二合一）。
+    let family4 = n_builtins * 2 + 1;
+    if used.contains(&family4) && !m[family4].is_empty() {
+        let mut h = OpcodeBuilder::new(m[family4].clone(), cfg, rng);
+        let a = h.raw_inst(2);
+        let tab = h.rk(3);
+        let key = h.rk(4);
+        let fj = h.rng.name();
+        let one = super::ident(h.rng, 1);
+        let two = super::ident(h.rng, 2);
+        out.push_str(&h.build(&format!(
+            "{{STK}}[{a}] = {tab}[{key}]; for {fj}={a}+{two}, {{TOP}} do {{STK}}[{fj}]=nil end; zm({{STK}}[{a}]()); {{STK}}[{a}]=nil; {{PC}} = {{PC}} + {one}",
+            a=a, tab=tab, key=key, fj=fj, one=one, two=two
+        )));
     }
     out
 }
