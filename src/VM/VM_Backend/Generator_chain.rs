@@ -726,7 +726,7 @@ rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
                 &v_rt_x, &v_rt_n, &v_rt_d, &v_rt_g, &v_rt_t,
                 &v_rd_o, &v_rd_g, &v_rd_e, &v_rd_c1, &v_rd_c2, &v_rd_c3, &v_rd_c4, &v_rd_c5,
                 sc_add, sc_rot_in, sc_add_k1, sc_mul_k2, sc_rot_k2, sc_rot_k4, var_whiten.as_str(),
-                &rng_whiten_mul_s, &rng_whiten_add_s, &var_whiten_pos)
+                &rng_whiten_mul_s, &rng_whiten_add_s, &var_whiten_pos, var_a2.as_str())
         );
         let (kt_name, pj_name) = (rng.name(), rng.name());
         let kc = crate::VM::VM_Backend::Generator_flow::build_k(&mut rng, kt_name.as_str());

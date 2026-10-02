@@ -243,10 +243,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let cid_gk = uni.register("KryvexObf_");
         let (ci_stmt, sc_index2) = uni.fetch(&mut rng, cid_index);
         let (gk_stmt, sc_kobf) = uni.fetch(&mut rng, cid_gk);
-        let body_consts = format!(
-            "{st}={nxt}; {bc_scatter} ",
-            st = var_state, nxt = obf_s_protos,
-bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
+        let (bc_scatter, agg_field, poison_fn) = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
@@ -255,9 +252,9 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
                 &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
-                chain_delta, chain_m, chain_k0, psn_n.as_str())
-        );
-        let body_consts = format!("{ci_stmt}{gk_stmt}") + &body_consts;
+                chain_delta, chain_m, chain_k0, psn_n.as_str());
+        let body_consts = format!("{st}={nxt}; {ci_stmt}{gk_stmt} {bc_scatter} ",
+            st = var_state, nxt = obf_s_protos);
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
         // 滚动密钥流（k1..k4 随消费演化）——跳读须逐字节喂 rd() 推进外层密钥；
@@ -296,15 +293,20 @@ bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
         );
         // ⑭ 九元联合 nil 声明 + ⑦ repeat…until false 换皮 + ⑨ 区间树
         let d14: Vec<String> = (0..9).map(|_| rng.name()).collect();
+        // ③ 汇总校验：元数据槽第一段（lines 槽）已改为「计数 1 + 4B 聚合值」——
+        // 读回后与常量态累计值比对；不符则调用常量态留下的投毒闭包（整表偏移解码），
+        // 于是「全对或全错」：不再有逐常量可验证的反馈，也没有 nil 报错信号。
+        let m32d = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 32);
         let body_debug = format!(
             "{st}={nxt}; {tree9} repeat \
              local {d0},{d1},{d2},{d3},{d4},{d5},{d6},{d7},{d8}; \
-             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {a5}() end; \
+             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {d0}={a5}(); if ({d0}%{m32d})~={c}.{aggf} then {c}.{pf}() end end; \
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}(); {a5}(); {a5}() end; \
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; break; until false; ",
             st = var_state, nxt = obf_s_ret, a5 = fn_a5, rs = fn_read_string, i = v_ch_i, n = v_ch_n,
             d0 = d14[0], d1 = d14[1], d2 = d14[2], d3 = d14[3], d4 = d14[4],
             d5 = d14[5], d6 = d14[6], d7 = d14[7], d8 = d14[8],
+            c = fn_c, aggf = agg_field, pf = poison_fn, m32d = m32d,
             tree9 = it9(&mut rng, var_state.as_str())
         );
         // ⑦ while true 壳 + ⑭ return nil 兜底（ret 态跑完显式出）

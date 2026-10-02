@@ -560,6 +560,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let mut inv_perm: Vec<usize> = vec![0; const_count as usize];
     for (oi, &ppos) in cperm.iter().enumerate() { inv_perm[ppos as usize] = oi; }
     let mut slot: u32 = 0;
+    // ③ 汇总校验器：每常量只**累计**进一个整函数的聚合值（不再逐常量落盘校验和）。
+    // 聚合值最后落在远离常量节的元数据槽（lines 槽：计数=1 + 4B 值），
+    // 读侧在常量态末尾才比对，失败时整体投毒——「全对或全错」。
+    let mut agg18: u32 = 0;
     let mut seen: std::collections::HashMap<(Vec<u8>, u32, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
     for pos in 0..const_count as usize {
         let idx = inv_perm[pos];
@@ -599,22 +603,30 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 };
                 w.push(tag_map[*c_type as usize]);
                 if *c_type == 3 { write_string(w, &entry.1); } else { w.extend_from_slice(&entry.1); }
-                // ③-3 每常量 MAC：密文块后 4B 校验和（密文+槽号+折叠+R链），
-                // 读侧分派闭包先验后解
-                w.extend_from_slice(&const_mac18(&entry.1, slot, fold, rl18, fc18).to_le_bytes());
+                // ③ 每常量 MAC 只累计进整函数聚合（与读侧 vmac 同式；折叠常数 31、+1）
+                let mac18 = const_mac18(&entry.1, slot, fold, rl18, fc18);
+                agg18 = agg18.wrapping_mul(31).wrapping_add(mac18).wrapping_add(1);
             }
             _ => panic!(),
         }
         slot += 1;
     }
 
-    // ㉓-C 诱饵槽发射（排在真实槽后；blob 随机字节即可——永不解密）
+    // ㉓-C 诱饵槽发射（排在真实槽后；blob 随机字节即可——永不解密）。
+    // ③ 读侧会逐槽读回并累计汇总值，故诱饵也必须进同一聚合：折叠键=0（读侧
+    // ft 无此槽→0）、R 链值=链末（读侧 rt 回落到 rf）——与读侧同入参。
     for _ in 0..d_count18 {
         match rng.random_range(0..5) {
-            0 => { w.push(tag_map[0]); } // nil：仅占一个槽号
-            1 => { w.push(tag_map[1]); for _ in 0..12 { w.push(rng.random_range(0..=255u8)); } } // bool：8B+4B MAC 同线长
-            _ => { w.push(tag_map[2]); for _ in 0..12 { w.push(rng.random_range(0..=255u8)); } } // num：8B+4B MAC
+            0 => { w.push(tag_map[0]); } // nil：仅占一个槽号（读侧不累计）
+            t => {
+                w.push(tag_map[if t == 1 { 1 } else { 2 }]);
+                let blob: Vec<u8> = (0..8).map(|_| rng.random_range(0..=255u8)).collect();
+                w.extend_from_slice(&blob);
+                let mac18 = const_mac18(&blob, slot, 0u32, roll18, fc18);
+                agg18 = agg18.wrapping_mul(31).wrapping_add(mac18).wrapping_add(1);
+            }
         }
+        slot += 1;
     }
 
     let p_count = r.read_u32();
@@ -639,7 +651,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     }
     // ② 元数据剥离（续）：lines/locals/upvalue 名只消费不落盘
     let l_count = r.read_u32();
-    w.extend_from_slice(&0u32.to_le_bytes());
+    // ③ 汇总校验：lines 槽写「计数 1 + 4B 聚合值」（读侧 debug 态读回、与常量态累计值比对）
+    w.extend_from_slice(&1u32.to_le_bytes());
+    w.extend_from_slice(&agg18.to_le_bytes());
     r.read_bytes((l_count * 4) as usize);
     let loc_count = r.read_u32();
     w.extend_from_slice(&0u32.to_le_bytes());
