@@ -647,20 +647,49 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 }
             }
         }
-        let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
-        let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 };
-        let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-        let a_enc = (a as u32).wrapping_add(mag);
         // ③ 槽位洗牌：K 域操作数按模式重映射（RK→perm，IABx-K→perm）；
         // 寄存器/跳转域不动
         let real_op18 = OpCode::from_u8(inverse_opcode_map[op as usize]);
-        let (be18, ce18) = match real_op18 {
+        let (mut be18, mut ce18) = match real_op18 {
             Some(ro) if ro.mode() == OpMode::IABC => (
                 if ro.b_mode() == OpArgMask::K { remap_rk(b) } else { b },
                 if ro.c_mode() == OpArgMask::K { remap_rk(c) } else { c }),
             Some(ro) if ro.mode() == OpMode::IABx && ro.b_mode() == OpArgMask::K => (remap_bx(b), c),
             _ => (b, c),
         };
+        // ---- 目标三②③：普通 JMP → 族六「计算式跳转」----
+        // 随机挑一部分 JMP 改成：真实后继与诱饵后继都以密文落盘（密钥 = 运行期
+        // PC 与本原型 pf_ld 现算），静态读不出下一条是谁；诱饵后继指向本原型尾部
+        // 的死指令段——那段垃圾因此在静态 CFG 上多出一条「只有运行期才知道真假」
+        // 的入边（实际永不执行）。
+        let mut a_log: u32 = a as u32;
+        let mut cj_sel: Option<u32> = None;
+        if real_op18 == Some(OpCode::Jmp) && dead_count > 0 && rng.random_range(0..10) < 7 {
+            let fam6 = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 3;
+            let fv = fused_map.get(fam6).map(|v| v.as_slice()).unwrap_or(&[]);
+            // 目标记录下标 = 本记录下标(pb18+pc18+1) + 1 + sBx（Jmp 取指后 pc 已自增）
+            let t1 = pb18 as i64 + pc18 as i64 + 2 + (b as i32 as i64);
+            if !fv.is_empty() && t1 >= pb18 as i64 + 1 && t1 <= pb18 as i64 + inst_count as i64 {
+                let t2 = pb18 as i64 + inst_count as i64 + 1 + rng.random_range(0..dead_count) as i64;
+                let salt = rng.random_range(0x1000..0xFF_FFFFu32);
+                // 密钥与 handler 同式：k=( (PC ^ ld) ^ salt )——纯异或（不取模）。
+                // 注意 handler 看到的 PC 是「取指后已自增」的值 = 记录下标 + 1。
+                let pcr = pb18.wrapping_add(pc18 as u32).wrapping_add(2);
+                let k1 = (pcr ^ kp18) ^ salt;
+                a_log = (t1 as u32) ^ k1;
+                be18 = (t2 as u32) ^ k1;
+                ce18 = salt;
+                cj_sel = Some(fv[rng.random_range(0..fv.len())]);
+                fused_used.insert(fam6);
+            }
+        }
+        let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
+        let selected_op = match cj_sel {
+            Some(v) => v,
+            None => if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 },
+        };
+        let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
+        let a_enc = a_log.wrapping_add(mag);
         let (fb0, fc0) = if mag % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
         let (eo18, ca18, cb18, cc18) = ch_split(chain18);
         let g18 = mag.wrapping_add(eo18).wrapping_add(delta);

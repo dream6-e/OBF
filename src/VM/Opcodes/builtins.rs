@@ -54,10 +54,10 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng, perm: 
 
 /// 融合指令分五族：builtin-load + LOADK + CALL 三合一、builtin-load + GETTABLE 二合一，
 /// 以及目标二新增的「取字段 + 调用」两族：SELF(A,B,C)+CALL(A,2,1)（零参方法调用）与
-/// GETTABLE(A,B,C)+CALL(A,1,1)（零参点调用）。后两族与 builtin 槽位无关，
-/// 各占一个额外索引（`FUSED_OP_COUNT - 2` / `FUSED_OP_COUNT - 1`）。
+/// GETTABLE(A,B,C)+CALL(A,1,1)（零参点调用），以及目标三新增的族六「计算式跳转」
+/// （JMP 落点由运行期值现算 + 诱饵后继）。后三族与 builtin 槽位无关，各占一个额外索引。
 pub const FUSED_OP_BASE: usize = TOTAL_OPCODES;
-pub const FUSED_OP_COUNT: usize = BUILTIN_NAMES.len() * 2 + 3;
+pub const FUSED_OP_COUNT: usize = BUILTIN_NAMES.len() * 2 + 4;
 
 /// 仅为本产物中实际触发融合的槽位生成 handler，避免扩张 BST 分发树。
 pub fn generate_fused(
@@ -158,6 +158,30 @@ pub fn generate_fused(
              if (({v}=={ot})~=({cd}~=0X0)) then {{PC}}={{PC}}+{gp}+{one} else {{PC}}={{PC}}+{gp} end",
             v = v, tab = tab, key = key, dr = dr, r1 = r1, rkv = rkv, r2 = r2, cd = cd, gp = gp, ot = ot,
             pai = pa, c256 = c256, c512 = c512, c127 = c127, c2 = c2, c17 = c17, c18 = c18, one = one)));
+    }
+    // 族六：计算式跳转（目标三第 2 条 + 第 3 条）——JMP 的落点不再以明文偏移落盘。
+    // 线上：A=真实后继的**密文**、B=诱饵后继的密文、C=逐站点盐；
+    // handler 用运行期值（PC 与本原型 pf_ld，见 execute 入口写槽）现算两支密钥，
+    // 解出两个绝对落点，再用一个「只有运行期才知道」的恒真条件选真实后继：
+    //   真分支的判据 bx(k,k)==0 只在 k 的**运行期取值**下成立，静态读者要读出
+    //   下一条是谁，必须先复刻密钥推导与整条指令解码（等于模拟）。
+    // 诱饵后继指向本原型尾部的死指令段（只有运行期才知道那条边永不走），
+    // 使那段垃圾在静态 CFG 上获得一条真实入边（目标三第 3 条）。
+    let family6 = n_builtins * 2 + 3;
+    if used.contains(&family6) && !m[family6].is_empty() {
+        let mut h = OpcodeBuilder::new(m[family6].clone(), cfg, rng);
+        let e1 = h.raw_inst(2);
+        let e2 = h.raw_inst(3);
+        let sa = h.raw_inst(4);
+        let k1 = h.rng.name();
+        let ld = cfg.ld_key.clone();
+        let bx = cfg.builtin_bxor.clone();
+        out.push_str(&h.build(&format!(
+            // 键 = (运行期 PC ^ 本原型 pf_ld) ^ 记录盐：两个候选目标共用同一把键
+            // （不取模——纯异或，热路径零额外算术开销；两候选仍同样不可静态分辨）。
+            "local {k1}={bx}({bx}({{PC}},{ld}),{sa}); \
+             if {bx}({k1},{k1})==0X0 then {{PC}}={bx}({e1},{k1}) else {{PC}}={bx}({e2},{k1}) end",
+            k1 = k1, e1 = e1, e2 = e2, sa = sa, ld = ld, bx = bx)));
     }
     out
 }

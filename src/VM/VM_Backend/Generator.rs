@@ -407,7 +407,10 @@ impl Generator {
         let k_state = sk[15].clone(); let k_mode = sk[16].clone();
         let k_retv = sk[17].clone(); let k_retf = sk[18].clone(); let k_rett = sk[19].clone();
         
-        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: format!("self[{}]", k_breg), builtin_mask: format!("self[{}]", k_bmask), builtin_bxor: fn_bxor2.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
+        // 目标三②：计算式跳转的密钥源——n_kon 是 execute 入口从 KREG 取出的本原型
+        // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
+        let (n_kon, n_ka) = (rng.name(), rng.name());
+        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: format!("self[{}]", k_breg), builtin_mask: format!("self[{}]", k_bmask), builtin_bxor: fn_bxor2.clone(), ld_key: n_kon.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
         let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
 
         
@@ -858,7 +861,6 @@ impl Generator {
         // ⑱.4 数组驻留掩码：body_insts 存的是逐原型掩码值（K 从 kp/pb 派生，同式）。
         // 中危刀1 密钥分驻：pf_ld（仅掩码用）从 chunk 蒸发进弱键注册表 KREG（键=chunk）；
         // pf_lld 是入口 pc 基址（每次入口读）必须留在 chunk——半分量分驻+换钥兜底
-        let (n_kon, n_ka) = (rng.name(), rng.name());
         // 数据流打散（本轮）：钥匙派生不再走单一「ka→三元组→升序三存」线性模板——
         // 拓扑池（0=原版保留在池中）× 存储语句乱序（(槽,值) 配对恒定，只换时间序）。
         // 全变体输出恒等：ma=bx(kon,lld)、mb=bx(kon,ma)、mc=bx(lld,ma)。入口一次，跳数无感。
