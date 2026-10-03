@@ -44,9 +44,15 @@ pub(super) struct EncCtx {
     /// 第 2 项：每簇的 ChaCha 状态布局（全状态置换 ρ / 轮数 / counter 步进）——
     /// 读写两侧同参；产物侧的摆位与元组由 Generator_chain 按此发射
     pub layout: Vec<ChaChaLayout>,
-    /// 第 3 项 D：单根 K0（8 字）——四组与 boot 的密钥/盐/kind 全部由它 KDF 现算；
+    /// 第 3 项 D：单根 K0（8 字）——四组密钥/盐/kind 全部由它 KDF 现算；
     /// 它本身取自原生流（Native Stream），产物里以 token 掩码形态落一份
     pub root: [u32; 8],
+}
+
+#[derive(Clone, Copy)]
+enum ConstantSlot {
+    Source(usize),
+    Decoy(usize),
 }
 
 pub(super) struct PayloadReader<'a> { pub(super) data: &'a [u8], pub(super) pos: usize }
@@ -124,45 +130,6 @@ pub(super) fn scan_max_stack(r: &mut PayloadReader, out: &mut u8) {
     for _ in 0..upv_count { let s_len = r.read_u32(); r.read_bytes(s_len as usize); }
 }
 
-pub(super) fn scan_setglobal_targets(r: &mut PayloadReader, targets: &mut HashSet<Vec<u8>>, setglobal_op: u8) {
-    r.read_string();
-    r.read_u32(); r.read_u32();
-    r.read_u8(); r.read_u8(); r.read_u8(); r.read_u8();
-    let inst_count = r.read_u32();
-    let mut raw_insts: Vec<(u8, u8, u32, u32)> = Vec::with_capacity(inst_count as usize);
-    for _ in 0..inst_count {
-        let op = r.read_u8(); let a = r.read_u8(); let b = r.read_u32(); let c = r.read_u32();
-        raw_insts.push((op, a, b, c));
-    }
-    let const_count = r.read_u32();
-    let mut local_consts: Vec<Option<Vec<u8>>> = Vec::with_capacity(const_count as usize);
-    for _ in 0..const_count {
-        let c_type = r.read_u8();
-        match c_type {
-            0 => local_consts.push(None),
-            1 => { r.read_u8(); local_consts.push(None); }
-            2 => { r.read_u64(); local_consts.push(None); }
-            3 => { local_consts.push(Some(r.read_string().to_vec())); }
-            _ => panic!(),
-        }
-    }
-    for (op, _a, b, _c) in &raw_insts {
-        if *op == setglobal_op {
-            if let Some(Some(s)) = local_consts.get(*b as usize) {
-                targets.insert(s.clone());
-            }
-        }
-    }
-    let p_count = r.read_u32();
-    for _ in 0..p_count { scan_setglobal_targets(r, targets, setglobal_op); }
-    let l_count = r.read_u32();
-    r.read_bytes((l_count * 4) as usize);
-    let loc_count = r.read_u32();
-    for _ in 0..loc_count { r.read_string(); r.read_u32(); r.read_u32(); }
-    let upv_count = r.read_u32();
-    for _ in 0..upv_count { r.read_string(); }
-}
-
 // 反混淆判据②修复：每条线上指令尾部挂 0..3 个随机垃圾字节，数量编码在线上魔数
 // 高 2 位（mag 取值 0x0100_0000..0x7FFF_0000，kp18 ≤ 0x02FF_FFFF 不碰高位，
 // 所以 (mag^kp18)>>29 与 mag>>29 一致，读写两侧同式）。「每条恰好 16B、
@@ -172,7 +139,7 @@ fn inst_junk(w: &mut Vec<u8>, mag_file: u32, rng: &mut StdRng) {
     for _ in 0..jn { w.push(rng.random_range(0..256u32) as u8); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], builtin_map: &[Vec<u32>], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, setglobal_targets: &HashSet<Vec<u8>>, getglobal_op: u8, getglobalstr_op: u8, inverse_opcode_map: &[u8; 90], slot_perm: &[usize], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) -> Vec<(usize, u32)> {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, inverse_opcode_map: &[u8; 90], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) -> Vec<(usize, u32)> {
     // ② 元数据剥离：chunk 名/lines/locals/upvalue 名在 VM 端零消费者
     // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
     // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
@@ -234,6 +201,14 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             _ => panic!(),
         }
     }
+    // 每原型始终加入少量有效数字诱饵。它们稍后会被随机插入真实槽之间，
+    // 并由尾部不可达 ADD 指令引用；密文、槽位与聚合 MAC 都走正式管线。
+    let decoy_count18 = rng.random_range(1..=(const_count as usize + 1).min(8).max(1));
+    let decoy_consts: Vec<Vec<u8>> = (0..decoy_count18).map(|_| {
+        let whole = rng.random_range(10_000u64..=9_999_999u64) as f64;
+        let frac = rng.random_range(0u64..=99_999u64) as f64 / 100_000.0;
+        (whole + frac).to_le_bytes().to_vec()
+    }).collect();
 
     const BITRK: u32 = 128;
     // Per-Proto 独立平移。A 恒为寄存器；IABC 的 B/C 按操作码模式表平移。
@@ -262,49 +237,26 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             }
         }
     }
-    let mut referenced_elsewhere: HashSet<usize> = HashSet::new();
-    for (op, _a, b, c) in &raw_insts {
-        if *op == getglobal_op || *op == getglobalstr_op { continue; }
-        if let Some(real_op) = OpCode::from_u8(inverse_opcode_map[*op as usize]) {
-            let is_bx = matches!(real_op.mode(), OpMode::IABx);
-            if is_bx {
-                if real_op.b_mode() == OpArgMask::K && (*b as usize) < local_consts.len() {
-                    referenced_elsewhere.insert(*b as usize);
-                }
-            } else {
-                if real_op.b_mode() == OpArgMask::K && *b >= BITRK {
-                    referenced_elsewhere.insert((*b - BITRK) as usize);
-                }
-                if real_op.c_mode() == OpArgMask::K && *c >= BITRK {
-                    referenced_elsewhere.insert((*c - BITRK) as usize);
-                }
-            }
-        }
-    }
+    // 全局名（包括内建名）保留为普通字符串常量，统一由常量解码器和环境表处理。
 
-    let mut builtin_rewrite: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    let mut omit_const: HashSet<usize> = HashSet::new();
-    for (idx, (ctype, bytes)) in local_consts.iter().enumerate() {
-        if *ctype == 3 {
-            if let Some(slot) = crate::VM::Opcodes::builtins::BUILTIN_NAMES.iter().position(|n| n.as_bytes() == bytes.as_slice()) {
-                if !setglobal_targets.contains(bytes) {
-                    builtin_rewrite.insert(idx, slot);
-                    if !referenced_elsewhere.contains(&idx) {
-                        omit_const.insert(idx);
-                    }
-                }
-            }
-        }
+    // 真实常量与有效诱饵共用一次槽位置换。cperm 只映射真实源槽；decoy_slots
+    // 专供不可达尾部指令使用，确保活跃指令永远不会引用诱饵。
+    let total_const_count = const_count + decoy_count18 as u32;
+    let mut const_layout: Vec<ConstantSlot> = (0..const_count as usize)
+        .map(ConstantSlot::Source)
+        .chain((0..decoy_count18).map(ConstantSlot::Decoy))
+        .collect();
+    for i in (1..const_layout.len()).rev() {
+        let j = rng.random_range(0..=i);
+        const_layout.swap(i, j);
     }
-
-    // ③ 槽位 PRP 洗牌：常量的落盘槽位过一遍随机置换——落盘常量表第 s 槽
-    // 放原常量 inv[s]，指令侧 RK/IABx-K 引用同步重映射为 perm[idx]。读侧
-    // 一切（折叠扫描、R 链、解密 nonce、建表）都以「线上操作数值/落盘槽号」
-    // 为准逐式重放，与写侧对同一置换对称——读侧零改动。
-    let mut cperm: Vec<u32> = (0..const_count).collect();
-    for pi in (1..cperm.len()).rev() {
-        let pj = rng.random_range(0..=pi);
-        cperm.swap(pi, pj);
+    let mut cperm = vec![0u32; const_count as usize];
+    let mut decoy_slots = vec![0u32; decoy_count18];
+    for (slot, entry) in const_layout.iter().enumerate() {
+        match *entry {
+            ConstantSlot::Source(idx) => cperm[idx] = slot as u32,
+            ConstantSlot::Decoy(idx) => decoy_slots[idx] = slot as u32,
+        }
     }
     let remap_rk = |v: u32| -> u32 {
         if v >= BITRK && (v - BITRK) < const_count { BITRK + cperm[(v - BITRK) as usize] } else { v }
@@ -338,7 +290,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // 反混淆判据③续（死指令）：真实指令流末尾（最后一条 RETURN 之后，永不执行）
     // 追加少量死指令，A 域取高于活跃寄存器区的随机值——解码后的 A 集合不再是
     // 「恰好铺满 0..maxstack」的干净区间。dead_count 先于循环抽签（inst_count 写头要用）。
-    let dead_count: usize = rng.random_range(2..=std::cmp::min(24, 4 + raw_insts.len() / 18).max(4));
+    let dead_min = decoy_count18.max(2);
+    let dead_max = std::cmp::min(24, 4 + raw_insts.len() / 18).max(dead_min);
+    let dead_count: usize = rng.random_range(dead_min..=dead_max);
     // 目标二③（第二部分）：本原型的记录段是 [pb18+1, pb18+inst_count+dead_count]，
     // 游标推到段尾再留一段随机死槽——下一个原型（先序遍历）的基址必落在其后，
     // 所有原型的段在共用空间里互不重叠。
@@ -374,133 +328,6 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     while i < n_insts {
         let (op, a, b, c) = raw_insts[i];
 
-        // ---- SuperOperator: builtin-load + LoadK + Call(B=2, C=1) -> 1 条 ----
-        if (op == getglobal_op || op == getglobalstr_op)
-            && i + 1 < n_insts
-            && i >= freeze_until
-            && !jump_targets.contains(&(i + 1))
-        {
-            // i == 0 是函数入口，没有前驱指令，控制流只能从这里开始，天然安全；
-            // i > 0 则要求前一条指令一定会顺序落入本条（不会跳走、不会跳过本条）。
-            let prev_falls_through = if i == 0 {
-                true
-            } else {
-                let prev_real = inverse_opcode_map[raw_insts[i - 1].0 as usize];
-                !SKIP_NEXT_OPS.contains(&prev_real)
-                    && !REL_JUMP_OPS.contains(&prev_real)
-                    && !NO_FALLTHROUGH_OPS.contains(&prev_real)
-            };
-            if prev_falls_through {
-                if let Some(&slot) = builtin_rewrite.get(&(b as usize)) {
-                    // 族二：builtin-load + GETTABLE(A_dst, B=builtin寄存器, C=RK)。
-                    let (op2, a2, b2, c2) = raw_insts[i + 1];
-                    let fslot2 = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() + slot_perm[slot];
-                    if inverse_opcode_map[op2 as usize] == 6 && b2 == a as u32 {
-                        let key_alive = c2 < BITRK || !omit_const.contains(&((c2 - BITRK) as usize));
-                        let fused_vals = fused_map.get(fslot2).map(|v| v.as_slice()).unwrap_or(&[]);
-                        if key_alive && !fused_vals.is_empty() {
-                            let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
-                            let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                            let a_enc = (a2 as u32).wrapping_add(mag);
-                            let key = remap_rk(c2);
-                            let slot_value = slot_perm[slot] as u32;
-                            // Handler 的逻辑 B=槽号、逻辑 C=表键；奇数魔数在写侧预交换。
-                            let (fb0, fc0) = if mag % 2 == 1 { (key, slot_value) } else { (slot_value, key) };
-                            let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                            let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                            let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-                            let mag_file = g18 ^ kp18;
-                            w.extend_from_slice(&mag_file.to_le_bytes());
-                            w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                            w.extend_from_slice(&fb.to_le_bytes());
-                            w.extend_from_slice(&fc.to_le_bytes());
-                            inst_junk(w, mag_file, rng);
-                            fused_used.insert(fslot2);
-                            fused_count += 1;
-                            pc18 += 1;
-                            let r718 = roll18.rotate_left(7);
-                            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-                            chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                            if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
-                            if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
-                            fused_dead.insert(i + 1);
-                            fused_dead.insert(i + 2);
-                            i += 1;
-                            continue;
-                        }
-                    }
-                    if i + 2 < n_insts && !jump_targets.contains(&(i + 2)) {
-                    let (op1, a1, b1, _c1) = raw_insts[i + 1];
-                    let (op2, a2, b2, c2) = raw_insts[i + 2];
-                    let is_loadk = inverse_opcode_map[op1 as usize] == 1 && a1 as u32 == a as u32 + 1;
-                    let is_call_1arg_0ret =
-                        inverse_opcode_map[op2 as usize] == 28 && a2 == a && b2 == 2 && c2 == 1;
-                    // 常量必须没被 omit_const 抹掉，否则 CONSTS[b1+1] 会取错
-                    let const_alive = !omit_const.contains(&(b1 as usize));
-                    if is_loadk && is_call_1arg_0ret && const_alive {
-                        // 必须和 builtin-load 一样过 slot_perm：handler 是按
-                        // fused_map[perm[名字下标]] 注册的，指令侧要用同一个下标。
-                        let fused_vals = fused_map.get(slot_perm[slot]).map(|v| v.as_slice()).unwrap_or(&[]);
-                        if !fused_vals.is_empty() {
-                            let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
-                            // ⑮ 线格式：op=魔数、A=(a+魔数) u32、(B,C) 按魔数奇偶预交换
-                            let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                            let a_enc = (a as u32).wrapping_add(mag);
-                            let b1e = remap_bx(b1); // ③ 槽位洗牌：常量下标同步置换
-                            let slot_value = slot_perm[slot] as u32;
-                            // Handler 的逻辑 B=槽号、逻辑 C=常量索引；奇数魔数在写侧预交换。
-                            let (fb0, fc0) = if mag % 2 == 1 { (b1e, slot_value) } else { (slot_value, b1e) };
-                            let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                            let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                            let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-                            let mag_file = g18 ^ kp18;
-                            w.extend_from_slice(&mag_file.to_le_bytes());
-                            w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                            w.extend_from_slice(&fb.to_le_bytes());
-                            w.extend_from_slice(&fc.to_le_bytes()); // 常量下标搬进 C
-                            inst_junk(w, mag_file, rng);
-                            fused_used.insert(slot_perm[slot]);
-                            fused_count += 1;
-                            pc18 += 1;
-                            let r718 = roll18.rotate_left(7);
-                            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-                            chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                            if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
-                            if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
-                            fused_dead.insert(i + 1);
-                            fused_dead.insert(i + 2);
-                            i += 1; // i+1 / i+2 照常写出，成为永不执行的死槽
-                            continue;
-                        }
-                    }
-                    }
-                }
-            }
-        }
-
-        if op == getglobal_op || op == getglobalstr_op {
-            if let Some(slot) = builtin_rewrite.get(&(b as usize)) {
-                let op_index = crate::VM::Opcodes::builtins::BUILTIN_OP_BASE + slot_perm[*slot];
-                let mapped_vals = builtin_map.get(op_index).map(|v| v.as_slice()).unwrap_or(&[]);
-                let selected_op = if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op_index as u32 };
-                let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                let a_enc = (a as u32).wrapping_add(mag);
-                let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                let mag_file = g18 ^ kp18;
-                w.extend_from_slice(&mag_file.to_le_bytes()); w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                let slot_value = slot_perm[*slot] as u32;
-                let (fb0, fc0) = if mag % 2 == 1 { (0u32, slot_value) } else { (slot_value, 0u32) };
-                w.extend_from_slice(&(((fb0 ^ cb18) ^ (g18 ^ ki1)) ^ kb).to_le_bytes()); w.extend_from_slice(&(((fc0 ^ cc18) ^ (g18 ^ ki2)) ^ kc).to_le_bytes());
-                inst_junk(w, mag_file, rng);
-                pc18 += 1; // 槽号 <128，不会被常量折叠扫描识别
-                let r718 = roll18.rotate_left(7);
-                roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-                chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                i += 1;
-                continue;
-            }
-        }
         // ---- SuperOperator 族三/四：取字段 + 调用（目标二第 2 条）----
         // 族三：SELF(A,B,C) + CALL(A,2,1) —— 零参方法调用（`o:m()` 形态）
         // 族四：GETTABLE(A,B,C) + CALL(A,1,1) —— 零参点调用（`t.f()` 形态）
@@ -530,10 +357,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             };
             if let Some(fidx) = fam {
                 if !skip_here && prev_falls_through {
-                    let b_alive = b < BITRK || !omit_const.contains(&((b - BITRK) as usize));
-                    let c_alive = c < BITRK || !omit_const.contains(&((c - BITRK) as usize));
                     let fused_vals = fused_map.get(fidx).map(|v| v.as_slice()).unwrap_or(&[]);
-                    if b_alive && c_alive && !fused_vals.is_empty() {
+                    if !fused_vals.is_empty() {
                         let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
                         let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
                         let a_enc = (a as u32).wrapping_add(mag);
@@ -602,14 +427,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     if is_jmp_after {
                         if let Some(oth_raw) = other_raw {
                             // B 是寄存器域（GETTABLE.b_mode=REG）、C 是 RK：常量域照旧洗牌映射
-                            let c_alive = c < BITRK || !omit_const.contains(&((c - BITRK) as usize));
-                            let oth = if oth_raw >= BITRK {
-                                let oi = (oth_raw - BITRK) as usize;
-                                if omit_const.contains(&oi) { None } else { Some(remap_rk(oth_raw)) }
-                            } else { Some(oth_raw) };
+                            let oth = if oth_raw >= BITRK { remap_rk(oth_raw) } else { oth_raw };
                             let fused_vals = fused_map.get(crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 2)
                                 .map(|v| v.as_slice()).unwrap_or(&[]);
-                            if let (true, Some(oth)) = (c_alive, oth) {
+                            if !fused_vals.is_empty() {
                                 if !fused_vals.is_empty() {
                                     let packed: u32 = (a as u32) | ((oth & 0x1FF) << 8)
                                         | ((cond & 1) << 17) | ((gap & 0xFF) << 18);
@@ -706,11 +527,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         i += 1;
     }
 
-    // 反混淆判据③续：死指令本体。排在真实指令流之后（最后一条 RETURN 之后，
-    // 任何跳转目标都 ≤ 原指令数，控制流不可能进入）；魔数取自本表真实别名，
-    // A 域取高于活跃寄存器区的随机值（<128，不碰 RK 常量域），B/C 取 <128 的
-    // 寄存器态值（解码后 <128 ⇒ 永不被折叠扫描当成常量引用）。R 链照常推进
-    // （读侧 body_consts 扫描会重放全部数组项，含死指令），折叠表不受污染。
+    // 死指令写在真实指令尾部；前 dead_count 条 ADD 的 C 域分别指向混排数字诱饵。
+    // 尾段没有任何控制流入边，但写侧/读侧都完整推进指令链、引用折叠与常量 MAC。
     {
         let mut alias_mags: Vec<u32> = Vec::new();
         for lst in mapped_opcodes.iter() {
@@ -719,12 +537,25 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             }
         }
         if alias_mags.is_empty() { alias_mags.push(0x0123_4567); }
+        let add_opcode = inverse_opcode_map.iter().position(|&real| real == OpCode::Add as u8);
+        let add_alias = add_opcode
+            .and_then(|idx| mapped_opcodes.get(idx))
+            .and_then(|aliases| aliases.first())
+            .copied()
+            .unwrap_or(OpCode::Add as u32);
+        let add_mag = op_magic.get(&add_alias).copied().unwrap_or(add_alias);
         let lo = (max_stack as u32 + gshift_p as u32 + 1).min(120);
-        for _ in 0..dead_count {
-            let mag = alias_mags[rng.random_range(0..alias_mags.len())];
+        for dead_idx in 0..dead_count {
             let a_dead = rng.random_range(lo..128u32);
-            let b_dead = rng.random_range(0..128u32);
-            let c_dead = rng.random_range(0..128u32);
+            let (mag, b_dead, c_dead) = if let Some(&decoy_slot) = decoy_slots.get(dead_idx) {
+                // ADD 的 C 域指向一个混排数字诱饵；指令只存在于不可达尾段。
+                // B 保持寄存器域，C 使用 BITRK+槽号，因此读写两侧折叠扫描会
+                // 将该引用与真实 RK 引用完全同样地纳入 fold/R 链。
+                (add_mag, gshift_p as u32, BITRK + decoy_slot)
+            } else {
+                (alias_mags[rng.random_range(0..alias_mags.len())],
+                 rng.random_range(0..128u32), rng.random_range(0..128u32))
+            };
             let a_enc = a_dead.wrapping_add(mag);
             let (fb0, fc0) = if mag % 2 == 1 { (c_dead, b_dead) } else { (b_dead, c_dead) };
             let (eo18, ca18, cb18, cc18) = ch_split(chain18);
@@ -740,87 +571,57 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             let r718 = roll18.rotate_left(7);
             roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
             chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
+            if fb0 > 127 && fc_pb(mag) {
+                let fold_slot = fb0 - 128;
+                let e = fold_map.entry(fold_slot).or_insert(0u32);
+                *e = e.wrapping_add(fc_f(pc18));
+                roll_map.insert(fold_slot, roll18);
+            }
+            if fc0 > 127 && fc_pc(mag) {
+                let fold_slot = fc0 - 128;
+                let e = fold_map.entry(fold_slot).or_insert(0u32);
+                *e = e.wrapping_add(fc_f(pc18));
+                roll_map.insert(fold_slot, roll18);
+            }
         }
     }
     // ⑰ 组字节先行（组=本原型的参数组下标），然后逐条内联密文：
-    // 字符串=tag+长度前缀密文；数字=tag+8B 密文。nonce 的池下标改用
-    // **节内槽位号**（与 Lua 侧 pos-1 一致）；同值复用同一 (blob,li)。
+    // 字符串=tag+长度前缀密文；数字=tag+8B 密文。每槽按自己的槽号派生 nonce，
+    // 不复用其他槽的密文，以保证洗牌后的折叠键与运行期解密键严格一致。
     w.push(group as u8);
-    // ㉓-C 死常量：每原型追加随机个诱饵槽（nil/bool/num 混排，blob=随机字节——
-    // 惰性解码下诱饵永不被访问即永不解密），常量槽数量/节尺寸不再对应真实使用。
-    // 诱饵槽排在真实槽之后，指令的 RK 引用不可能到达（li<真实数），无副作用。
-    let d_count18: u32 = rng.random_range(0..=1 + (const_count as usize).min(24) as u32);
-    w.extend_from_slice(&((const_count + d_count18).to_le_bytes()));
-    // ③ 槽位洗牌落盘：第 slot 槽写原常量 inv_perm[slot]；nonce/折叠键仍用
-    // 槽位号（=指令侧重映射后的操作数值，读写两侧同式）
-    let mut inv_perm: Vec<usize> = vec![0; const_count as usize];
-    for (oi, &ppos) in cperm.iter().enumerate() { inv_perm[ppos as usize] = oi; }
+    // 常量记录按同一混排布局发射。诱饵使用有效 f64 明文，并与真实数值常量
+    // 共用 fold/R 派生、ChaCha 加密和聚合 MAC；其引用仅位于不可达尾部。
+    w.extend_from_slice(&total_const_count.to_le_bytes());
     let mut slot: u32 = 0;
-    // ③ 汇总校验器：每常量只**累计**进一个整函数的聚合值（不再逐常量落盘校验和）。
-    // 聚合值最后落在远离常量节的元数据槽（lines 槽：计数=1 + 4B 值），
-    // 读侧在常量态末尾才比对，失败时整体投毒——「全对或全错」。
+    // ③ 汇总校验器：每个非 nil 记录（含诱饵）都按落盘顺序累计；读侧使用同式。
     let mut agg18: u32 = 0;
-    let mut seen: std::collections::HashMap<(Vec<u8>, u32, u32), (u8, Vec<u8>, u32)> = std::collections::HashMap::new();
-    for pos in 0..const_count as usize {
-        let idx = inv_perm[pos];
-        let (c_type, bytes) = &local_consts[idx];
-        if omit_const.contains(&idx) {
-            w.push(tag_map[0]); // ㉓-B 省略槽 tag 逐 build 随机
-            slot += 1;
-            continue;
-        }
+    for layout_entry in &const_layout {
+        let (c_type, bytes) = match *layout_entry {
+            ConstantSlot::Source(idx) => (local_consts[idx].0, local_consts[idx].1.as_slice()),
+            ConstantSlot::Decoy(idx) => (2, decoy_consts[idx].as_slice()),
+        };
         match c_type {
             0 => { w.push(tag_map[0]); }
-            // ③-2 统一加密：bool 不再裸字节——按 0.0/1.0 双精度走 knum 加密
-            // 管线（8B 密文），线上形态与数字槽完全一致
+            // bool 也走 8 字节 double 密文管线，线上 tag 与数字结构一致。
             1 | 2 | 3 => {
-                // #3 折叠 + ㉓-A R 链混入：nonce=[盐^roll^F, r7^(槽*6+kind), 盐^rotl7(r7)]
-                // roll=最后引用本槽指令之后的 R 状态（未引用槽=链末值）——常量解密
-                // 依赖解释（指令流文件值），不依赖槽位号直传
                 let fold = fold_map.get(&slot).copied().unwrap_or(0u32);
                 let rl18 = roll_map.get(&slot).copied().unwrap_or(roll18);
                 let r7l18 = rl18.rotate_left(7);
-                let kind = if *c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
+                let kind = if c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
                 let s118 = enc.salts[group] ^ rl18 ^ fold;
                 let s218 = r7l18 ^ slot.wrapping_mul(6).wrapping_add(kind);
                 let s318 = enc.salts[group] ^ r7l18.rotate_left(7);
-                let entry = match seen.get(&(bytes.clone(), fold, rl18)) {
-                    Some(e) => e.clone(),
-                    None => {
-                        let li = slot;
-                        let payload18: Vec<u8> = if *c_type == 1 {
-                            let dv: f64 = if bytes[0] != 0 { 1.0 } else { 0.0 };
-                            dv.to_le_bytes().to_vec()
-                        } else { bytes.clone() };
-                        let blob = chacha_xor_layout(&enc.keys[group], [s118, s218, s318], &payload18, &enc.layout[group]);
-                        seen.insert((bytes.clone(), fold, rl18), (*c_type, blob.clone(), li));
-                        (*c_type, blob, li)
-                    }
-                };
-                w.push(tag_map[*c_type as usize]);
-                if *c_type == 3 { write_string(w, &entry.1); } else { w.extend_from_slice(&entry.1); }
-                // ③ 每常量 MAC 只累计进整函数聚合（与读侧 vmac 同式；折叠常数 31、+1）
-                let mac18 = const_mac18(&entry.1, slot, fold, rl18, fc18);
+                let payload18: Vec<u8> = if c_type == 1 {
+                    let dv: f64 = if bytes[0] != 0 { 1.0 } else { 0.0 };
+                    dv.to_le_bytes().to_vec()
+                } else { bytes.to_vec() };
+                let blob = chacha_xor_layout(&enc.keys[group], [s118, s218, s318], &payload18, &enc.layout[group]);
+                w.push(tag_map[c_type as usize]);
+                if c_type == 3 { write_string(w, &blob); } else { w.extend_from_slice(&blob); }
+                let mac18 = const_mac18(&blob, slot, fold, rl18, fc18);
                 agg18 = agg18.wrapping_mul(31).wrapping_add(mac18).wrapping_add(1);
             }
             _ => panic!(),
-        }
-        slot += 1;
-    }
-
-    // ㉓-C 诱饵槽发射（排在真实槽后；blob 随机字节即可——永不解密）。
-    // ③ 读侧会逐槽读回并累计汇总值，故诱饵也必须进同一聚合：折叠键=0（读侧
-    // ft 无此槽→0）、R 链值=链末（读侧 rt 回落到 rf）——与读侧同入参。
-    for _ in 0..d_count18 {
-        match rng.random_range(0..5) {
-            0 => { w.push(tag_map[0]); } // nil：仅占一个槽号（读侧不累计）
-            t => {
-                w.push(tag_map[if t == 1 { 1 } else { 2 }]);
-                let blob: Vec<u8> = (0..8).map(|_| rng.random_range(0..=255u8)).collect();
-                w.extend_from_slice(&blob);
-                let mac18 = const_mac18(&blob, slot, 0u32, roll18, fc18);
-                agg18 = agg18.wrapping_mul(31).wrapping_add(mac18).wrapping_add(1);
-            }
         }
         slot += 1;
     }
@@ -837,7 +638,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         pidx18 += 1;
         let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, builtin_map, fused_map, fused_used, setglobal_targets, getglobal_op, getglobalstr_op, inverse_opcode_map, slot_perm, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0, alloc18);
+        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, fused_map, fused_used, inverse_opcode_map, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0, alloc18);
         // 目标二③（函数边界模糊化，第一部分）：长度前缀计入随机尾部填充，
         // 每个原型块尾部追加 0..16 字节随机诱饵——长度不再等于内容长度，边界处
         // 出现的是指令样随机字节。读侧只按长度跳过（body_protos），无需同步改动；

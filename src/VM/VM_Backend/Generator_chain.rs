@@ -21,7 +21,6 @@ pub(super) struct ChainIn {
     pub at: AntiTamperResult,
     pub keys: CipherKeys,
     pub enc: EncCtx,
-    pub builtin_slot_perm: Vec<usize>,
     pub sigma: [u32; 4],
     pub fn_a3: String,
     pub fn_bxor: String,
@@ -83,10 +82,10 @@ pub(super) struct ChainIn {
     pub payload_str: String,
     pub pf_cnt18: String,
     pub pf_consts: String,
+    pub const_path_key: String,
     pub sk_setup: String,
     pub t: String,
     pub x: String,
-    pub var_bname: String,
     pub var_boot_env: String,
     pub var_l: String,
     pub var_state_flag: String,
@@ -142,7 +141,7 @@ pub(super) struct ChainMid {
 pub(super) fn build_chain(x: ChainIn) -> String {
     let ChainIn {
         rng: mut rng, at: mut at, keys, enc,
-        builtin_slot_perm, sigma,
+        sigma,
         fn_a3,
         fn_bxor,
         fn_c,
@@ -227,7 +226,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         sk_setup,
         t,
         x,
-        var_bname,
+        const_path_key,
         var_boot_env,
         var_l,
         var_state_flag,
@@ -321,7 +320,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         };
         let (qS, qA, qB, qC, qD) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let (r1e, r2e, r3e, r4e) = (r_lit(&mut rng, 16), r_lit(&mut rng, 12), r_lit(&mut rng, 8), r_lit(&mut rng, 7));
-        // 第 3 项 D：单根 K0 与 KDF 函数——四组与 boot 的全部密钥材料都从这一份
+        // 第 3 项 D：单根 K0 与 KDF 函数——四组的全部密钥材料都从这一份
         // 根现算。根以 token 掩码形态落盘（X/掩码分表、槽位洗牌、运行期异或还原）；
         // KDF 是纯算术（32 位异或实现 + 算术旋转 + 16 位拆乘），与 Rust 侧逐位同式。
         // 位置：在 xor32/rotl32 定义之后（KDF 体引用这两个局部），且在各簇之前。
@@ -332,7 +331,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             (rt, f)
         };
         // 根装配辅料（X/掩码/槽位表 + 异或实现）只在装配期用：装完即销毁；
-        // 值表本身必须常驻（各簇/内建簇的流闭包以 upvalue 捕获它）
+        // 值表本身必须常驻（各常量解码簇的流闭包以 upvalue 捕获它）
         block_chacha_setup.push_str(&crate::VM::VM_Backend::Generator_kdf::dispose_stmt(&mut rng, &root_tok.aux));
         let kdf_name = rng.name();
         let kdf_m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
@@ -515,7 +514,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 rng.obfuscate_num((ly.rho[i] + 1) as i64, 1, &keys)
             };
             let (o12, o13, o14, o15) = (ov(&mut rng, 12), ov(&mut rng, 13), ov(&mut rng, 14), ov(&mut rng, 15));
-            // ㉒ 簇内 cb 同 boot 域处理：焊接混合模数 + 两条 16 环游标化。
+            // ㉒ 簇内 cb 与通用解码路径一致：焊接混合模数 + 两条 16 环游标化。
             let gmix_v = mk_m(&mut rng);
             let gmix_e = weld.dst();
             let gmix_weld = format!("local {};", gmix_e) + &weld.weld(&mut rng, &gmix_e, &format!("({})", gmix_v));
@@ -617,6 +616,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             let (v_num_i, v_num_g) = (rng.name(), rng.name());
             let fd18n = rng.name();
             let rl18n = rng.name();
+            let (num_path_arg, num_count_arg) = (rng.name(), rng.name());
             // 第 2 项：dec_num 形态池四型 → 本簇抽两型同时发射 + 运行期 h 选路
             let (dn_f0, dn_f1) = {
                 let a = rng.range(0, 4);
@@ -630,12 +630,14 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decnum(
                     &mut rng, f, nm.as_str(), sm_p.as_str(), knum_var.as_str(), vb.as_str(),
                     vs.as_str(), ve.as_str(), vm.as_str(), f64_parts.join("+"),
-                    v_num_i.as_str(), v_num_g.as_str(), fd18n.as_str(), rl18n.as_str()));
+                    v_num_i.as_str(), v_num_g.as_str(), fd18n.as_str(), rl18n.as_str(),
+                    num_path_arg.as_str(), num_count_arg.as_str(), fn_bxor.as_str()));
             }
             cl.push_str(&bind2(&mut rng, out_dn.as_str(), dn_a.as_str(), dn_b.as_str()));
             let (v_str_i, v_str_g, v_str_s) = (rng.name(), rng.name(), rng.name());
             let fd18s = rng.name();
             let rl18s = rng.name();
+            let (str_path_arg, str_count_arg) = (rng.name(), rng.name());
             let (ds_f0, ds_f1) = {
                 let a = rng.range(0, 4);
                 let mut b = rng.range(0, 3);
@@ -647,7 +649,8 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             for (f, nm) in [(ds_f0, ds_a.clone()), (ds_f1, ds_b.clone())] {
                 cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
                     &mut rng, f, nm.as_str(), sm_s.as_str(), kstr_var.as_str(),
-                    v_str_s.as_str(), v_str_i.as_str(), v_str_g.as_str(), fd18s.as_str(), rl18s.as_str()));
+                    v_str_s.as_str(), v_str_i.as_str(), v_str_g.as_str(), fd18s.as_str(), rl18s.as_str(),
+                    str_path_arg.as_str(), str_count_arg.as_str(), fn_bxor.as_str(), fn_s_byte.as_str()));
             }
             cl.push_str(&bind2(&mut rng, out_ds.as_str(), ds_a.as_str(), ds_b.as_str()));
             // 出口赋给簇外可见名。注意：派生表（密钥字表）**不能**在这里销毁——
@@ -754,7 +757,6 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             at,
             keys,
             enc,
-            builtin_slot_perm,
             sigma,
             fn_a3,
             fn_bxor,
@@ -819,7 +821,7 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             sk_setup,
             t,
             x,
-            var_bname,
+            const_path_key,
             var_boot_env,
             var_l,
             var_state_flag,

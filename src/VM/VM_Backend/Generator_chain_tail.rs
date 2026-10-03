@@ -1,8 +1,7 @@
 //! Generator_chain 的后半段：原型解码状态机（body_init/insts/consts/protos/debug/ret）、
-//! 行完整性守卫、Part 洗牌拼接、Boot 内建名解密簇与最外层启动壳。
+//! 行完整性守卫、Part 洗牌拼接与最外层启动壳。
 //! 从 Generator_chain.rs 拆出（守单文件 80 KB 上限，保持两文件各约 42 KB）。
 
-use crate::VM::Opcodes;
 use super::Generator_util::{ControlFlowBuilder, GenRng};
 use super::Generator_chain::{ChainIn, ChainMid};
 
@@ -27,7 +26,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
     } = mid;
     let ChainIn {
         rng: mut rng, at: mut at, keys, enc,
-        builtin_slot_perm, sigma,
+        sigma,
         fn_a3,
         fn_bxor,
         fn_c,
@@ -112,7 +111,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         sk_setup,
         t,
         x,
-        var_bname,
+        const_path_key,
         var_boot_env,
         var_l,
         var_state_flag,
@@ -121,7 +120,6 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         weld: mut weld,
         uni: mut uni,
     } = x;
-    const CG: usize = super::Generator_chain::CG_GROUPS;
     let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
         let k1 = rng.range(0x100, 0xFFFF) as u32;
         let k2 = rng.range(0x100, 0xFFFF) as u32;
@@ -268,7 +266,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
                 fn_a5.as_str(), fn_read_dec.as_str(), var_enc_c.as_str(), var_cache.as_str(),
-                fn_c.as_str(), pf_consts.as_str(),
+                fn_c.as_str(), pf_consts.as_str(), const_path_key.as_str(),
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
                 &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
@@ -595,191 +593,11 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         }
 
         out.push_str(&line_guard(&mut rng, &mut uni, false));
-        // ㉘D7 尾部形式改写：reg/env/名暂存三声明与解码调用互不依赖，前移到解码
-        // 之前；解码调用包一层函数边界，打破「解码→触发→取环境」的平铺调用链形态
-        out.push_str(&format!(" {} = {{}}; local {} = (getfenv and getfenv() or _ENV or _G); local {}; ", var_builtin_reg, var_boot_env, var_bname));
+        // ㉘D7 尾部形式改写：空的兼容 registry 与当前环境捕获前移到解码之前；
+        // 解码调用包一层函数边界，打破「解码→触发→取环境」的平铺调用链形态。全局名已走普通常量。
+        out.push_str(&format!("{}={{}}; local {}=(getfenv and getfenv() or _ENV or _G); ", var_builtin_reg, var_boot_env));
         out.push_str(&format!("local main_chunk=(function() return {}() end)(); ", fn_decode_chunk));
         out.push_str(&at.trigger);
-        // ⑰ 内建名专用簇：独立 key/salt/kind，密文以混合转义字面量内嵌，
-        // 与四组常量簇完全分离——导出任何常量簇参数都拿不到内建名
-        {
-            // 第 3 项 D：boot 簇也走单根派生——组号 = CG，密钥/盐/kind 全由 K0 现算
-            let dgb = crate::VM::VM_Backend::Generator_kdf::derive_group(&mut rng, &keys, kdf_name.as_str(), &root_fetch, CG);
-            let bges = crate::VM::VM_Backend::Generator_chacha::group_keys(&enc.root, CG as u32);
-            let bkey: [u32; 8] = bges.key;
-            let bsalt: u32 = bges.salt;
-            let bkind: u32 = bges.knum;
-            // 第 2 项：内建名簇同样带自己的状态布局（ρ / 轮数 / counter 步进）
-            let blay = crate::VM::VM_Backend::Generator_chacha::ChaChaLayout::new(&mut rng);
-            let binv = blay.inv();
-            let mut boot_lits: Vec<String> = Vec::with_capacity(Opcodes::builtins::BUILTIN_NAMES.len());
-            for (i, name) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
-                let blob = crate::VM::VM_Backend::Generator_chacha::stream_xor(&bkey, [bsalt, i as u32, bkind], name.as_bytes(), &blay);
-                boot_lits.push(format!("\"{}\"", crate::VM::VM_Backend::Generator_util::lua_mixed(&blob)));
-            }
-            let (bk, bs, bcb, bsm, bdec, bpt) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-            // 第 3 项 D：盐同样由根现算（KDF 值直接落名，无 X/掩码表）
-            let salt_decl_b = format!("local {bs}={s}; ", bs = bs, s = dgb.salt);
-            // ① sigma 还原与密钥解耦（只由本簇独立随机数还原，无密钥锚点）
-            let sm32b = rng.name();
-            let sm32bv = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
-            let sigma_items_b: Vec<String> = (0..4)
-                .map(|i| {
-                    let r = rng.next();
-                    let d = sigma[i].wrapping_sub(r);
-                    format!("(({}+{})%{m32})", rng.obfuscate_num(d as i64, 1, &keys), rng.obfuscate_num(r as i64, 1, &keys), m32 = sm32b)
-                })
-                .collect();
-            let sigma_lua = sigma_items_b.join(",");
-            let bkey_fetch = dgb.fetch.join(",");
-            let btm = rng.name();
-            // 逻辑序 16 字 → 物理位置序（boot 簇同款）
-            let mut blogical: [String; 16] = std::array::from_fn(|_| String::new());
-            for i in 0..4 { blogical[i] = sigma_items_b[i].clone(); }
-            for j in 0..8 { blogical[4 + j] = dgb.fetch[j].clone(); }
-            for i in 12..16 { blogical[i] = "0X0".to_string(); }
-            // ㉘D7 簇头声明互无依赖者洗牌发射（密钥 token 声明与盐有先后依赖，合并为一条）
-            let mut cluster_decls: Vec<String> = vec![
-                format!("local {m32}={m32v}; ", m32 = sm32b, m32v = sm32bv),
-                format!("local {bp}={{{lits}}}; ", bp = bpt, lits = boot_lits.join(",")),
-                dgb.decl.clone(),
-                salt_decl_b,
-            ];
-            let (kd_a, kd_b) = (cluster_decls[2].clone(), cluster_decls[3].clone());
-            cluster_decls.truncate(2);
-            rng.shuffle(&mut cluster_decls);
-            cluster_decls.push(kd_a);
-            cluster_decls.push(kd_b);
-            for d in &cluster_decls { out.push_str(d); }
-            // 状态模板（指纹选路第二支整表拷贝）——必须在 sm32/密钥 token 声明之后
-            out.push_str(&format!("local {tm}={}; ",
-                crate::VM::VM_Backend::Generator_chacha::state_literal(&blay, &blogical), tm = btm));
-            let mut bdirect = blogical.clone();
-            bdirect[12] = "ctr".to_string();
-            bdirect[13] = "n1".to_string();
-            bdirect[14] = "n2".to_string();
-            bdirect[15] = "n3".to_string();
-            let bs_lit = crate::VM::VM_Backend::Generator_chacha::state_literal(&blay, &bdirect);
-            let bov = |rng: &mut GenRng, i: usize| -> String {
-                rng.obfuscate_num((blay.rho[i] + 1) as i64, 1, &keys)
-            };
-            let (bo12, bo13, bo14, bo15) = (bov(&mut rng, 12), bov(&mut rng, 13), bov(&mut rng, 14), bov(&mut rng, 15));
-            // ㉒② 焊接混合模数（cb 每 64 字节块重入——第二次起逻辑无分支）；
-            // ㉒① 两条 16 环 → 4 态游标机（块内局部名 wq 双字母避开遮蔽池）。
-            let mix_m_v = mk_m(&mut rng);
-            let mix_e = weld.dst();
-            let mix_weld = format!("local {};", mix_e) + &weld.weld(&mut rng, &mix_e, &format!("({})", mix_m_v));
-            let s1_walk = {
-                let off = rng.range(0, 100);
-                let unit = |iv: &str| format!("o[{iv}]=s[{iv}]; ", iv = iv);
-                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
-            };
-            // ⑤ u32 拆分字节权逐构建派生
-            let (bp2, bp3) = (rng.name(), rng.name());
-            let (bp2v, bp3v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
-            let bmap = rng.name();
-            let bbase: Vec<String> = (0..16).map(|p| {
-                let k = rng.range(0x40, 0xFFFF) as u32;
-                format!("(0X{:X}-0X{:X})", (binv[p] * 4 + 1) as u32 + k, k)
-            }).collect();
-            out.push_str(&format!("local {bmap}={{{lits}}}; ", bmap = bmap, lits = bbase.join(",")));
-            let bi_nb = rng.name();
-            let s2_walk = {
-                let off = rng.range(0, 100);
-                let me = mix_e.clone();
-                let bm = bmap.clone();
-                let bn = bi_nb.clone();
-                let unit = |iv: &str| format!("local {bi}={bm}[{iv}]; local wq=(s[{iv}]+o[{iv}])%{me}; out[{bi}]=wq%256; out[{bi}+0X1]=math_floor(wq/256)%256; out[{bi}+0X2]=math_floor(wq/{p2})%256; out[{bi}+0X3]=math_floor(wq/{p3})%256; ", me = me, iv = iv, bi = bn, bm = bm, p2 = bp2, p3 = bp3);
-                crate::VM::VM_Backend::Generator_util::cursor_walk_static(&mut rng, None, off, 1, 16, 4, None, &unit)
-            };
-            out.push_str(&format!(
-                "local function {cb}(n1,n2,n3,ctr) {mixw} local s; if ({h}%0X3)==0X0 then s={lit} else s={{}}; for {ti}=0X1,0X10 do s[{ti}]={tm}[{ti}] end; s[{o12}]=ctr; s[{o13}]=n1; s[{o14}]=n2; s[{o15}]=n3 end; local o={{}}; local {p2}={p2v}; local {p3}={p3v}; {w1} {rounds} local out={{}}; {w2} return out end; ",
-                cb = bcb, h = h_var, lit = bs_lit, tm = btm, ti = rng.name(), mixw = mix_weld, w1 = s1_walk, w2 = s2_walk,
-                o12 = bo12, o13 = bo13, o14 = bo14, o15 = bo15,
-                p2 = bp2, p3 = bp3, p2v = bp2v, p3v = bp3v,
-                rounds = mk_rounds(&mut rng, fn_qr.as_str(), &blay)));
-            // 第 2 项：boot 簇 counter 同样走奇步长线性表；第 3 项 C：块链式解密
-            // （与四个载荷簇同一套「上一块明文喂下一块 counter」规则）
-            let bctr0e = rng.obfuscate_num(blay.ctr0 as i64, 1, &keys);
-            let bstepe = rng.obfuscate_num(blay.step as i64, 1, &keys);
-            let pz_b = poison_ks(&mut rng, "blk");
-            {
-                let (bn, bpos, bctr, bq, bfw, bww, blim) =
-                    (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-                out.push_str(&format!(
-                    "local function {sm}(e,pool_idx,kind) local {n}=#e; local out={{}}; local {pos}=0X1; local {ctr}={c0};                      while {pos}<={n} do local blk={cb}({sl},pool_idx,kind,{ctr}); {pz} local {lim}={pos}+0X3F; if {lim}>{n} then {lim}={n} end                        local {q}=0X0; local {fw}=0X0; local {ww}=0X1;                        while {pos}<={lim} do {q}={q}+0X1; local p={xt}[{sb}(e,{pos})][blk[{q}]]; out[{pos}]=p; if {q}<=0X8 then {fw}=({fw}+p*{ww})%{m32} {ww}=({ww}*0X100)%{m32} end {pos}={pos}+0X1 end                        {ctr}=({ctr}+{st}+{fw})%{m32} end; return out end; ",
-                    sm = bsm, cb = bcb, sl = bs, c0 = bctr0e, pz = pz_b, m32 = sm32b, st = bstepe,
-                    xt = xor_tbl_var, sb = fn_s_byte,
-                    n = bn, pos = bpos, ctr = bctr, q = bq, fw = bfw, ww = bww, lim = blim));
-            }
-            let (v_str_i, v_str_g, v_str_s) = (rng.name(), rng.name(), rng.name());
-            let fd18b = rng.name(); // 哑形参：boot 域 bsm 是 3 参，fold/rl 实参多余即弃
-            let rl18b = rng.name();
-            // kind 取 dgb.knum：与写侧 `stream_xor(&bkey,[bsalt,i,bkind],…)` 的
-            // bkind（= bges.knum）必须同值；kstr 是载荷簇字符串解码器用的那个。
-            let (bkind_decl, bkind_lit) = (String::new(), dgb.knum.clone());
-            let _ = bkind;
-            out.push_str(&bkind_decl);
-            // 第 2 项：boot 簇 dec_str 同样两型发射 + 运行期按指纹选路
-            let (bd_f0, bd_f1) = {
-                let a = rng.range(0, 4);
-                let mut b = rng.range(0, 3);
-                if b >= a { b += 1; }
-                (a, b)
-            };
-            let bd_a = rng.name();
-            let bd_b = rng.name();
-            for (f, nm) in [(bd_f0, bd_a.clone()), (bd_f1, bd_b.clone())] {
-                out.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
-                    &mut rng, f, nm.as_str(), bsm.as_str(), bkind_lit.as_str(),
-                    v_str_s.as_str(), v_str_i.as_str(), v_str_g.as_str(), fd18b.as_str(), rl18b.as_str()));
-            }
-            out.push_str(&format!("local {b}=nil; ", b = bdec));
-            out.push_str(&bind2(&mut rng, bdec.as_str(), bd_a.as_str(), bd_b.as_str()));
-            // ㉒② 每个内建槽号过一次焊接构造：惰性缓存+大随机键+校验恒等式。
-            // 全块只声明一个单字母局部（do 域内复用——E 先是载荷槽、下一个内建又变
-            // 寄存器位），局部数不膨胀，命名维度消失。
-            let bi_e = weld.dst();
-            out.push_str(&format!("do local {};", bi_e));
-            // ㉘D6 内建名各次迭代互不依赖（各自写不同槽位、bname 仅暂存、焊接
-            // 构造按调用独立缓存）——迭代整体洗牌，消除 BUILTIN_NAMES 的固定枚举序
-            let mut builtin_stmts: Vec<String> = Vec::new();
-            for (i, _) in Opcodes::builtins::BUILTIN_NAMES.iter().enumerate() {
-                let slot = builtin_slot_perm[i];
-                let wslot_stmt = weld.weld(&mut rng, &bi_e, &(slot + 1).to_string());
-                builtin_stmts.push(format!(
-                    "{bname}={bdec}({bp}[{lidx}],{ridx}); {ws} {reg}[{we}]={benv}[{bname}]; if {reg}[{we}]==nil and getgenv then {reg}[{we}]=getgenv()[{bname}] end; ",
-                    bname = var_bname, bdec = bdec, bp = bpt, lidx = i + 1, ridx = i,
-                    ws = wslot_stmt, we = bi_e,
-                    reg = var_builtin_reg, benv = var_boot_env
-                ));
-            }
-            rng.shuffle(&mut builtin_stmts);
-            for stmt in &builtin_stmts { out.push_str(stmt); }
-            out.push_str(" end; ");
-            // ⑱ 用毕销毁（⑳.1 伪装化）：连续 X=nil 运行是指纹——每个变量换一种
-            // "取值赋值" 形态消化，nil 全部来自合法表达式的自然缺失：
-            // 槽位表取未用键 / 未命中补取(恒执行) / 空表取键 / or 链 /
-            // 条件式恒 nil / 间接索引，混入常见池取图案，无 =nil 字面赋值
-            let (g1, g2, g3) = (rng.name(), rng.name(), rng.name());
-            let h1 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
-            let h2 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
-            let h3 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
-            let h4 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
-            let h5 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
-            let h6 = format!("0X{:X}", rng.range(0x1000, 0xFFFFF));
-            out.push_str(&format!(
-                "local {g1}={reg}[{h1}]; {bk}={g1}; if not {g1} then {bs}={reg}[{h2}] end; \
-                 local {g2}=({{}})[{h3}]; {bcb}={g2}; {bsm}={reg}[{h4}] or ({{}})[{h5}]; \
-                 {bdec}={bdec} and nil or {bdec}; local {g3}={reg}; {bpt}={g3}[({{}})[{h6}]]; ",
-                reg = var_builtin_reg, g1 = g1, g2 = g2, g3 = g3,
-                bk = bk, bs = bs, bcb = bcb, bsm = bsm, bdec = bdec, bpt = bpt,
-                h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5, h6 = h6));
-            // ② 内建名簇的 token 辅料（X/掩码/槽位表/异或实现/状态模板/kind）同样用毕销毁
-            let mut boot_aux = vec![btm.clone()];
-            boot_aux.push(bkind_lit.clone());
-            out.push_str(&crate::VM::VM_Backend::Generator_kdf::dispose_stmt(&mut rng, &boot_aux));
-        }
         // ㉑ thunk 快照：密文 thunk 常驻，明文可随时写回回收
         // ㉒① thunk 快照环 → 动态分段游标机（上界=运行期原型数，P 表在作用域）。
         let thunk_walk = {
@@ -791,7 +609,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         out.push_str(&thunk_walk);
         let fu = rng.name();
         
-        // ⑳.5 尾部探针：此前最后一个采样点在 parts 之后——main_chunk 解码/内建簇/
+        // ⑳.5 尾部探针：此前最后一个采样点在 parts 之后——main_chunk 解码/
         // thunk 快照/return 壳整段是"探针之下"的插入盲区（用户实测 print 插行未检出）。
         // 紧贴 return 再布一枚，把盲区压缩到 return 语句本身；⑤ fu 壳内最后一针
         // 封住 return 壳表达式内的语句缝隙。二者均在行 2 内，针式 :2: 一致。

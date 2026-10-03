@@ -17,13 +17,13 @@ pub(crate) static DBG_ARITH: bool = true;
 pub use super::Generator_util::{CipherKeys, GenRng};
 use super::Generator_util::{
     build_opcode_tree, rename_ident, rewrite_chunk,
-    scan_setglobal_targets, scan_used_opcodes, uses_ident, write_string, PayloadReader,
+    scan_used_opcodes, uses_ident, write_string, PayloadReader,
 };
 
 
 pub struct Generator { ctx: VmContext }
 
-/// ㉛ 载荷白化层的专用派生组号/字序号（不与四组常量簇、boot 簇（0..CG）冲突）。
+/// ㉛ 载荷白化层的专用派生组号/字序号（不与四组常量簇冲突）。
 pub(super) const WHITEN_GROUP: usize = 0x5A;
 pub(super) const WHITEN_WORD: u32 = 7;
 /// ㉛ 位置相关白化掩码（Rust 侧与产物内 Lua 侧逐位同式）：
@@ -80,14 +80,8 @@ impl Generator {
         let mut used_ops = HashSet::new();
         { let mut scan_reader = PayloadReader { data: payload, pos: 0 }; scan_used_opcodes(&mut scan_reader, &mut used_ops); }
 
-        let mut setglobal_targets: HashSet<Vec<u8>> = HashSet::new();
-        let setglobal_op = self.ctx.opcode_map[7];
-        let getglobal_op = self.ctx.opcode_map[5];
-        let getglobalstr_op = self.ctx.opcode_map[56];
         let mut inverse_opcode_map = [0u8; 90];
         for i in 0..90 { inverse_opcode_map[self.ctx.opcode_map[i] as usize] = i as u8; }
-        let builtin_slot_perm = Opcodes::builtins::slot_permutation(self.ctx.seed);
-        { let mut sg_reader = PayloadReader { data: payload, pos: 0 }; scan_setglobal_targets(&mut sg_reader, &mut setglobal_targets, setglobal_op); }
 
         let mut mapped_opcodes: [Vec<u32>; Opcodes::builtins::TOTAL_OPCODES] = std::array::from_fn(|_| Vec::new());
         let mut fused_opcodes: [Vec<u32>; Opcodes::builtins::FUSED_OP_COUNT] = std::array::from_fn(|_| Vec::new());
@@ -134,7 +128,7 @@ impl Generator {
         // 密文直接写进各原型常量节，中央 gs/gn 密文表废除
         const CG: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
         // 第 3 项 D：**单根派生**——另起一条原生流（Native Stream）取 32 字节密钥流
-        // 折成 K0（8 字），四组密钥/盐/kind 与 boot 的那套全部由 K0 经 KDF 现算：
+        // 折成 K0（8 字），四组密钥/盐/kind 全部由 K0 经 KDF 现算：
         // 产物里不再有「一组 8 个密钥字」的独立材料，只剩这一份 token 化的根，
         // 而推导过程在运行期才发生（静态读者要先复刻 Lua 的异或表/旋转语义）。
         let nat_k0 = crate::VM::VM_Backend::Generator_native::Native::new(&mut rng);
@@ -217,7 +211,7 @@ impl Generator {
         // 目标二③（第二部分）：全文件共用指令空间基址游标——根原型从一个小随机基址
         // 起步，每个原型（先序遍历）分到一段互不重叠的记录区间，段间留随机死槽。
         let mut alloc18: u32 = rng.range(4, 64) as u32;
-        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &mapped_opcodes, &fused_opcodes, &mut fused_used, &setglobal_targets, getglobal_op, getglobalstr_op, &inverse_opcode_map, &builtin_slot_perm, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18);
+        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -410,7 +404,7 @@ impl Generator {
         // 目标三②：计算式跳转的密钥源——n_kon 是 execute 入口从 KREG 取出的本原型
         // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
         let (n_kon, n_ka) = (rng.name(), rng.name());
-        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: format!("self[{}]", k_breg), builtin_mask: format!("self[{}]", k_bmask), builtin_bxor: fn_bxor2.clone(), ld_key: n_kon.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
+        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), env_ref: format!("self[{}]", k_env), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: format!("self[{}]", k_breg), builtin_mask: format!("self[{}]", k_bmask), builtin_bxor: fn_bxor2.clone(), ld_key: n_kon.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
         let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
 
         
@@ -845,6 +839,17 @@ impl Generator {
         let arrs = format!("{}, {}, {}, {}", var_opcodes, var_a_arr, var_b_arr, var_c_arr);
         block_execute_def.push_str(&format!("local {};{}={}[{}],{}[{}],{}[{}],{}[{}];", arrs, arrs, var_vm, k_ops, var_vm, k_aa, var_vm, k_bb, var_vm, k_cc));
         // pc/top 是**循环外**的局部变量
+        // 常量路径态采用 PC 势函数：每步按实际 next-PC 增量推进，合法分支在同一
+        // 汇合点、循环回边都归一到同一值；常量代理表只通过随机负键暂存此态。
+        let const_path_key = format!("(-0X{:X})", rng.range(0x10000, 0x7FFF_FFFF) as u32);
+        let const_path_state = rng.name();
+        let const_path_prev_pc = rng.name();
+        let const_path_mul = (rng.range(0x1001, 0xFFFF) as u32) | 1;
+        let const_path_add = rng.next();
+        let const_path_op_mix = (rng.range(0x101, 0xFFFF) as u32) | 1;
+        let const_path_a_mix = (rng.range(0x101, 0xFFFF) as u32) | 1;
+        let const_path_b_mix = (rng.range(0x101, 0xFFFF) as u32) | 1;
+        let const_path_c_mix = (rng.range(0x101, 0xFFFF) as u32) | 1;
         // ㉑ 保守版明文窗口变量：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         let (np21, md21, th21, tw21) = (rng.name(), rng.name(), rng.name(), rng.name());
         // ⑱.4 驻留收紧：水位步长从 0x8000~0x40000 降到 0x2000~0x8000——
@@ -857,6 +862,9 @@ impl Generator {
         let kreg_n = rng.name();
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
         block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, k_pc, var_vm, k_top));
+        block_execute_def.push_str(&format!(
+            "local {state}=({pc}*0X{mul:X}+0X{add:X})%0X100000000;",
+            state = const_path_state, pc = var_pc, mul = const_path_mul, add = const_path_add));
 
         // ⑱.4 数组驻留掩码：body_insts 存的是逐原型掩码值（K 从 kp/pb 派生，同式）。
         // 中危刀1 密钥分驻：pf_ld（仅掩码用）从 chunk 蒸发进弱键注册表 KREG（键=chunk）；
@@ -948,6 +956,9 @@ impl Generator {
             block_execute_def.push_str("while true do ");
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "true"));
             block_execute_def.push_str(&dispatch_state.guard);
+            block_execute_def.push_str(&format!(
+                "local {prev}={pc};",
+                prev = const_path_prev_pc, pc = var_pc));
 
             // ㉚ 目标①：取指改走 DC 缓存（元表前向填充=结构解码；单条公式全解作废）。
             // 条目={mag+Δ, a, B, C}（链偏移撤销+奇偶交换都在填充内完成）；
@@ -962,10 +973,19 @@ impl Generator {
             }
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
             block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
+            // 同一 PC 上的操作码与三个实际操作数混入本次常量态；分支汇合处因指令
+            // 记录固定而自动收敛，路径间不同的执行前缀则通过 PC 势函数统一归一。
+            block_execute_def.push_str(&format!(
+                "{vm}[{ck}][{key}]=({state}+op*0X{om:X}+inst_A*0X{am:X}+inst_B*0X{bm:X}+inst_C*0X{cm:X})%0X100000000;",
+                vm = var_vm, ck = k_consts, key = const_path_key, state = const_path_state,
+                om = const_path_op_mix, am = const_path_a_mix, bm = const_path_b_mix, cm = const_path_c_mix));
             block_execute_def.push_str(&format!("local {}=op+{};", dispatch_state.route_op, dispatch_state.bias));
 
             block_execute_def.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
             block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, &dispatch_state.route_op, &dispatch_state.bias, &keys, &mut rng));
+            block_execute_def.push_str(&format!(
+                "{state}=({state}+({pc}-{prev})*0X{mul:X})%0X100000000;",
+                state = const_path_state, pc = var_pc, prev = const_path_prev_pc, mul = const_path_mul));
             block_execute_def.push_str(&dispatch_state.update);
             block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
             // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
@@ -1057,7 +1077,7 @@ impl Generator {
 
         let block_decoder_script = decoder_script.replace("\n", " ");
         
-        let var_boot_env = rng.name(); let var_bname = rng.name();
+        let var_boot_env = rng.name();
 
         let fn_qr = rng.name();
         let fn_xor32 = rng.name();
@@ -1071,7 +1091,7 @@ impl Generator {
 
         // phase 2 已原样搬至 Generator_chain.rs（README 单文件 ≤ 80 KB 规则）。
         Generator_chain::build_chain(Generator_chain::ChainIn {
-            rng, at, keys, enc, builtin_slot_perm, sigma,
+            rng, at, keys, enc, sigma,
             var_whiten,
             var_whiten_pos,
             whiten_mul,
@@ -1080,7 +1100,7 @@ impl Generator {
             pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, var_a2,
             var_b, var_builtin_reg, var_chk, var_idx, var_junk, var_p, var_raw_p, var_tamper, var_vc, np21,
             md21, th21, tw21, rk21, kreg_n,
-            fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, sk_setup, t, x, var_bname, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
+            fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, const_path_key, sk_setup, t, x, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
             weld,
             uni,
         })

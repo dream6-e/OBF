@@ -132,15 +132,6 @@ pub fn token_value(rng: &mut GenRng, keys: &CipherKeys, v: u32, op: &str, h: &st
     (decl, t)
 }
 
-/// token 化到**指定名字**上（声明 `local <name>=…`）：给「用毕要统一销毁」的
-/// 场合（boot 域）用，名字由调用方指定，销毁语句才能指到同一个变量。
-pub fn token_value_as(rng: &mut GenRng, keys: &CipherKeys, v: u32, op: &str, h: &str, name: &str) -> String {
-    let m = rng.next();
-    let x = rng.obfuscate_num((v ^ m) as i64, 1, keys);
-    let me = rng.obfuscate_num(m as i64, 1, keys);
-    format!("local {n}={op}({x},{me}+({h}-{h})); ", n = name, op = op, x = x, me = me, h = h)
-}
-
 /// 装配辅料用毕销毁：赋一个「合法表达式里自然缺失的值」，不出现 `=nil` 字面量。
 pub fn dispose_stmt(rng: &mut GenRng, names: &[String]) -> String {
     let mut out = String::new();

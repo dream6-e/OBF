@@ -417,7 +417,7 @@ pub fn build_consts(
     sc_index2: &str, sc_kobf: &str, var_state_flag: &str, var_idx_chunk: &str,
     var_tbl: &str, var_e: &str, ds: &[String; 4], dn: &[String; 4], fn_read_string: &str, fn_s_byte: &str,
     fn_a5: &str, fn_read_dec: &str, var_enc_c: &str, var_cache: &str,
-    fn_c: &str, pf_consts: &str,
+    fn_c: &str, pf_consts: &str, const_path_key: &str,
     v_ch_i: &str, v_ch_n: &str, t: &str,
     pf_opcodes: &str, pf_a_arr: &str, pf_b_arr: &str, pf_c_arr: &str, fn_rotl: &str,
     fc: &crate::VM::VM_Backend::Generator_util::FoldCtx,
@@ -438,7 +438,7 @@ pub fn build_consts(
                 let dsp_name = rng.name();
                 // 形态①②：__index 三handler+驱动换相
                 let hh_name = rng.name();
-                let (hh_cur, hh_c, hh_a2, hh_aux) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let (hh_cur, hh_c, hh_a2, hh_aux, hh_tb_arg) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
                 let hh_codes: Vec<i64> = {
                     let mut cs = Vec::new();
                     while cs.len() < 5 {
@@ -531,9 +531,9 @@ pub fn build_consts(
                 let (fd3, rl3) = (rng.name(), rng.name());
                 let (fd2, rl2) = (rng.name(), rng.name());
                 let (fd1, rl1) = (rng.name(), rng.name());
-                let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],ev[(0X3)],{fd},{rl})", pre = mac_pre(&fd3, &rl3), fds = fds, fd = fd3, rl = rl3);
-                let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl})", pre = mac_pre(&fd2, &rl2), fdn = fdn, fd = fd2, rl = rl2);
-                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl})~={zero}", pre = mac_pre(&fd1, &rl1), fdn = fdn, fd = fd1, rl = rl1, zero = zero);
+                let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&fd3, &rl3), fds = fds, fd = fd3, rl = rl3);
+                let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&fd2, &rl2), fdn = fdn, fd = fd2, rl = rl2);
+                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])~={zero}", pre = mac_pre(&fd1, &rl1), fdn = fdn, fd = fd1, rl = rl1, zero = zero);
                 let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%{m32})", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s, m32 = m32);
                 // ── ld 处理器体（参数 pos；逐体独立局部名）──
                 let (bn2, bj2) = (rng.name(), rng.name());
@@ -681,10 +681,11 @@ pub fn build_consts(
                 // 体内引用 vmac，词序先于其定义会把 vm 解析成全局）
                 lua.push_str(&ct_init);
                 for x in &dsp_defs { lua.push_str(x); }
-                // 缓存前哨：命中（值非 nil）直接短路
+                // 缓存前哨：非字符串常量命中后短路；字符串必须在每次取用时重解密。
                 lua.push_str(&format!(
-                    "local {memo}=function({ddm},{ix}) local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
-                    memo = memo_name, ix = var_idx_chunk, ca = var_cache, ddm = ddm));
+                    "local {memo}=function({ddm},{ix}) local ev={ec}[({ix})]; if type(ev)=='table' and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
+                    memo = memo_name, ix = var_idx_chunk, ca = var_cache, ddm = ddm,
+                    ec = var_enc_c, strtag = three));
                 lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
                                 // ③-4：记录解码调用点随调用制变体（表制走闭包表，函数制直调）
                 let kbh = if table_regime {
@@ -700,16 +701,16 @@ lua.push_str(&format!(
                     "local {hh}={{}}; \
                      {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in pairs({cab}) do {cab}[{wk}]=nil end end; if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
-                     {hh}[{e_kb}]=function({ix},{ix}) local {ev}={ec}[({ix})] if type({ev})~='table' then {fake} return {x_nil1} end \
-                       {kbh}\
-                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={psn} and {pfn}({aux}) or {aux}; {ca}[({ix})]={pv}; while {w3v} do return {x_ret1},{pv} end end; ",
+                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[({ix})] if type({ev})~='table' then {fake} return {x_nil1} end; \
+                       {ev}[(0X4)]={tba}[{pathkey}] or 0X0; {ev}[(0X5)]=(({ev}[(0X5)] or 0X0)+0X1)%{m32}; {kbh}\
+                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={psn} and {pfn}({aux}) or {aux}; if type({pv})~='string' then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
                     wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, pv = rng.name(),
                     pfn = pfn_n, psn = psn,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
-                    ev = var_e, kbh = kbh,
+                    ev = var_e, kbh = kbh, tba = hh_tb_arg, pathkey = const_path_key, m32 = m32,
                     ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v,
                     fake = fake_stmt.as_str()));
                 // ㉔ 解码链状态转移四形态化：基形已是键表引用表达式（②），
@@ -736,7 +737,7 @@ lua.push_str(&format!(
                 let tr_c = dc_trans(e_kc);
                 lua.push_str(&format!(
                     "{mt}[{idx}]=function({tb},{ix}) {infra}local {cur}={init}; local {aux}; \
-                     while true do local {a2x}; if {cur}=={e_kc} then {a2x}={aux} else {a2x}={ix} end; local {c},{a2}={hh}[{cur}]({ix},{a2x}); \
+                     while true do local {a2x}; if {cur}=={e_kc} then {a2x}={aux} else {a2x}={ix} end; local {c},{a2}={hh}[{cur}]({ix},{a2x},{tb}); \
                        if {c}=={x_ret1} then return {a2} end; \
                        if {c}=={x_fail1} then return {a2} end; \
                        if {c}=={x_nil1} then while {w4v} do return nil end end; \
@@ -845,10 +846,24 @@ pub fn build_decnum(
     fn_dec_num: &str, pl: &str, kind_num: &str, vb: &str,
     v_sign: &str, v_exp: &str, v_mant: &str, f64parts: String,
     v_num_i: &str, v_num_g: &str, fd: &str, rl: &str,
+    path: &str, count: &str, fn_bxor: &str,
 ) -> String {
+    let (mask_seed, mask_bytes, mask_i, plv) = (rng.name(), rng.name(), rng.name(), rng.name());
+    let pm = (rng.range(0x101, 0xFFFF) as u32) | 1;
+    let cm = (rng.range(0x101, 0xFFFF) as u32) | 1;
+    let sm = (rng.range(0x101, 0xFFFF) as u32) | 1;
+    let salt = rng.next();
+    let stride = (rng.range(1, 0x100) as u32) | 1;
+    let mask_pre = format!(
+        "local {seed}=((({path} or 0X0)*0X{pm:X}+({count} or 0X0)*0X{cm:X}+pool_idx*0X{sm:X}+0X{salt:X})%0X100000000); local {bytes}={{}}; for {i}=0X1,#v_enc do {bytes}[{i}]={bx}(v_enc[{i}],({seed}+{i}*0X{stride:X})%0X100) end; ",
+        seed = mask_seed, path = path, count = count, pm = pm, cm = cm, sm = sm, salt = salt,
+        bytes = mask_bytes, i = mask_i, bx = fn_bxor, stride = stride);
+    let unmask = format!(
+        "for {i}=0X1,#{plv} do {plv}[{i}]={bx}({plv}[{i}],({seed}+{i}*0X{stride:X})%0X100) end; ",
+        i = mask_i, plv = plv, bx = fn_bxor, seed = mask_seed, stride = stride);
     match form {
         0 => format!(
-            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
              local {vb}, {i}, {g} = {{}}, 0, 0; \
              while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {plv}[{i}] end; \
              local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
@@ -857,10 +872,11 @@ pub fn build_decnum(
              if {v_exp} == 2047 then return {v_mant} == 0 and {v_sign} * (1/0) or (0/0) \
              elseif {v_exp} == 0 then return {v_sign} * {v_mant} * (2^(-1074)) \
              else return {v_sign} * ({v_mant} + 2^52) * (2^({v_exp} - 1075)) end end; ",
-            i = v_num_i, g = v_num_g, plv = rng.name()
+            i = v_num_i, g = v_num_g, plv = plv, pre = mask_pre, masked = mask_bytes,
+            unmask = unmask, path = path, count = count
         ),
         1 => format!(
-            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
              local {vb}={{}} for {i}=0X1,0X8 do {vb}[{i}]={plv}[{i}] end; \
              local {i}=0X6; local {v_mant}={vb}[0X7]%0X10; \
              while {i}>=0X1 do {v_mant}={v_mant}*0X100+{vb}[{i}]; {i}={i}-0X1 end; \
@@ -869,12 +885,13 @@ pub fn build_decnum(
              if {v_exp}==0X7FF then if {v_mant}==0X0 then return {v_sign}*(1/0) end return 0/0 end; \
              if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
              return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
-            i = v_num_i, vb = vb, plv = rng.name()
+            i = v_num_i, vb = vb, plv = plv, pre = mask_pre, masked = mask_bytes,
+            unmask = unmask, path = path, count = count
         ),
         2 => {
             let w = rng.name();
             format!(
-            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
              local {vb}, {i} = {{}}, 0; \
              repeat {i}={i}+0X1; {vb}[{i}]={plv}[{i}] until {i}>=0X8; \
              local {v_mant}=({vb}[0X7]%0X10)*2^48; \
@@ -885,14 +902,15 @@ pub fn build_decnum(
              if {v_exp}==0X7FF then return {v_mant}==0 and {v_sign}*(1/0) or (0/0) end; \
              if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
              return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
-            i = v_num_i, vb = vb, plv = rng.name(), w = w
+            i = v_num_i, vb = vb, plv = plv, w = w, pre = mask_pre, masked = mask_bytes,
+            unmask = unmask, path = path, count = count
             )
         }
         _ => {
             let sp = rng.name();
             let fx = rng.name();
             format!(
-            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}) local {plv}={pl}(v_enc,pool_idx,{kind_num},{fd},{rl}); \
+            "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
              local {vb}={{}}; local {i}=0X8; \
              while {i}>0X0 do {vb}[{i}]={plv}[{i}]; {i}={i}-0X1 end; \
              local {v_mant}=({vb}[7]%0X10)*2^48+{vb}[6]*2^40+{vb}[5]*2^32+{vb}[4]*2^24+{vb}[3]*2^16+{vb}[2]*2^8+{vb}[1]; \
@@ -901,7 +919,8 @@ pub fn build_decnum(
              local {sp}={{[0X7FF]=function() return ({v_mant}==0X0) and {v_sign}*(1/0) or (0/0) end,[0X0]=function() return {v_sign}*{v_mant}*2^(-1074) end}}; \
              local {fx}={sp}[{v_exp}]; if {fx} then return {fx}() end; \
              return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
-            i = v_num_i, vb = vb, plv = rng.name(), sp = sp, fx = fx
+            i = v_num_i, vb = vb, plv = plv, sp = sp, fx = fx, pre = mask_pre, masked = mask_bytes,
+            unmask = unmask, path = path, count = count
             )
         }
     }
@@ -915,43 +934,63 @@ pub fn build_decnum(
 pub fn build_decstr(
     rng: &mut GenRng, form: usize, fn_dec_str: &str, pl: &str, kind_str: &str,
     v_str_s: &str, v_str_i: &str, v_str_g: &str, fd: &str, rl: &str,
+    path: &str, count: &str, fn_bxor: &str, fn_s_byte: &str,
 ) -> String {
+    let (e, p, plv, mask_seed, mask_parts, mask_text, mask_i) =
+        (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let pm = (rng.range(0x101, 0xFFFF) as u32) | 1;
+    let cm = (rng.range(0x101, 0xFFFF) as u32) | 1;
+    let sm = (rng.range(0x101, 0xFFFF) as u32) | 1;
+    let salt = rng.next();
+    let stride = (rng.range(1, 0x100) as u32) | 1;
+    let mask_pre = format!(
+        "local {seed}=((({path} or 0X0)*0X{pm:X}+({count} or 0X0)*0X{cm:X}+({slot} or 0X0)*0X{sm:X}+0X{salt:X})%0X100000000); local {parts}={{}}; for {i}=0X1,#{e} do {parts}[{i}]=string_char({bx}({sb}({e},{i}),({seed}+{i}*0X{stride:X})%0X100)) end; local {masked}=table_concat({parts}); ",
+        seed = mask_seed, path = path, count = count, slot = p, pm = pm, cm = cm, sm = sm,
+        salt = salt, parts = mask_parts, i = mask_i, e = e, bx = fn_bxor, sb = fn_s_byte,
+        stride = stride, masked = mask_text);
+    let unmask = format!(
+        "for {i}=0X1,#{plv} do {plv}[{i}]={bx}({plv}[{i}],({seed}+{i}*0X{stride:X})%0X100) end; ",
+        i = mask_i, plv = plv, bx = fn_bxor, seed = mask_seed, stride = stride);
     match form {
         0 => format!(
-            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
+            "local function {fn_dec_str}({e},{p},{fd},{rl},{path},{count}) {pre} local {plv}={pl}({masked},{p},{kind_str},{fd},{rl}); {unmask} local {n}=#{plv}; \
              local {s}, {i}, {g} = {{}}, 0, 0; \
              while {i} < {n} do {i} = {i} + 1; {s}[{i}] = string_char({plv}[{i}]) end; \
              return table_concat({s}) end; ",
-            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            e = e, p = p, n = rng.name(), plv = plv, pre = mask_pre, masked = mask_text,
+            unmask = unmask, path = path, count = count,
             s = v_str_s, i = v_str_i, g = v_str_g
         ),
         1 => format!(
-            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
+            "local function {fn_dec_str}({e},{p},{fd},{rl},{path},{count}) {pre} local {plv}={pl}({masked},{p},{kind_str},{fd},{rl}); {unmask} local {n}=#{plv}; \
              local {s}=\"\" local {i}={n}; \
              while {i}>0 do {s}=string_char({plv}[{i}])..{s}; {i}={i}-1 end; \
              return {s} end; ",
-            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            e = e, p = p, n = rng.name(), plv = plv, pre = mask_pre, masked = mask_text,
+            unmask = unmask, path = path, count = count,
             s = v_str_s, i = v_str_i
         ),
         2 => {
             let t = rng.name();
             format!(
-            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
+            "local function {fn_dec_str}({e},{p},{fd},{rl},{path},{count}) {pre} local {plv}={pl}({masked},{p},{kind_str},{fd},{rl}); {unmask} local {n}=#{plv}; \
              local {s}={{}} local {i}=0; \
              while {i}+0X4<={n} do {s}[#{s}+0X1]=string_char({plv}[{i}+0X1],{plv}[{i}+0X2],{plv}[{i}+0X3],{plv}[{i}+0X4]); {i}={i}+0X4 end; \
              local {t}=\"\" while {i}<{n} do {i}={i}+0X1; {t}={t}..string_char({plv}[{i}]) end; \
              return table_concat({s})..{t} end; ",
-            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            e = e, p = p, n = rng.name(), plv = plv, pre = mask_pre, masked = mask_text,
+            unmask = unmask, path = path, count = count,
             s = v_str_s, i = v_str_i, t = t
             )
         }
         _ => format!(
-            "local function {fn_dec_str}({e},{p},{fd},{rl}) local {plv}={pl}({e},{p},{kind_str},{fd},{rl}); local {n}=#{plv}; \
+            "local function {fn_dec_str}({e},{p},{fd},{rl},{path},{count}) {pre} local {plv}={pl}({masked},{p},{kind_str},{fd},{rl}); {unmask} local {n}=#{plv}; \
              local {s}={{}} local {i}=0; \
              while {i}<{n} do {i}={i}+0X1; {s}[{i}]={plv}[{i}] end; \
              local {g}=0 while {g}<{n} do {g}={g}+0X1; {s}[{g}]=string_char({s}[{g}]) end; \
              return table_concat({s},\"\",0X1,{n}) end; ",
-            e = rng.name(), p = rng.name(), n = rng.name(), plv = rng.name(),
+            e = e, p = p, n = rng.name(), plv = plv, pre = mask_pre, masked = mask_text,
+            unmask = unmask, path = path, count = count,
             s = v_str_s, i = v_str_i, g = v_str_g
         ),
     }

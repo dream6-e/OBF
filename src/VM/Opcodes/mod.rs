@@ -146,6 +146,8 @@ pub struct OpcodeConfig {
     pub inst: String,
     pub upvals: String,
     pub env: String,
+    /// 当前 VM 实例环境槽的可写引用（全局 getfenv/setfenv 代理使用）。
+    pub env_ref: String,
     pub protos: String,
     pub handlers: String,
     pub varargs: String,
@@ -334,6 +336,7 @@ impl<'a> OpcodeBuilder<'a> {
         code = code.replace("{INST}", &self.local_inst);
         code = code.replace("{UPVALS}", &self.cfg.upvals);
         code = code.replace("{ENV}", &self.cfg.env);
+        code = code.replace("{ENV_REF}", &self.cfg.env_ref);
         code = code.replace("{PROTOS}", &self.cfg.protos);
         code = code.replace("{HANDLERS}", &self.cfg.handlers);
         code = code.replace("{VARARGS}", &self.cfg.varargs);

@@ -1,5 +1,16 @@
 use super::{OpcodeBuilder, OpcodeConfig, OpcodesRng};
 
+// Shared by GETGLOBAL, GETGLOBALSTR and GETIMPORT: decode a normal string constant,
+// look it up in the current VM frame's environment, and proxy numeric getfenv/setfenv
+// levels back to that frame's writable environment slot. Function targets use native APIs.
+fn global_lookup_body(const_slot: &str, dst: &str) -> String {
+    format!(
+        "local k = {{CONSTS}}[{const_slot}+1]; local e = {{ENV}}; local v = e[k]; if v == nil and getgenv then v = getgenv()[k] end; if getfenv and v == getfenv then local f = v; v = function(level) if level == nil or type(level) == 'number' then return {{ENV_REF}} end; return f(level) end elseif setfenv and v == setfenv then local f = v; local wrapped; wrapped = function(target, new_env) if type(target) == 'number' then if type(new_env) ~= 'table' then return f(target, new_env) end; {{ENV_REF}} = new_env; return wrapped end; return f(target, new_env) end; v = wrapped end; {{STK}}[{dst}] = v",
+        const_slot = const_slot,
+        dst = dst,
+    )
+}
+
 pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> String {
     let mut out = String::new();
 
@@ -11,10 +22,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut getglobal = OpcodeBuilder::new(m[5].clone(), cfg, rng);
     let gg_b = getglobal.raw_inst(3);
     let gg_a = getglobal.raw_inst(2);
-    out.push_str(&getglobal.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; local v = {{ENV}}[k]; if v == nil and getgenv then v = getgenv()[k] end; {{STK}}[{}] = v", 
-        gg_b, gg_a
-    )));
+    out.push_str(&getglobal.build(&global_lookup_body(&gg_b, &gg_a)));
 
     let mut gettable = OpcodeBuilder::new(m[6].clone(), cfg, rng);
     let gt_b = gettable.reg(3);
@@ -32,7 +40,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let sg_b = setglobal.raw_inst(3);
     let sg_a = setglobal.raw_inst(2);
     out.push_str(&setglobal.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; {{ENV}}[k] = {{STK}}[{}]; if getgenv then getgenv()[k] = {{STK}}[{}] end", 
+        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]; if getgenv then getgenv()[k] = {{STK}}[{}] end",
         sg_b, sg_a, sg_a
     )));
 
@@ -82,7 +90,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut closure = OpcodeBuilder::new(m[36].clone(), cfg, rng);
     let cl_a = closure.raw_inst(2);
     let cl_b = closure.raw_inst(3);
-    
+
     let m0_checks: Vec<String> = m[0].iter().map(|op| format!("uv_inst[1] == {}", op)).collect();
     let m88_checks: Vec<String> = m[88].iter().map(|op| format!("uv_inst[1] == {}", op)).collect();
     let mut all_checks = m0_checks;
@@ -105,10 +113,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut getimport = OpcodeBuilder::new(m[49].clone(), cfg, rng);
     let gi_b = getimport.raw_inst(3);
     let gi_a = getimport.raw_inst(2);
-    out.push_str(&getimport.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; local v = {{ENV}}[k]; if v == nil and getgenv then v = getgenv()[k] end; {{STK}}[{}] = v", 
-        gi_b, gi_a
-    )));
+    out.push_str(&getimport.build(&global_lookup_body(&gi_b, &gi_a)));
 
     let mut namecall = OpcodeBuilder::new(m[50].clone(), cfg, rng);
     let nc_b = namecall.raw_inst(3);
@@ -131,16 +136,13 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut getglobalstr = OpcodeBuilder::new(m[56].clone(), cfg, rng);
     let ggs_b = getglobalstr.raw_inst(3);
     let ggs_a = getglobalstr.raw_inst(2);
-    out.push_str(&getglobalstr.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; local v = {{ENV}}[k]; if v == nil and getgenv then v = getgenv()[k] end; {{STK}}[{}] = v", 
-        ggs_b, ggs_a
-    )));
+    out.push_str(&getglobalstr.build(&global_lookup_body(&ggs_b, &ggs_a)));
 
     let mut setglobalstr = OpcodeBuilder::new(m[57].clone(), cfg, rng);
     let sgs_b = setglobalstr.raw_inst(3);
     let sgs_a = setglobalstr.raw_inst(2);
     out.push_str(&setglobalstr.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; {{ENV}}[k] = {{STK}}[{}]; if getgenv then getgenv()[k] = {{STK}}[{}] end", 
+        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]; if getgenv then getgenv()[k] = {{STK}}[{}] end",
         sgs_b, sgs_a, sgs_a
     )));
 

@@ -137,7 +137,7 @@ pub(super) fn group_keys(k0: &[u32; 8], g: u32) -> GroupKeys {
 
 /// 第 3 项 D：根密钥 K0 ← **原生流**（Native Stream）。另起一条原生流实例、
 /// 独立种子，取 32 字节密钥流（加密全零即密钥流本身）折成 8 个 u32。
-/// 产物里落盘的只有这份根（且是 token 化掩码形态），四组密钥/boot 密钥全部由
+/// 产物里落盘的只有这份根（且是 token 化掩码形态），四组密钥材料全部由
 /// 它在运行期经 KDF 现算——不再有「每组一套密钥材料」可循。
 pub(super) fn native_root(nat: &super::Generator_native::Native, seeds: &[u8]) -> [u32; 8] {
     let sb = nat.sbox(seeds);
