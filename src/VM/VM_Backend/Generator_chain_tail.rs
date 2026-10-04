@@ -46,20 +46,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         pf_opcodes,
         pf_protos,
         psn_n,
+        poison_delay_key,
         var_a2,
         var_whiten,
         var_whiten_pos,
         whiten_mul,
         whiten_add,
-        var_b,
         var_builtin_reg,
-        var_chk,
-        var_idx,
-        var_junk,
-        var_p,
-        var_raw_p,
-        var_tamper,
-        var_vc,
         np21,
         md21,
         th21,
@@ -119,15 +112,17 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         xor_tbl_var,
         weld: mut weld,
         uni: mut uni,
+        ..
     } = x;
+    let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
     let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
         let k1 = rng.range(0x100, 0xFFFF) as u32;
         let k2 = rng.range(0x100, 0xFFFF) as u32;
         match rng.range(0, 4) {
-            0 => format!("if {psn} then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = psn_n, ks = ks, k = k1),
-            1 => format!("if {psn} then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = psn_n, ks = ks, k = k1, z = rng.name()),
-            2 => format!("if {psn} then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = psn_n, ks = ks, k = k1, k2 = k2),
-            _ => format!("if {psn} then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = psn_n, ks = ks, k = k1, k2 = k2, z = rng.name()),
+            0 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1),
+            1 => format!("if {psn} and {delay}<=0 then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1, z = rng.name()),
+            2 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2),
+            _ => format!("if {psn} and {delay}<=0 then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2, z = rng.name()),
         }
     };
     let bind2 = |rng: &mut GenRng, dst: &str, n0: &str, n1: &str| -> String {
@@ -254,7 +249,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let cid_gk = uni.register("KryvexObf_");
         let (ci_stmt, sc_index2) = uni.fetch(&mut rng, cid_index);
         let (gk_stmt, sc_kobf) = uni.fetch(&mut rng, cid_gk);
-        let (bc_scatter, agg_field, poison_fn) = crate::VM::VM_Backend::Generator_flow::build_consts(
+        let (bc_scatter, agg_field) = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
@@ -263,7 +258,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
                 &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
-                chain_delta, chain_m, chain_k0, psn_n.as_str());
+                chain_delta, chain_m, chain_k0, psn_n.as_str(),
+                poison_delay_expr.as_str());
         let body_consts = format!("{st}={nxt}; {ci_stmt}{gk_stmt} {bc_scatter} ",
             st = var_state, nxt = obf_s_protos);
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
@@ -306,20 +302,26 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         );
         // ⑭ 九元联合 nil 声明 + ⑦ repeat…until false 换皮 + ⑨ 区间树
         let d14: Vec<String> = (0..9).map(|_| rng.name()).collect();
-        // ③ 汇总校验：元数据槽第一段（lines 槽）已改为「计数 1 + 4B 聚合值」——
-        // 读回后与常量态累计值比对；不符则调用常量态留下的投毒闭包（整表偏移解码），
-        // 于是「全对或全错」：不再有逐常量可验证的反馈，也没有 nil 报错信号。
+        // ③ 汇总校验：随机选中的采样点发现不符时只置共享投毒旗，不调用失败闭包。
+        // 采样位来自局部对象地址哈希，不消耗用户 math.random 的状态。
         let m32d = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 32);
+        let (go, gb, ga, gx, gs, gh, gi) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
+        let verify_agg = format!(
+            "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}=pcall(function() return type({d0})~='number' or {d0}%{mod}~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
+            go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
+            d0 = d14[0], mod = m32d, c = fn_c, aggf = agg_field, psn = psn_n, co = rng.name(), cm = rng.name()
+        );
         let body_debug = format!(
             "{st}={nxt}; {tree9} repeat \
              local {d0},{d1},{d2},{d3},{d4},{d5},{d6},{d7},{d8}; \
-             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {d0}={a5}(); if ({d0}%{m32d})~={c}.{aggf} then {c}.{pf}() end end; \
+             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {d0}={a5}(); {verify} end; \
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}(); {a5}(); {a5}() end; \
              {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; break; until false; ",
             st = var_state, nxt = obf_s_ret, a5 = fn_a5, rs = fn_read_string, i = v_ch_i, n = v_ch_n,
             d0 = d14[0], d1 = d14[1], d2 = d14[2], d3 = d14[3], d4 = d14[4],
-            d5 = d14[5], d6 = d14[6], d7 = d14[7], d8 = d14[8],
-            c = fn_c, aggf = agg_field, pf = poison_fn, m32d = m32d,
+            d5 = d14[5], d6 = d14[6], d7 = d14[7], d8 = d14[8], verify = verify_agg,
             tree9 = it9(&mut rng, var_state.as_str())
         );
         // ⑦ while true 壳 + ⑭ return nil 兜底（ret 态跑完显式出）
@@ -328,21 +330,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let body_ret = format!("while true do if not(not {pj}[({pkx1})]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; local {r14}=nil; if {r14} then return nil end; break; end; ",
             out = v_ch_out, c = fn_c, g = v_ch_g, pj = pj_name, pkx1 = pkx1, r14 = r14);
 
-        // ⑳ 行完整性守卫（用户 2026-09-25 指示，推翻早前"放弃行数守卫/反美化 fail-open"）：
-        // 产物只许 1 行注释 + 1 行整体逻辑；采样点用 pcall 触发真实索引错误，
-        // 从解释器位置前缀取行号（gmatch 取最后一个 :N:，防 chunkname 内含 :N: 干扰），
-        // 行号≠期望值时触发同型索引错误自然崩溃——文案为解释器原生，无 error()、无自造报错。
-        // 已知边界：最后一个采样点之后的拆行不在守卫范围内。
-        // ⑳.2 守卫伪装化：不再提取行号（gmatch/tonumber/行号变量全删）——
-        // 形态是「自检函数 + pcall 验证 + 错误消息内容断言」：探针每构建从
-        // 索引/调用/算术/连接四族随机取型；期望行以 ":"..(r1-r2)..":" 针式内嵌
-        // 于 find（消息里找不到该前缀才触发同型自然错误）；定义式/内联两形态随机
-        // ⑳.3 守卫去线性化：逻辑拆进挂表的多个 function、全部以 : 方法调用
-        // 驱动，数据流折进参数树（t:dz(t:cx(e))），定义顺序洗牌+诱饵方法埋伏；
-        // 链路：驱动→m1(pcall 自派发)→m2(探针错误族随机)→m3(find 针式)→
-        // m4(触发族随机：h and 容纳值 or nil 折叠，nil 时自然崩溃)
-        // ㉓ inline=true：守卫落在 fu（兄弟字段，先于 wai 执行、够不到前导局部），
-        // 型别填充不走统一流，用自足 string.char(数字) 拼装——同样零字面量。
+        // ⑳ 行完整性守卫：运行期抽样探测行位置；失配只置共享投毒旗并继续。
+        // 每个采样点以对象地址哈希选取，不调用 math.random，也不改变脚本的随机序列。
+        // 定义式/内联两形态仍保留随机化探针与错误消息针式，但不再制造固定报错。
+        // ㉓ inline=true 的 fu 与 wai 是兄弟闭包；共享 poison 已移到二者共同的外围作用域。
         let line_guard = |rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream, inline: bool| -> String {
             let tbl = rng.name();
             let probe_body = |rng: &mut GenRng| -> String {
@@ -371,14 +362,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let needle = format!("{s}({c})..(0X2)..{s}({c})", s = sc, c = c58);
             let pb = probe_body(rng);
             let (ts, tolerant) = trig_stmt(rng, &p_u);
-            // ⑦ m_hit 去空壳：原来 local u=h and tol or nil; ts 一眼即知是桩。
-            // 先捕获 type(u)，再洗牌插 1~2 句对 ""/function/nil 全安全的填充语，
-            // 触发语句按随机形态收尾（直尾 / if not u 尾）——触发语义不变：
-            // u=nil 时 ts 仍抛同型自然错误
+            // 失败时只置共享 poison；填充语句及探针仍按产物随机化，且脚本继续运行。
             let (f1, f2) = (rng.name(), rng.name());
-            // 投毒赋值的恒真谓词继续保留原形式；本次仅调整普通常量伪装。
-            let (ga, gb) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
-            let taut = format!("(0X{:X}-0X{:X}==0X{:X})", ga, gb, ga - gb);
             let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}=type({u}); ",
                 u = p_u, h = p_hit, tol = tolerant, f1 = f1);
             // ㉓ 填充语型别串：壳内守卫走统一流惰性解密；fu 内守卫（inline）
@@ -418,12 +403,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             rng.shuffle(&mut hopts);
             let hn = 1 + rng.range(0, 2);
             for i in 0..hn { ht_body.push_str(&hopts[i]); }
-            // 诱饵化：命中失败不再抛同型错误（用户指示：运行不报错）——
-            // 改置投毒旗（后续常量解码全乱码、程序走进错误分支），形态保持 if not u 触发族
             if rng.range(0, 2) == 0 {
-                ht_body.push_str(&format!("if not {u} then {psn}={psn} or {taut} else {ts} end; ", u = p_u, psn = psn_n, taut = taut, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {psn}={psn} or not {u} else {ts} end; ", u = p_u, psn = psn_n, ts = ts));
             } else {
-                ht_body.push_str(&format!("if not {u} then {psn}={psn} or {taut} end; if {u} then {ts} end; ", u = p_u, psn = psn_n, taut = taut, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {psn}={psn} or not {u} end; if {u} then {ts} end; ", u = p_u, psn = psn_n, ts = ts));
             }
             let mut ms = vec![
                 format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",
@@ -445,8 +428,16 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                     t = tbl, d2 = rng.name(), s = p_self, q = rng.name()));
             }
             rng.shuffle(&mut ms);
-            format!("local {t}={{}} {ms} {t}:{drv}() ",
-                t = tbl, ms = ms.concat(), drv = m_drv)
+            let body = format!("local {t}={{}} {ms} {t}:{drv}() ",
+                t = tbl, ms = ms.concat(), drv = m_drv);
+            let (go, gb, ga, gx, gs, gh, gi) =
+                (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+            let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
+            format!(
+                "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then {body} end;",
+                go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi,
+                seed = gate_seed, body = body
+            )
         };
         let mut ch_pairs: Vec<(String, String)> = vec![
             (obf_s_init.clone(), body_init),
@@ -507,6 +498,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
 
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
+        // fu 与 wai 是兄弟闭包；共享投毒旗必须位于二者共同可见的词法作用域。
+        // 保持与 return 壳同一物理行，不影响行完整性探针的目标行号。
+        out.push_str(&format!("local {}=false; ", psn_n));
         out.push_str(&header_block);
         // ㉓ 统一流前导（表+惰性解码器）：直接落在主 return({}) 壳内——header_block
         // 打开的 wai 函数体开头（用户指示，不另起壳）；壳内所有取用点（守卫/散点/
@@ -515,8 +509,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         out.push_str(&uni.emit_prelude(&mut rng));
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
-        // ㉘D1 七件套声明形式打乱：名字-初值配对后洗牌发射——固定的
-        // 「np,md,th,tw,rk,kreg,psn」字面顺序消失；后续按名引用，顺序无语义
+        // ㉘D1 六件套声明形式打乱：名字-初值配对后洗牌发射；共享 poison 在外围先声明。
         {
             // 注意：此处早于 block_p_def（键表），不能用 obfuscate_num 的键表形态，
             // 只用纯算式零（大写十六进制）。㉚④：零用 x%x 恒零——不再用
@@ -530,12 +523,18 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 (tw21.clone(), "0X0".to_string()),
                 (rk21.clone(), z_rk),
                 (kreg_n.clone(), "setmetatable({},{__mode='k'})".to_string()),
-                (psn_n.clone(), "false".to_string()),
             ];
             rng.shuffle(&mut decls);
             let names: Vec<String> = decls.iter().map(|(n, _)| n.clone()).collect();
             let vals: Vec<String> = decls.iter().map(|(_, v)| v.clone()).collect();
             out.push_str(&format!("local {}={}; ", names.join(","), vals.join(",")));
+            // 复用 kreg 的私有槽，避免新增 Lua upvalue；地址哈希提供每次启动的小幅抖动，
+            // 不读取或消费 math.random。失败后先让 VM 继续一段随机指令数，再启用扰动。
+            let poison_delay_seed = rng.range(32, 80);
+            out.push_str(&format!(
+                "{tab}[0X{key:X}]={seed}+(function()local s=tostring({tab});local h=0;for i=1,#s do h=(h*33+string.byte(s,i))%17 end;return h end)(); ",
+                tab = kreg_n, key = poison_delay_key, seed = poison_delay_seed
+            ));
         }
         // ㉒② 焊接缓存表声明：长时状态只剩槽号；此后各站点以「一个 if 三件事」
         // 形态（惰性缓存+随机大数键）发射焊接构造。

@@ -75,7 +75,6 @@ impl Generator {
         let mut weld = crate::VM::VM_Backend::Generator_kdf::WeldCache::new(&mut rng);
         // ㉓ 统一流：packer 脚本串/探测九件套/守卫散点串共用的一条密钥流（惰性解密）。
         let mut uni = crate::VM::VM_Backend::Generator_util::UniStream::new(&mut rng);
-        let mut at = AntiTamper::generate_split(true, &key_seed_var);
         
         let mut used_ops = HashSet::new();
         { let mut scan_reader = PayloadReader { data: payload, pos: 0 }; scan_used_opcodes(&mut scan_reader, &mut used_ops); }
@@ -343,14 +342,15 @@ impl Generator {
         let block_vm_core = Lua_core::build_vm_core().replace("\n", " ");
         
         let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng, &mut uni);
-        let var_junk = rng.name(); let var_vc = rng.name(); let var_builtin_reg = rng.name();
+        let var_vc = rng.name(); let var_builtin_reg = rng.name();
         let var_builtin_view = rng.name(); let var_builtin_mask = rng.name(); let var_builtin_i = rng.name(); let var_builtin_xor = rng.name();
-        let block_packer_vars = format!("local {}, {}, {}; ", var_junk, var_vc, var_builtin_reg);
+        let block_packer_vars = format!("local {}, {}; ", var_vc, var_builtin_reg);
 
         let fn_execute = "execute";
-        // 诱饵投毒旗（prelude 局部）：守卫失败/诱饵 handler 置位 → 后续常量解码
-        // 全部 type-preserving 扰乱——程序继续跑、不报错、输出乱码（用户指示）
+        // 诱饵投毒旗（外围 upvalue）：守卫失败/诱饵 handler 置位后先经过随机指令窗口，
+        // 再渐进污染常量、密钥或路由；探针本身不早退，也不提供固定错误位置。
         let psn_n = rng.name();
+        let mut at = AntiTamper::generate_split(true, &key_seed_var, &psn_n);
         let var_pc = rng.name();
         let var_stk = rng.name();
         let var_top = rng.name();
@@ -628,20 +628,17 @@ impl Generator {
                     mk_stmt = Some(match mk_stmt.take() { Some(x) => x + &dc_stmt, None => dc_stmt });
                 }
                 body = body.replace("{STOREBACK}", "");
-                // ── 冷块前奏打散：{rk 声明 + 状态自校验 + 取指分组} 全是独立纯读/声明，
-                // 任意线性化等价 → 语句池洗牌，"校验必居首 + 取指两连"的指纹消失；
-                // 校验恒先于任何写（体在后），跳错块照旧拒绝。常数经 obfuscate 去指纹。
+                // ── 冷块前奏打散：{rk 声明 + 状态投毒采样 + 取指分组} 均先于主体执行，
+                // 独立语句仍可洗牌；状态不符只置共享投毒旗，不在固定位置早退。
                 let mut pre: Vec<String> = Vec::new();
                 pre.push("local rk1,rk2;".to_string());
-                // 状态号自校验：分发器刚把本块的状态号写进槽位，对不上说明跳错了块
+                // 状态号不符时置共享投毒旗；主体仍按原控制流继续，避免固定早退信号。
                 // 状态值固定 depth=1，使用运行时查表表示，校验值仍保持完整 32 位。
                 let st_obf = rng.obfuscate_num(*st as i64, 1, &keys);
-                match rng.range(0, 4) {
-                    0 => pre.push(format!("if {s}[{}]~={} then return end;", k_state, st_obf, s = p_self)),
-                    1 => pre.push(format!("if {s}[{}]-{}~=0 then return end;", k_state, st_obf, s = p_self)),
-                    2 => pre.push(format!("if {s}[{}]=={} then else return end;", k_state, st_obf, s = p_self)),
-                    _ => pre.push(format!("if not({s}[{}]=={}) then return end;", k_state, st_obf, s = p_self)),
-                }
+                pre.push(format!(
+                    "{psn}={psn} or ({s}[{key}]~={state});",
+                    psn = psn_n, s = p_self, key = k_state, state = st_obf
+                ));
                 let mut ai = 0usize;
                 while ai < alias_pairs.len() {
                     let rem = alias_pairs.len() - ai;
@@ -833,7 +830,7 @@ impl Generator {
 
 
 
-        let var_idx = rng.name(); let var_b = rng.name(); let var_tamper = rng.name(); let fn_s_byte = rng.name(); let fn_s_sub = rng.name(); let var_raw_p = rng.name(); let var_chk = rng.name(); let var_p = rng.name(); let var_a2 = rng.name(); let fn_a3 = rng.name(); let x = rng.name(); let var__a = rng.name(); let var__b = rng.name(); let fn_read_dec = rng.name(); let fn_bxor = rng.name(); let fn_b_rotr = rng.name(); let fn_a5 = rng.name(); let fn_read_string = rng.name(); let fn_a10 = rng.name(); let fn_decode_chunk = rng.name(); let fn_u32_dec = rng.name(); let l = rng.name(); let s_t = rng.name(); let v = rng.name(); let v_sign = rng.name(); let v_exp = rng.name(); let v_mant = rng.name(); let t = rng.name(); let fn_c = rng.name();
+        let fn_s_byte = rng.name(); let fn_s_sub = rng.name(); let var_raw_p = rng.name(); let var_p = rng.name(); let var_a2 = rng.name(); let fn_a3 = rng.name(); let x = rng.name(); let var__a = rng.name(); let var__b = rng.name(); let fn_read_dec = rng.name(); let fn_bxor = rng.name(); let fn_b_rotr = rng.name(); let fn_a5 = rng.name(); let fn_read_string = rng.name(); let fn_a10 = rng.name(); let fn_decode_chunk = rng.name(); let fn_u32_dec = rng.name(); let l = rng.name(); let s_t = rng.name(); let v = rng.name(); let v_sign = rng.name(); let v_exp = rng.name(); let v_mant = rng.name(); let t = rng.name(); let fn_c = rng.name();
         // 数组槽位只读一次（热路径每指令都读会白花 4 次哈希查找）
         let arrs = format!("{}, {}, {}, {}", var_opcodes, var_a_arr, var_b_arr, var_c_arr);
         block_execute_def.push_str(&format!("local {};{}={}[{}],{}[{}],{}[{}],{}[{}];", arrs, arrs, var_vm, k_ops, var_vm, k_aa, var_vm, k_bb, var_vm, k_cc));
@@ -859,6 +856,8 @@ impl Generator {
         let rk21 = rng.name();
         let rkey_every = rng.range(4, 16);
         let kreg_n = rng.name();
+        let poison_delay_key = rng.range(0x7000_0000, 0x7FFF_FFFF) as u32;
+        let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
         block_execute_def.push_str(&format!("local {},{}={}[{}],{}[{}];", var_pc, var_top, var_vm, k_pc, var_vm, k_top));
         block_execute_def.push_str(&format!(
@@ -946,7 +945,7 @@ impl Generator {
             block_execute_def.insert_str(0, &factory_prefix);
             block_execute_def.push_str(&init_dc_stmt);
         }
-        let dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng);
+        let dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng, &psn_n, &poison_delay_expr);
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）
             block_execute_def.push_str("while true do break end end ");
@@ -1096,8 +1095,8 @@ impl Generator {
             whiten_mul,
             whiten_add,
             fn_a3, fn_bxor, fn_c, fn_decode_chunk, fn_s_byte, fn_s_sub, pf_a_arr, pf_b_arr, pf_c_arr, pf_is_vararg,
-            pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, var_a2,
-            var_b, var_builtin_reg, var_chk, var_idx, var_junk, var_p, var_raw_p, var_tamper, var_vc, np21,
+            pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, poison_delay_key, var_a2,
+            var_builtin_reg, var_p, var_raw_p, var_vc, np21,
             md21, th21, tw21, rk21, kreg_n,
             fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, const_path_key, sk_setup, t, x, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
             weld,

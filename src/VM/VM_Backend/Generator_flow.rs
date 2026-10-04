@@ -8,7 +8,7 @@ pub struct KConsts {
     pub e_a: String, pub e_b: String, pub e_c: String, pub e_d: String,
     pub e_ka: String, pub e_kb: String, pub e_kc: String,
     pub eh_ret: String, pub eh_nil: String, pub eh_next: String,
-    pub eh_val: String, pub eh_fail: String,
+    pub eh_val: String,
 }
 
 /// 形态⑩：常数=自写位运算闭包派生链——bx(bx(a,b),c) = a^b^c = val，深括号两层
@@ -32,7 +32,7 @@ fn kexpr(kt: &str, kv: &[i64; 9], i: usize, j: usize, add: bool, rng: &mut GenRn
     else { format!("{0}{2}-{0}{1}", kt, a, b) }
 }
 
-/// K 表 9 魔数（互异重摇 12 派生值）+ 全部派生拼写
+/// K 表 9 魔数（互异重摇 11 派生值）+ 全部派生拼写
 pub fn build_k(rng: &mut GenRng, kt_name: &str) -> KConsts {
         let kv: [i64; 9] = loop {
             let mut kv = [0i64; 9];
@@ -43,10 +43,10 @@ pub fn build_k(rng: &mut GenRng, kt_name: &str) -> KConsts {
             let mut vs = vec![
                 g(0, 1, false), g(2, 3, true), g(4, 5, false), g(6, 7, true),
                 g(8, 2, true), g(7, 4, false), g(5, 3, true),
-                g(2, 5, true), g(3, 6, true), g(1, 5, true), g(0, 6, true), g(7, 2, true),
+                g(2, 5, true), g(3, 6, true), g(1, 5, true), g(0, 6, true),
             ];
             vs.sort(); vs.dedup();
-            if vs.len() == 12 { break kv; }
+            if vs.len() == 11 { break kv; }
         };
         let kspell: Vec<String> = (0..9)
             .map(|i| if rng.range(0, 2) == 0 { format!("0X{:X}", kv[i]) } else { format!("{}", kv[i]) })
@@ -70,17 +70,16 @@ pub fn build_k(rng: &mut GenRng, kt_name: &str) -> KConsts {
         let (h_kb, e_kb) = (kval(&kv, 7, 4, false), kexpr(&kt_name, &kv, 7, 4, false, rng));
         let (h_kc, e_kc) = (kval(&kv, 5, 3, true), kexpr(&kt_name, &kv, 5, 3, true, rng));
         // HH 码同走 K 派生
-        let (hh_ret, eh_ret) = (kval(&kv, 2, 5, true), kexpr(&kt_name, &kv, 2, 5, true, rng));
-        let (hh_nil, eh_nil) = (kval(&kv, 3, 6, true), kexpr(&kt_name, &kv, 3, 6, true, rng));
-        let (hh_next, eh_next) = (kval(&kv, 1, 5, true), kexpr(&kt_name, &kv, 1, 5, true, rng));
-        let (hh_val, eh_val) = (kval(&kv, 0, 6, true), kexpr(&kt_name, &kv, 0, 6, true, rng));
-        let (hh_fail, eh_fail) = (kval(&kv, 7, 2, true), kexpr(&kt_name, &kv, 7, 2, true, rng));
+        let eh_ret = kexpr(&kt_name, &kv, 2, 5, true, rng);
+        let eh_nil = kexpr(&kt_name, &kv, 3, 6, true, rng);
+        let eh_next = kexpr(&kt_name, &kv, 1, 5, true, rng);
+        let eh_val = kexpr(&kt_name, &kv, 0, 6, true, rng);
     KConsts {
         kspell: kspell.try_into().unwrap(),
         e_a: e_a, e_b: e_b, e_c: e_c, e_d: e_d,
         e_ka: e_ka, e_kb: e_kb, e_kc: e_kc,
         eh_ret: eh_ret, eh_nil: eh_nil, eh_next: eh_next,
-        eh_val: eh_val, eh_fail: eh_fail,
+        eh_val: eh_val,
     }
 }
 
@@ -425,11 +424,11 @@ pub fn build_consts(
     salt_names: &[String; 4],
     pf_ld_key: &str, pf_lld_key: &str, pf_cnt_key: &str,
     chain_delta: u32, chain_m: u64, chain_k0: u64,
-    psn: &str,
-) -> (String, String, String) {
+    psn: &str, poison_delay: &str,
+) -> (String, String) {
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
-    let (eh_ret, eh_nil, eh_next, eh_val, eh_fail) =
-        (k.eh_ret.as_str(), k.eh_nil.as_str(), k.eh_next.as_str(), k.eh_val.as_str(), k.eh_fail.as_str());                // ── ⑥ 常量池查表打散
+    let (eh_ret, eh_nil, eh_next, eh_val) =
+        (k.eh_ret.as_str(), k.eh_nil.as_str(), k.eh_next.as_str(), k.eh_val.as_str());                // ── ⑥ 常量池查表打散
                 // 读入侧/访问侧各一张调度表，键 = 混淆数字展开式（运行期才是 1/2/3）
                 // 注册洗牌；挂永不命中诱饵键
                 // 缓存检查拆成独立前哨闭包。缓存值只可能是 string/number/false
@@ -439,18 +438,8 @@ pub fn build_consts(
                 // 形态①②：__index 三handler+驱动换相
                 let hh_name = rng.name();
                 let (hh_cur, hh_c, hh_a2, hh_aux, hh_tb_arg) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-                let hh_codes: Vec<i64> = {
-                    let mut cs = Vec::new();
-                    while cs.len() < 5 {
-                        let m = rng.range(1 << 20, (1 << 24) - 1) as i64;
-                        if !cs.contains(&m) { cs.push(m); }
-                    }
-                    cs
-                };
-                let (hh_ret, hh_nil, hh_next, hh_val, hh_fail) =
-                    (hh_codes[0], hh_codes[1], hh_codes[2], hh_codes[3], hh_codes[4]);
-                let (x_ret1, x_nil1, x_next1, x_val1, x_fail1) =
-                    (eh_ret, eh_nil, eh_next, eh_val, eh_fail);
+                        let (x_ret1, x_nil1, x_next1, x_val1) =
+                    (eh_ret, eh_nil, eh_next, eh_val);
                 let x_ka = e_ka;
                 let pk6 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
                 let pkB = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
@@ -515,11 +504,10 @@ pub fn build_consts(
                 // V0/V1 = 表调用制（调用点 ld[(t)]/dsp[(ev[1])]）；V2/V3 = 函数制。
                 let ctv = rng.range(0, 4);
                 let table_regime = ctv < 2;
-                // ③ 汇总校验：agg=整函数累计值（常量态内逐常量折叠）；aggf/poison 由常量态
-                // 挂到本次解码的 chunk 表，debug 态读回远端落盘值比对，失败整体投毒
+                // ③ 汇总校验：agg=整函数累计值（常量态内逐常量折叠）；aggf 挂到
+                // 本次解码的 chunk 表，debug 态读回远端落盘值并静默置共享投毒旗。
                 let agg_name = rng.name();
                 let agg_field = rng.name();
-                let poison_fn = rng.name();
                 // ── dsp 处理器体：fd/rl 局部 + MAC 先验 + 解码表达式（逐支独立名）──
                 // ③ 逐常量 MAC 不再存线上、也不在分派闭包里比对：折叠进 agg（见 ld 处理器），
                 // 由 debug 态的汇总比对一次性裁定（错就整体投毒）。但 fd/rl 两个键仍必须
@@ -640,6 +628,8 @@ pub fn build_consts(
                 // 「程序运行至今累计」的完整常量明文表；记录保留可重复解密
                 let (ecb_n, cab_n) = (rng.name(), rng.name());
                 let pfn_n = rng.name();
+                // 字符串常量按短命对象地址低概率采样扰动，避免每次篡改都落在同一失败点；不触碰 math.random。
+                let (poison_s, poison_h, poison_i) = (rng.name(), rng.name(), rng.name());
                 // 诱饵/投毒常数逐产物随机（去黄金比例 2654435761/9E3779B9 指纹）：
                 // 乘数取奇数保证双射性（mod 2^32 下奇乘可逆）
 
@@ -658,11 +648,12 @@ pub fn build_consts(
                     "local {m32}={m32v}; local {agg}=0X0; local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
                      local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
-                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then return {kobf}..((#q*{ksmul})%{m32}) elseif tq=='boolean' then return not q end return q end; ",
+                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then local {ps}=tostring({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+string.byte({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=='boolean' then return not q end return q end; ",
                     m32 = m32, m32v = m32v, agg = agg_name,
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
                     wctr = wctr, pfn = pfn_n, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
+                    ps = poison_s, ph = poison_h, pi = poison_i,
                     m1 = rng.name(), m2 = rng.name(),
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
                     w2_ = w2v, w20 = wk2, w3_ = w3v, w30 = wk3, w4_ = w4v, w40 = wk4);
@@ -699,16 +690,16 @@ pub fn build_consts(
                 };
 lua.push_str(&format!(
                     "local {hh}={{}}; \
-                     {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in pairs({cab}) do {cab}[{wk}]=nil end end; if {flg} then else return {x_fail1},({kobf}..{ix}) end; \
-                       local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
+                     {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in pairs({cab}) do {cab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
+                       local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else if {psn} and {delay}<=0 then return {x_ret1},{pfn}(g) end; return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
                      {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[({ix})] if type({ev})~='table' then {fake} return {x_nil1} end; \
                        {ev}[(0X4)]={tba}[{pathkey}] or 0X0; {ev}[(0X5)]=(({ev}[(0X5)] or 0X0)+0X1)%{m32}; {kbh}\
-                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={psn} and {pfn}({aux}) or {aux}; if type({pv})~='string' then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
+                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if type({pv})~='string' then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
                     wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, pv = rng.name(),
-                    pfn = pfn_n, psn = psn,
+                    pfn = pfn_n, psn = psn, delay = poison_delay,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
-                    x_fail1 = x_fail1, kobf = sc_kobf, memo = memo_name,
+                    memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
                     ev = var_e, kbh = kbh, tba = hh_tb_arg, pathkey = const_path_key, m32 = m32,
                     ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v,
@@ -739,14 +730,13 @@ lua.push_str(&format!(
                     "{mt}[{idx}]=function({tb},{ix}) {infra}local {cur}={init}; local {aux}; \
                      while true do local {a2x}; if {cur}=={e_kc} then {a2x}={aux} else {a2x}={ix} end; local {c},{a2}={hh}[{cur}]({ix},{a2x},{tb}); \
                        if {c}=={x_ret1} then return {a2} end; \
-                       if {c}=={x_fail1} then return {a2} end; \
                        if {c}=={x_nil1} then while {w4v} do return nil end end; \
                        if {c}=={x_next1} then {tr_b} else {tr_c} {aux}={a2} end; \
                      end end; ",
                     mt = mt_name, idx = sc_index2, tb = var_tbl, ix = var_idx_chunk,
                     infra = dc_infra, init = dc_init, tr_b = tr_b, tr_c = tr_c,
                     cur = hh_cur, aux = hh_aux, c = hh_c, a2 = hh_a2,
-                    hh = hh_name, x_fail1 = x_fail1, e_kc = e_kc, w4v = w4v, a2x = rng.name()));
+                    hh = hh_name, e_kc = e_kc, w4v = w4v, a2x = rng.name()));
                 lua.push_str(&format!(
                     "{c}.{pf}=setmetatable({{}},{mt}); {mt}=({{}})[{mtn}]; ",
                     c = fn_c, pf = pf_consts, mt = mt_name, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
@@ -803,33 +793,55 @@ lua.push_str(&format!(
                      {rdl}",
                     i = v_ch_i, n = v_ch_n, a5 = fn_a5, pj = pj_name, pk6 = pk6,
                     t = t, rd = fn_read_dec, rdl = rdl));
-                // ③ 收尾：聚合值 + 投毒闭包挂到本次解码的 chunk 表（debug 态比对后调用）
+                // ③ 收尾：聚合值挂到本次解码的 chunk 表，debug 态随机采样核对后置共享投毒旗。
                 // 目标一② 层间耦合（读侧）：汇总值挂载前与本原型明文头部字段同式混入
                 // （写侧落盘值 = agg18 ^ (kp18 ^ rotl(pb18,7))）；诱饵槽仍走 `or 0X0`。
                 let mx_expr = format!("{bx}({c}.{pld},{rot}({c}.{plld},0X7))",
                     bx = fn_bxor, c = fn_c, pld = pf_ld_key, plld = pf_lld_key, rot = fn_rotl);
-                let (pk, pv) = (rng.name(), rng.name());
                 lua.push_str(&format!(
-                    "{c}.{aggf}=({bx})({agg},{mx}); {c}.{pf}=function() for {k},{v} in pairs({ecb}) do if type({v})=='table' then {v}[0X3]=({v}[0X3]*0X7+0X3)%{m32} end end end; ",
-                    c = fn_c, aggf = agg_field, agg = agg_name, pf = poison_fn, mx = mx_expr,
-                    bx = fn_bxor,
-                    k = pk, v = pv, ecb = ecb_n, m32 = m32));
-                // 返回值：常量态代码 + 汇总值字段名 + 投毒闭包字段名（debug 态用）
-                (lua, agg_field, poison_fn)
+                    "{c}.{aggf}=({bx})({agg},{mx}); ",
+                    c = fn_c, aggf = agg_field, agg = agg_name, mx = mx_expr, bx = fn_bxor));
+                // 返回值：常量态代码 + 汇总值字段名（debug 态随机采样核对）
+                (lua, agg_field)
 }
 
 /// 解头（防篡改探针+入口解密装配）—— 自 Generator.rs 拆出
 #[allow(clippy::too_many_arguments)]
 pub fn build_header(
     rng: &mut GenRng, keys: &CipherKeys, fn_s_byte: &str, fn_s_sub: &str, var_raw_p: &str,
-    payload_str: &str, var_chk: &str, var_idx: &str, var_junk: &str, var_b: &str, var_tamper: &str,
-    var_vc: &str, var_p: &str, var_a2: &str, entry_func: &str, fn_a3: &str, x: &str,
-    fn_lit: &str, mode_lit: &str, k_lit: &str, var_whiten: &str, var_whiten_pos: &str,
+    payload_str: &str, var_vc: &str, var_p: &str, var_a2: &str, entry_func: &str, fn_a3: &str, x: &str,
+    fn_lit: &str, mode_lit: &str, k_lit: &str, var_whiten: &str, var_whiten_pos: &str, psn: &str,
 ) -> String {
-    // ㉓-D 去 KRYVEX 包裹标记（水印注释保留）：raw_p 直接是载荷本体；
-    // 校验和循环照旧消费前 6 字节（原标记长度），读取偏移相应 -6。
-    // D18_OFF 必须等于被移除标记 "KRYVEX" 的长度。
-    format!("local {}, {} = {}, {}; local {} = ([=[{}]=]); local {}, {}, {} = {}, {}, {}; repeat local {}={}({},{}); {}={}+{}; {}={}+{}; {}={}+({}%{}); until {}>={}; {} = ({}-{}) + ({}-{}); {}={}+(type({})=={fn_lit} and 0 or {}); local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {} = setmetatable({{}}, mt_vc); local {}, {} = {}({}({},{}-{}+{}*{})), {}; local function {}() local {}={}({},{},{}); {}={}+{}; return {} end; local k1,k2,k3,k4 = {}(),{}(),{}(),{}(); local {wk}=0X0; local {wp}=0X4; ", fn_s_byte, fn_s_sub, "string_byte", "string_sub", var_raw_p, payload_str, var_chk, var_idx, var_junk, rng.obfuscate_num(0i64, 1, &keys), rng.obfuscate_num(1i64, 1, &keys), rng.obfuscate_num(0i64, 1, &keys), var_b, fn_s_byte, var_raw_p, var_idx, var_chk, var_chk, var_b, var_idx, var_idx, rng.obfuscate_num(1i64, 1, &keys), var_junk, var_junk, var_b, rng.obfuscate_num(2i64, 1, &keys), var_idx, rng.obfuscate_num(7i64, 1, &keys), var_tamper, var_chk, var_chk, var_junk, var_junk, var_tamper, var_tamper, fn_s_byte, rng.obfuscate_num(73i64, 1, &keys), var_vc, var_p, var_a2, entry_func, fn_s_sub, var_raw_p, var_idx, rng.obfuscate_num(6i64, 1, &keys), var_tamper, rng.obfuscate_num(1337i64, 2, &keys), rng.obfuscate_num(1i64, 1, &keys), fn_a3, x, fn_s_byte, var_p, var_a2, var_a2, var_a2, var_a2, rng.obfuscate_num(1i64, 1, &keys), x, fn_a3, fn_a3, fn_a3, fn_a3, wk = var_whiten, wp = var_whiten_pos)
+    // ㉓-D 去 KRYVEX 包裹标记后，载荷从第 1 字节开始读取。
+    let mut lua = format!(
+        "local {byte},{sub}={byte_name},{sub_name}; local {raw}=([=[{payload}]=]); ",
+        byte = fn_s_byte, sub = fn_s_sub, raw = var_raw_p, payload = payload_str,
+        byte_name = "string_byte", sub_name = "string_sub"
+    );
+
+    // 旧版的累加循环彼此抵消，并未核对载荷；仅保留有意义的 API 类型探针。
+    // 探针以运行期局部对象地址派生采样位，不消耗用户的 math.random 状态。
+    let (gate_ok, gate_bit, gate_a, gate_b, gate_s, gate_h, gate_i) =
+        (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let (type_ok, type_result) = (rng.name(), rng.name());
+    let gate_seed = rng.range64(0x1000, 0x7FFF_FF00);
+    lua.push_str(&format!(
+        "local {ok},{bit}=pcall(function() local {a},{b}={{}},{{}}; local {s}=tostring({a})..tostring({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+string.byte({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
+         local {tok},{tr}=pcall(function() return type({byte})=={fn_lit} end); {psn}={psn} or ({ok} and {bit}==0X0 and {tok} and not {tr}); ",
+        ok = gate_ok, bit = gate_bit, a = gate_a, b = gate_b, s = gate_s, h = gate_h, i = gate_i,
+        seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, psn = psn
+    ));
+    lua.push_str(&format!(
+        "local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {vc}=setmetatable({{}},mt_vc); \
+         local {p},{a2}={entry}({sub}({raw},{start})),{one}; \
+         local function {a3}() local {x}={byte}({p},{a2},{a2}); {a2}={a2}+{one}; return {x} end; \
+         local k1,k2,k3,k4={a3}(),{a3}(),{a3}(),{a3}(); local {wk}=0X0; local {wp}=0X4; ",
+        mode_lit = mode_lit, k_lit = k_lit, vc = var_vc,
+        p = var_p, a2 = var_a2, entry = entry_func, sub = fn_s_sub, raw = var_raw_p,
+        start = rng.obfuscate_num(1i64, 1, keys), one = rng.obfuscate_num(1i64, 1, keys),
+        a3 = fn_a3, x = x, byte = fn_s_byte, wk = var_whiten, wp = var_whiten_pos
+    ));
+    lua
 }
 
 /// 数值解码器（ChaCha 链式解密后按 IEEE-754 还原 double）—— 拆出。

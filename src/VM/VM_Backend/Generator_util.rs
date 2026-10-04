@@ -631,9 +631,9 @@ pub(super) struct DispatchState {
     pub update: String,
 }
 
-/// 每次 opcode 分发都有状态偏移；两份独立滚动值相互校验，令累加器更新成为
-/// 下一条指令路由的先决条件。删去 `acc` 更新会在下次分发前触发 guard。
-pub(super) fn build_dispatch_state(rng: &mut GenRng) -> DispatchState {
+/// 每次 opcode 分发都有状态偏移；两份独立滚动值相互校验。失配只污染共享旗标
+/// 并扰动路由偏移，不在 dispatcher 中早退或暴露固定失败点。
+pub(super) fn build_dispatch_state(rng: &mut GenRng, poison: &str, poison_delay: &str) -> DispatchState {
     let (acc, check, bias, mask, mul, ca, cb, cc, modulus, route_op) = (
         rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
         rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
@@ -641,6 +641,7 @@ pub(super) fn build_dispatch_state(rng: &mut GenRng) -> DispatchState {
     let seed = rng.range64(0x1000, 0xFFFF_FFFF);
     let seed_lit = rng.format_num(seed);
     let mask_v = rng.range64(0x4000, 0x1_0000);
+    let damage_v = rng.range64(3, 0xFFFF);
     let mul_v = rng.range64(0x31, 0x100) | 1;
     let (ca_v, cb_v, cc_v) = (
         rng.range64(3, 0x40), rng.range64(3, 0x40), rng.range64(3, 0x40),
@@ -651,7 +652,11 @@ pub(super) fn build_dispatch_state(rng: &mut GenRng) -> DispatchState {
         modulus=modulus, mask=mask, seed=seed_lit, mul_v=mul_v, ca_v=ca_v,
         cb_v=cb_v, cc_v=cc_v, mask_v=mask_v,
     );
-    let guard = format!("if {acc}~={check} then return end;{bias}={acc}%{mask};", acc=acc, check=check, bias=bias, mask=mask);
+    let guard = format!(
+        "{poison}={poison} or ({acc}~={check});if {poison} and {poison_delay}>0 then {poison_delay}={poison_delay}-1 end;if {poison} and {poison_delay}>0 then {bias}={check} else {bias}=({acc}+({acc}-{check})*{damage})%{mask} end;",
+        poison = poison, poison_delay = poison_delay, acc = acc, check = check,
+        bias = bias, damage = damage_v, mask = mask
+    );
     let route = route_op.clone();
     let update = format!(
         "{check}=({acc}*{mul}+op+inst_A*{ca}+inst_B*{cb}+inst_C*{cc})%{modulus};{acc}=({acc}*{mul}+inst_C*{cc}+inst_B*{cb}+inst_A*{ca}+op)%{modulus};",

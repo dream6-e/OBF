@@ -770,9 +770,8 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     // ⑤ base85/字节权重表不裸发大幂常量——逐项乘积链推导
     line(1, "local S = {[0] = 1}; S[1] = S[0]*85; S[2] = S[1]*85; S[3] = S[2]*85; S[4] = S[3]*85;", &mut out);
     line(1, "local T = {[0] = 1}; T[1] = T[0]*256; T[2] = T[1]*256; T[3] = T[2]*256;", &mut out);
-    // 环境探针：借参考件这块的格式，内容换成本外壳真正需要的前置检查。被 hook 坏的
-    // string.char/string.byte 会让整份解码静默错位，而缺 loader（或它不在捕获表里）会在
-    // 最后一步才炸——都在这里先死，报错更好读。
+    // 环境探针记录 string.char/string.byte/loader 的异常，但不在固定位置早退。
+    // 解码完成后把状态映射成载荷行偏移，由 VM 内部的随机化守卫决定后续劣化方式。
     line(1, "local L = 0;", &mut out);
     line(1, "do", &mut out);
     line(2, "local O = {65, 97, 255, 0};", &mut out);
@@ -785,11 +784,9 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     );
     line(2, "end;", &mut out);
     line(2, "if L == 0 and not (R and Y) then L = 2; end;", &mut out);
-    // 行号自检（防顶插、防拆行）：整份成品外壳被压成**一行**，外壳自己定义的函数
-    // 必然落在第 1 行；探针函数故意访问 nil 的下标，pcall 回来的错误消息里会带
-    // 「chunk名:行号: 」。有人在文件最顶端插行（或把外壳拆成多行）→ 行号变 2、3…
-    // → L=3，由下面同一条 `G.error()` 通路收尾（与 e1/e2 一样是自然失败，
-    // 不输出任何东西、不留「检测到篡改」字样）。宿主若不报行号则放行（fail-open）。
+    // 行偏移只记录到 L：外壳自身压成一行，顶插或拆行会改变这里读到的行号。
+    // 不在探针处报错；完成解码后将 L 映射为载荷前缀换行，让内层 VM 守卫以随机
+    // 子集采样并渐进污染状态。宿主若不提供行号则放行（fail-open）。
     line(2, "local F = function() local vf; return vf.x end;", &mut out);
     line(2, "local hf, ef = G.pcall(F);", &mut out);
     line(2, "local qf, bf = G.string.find, G.string.byte;", &mut out);
@@ -811,12 +808,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(3, "if nf and nf ~= 0X1 then L = 3; end;", &mut out);
     line(2, "end;", &mut out);
     line(1, "end;", &mut out);
-    // 探针失败按 `L` 分档：e1 = `string.byte`/`string.char` 往返被 hook 坏，e2 = 没有 loader 或没有 unpack。
-    line(
-        1,
-        "if L ~= 0 then G.error() end;",
-        &mut out,
-    );
+    // L 延迟到载荷解码后处理；环境/行号探针本身不提供固定的早退或错误点。
     line(1, &format!("local E = [=[{payload}]=];"), &mut out);
     // 数字表按 D 的位置建：D 是种子置换过的 85 字符 ⇒ 通用 base85 解码器读不出来。
     line(1, "for p = 1, 85 do V[Q(D, p, p)] = p - 1; end;", &mut out);
@@ -920,6 +912,8 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     line(2, "N = N .. Z(Y(d, p, q));", &mut out);
     line(1, "end;", &mut out);
     line(1, "d = nil;", &mut out);
+    // 外层探针只将异常编码成额外行偏移；内层 VM 负责随机采样并延迟劣化。
+    line(1, "if L ~= 0 then N = Z(0XA) .. N; end;", &mut out);
     line(
         1,
         "local ok, f = G.pcall(R, N);",

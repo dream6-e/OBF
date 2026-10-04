@@ -77,12 +77,12 @@ fn shuffle_vec(vec: &mut Vec<usize>) {
     }
 }
 
-pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
+pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiTamperResult {
     let mut rng = thread_rng();
     
     let v_env = rand_var();
     let v_net = rand_var();
-    let v_crash = rand_var();
+    let v_tripwire = rand_var();
     let v_dec = rand_var();
     let v_res = rand_var();
     let v_pool = rand_var();
@@ -158,25 +158,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     // 守卫体与 Generator 的解头/方法原型/body_consts 复用同一张表。
     let mut st = StreamTable::new(rand_var());
 
-    // 递归爆栈用的两个隐藏名：函数名 + 参数名，逐产物随机
-    let fn_crash_rec = rand_var();
-    let v_crash_arg = rand_var();
-    // 纯物理爆栈导致卡死，无视 Roblox 的 string.rep / 内存上限等沙盒过滤。
-    // 递归写成「把要递归的函数当参数传进去」的形式（`f(o) o(f,o)`），
-    // 产物里看不到 `pcall(f)` 这种一眼可辨的图案。
-    setup.push_str(&format!(
-    "local function {}() \
-        local j,s,k,v=_ENV,false;local t={{}};local p=type;if not k then v=s end;if p(t)~={crash_tab} then p=j end;repeat p={{}} until v; \
-         local function {}({}) {}({},{}); {}({},{}) end \
-         {}(pcall); \
-     local function we(x) return not x end;local gd if we(gd) then while we(s) do end;end \
-     end;\n",
-    v_crash, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, v_crash_arg, fn_crash_rec, v_crash_arg, fn_crash_rec,
-    crash_tab = {
-        let (a, b) = sc_key("table");
-        st.call("table", a, b)
-    }
-));
+    // 隐藏 tripwire 只置共享 poison 并返回；探针失败不直接卡死或抛固定错误。
+    setup.push_str(&format!("local function {}(...) {}=true end;\n", v_tripwire, poison_var));
     setup.push_str(&format!("local {} = {{{}}};\n", v_pool, pool_data));
     // 池解码器把线性逻辑与数据流打散：while 循环、自增下标、五态状态机、
     // 暂存表槽和逐产物随机局部名组合使用；密钥拆分和字节解码仍按运行期数据计算。
@@ -261,12 +244,12 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if te~=nil then if z(te)~=v then c(b,n) else g(1) end end;break;end;end;rt(typeof,raknet,error,print,_VERSION);\n"
 ));
     setup.push_str(&format!("local {}={{}};\n", v_net));
-    // 网表的陷阱门：任何取不到的键（有人删掉/改掉某块的键，或自己构造下标试探）
-    // 都返回爆栈函数 —— 直接卡死，而不是抛一句读得懂的 nil 调用错误暴露结构。
+    // 网表缺项时不早退、不爆栈：静默置共享投毒旗并返回恒等闭包，让链继续走。
+    let trap_arg = rand_var();
     setup.push_str(&format!(
-        "{}({},{{[{}]=function() return {} end}});\n",
+        "{}({},{{[{}]=function(...) {}=true;return function({}) return {} end end}});\n",
         format!("{}({})", v_res, poly_hash("setmetatable")),
-        v_net, format!("{}({})", v_dec, poly_hash("__index")), v_crash
+        v_net, format!("{}({})", v_dec, poly_hash("__index")), poison_var, trap_arg, trap_arg
     ));
 
     let mut current_expected: i64 = rng.gen_range(1000..9999);
@@ -278,16 +261,8 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     shuffle_vec(&mut guards_indices);
 
     // ── ③ 代码块互锁（紧密耦合 / 互相嵌合） ──
-    // 三件事让「逐段破解」失效：
-    //   ① 网表不再用 0/1/2… 顺序下标：每个守卫挂在一个随机 u32 键上，「下一块」
-    //      也要靠链上的键去找 —— 光看代码看不出执行顺序；定义/调用/触发各写同一个
-    //      值的不同派生算式，文本搜索对不上号；
-    //   ② 全链共享一个运行期状态量：每块入口按自己的 (乘数, 加数) 推进它，并把
-    //      「自己算出来的状态 − 这一步应有的状态」混进传给下一块的令牌里。
-    //      链路完整时这一项恒为 0（令牌与以前一模一样）；少跑/改跑/换序任何一块，
-    //      状态就对不上，令牌被污染 → 链尾自检失败 → 卡死。
-    //      校正项是「自然抵消」而不是一句 if，产物里没有「检查状态」的痕迹；
-    //   ③ 网表挂 __index → 爆栈 的陷阱门 + 两条形状一致的诱饵（见循环后）。
+    // 随机子集探测只改变不透明令牌；最终失配置共享 poison，不给固定早退/报错点。
+    // 缺失网表键由 __index 返回恒等闭包并置 poison；正常链路的令牌计算保持原样。
     let n_guards = guards_indices.len();
     let mut keys: Vec<u64> = Vec::new();
     while keys.len() < n_guards + 2 {
@@ -534,9 +509,9 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                 };
                 for (idx, mm) in mms.iter().enumerate() {
                     if idx == 2 {
-                        meta_lines.push(format!("{}[{}]={};", g_mt, mm_call(decoy, &mut st), v_crash));
+                        meta_lines.push(format!("{}[{}]={};", g_mt, mm_call(decoy, &mut st), v_tripwire));
                     }
-                    meta_lines.push(format!("{}[{}]={};", g_mt, mm_call(mm, &mut st), v_crash));
+                    meta_lines.push(format!("{}[{}]={};", g_mt, mm_call(mm, &mut st), v_tripwire));
                 }
                 check_code = format!(
                     "local {e} = {env}; \
@@ -662,11 +637,20 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
             }
         }
         
+        // 抽样位由两个同时存活的局部对象地址哈希派生；不触碰用户 math.random 状态。
+        let (gate_ok, gate_bit, gate_a, gate_b, gate_s, gate_h, gate_i) =
+            (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
+        let gate_seed = rng.gen_range(0x1000u64..0x7FFF_FF00u64);
+        let sampled_check = format!(
+            "local {ok},{bit}=pcall(function() local {a},{b}={{}},{{}};local {s}=tostring({a})..tostring({b});local {h}=0X{seed:X};for {i}=1,#{s} do {h}=({h}*0X21+string.byte({s},{i}))%0X7FFFFF01 end;return {h}%0X2 end);if {ok} and {bit}==0X0 then {check} else {good} end;",
+            ok = gate_ok, bit = gate_bit, a = gate_a, b = gate_b, s = gate_s, h = gate_h, i = gate_i,
+            seed = gate_seed, check = check_code, good = next_good
+        );
         current_expected += delta;
-        // 定义处直接发射键值字面量；状态推进语句块在最前（管线/链式两种形态都兼容）。
+        // 状态推进始终执行；只有探测体随机选中时才检查环境，并将坏令牌继续沿链传播。
         let single_guard_raw = format!(
             "{}[{}]=function(k)\n{}{}end;\n",
-            v_net, derived_num(keys[i], &mut rng), state_step, check_code
+            v_net, derived_num(keys[i], &mut rng), state_step, sampled_check
         );
         let minified_guard = minify_lua(&single_guard_raw);
         guards_code.push(minified_guard);
@@ -689,13 +673,13 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         key_var, v_net, derived_num(keys[0], &mut rng), initial_token
     ));
     trigger.push_str(&format!(
-        "local {} = setmetatable({{}}, {{ [{}] = function() return {} end }});\n",
+        "local {} = setmetatable({{}}, {{ [{}] = function(...) {}=true; return function() end end }});\n",
         v_jump,
         {
             let (a, b) = sc_key("__index");
             st.call("__index", a, b)
         },
-        v_crash
+        poison_var
     ));
     trigger.push_str(&format!("{}[{}] = function() end;\n", v_jump, current_expected));
     trigger.push_str(&format!("{}[{}]();\n", v_jump, key_var));

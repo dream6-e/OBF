@@ -41,19 +41,15 @@ pub(super) struct ChainIn {
     pub pf_opcodes: String,
     pub pf_protos: String,
     pub psn_n: String,
+    pub poison_delay_key: u32,
     pub var_a2: String,
     pub var_whiten: String,
     pub var_whiten_pos: String,
     pub whiten_mul: u64,
     pub whiten_add: u64,
-    pub var_b: String,
     pub var_builtin_reg: String,
-    pub var_chk: String,
-    pub var_idx: String,
-    pub var_junk: String,
     pub var_p: String,
     pub var_raw_p: String,
-    pub var_tamper: String,
     pub var_vc: String,
     pub np21: String,
     pub md21: String,
@@ -161,19 +157,15 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         pf_opcodes,
         pf_protos,
         psn_n,
+        poison_delay_key,
         var_a2,
         var_whiten,
         var_whiten_pos,
         whiten_mul,
         whiten_add,
-        var_b,
         var_builtin_reg,
-        var_chk,
-        var_idx,
-        var_junk,
         var_p,
         var_raw_p,
-        var_tamper,
         var_vc,
         np21,
         md21,
@@ -235,6 +227,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         weld: mut weld,
         uni: mut uni,
     } = x;
+    let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
     // CG 原为第一阶段块内 const，随代码原样搬迁重声明（同值同路径）。
     #[allow(dead_code)]
     const CG: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
@@ -247,18 +240,22 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         // 第 2 项：形态选路的**运行期绑定**——同一逻辑功能发射两型逐位等价的实现，
         // 由宿主指纹 h 在运行期择一（三种择一写法随机轮抽，产物里看不到固定
         // if/表形态；静态读者也必须先仿真宿主语义才知道走哪支）。
-        // 第 2 项：**静默投毒**——反篡改守卫若命中失败，只把投毒旗 psn 立起来
-        // （不抛错、不留「检测到篡改」信号），此后各簇解码出来的常量全乱：脚本
-        // 照跑、结果错，或走进错误分支。四种投毒形态轮抽（改 Keystream 首字节 /
-        // 全字节重排 / 首尾夹击 / 只改一位），全部是模 256 运算，不触发任何报错。
+        // 第 2 项：**延迟静默投毒**——守卫失败只立共享旗 psn；随机指令窗口结束后，
+        // 再渐进污染密钥/常量与路由。探针不早退、不抛专属错误；后续只呈现自然劣化。
+        // 四种 Keystream 扰动均为模 256 运算，并按短命对象地址作运行期抽样；不消耗全局随机数。
         let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
             let k1 = rng.range(0x100, 0xFFFF) as u32;
             let k2 = rng.range(0x100, 0xFFFF) as u32;
+            let (sample_s, sample_h, sample_i) = (rng.name(), rng.name(), rng.name());
+            let poison_sample = format!(
+                "(function()local {s}=tostring({{}});local {h}=0;for {i}=1,#{s} do {h}=({h}*0X21+string.byte({s},{i}))%0X7FFFFF01 end;return {h}%0X80==0X0 end)()",
+                s = sample_s, h = sample_h, i = sample_i
+            );
             match rng.range(0, 4) {
-                0 => format!("if {psn} then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = psn_n, ks = ks, k = k1),
-                1 => format!("if {psn} then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = psn_n, ks = ks, k = k1, z = rng.name()),
-                2 => format!("if {psn} then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = psn_n, ks = ks, k = k1, k2 = k2),
-                _ => format!("if {psn} then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = psn_n, ks = ks, k = k1, k2 = k2, z = rng.name()),
+                0 => format!("if {psn} and {delay}<=0 and {sample} then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1),
+                1 => format!("if {psn} and {delay}<=0 and {sample} then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, z = rng.name()),
+                2 => format!("if {psn} and {delay}<=0 and {sample} then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, k2 = k2),
+                _ => format!("if {psn} and {delay}<=0 and {sample} then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, k2 = k2, z = rng.name()),
             }
         };
         let bind2 = |rng: &mut GenRng, dst: &str, n0: &str, n1: &str| -> String {
@@ -674,9 +671,9 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let (k_stmt, sc_k) = uni.fetch(&mut rng, hid_k);
         let block_dec_header = crate::VM::VM_Backend::Generator_flow::build_header(
             &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
-            var_chk.as_str(), var_idx.as_str(), var_junk.as_str(), var_b.as_str(), var_tamper.as_str(),
             var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
-            sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str(), var_whiten.as_str(), var_whiten_pos.as_str());
+            sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str(), var_whiten.as_str(), var_whiten_pos.as_str(),
+            psn_n.as_str());
         let block_dec_header = format!("{fun_stmt}{mode_stmt}{k_stmt}") + &block_dec_header;
         // ㉛ 白化参数（逐构建随机）的产物侧拼写——read_dec 内每字节现算掩码用
         let rng_whiten_mul_s = rng.obfuscate_num(whiten_mul as i64, 1, &keys);
@@ -766,19 +763,15 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             pf_opcodes,
             pf_protos,
             psn_n,
+            poison_delay_key,
             var_a2,
             var_whiten,
             var_whiten_pos,
             whiten_mul,
             whiten_add,
-            var_b,
             var_builtin_reg,
-            var_chk,
-            var_idx,
-            var_junk,
             var_p,
             var_raw_p,
-            var_tamper,
             var_vc,
             np21,
             md21,
