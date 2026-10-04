@@ -10,15 +10,9 @@
 
 #![allow(dead_code)]
 
-/// ⑥ 位置权重伪装式：字节拼装 X*256+Y 的 256 是高/低字节位置权重，值必须
-/// 保持 256——用三种恒等式随机伪装（差式/差拆式/和式），P() 求值序不变
+/// 字节拼装的高位权重直接写为 0X100，不再用纯算术表达式伪装。
 fn w256() -> String {
-    let r = &mut rand::rng();
-    match rand::Rng::random_range(r, 0..3) {
-        0 => { let k: u32 = rand::Rng::random_range(r, 0x1100..0xFFFFF); format!("(0X{:X} - 0X{:X})", k, k - 0x100) }
-        1 => { let k: u32 = rand::Rng::random_range(r, 0x1100..0xFFFFF); format!("(0X{:X} - (0X{:X} + 0XF))", k, k - 0x100 - 0xF) }
-        _ => { let a: u32 = rand::Rng::random_range(r, 0x10..0xF0); format!("(0X{:X} + 0X{:X})", a, 0x100 - a) }
-    }
+    "0X100".to_string()
 }
 
 // ────────────────────────── 内部随机源 ──────────────────────────

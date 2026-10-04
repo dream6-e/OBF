@@ -634,8 +634,7 @@ impl Generator {
                 let mut pre: Vec<String> = Vec::new();
                 pre.push("local rk1,rk2;".to_string());
                 // 状态号自校验：分发器刚把本块的状态号写进槽位，对不上说明跳错了块
-                // 常数混淆固定 depth=1：差式嵌套 depth≥2 会造出 ≥2^32 中间值，
-                // 32 位 bxor（bit32/回退实现）高位丢失 → 校验值错（obf0/1/2 用 1 从未暴露）
+                // 状态值固定 depth=1，使用运行时查表表示，校验值仍保持完整 32 位。
                 let st_obf = rng.obfuscate_num(*st as i64, 1, &keys);
                 match rng.range(0, 4) {
                     0 => pre.push(format!("if {s}[{}]~={} then return end;", k_state, st_obf, s = p_self)),
@@ -1035,7 +1034,7 @@ impl Generator {
             };
             // ㉒② 焊接 2^32 模数（execute 换钥分支每次重走——第二次起逻辑无分支）；
             // ㉒① thunk 回写环、寄存器键轮换环 → 动态分段数值游标机
-            // （execute 作用域内 P 表已建，状态常数走 obfuscate_num 算式化出边）。
+            // （execute 作用域内 P 表已建，状态常数走 obfuscate_num 的运行时查表表示）。
             let w2_dst = weld.dst();
             let w2_mv = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let w2_stmt = format!("local {};", w2_dst) + &weld.weld(&mut rng, &w2_dst, &w2_mv);

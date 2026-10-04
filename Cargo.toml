@@ -25,7 +25,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "kryvex-simple"
 path = "src/main.rs"
-
-[workspace]
-members = ["CLI"]
-default-members = ["."]

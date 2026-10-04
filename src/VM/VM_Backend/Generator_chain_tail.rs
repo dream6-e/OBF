@@ -138,10 +138,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             _ => format!("local {t}={{{a},{b}}}; {d}={t}[({h}%0X2)+0X1]; ", d = dst, a = a, b = b, h = h_var, t = rng.name()),
         }
     };
-    let mk_m = |rng: &mut GenRng| -> String {
-        let k = rng.range(0x1000, 0xFFFFFF) as u64;
-        format!("(0X{:X}-0X{:X})", 4294967296u64 + k, k)
-    };
+    let mk_m = |_rng: &mut GenRng| -> String { "4294967296".to_string() };
     let mk_rounds = |rng: &mut GenRng, qrn: &str, ly: &crate::VM::VM_Backend::Generator_chacha::ChaChaLayout| -> String {
         let mut cols: Vec<(u32, u32, u32, u32)> = vec![(0,4,8,12),(1,5,9,13),(2,6,10,14),(3,7,11,15)];
         let mut dias: Vec<(u32, u32, u32, u32)> = vec![(0,5,10,15),(1,6,11,12),(2,7,8,13),(3,4,9,14)];
@@ -149,18 +146,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let mut ents: Vec<String> = Vec::new();
         for &(a, b, c, d) in cols.iter().chain(dias.iter()) {
             let m = |v: u32| (ly.rho[v as usize] + 1) as u32;
-            let f = |rng: &mut GenRng, v: u32| -> String {
-                if rng.range(0, 2) == 0 { v.to_string() }
-                else { let k = rng.range(0x10, 0xFFFF) as u32; format!("(0X{:X}-0X{:X})", v + k, k) }
-            };
+            let f = |rng: &mut GenRng, v: u32| -> String { rng.format_num(v as i64) };
             ents.push(format!("{{{},{},{},{}}}", f(rng, m(a)), f(rng, m(b)), f(rng, m(c)), f(rng, m(d))));
         }
         let (tv, iv, ev) = (rng.name(), rng.name(), rng.name());
-        let kf = rng.range(0x10, 0xFFFF) as u32;
         let rounds = (ly.rounds / 2) as u32;
         format!(
-            "local {tv}={{{ents}}}; for _=1,(0X{:X}-0X{:X}) do for {iv}=1,#{tv} do local {ev}={tv}[{iv}]; {qrn}({sv},{ev}[1],{ev}[2],{ev}[3],{ev}[4]) end end; ",
-            kf + rounds, kf, tv = tv, iv = iv, ev = ev, ents = ents.join(","), qrn = qrn, sv = "s")
+            "local {tv}={{{ents}}}; for _=1,{rounds} do for {iv}=1,#{tv} do local {ev}={tv}[{iv}]; {qrn}({sv},{ev}[1],{ev}[2],{ev}[3],{ev}[4]) end end; ",
+            tv = tv, iv = iv, ev = ev, ents = ents.join(","), qrn = qrn, sv = "s", rounds = rounds)
     };
 // ⑰ 中央字符串/数值池初始化块废除（池不存在了）。⑦ 的 while/repeat
         // 抽签壳保留在 body_ret/body_debug；池壳随池一起退役。
@@ -282,12 +275,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         // ⑱.2 读侧掩码还原：ln=u32d() 后与 f(u32d 前快照的 k1..k4, 层内序号) 异或。
         // 公式与写侧 pm_g/pm_sb 同源：mask 字节=(rotl8(ka^kb)+盐)%256，
-        // rotl8(r)=fn_b_rotr 的 rotr8(8-r)；盐=(i*A+B)%256，A/B 逐产物随机（pm_s）。
+        // rotl8(r)=fn_b_rotr 的 rotr8(8-r)，旋转位数在生成阶段预先计算并直接输出；
+        // 盐=(i*A+B)%256，A/B 逐产物随机（pm_s）。
         let (qa18, qb18, qc18, qd18) = (rng.name(), rng.name(), rng.name(), rng.name());
         let pm_lua = |x: &str, y: &str, r: u32, j: usize| -> String {
-            format!("({rt}({bx}({x},{y}),8-0X{r:X})+({i}*0X{a:X}+0X{b:X})%256)%256",
+            let rotation = 8 - r;
+            format!("({rt}({bx}({x},{y}),0X{rotation:X})+({i}*0X{a:X}+0X{b:X})%256)%256",
                 rt = fn_b_rotr, bx = fn_bxor, i = v_ch_i,
-                a = pm_s[j * 2], b = pm_s[j * 2 + 1], r = r)
+                a = pm_s[j * 2], b = pm_s[j * 2 + 1], rotation = rotation)
         };
         let m18_0 = pm_lua(&qa18, &qd18, pm_r0, 0);
         let m18_1 = pm_lua(&qb18, &qa18, pm_r1, 1);
@@ -369,12 +364,11 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let (m_drv, m_pcall, m_probe, m_chk, m_hit) =
                 (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
             let (p_err, p_hit, p_u, p_self) = (rng.name(), rng.name(), rng.name(), rng.name());
-            let d = rng.range(0x1000, 0xFFFF);
-            // ⑧ 针式去冒号字面量：":"..N..":" 是错误消息行号嗅探指纹——
-            // 冒号改 string.char(0X3A)（或差式）运行期构造，数值本身不变
+            // ⑧ 针式去冒号字面量：":"..N..":" 是错误消息行号嗅探指纹.
+            // 冒号与字符 2 使用直接数字字面量，由 string.char/连接在运行期构造目标串。
             let sc = rng.name();
-            let c58 = if rng.range(0, 2) == 0 { "0X3A".to_string() } else { format!("0X{:X}-0X{:X}", 0x1000 + 58, 0x1000) };
-            let needle = format!("{s}({c})..(0X{:X}-0X{:X})..{s}({c})", d + 2, d, s = sc, c = c58);
+            let c58 = "0X3A";
+            let needle = format!("{s}({c})..(0X2)..{s}({c})", s = sc, c = c58);
             let pb = probe_body(rng);
             let (ts, tolerant) = trig_stmt(rng, &p_u);
             // ⑦ m_hit 去空壳：原来 local u=h and tol or nil; ts 一眼即知是桩。
@@ -382,8 +376,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             // 触发语句按随机形态收尾（直尾 / if not u 尾）——触发语义不变：
             // u=nil 时 ts 仍抛同型自然错误
             let (f1, f2) = (rng.name(), rng.name());
-            // 投毒赋值去 "=true" 指纹：差式恒真谓词（0XA-0XB==0XC，逐守卫实例随机，
-            // 与库内既有差式数字形态一致）；psn=psn or (…) 幂等
+            // 投毒赋值的恒真谓词继续保留原形式；本次仅调整普通常量伪装。
             let (ga, gb) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
             let taut = format!("(0X{:X}-0X{:X}==0X{:X})", ga, gb, ga - gb);
             let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}=type({u}); ",
@@ -545,7 +538,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             out.push_str(&format!("local {}={}; ", names.join(","), vals.join(",")));
         }
         // ㉒② 焊接缓存表声明：长时状态只剩槽号；此后各站点以「一个 if 三件事」
-        // 形态（惰性缓存+大随机数当键+校验恒等式）发射焊接构造。
+        // 形态（惰性缓存+随机大数键）发射焊接构造。
         out.push_str(&weld.declare());
         // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
         // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
@@ -567,9 +560,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         // 后续模板仍引用同名局部（math_floor/string_char/...），语义不变
         {
             let pt = rng.name();
-            let kf = |v: usize| -> String {
-                if v % 2 == 0 { format!("0X{:X}", v) } else { format!("(0X{:X}-7)", v + 7) }
-            };
+            let kf = |v: usize| -> String { format!("0X{:X}", v) };
             let (km, ks, kt) = (rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF));
             let mut members = vec![
                 (km, "math_floor", "floor"),

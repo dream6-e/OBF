@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，223,401 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），106,384 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，296,400 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，212,060 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），99,462 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，266,258 B |
 
 前两个都通过 `luac5.1 -p` 与 `luau-compile --binary`，并在 `lua5.1`、`luau` 下运行验证；stdout 与原文件逐字节一致（19 行）。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。
 

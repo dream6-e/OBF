@@ -1,51 +1,32 @@
 //! ⑤ 库级常量 KDF 派生 + 常量混淆公共件（自 Generator_util 拆分，守 80KB 上限）。
 //!
-//! - `kdf_pow2` / `kdf_m32`：2^bits 不以裸大幂字面量发射——拆成 ≤0X100 的小因子
-//!   乘积，因子洗牌、乘法树随机加括号，逐构建形态不同、运行期值不变。
-//! - `obf_const`：链公式特征乘子的逐站点算术变形。
+//! - `kdf_pow2` / `kdf_m32`：直接发射数值字面量，不再拆成可静态折叠的乘积。
+//! - `obf_const`：保留调用接口，直接发射常量字面量。
 //! - `WeldCache`：焊接缓存（3 张缓存表 + 焊接语句发射器）。
 
 use super::Generator_util::{CipherKeys, GenRng};
 
-/// ⑤ 库级魔数 KDF 派生：2^bits 不以裸大幂字面量出现——逐构建把指数拆成
-/// ≤8 位的段（因子全部 ≤ 0X100，0X100/0X80 是通用字节常量，不构成指纹），
-/// 因子顺序洗牌、乘法树随机加括号，形态逐构建变化，运行期求值不变。
-pub(crate) fn kdf_pow2(rng: &mut GenRng, bits: u32) -> String {
-    let mut rem = bits;
-    let mut fs: Vec<u64> = Vec::new();
-    while rem > 0 {
-        let take = if rem >= 8 {
-            match rng.range(0, 4) { 0 => 7, 1 => 6, 2 => 5, _ => 8 }
-        } else { rem };
-        fs.push(1u64 << take);
-        rem -= take;
-    }
-    rng.shuffle(&mut fs);
-    fn join(rng: &mut GenRng, fs: &[u64]) -> String {
-        if fs.len() == 1 { return format!("0X{:X}", fs[0]); }
-        let cut = rng.range(1, fs.len());
-        format!("({}*{})", join(rng, &fs[..cut]), join(rng, &fs[cut..]))
-    }
-    join(rng, &fs)
+/// 直接发射 2^bits 的数值字面量，避免乘法因子表达式。
+pub(crate) fn kdf_pow2(_rng: &mut GenRng, bits: u32) -> String {
+    let value = 1u64.checked_shl(bits).expect("kdf_pow2 bits must be below 64");
+    numeric_literal(value)
 }
-/// ⑤ u32 模数 2^32 派生（同上机制）
+
+/// 大于 24 位的数用十进制，避免打包数值处理对长十六进制字面量的限制。
+fn numeric_literal(value: u64) -> String {
+    if value <= 0xFF_FFFF {
+        format!("0X{:X}", value)
+    } else {
+        value.to_string()
+    }
+}
+
+/// u32 模数 2^32，直接使用数值字面量。
 pub(super) fn kdf_m32(rng: &mut GenRng) -> String { kdf_pow2(rng, 32) }
 
-
-pub fn obf_const(rng: &mut GenRng, v: u64) -> String {
-    let hi = if v > 2 { (v - 1).min(0xFFFF) } else { 1 };
-    let a = rng.range(1, hi as usize + 1) as u64;
-    let b = rng.range(1, 0x10000) as u64;
-    // 链公式的特征乘子永不以裸值出现——它们是解码器家族的指纹常量，
-    // 裸值可被直接 grep 对齐；通用模数/小常量保留自然形态。
-    // ⑤：2^32/2^31 亦属可 grep 的库级指纹，与链公式乘子同等待遇
-    let distinctive = matches!(v, 0x101 | 0x1001 | 0x45D9 | 0x1_0001 | 0x11 | 0x1_0000_0000 | 0x8000_0000);
-    let r = rng.range(0, 3);
-    match (distinctive, r) {
-        (false, 0) => format!("0X{:X}", v),
-        (_, 1) => format!("(0X{:X}+0X{:X})", v - a, a),
-        _ => format!("(0X{:X}-0X{:X})", v + b, b),
-    }
+/// 保留公共调用接口，常量直接输出，不再生成和差恒等式。
+pub fn obf_const(_rng: &mut GenRng, v: u64) -> String {
+    numeric_literal(v)
 }
 
 /// 焊接缓存：3 张缓存表 + 焊接语句发射器。
@@ -72,8 +53,7 @@ impl WeldCache {
             if self.used.insert(k) { return k; }
         }
     }
-    /// 焊接语句：`if not T[k] then dst=C+((value)-C); T[k]=dst else dst=(T[k]) end;`
-    /// 三种拼写（两臂换序 / 存储拆出）。C 为校验常数；被缓存值必须是真值（数字）。
+    /// 缓存未命中时直接写入 value，命中时读取已缓存值。
     /// **dst 由调用方按作用域声明并复用**（局部数压到 1——同一字母在同一作用域
     /// 里反复承载不同状态，命名维度彻底消失；也避开 Lua5.1 单函数 200 局部上限）。
     pub fn weld(&mut self, rng: &mut GenRng, dst: &str, value: &str) -> String {
@@ -81,15 +61,13 @@ impl WeldCache {
         let k = self.key(rng);
         let kf = rng.format_num(k as i64);
         let t = self.tables[rng.range(0, self.tables.len())].clone();
-        let c = rng.range64(0x1000_0000, 0x7FFF_FFFF);
-        let cs = rng.format_num(c);
         match rng.range(0, 3) {
-            0 => format!("if not {t}[{k}] then {d}={cs}+(({v})-{cs}); {t}[{k}]={d} else {d}=({t}[{k}]) end; ",
-                         d = d, t = t, k = kf, cs = cs, v = value),
-            1 => format!("if {t}[{k}] then {d}=({t}[{k}]) else {d}={cs}+(({v})-{cs}); {t}[{k}]={d} end; ",
-                         d = d, t = t, k = kf, cs = cs, v = value),
-            _ => format!("if not {t}[{k}] then {t}[{k}]={cs}+(({v})-{cs}) end; {d}=({t}[{k}]); ",
-                         d = d, t = t, k = kf, cs = cs, v = value),
+            0 => format!("if not {t}[{k}] then {d}=({v}); {t}[{k}]={d} else {d}=({t}[{k}]) end; ",
+                         d = d, t = t, k = kf, v = value),
+            1 => format!("if {t}[{k}] then {d}=({t}[{k}]) else {d}=({v}); {t}[{k}]={d} end; ",
+                         d = d, t = t, k = kf, v = value),
+            _ => format!("if not {t}[{k}] then {t}[{k}]=({v}) end; {d}=({t}[{k}]); ",
+                         d = d, t = t, k = kf, v = value),
         }
     }
 }
@@ -218,7 +196,7 @@ pub struct DerivedGroup {
 pub fn derive_group(rng: &mut GenRng, keys: &CipherKeys, kdf: &str, root_fetch: &[String], g: usize) -> DerivedGroup {
     let kw = rng.name();
     let ge = rng.format_num(g as i64);
-    // 8 个密钥字：发射顺序洗牌、下标数字算式化（读不出「第几个字配哪个槽」）
+    // 8 个密钥字：发射顺序洗牌、下标使用运行时查表表示（读不出「第几个字配哪个槽」）
     let mut idx: Vec<usize> = (1..=8).collect();
     rng.shuffle(&mut idx);
     let mut decl = format!("local {kw}={{}}; ", kw = kw);

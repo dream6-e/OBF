@@ -170,11 +170,8 @@ pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
     let hm = format!("0X{:X}", NMOD);
     let (r1, r2, r3) = (rng.range64(3, 0x1_0000), rng.range64(3, 0x1_0000), rng.range64(3, 0x1_0000));
     let (p1, p2, p3) = (rng.format_num(r1), rng.format_num(r2), rng.format_num(r3));
-    // 恒等数字算式（差式）：位置下标与错误探针的实参都不出现裸小常量
-    let xnum = |rng: &mut GenRng, v: u32| -> String {
-        let k = rng.range(0x20, 0xFFFF) as u32;
-        format!("(0X{:X}-0X{:X})", v + k, k)
-    };
+    // 位置下标与错误探针实参直接使用数值字面量。
+    let xnum = |rng: &mut GenRng, v: u32| -> String { rng.format_num(v as i64) };
     // 类型名比较臂池：三种写法求值都是宿主给出的 "string"（值不同、语义同）
     let tstr = |rng: &mut GenRng| -> String {
         match rng.range(0, 3) {

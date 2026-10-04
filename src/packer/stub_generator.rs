@@ -95,7 +95,7 @@ impl StubGenerator {
         let op_state9 = pool.rng_mut().next_range(1001, 1100);
 
         // ㉕ pc 状态号运行时耦合（与主打包器同规格）：值域保持 1..10 稠密排列
-        // （路由器按 #insts/pc+1 语义），文本零裸值——逐槽混淆算式填充，
+        // （路由器按 #insts/pc+1 语义）；状态表直接写入数值字面量，
         // 引用走状态表/恒等委托两形态。
         let mut srng = GenRng::new(seed as u64);
         let mut pcs: Vec<usize> = (0..10).collect();
@@ -130,13 +130,13 @@ impl StubGenerator {
                 pc_refs_b.push(format!("{}[{}]", pct, idx_b));
             }
         }
-        // ㉕ op/tamper 数值统一经混淆算式下发
+        // ㉕ op/tamper 数值统一以数值字面量下发
         let obf_op = |v: usize, r: &mut GenRng| ControlFlowBuilder::obf_num(v as i64, r);
 
         let tamper_val = pool.rng_mut().next_range(10, 50);
 
         let mut insts_init = Vec::new();
-        // ㉕ pc 键=状态表引用；op 值=混淆算式
+        // ㉕ pc 键=状态表引用；op 值=直接数值字面量
         insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[0], opx=obf_op(op_state0, &mut srng)));
         insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[1], opx=obf_op(op_state1, &mut srng)));
         insts_init.push(format!("{v_s}.{p_insts}[{pck}]={{{opx}}};", v_s=v_s, p_insts=p_insts, pck=pc_refs_a[2], opx=obf_op(op_state2, &mut srng)));
@@ -162,17 +162,10 @@ impl StubGenerator {
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state5}+{tamper_val}] = function({v_i}) {v_s}.{p_p1}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p1} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state6}; end;", v_s=v_s, p_handlers=p_handlers, op_state5=obf_op(op_state5, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_p1=p_p1, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state6=pc_refs_b[6]));
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state6}+{tamper_val}] = function({v_i}) {v_s}.{p_p2}={v_q}:{m_next}({v_s}); if not {v_s}.{p_p2} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_s}.{p_pc}={pc_state7}; end;", v_s=v_s, p_handlers=p_handlers, op_state6=obf_op(op_state6, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_p2=p_p2, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_pc=p_pc, pc_state7=pc_refs_b[7]));
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state7}+{tamper_val}] = function({v_i}) local {v_len}=0; while true do local {v_lb}={v_q}:{m_next}({v_s}); if not {v_lb} then {v_s}.{p_r_flg}=true; {v_s}.{p_r_vals}={{{f_concat}({v_s}.{p_res})}}; return end; {v_len}={v_len}+{v_lb}; if {v_lb}<255 then break end end; {v_s}.{p_w}={v_len}; {v_s}.{p_pc}={pc_state8}; end;", v_s=v_s, p_handlers=p_handlers, op_state7=obf_op(op_state7, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, v_len=v_len, v_lb=v_lb, v_q=v_q, m_next=m_next, p_r_flg=p_r_flg, p_r_vals=p_r_vals, f_concat=f_concat, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state8=pc_refs_b[8]));
-        // ⑥ 字节拼装算术化：p1*256+p2 的权重 256 是两字节合一字的反编译锚——
-        // 改成运行期随机恒等算式（差一式/零和式/约简式三选一），语义不变
+        // 字节拼装权重直接使用 0X100，不再包成加减乘除恒等式。
         let bp1 = format!("{v_s}.{p_p1}", v_s = v_s, p_p1 = p_p1);
         let bp2 = format!("{v_s}.{p_p2}", v_s = v_s, p_p2 = p_p2);
-        // 位置权重 256 必须保值，只伪装拼写：差式/零和式/约简式
-        let k6: u32 = rand::rng().random_range(0x1100..0xFFFFF);
-        let w256 = match rand::rng().random_range(0..3) {
-            0 => format!("{}*(0X{:X}-0X{:X})+{}", bp1, k6, k6 - 0x100, bp2),
-            1 => format!("({}*(0X{:X})-{}*0X{:X})+{}", bp1, k6 + 0x100, bp1, k6, bp2),
-            _ => { let d6 = (k6 >> 8).max(1); format!("(({}*0X{:X})/0X{:X})+{}", bp1, d6 << 8, d6, bp2) }
-        };
+        let w256 = format!("{}*0X100+{}", bp1, bp2);
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state8}+{tamper_val}] = function({v_i}, {v_iter}) {v_s}.{p_ptr}=#{v_s}.{p_res}-({w256})+1; {v_iter}=0; while true do if {v_iter}>={v_s}.{p_w}+3 then break end; {v_s}.{p_res}[#{v_s}.{p_res}+1]={v_s}.{p_res}[{v_s}.{p_ptr}+{v_iter}]; {v_iter}={v_iter}+1; end; {v_s}.{p_pc}={pc_state9}; end;", v_s=v_s, p_handlers=p_handlers, op_state8=obf_op(op_state8, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, v_iter=v_iter, p_ptr=p_ptr, p_res=p_res, p_w=p_w, p_pc=p_pc, pc_state9=pc_refs_b[9]));
         handlers_init.push(format!("{v_s}.{p_handlers}[{op_state9}+{tamper_val}] = function({v_i}) {v_s}.{p_f}={f_floor}({v_s}.{p_f}/2); {v_s}.{p_bc}={v_s}.{p_bc}+1; {v_s}.{p_pc}={pc_state1}; end;", v_s=v_s, p_handlers=p_handlers, op_state9=obf_op(op_state9, &mut srng), tamper_val=obf_op(tamper_val, &mut srng), v_i=v_i, p_f=p_f, f_floor=f_floor, p_bc=p_bc, p_pc=p_pc, pc_state1=pc_refs_b[1]));
 
@@ -184,31 +177,12 @@ impl StubGenerator {
         let mut map_init = String::new();
         for (i, &c) in alphabet.iter().enumerate() {
             let b = c as u8 as u32;
-            let variant = pool.rng_mut().next_range(0, 4);
-            let line = match variant {
-                0 => {
-                    let off = pool.rng_mut().next_range(10, 120) as u32;
-                    let mult = pool.rng_mut().next_range(3, 9) as u32;
-                    let obf = (b + off) * mult;
-                    format!("{v_s}.{p_map}[{f_floor}(({obf}/{mult})-{off})]={i};\n", v_s=v_s, p_map=p_map, f_floor=f_floor, obf=obf, mult=mult, off=off, i=i)
-                }
-                1 => {
-                    let off = pool.rng_mut().next_range(10, 120) as i64;
-                    let mult = pool.rng_mut().next_range(3, 9) as i64;
-                    let obf = (b as i64 - off) * mult;
-                    format!("{v_s}.{p_map}[{f_floor}(({obf}/{mult})+{off})]={i};\n", v_s=v_s, p_map=p_map, f_floor=f_floor, obf=obf, mult=mult, off=off, i=i)
-                }
-                2 => {
-                    let mask = pool.rng_mut().next_range(1, 90) as u32;
-                    let obf = b ^ mask;
-                    format!("{v_s}.{p_map}[{v_q}:{m_bxor}({v_s},{obf},{mask})]={i};\n", v_s=v_s, p_map=p_map, v_q=v_q, m_bxor=m_bxor, obf=obf, mask=mask, i=i)
-                }
-                _ => {
-                    let off = pool.rng_mut().next_range(10, 120) as i64;
-                    let mult = pool.rng_mut().next_range(3, 9) as i64;
-                    let obf = (b as i64) * mult + off;
-                    format!("{v_s}.{p_map}[{f_floor}(({obf}-{off})/{mult})]={i};\n", v_s=v_s, p_map=p_map, f_floor=f_floor, obf=obf, off=off, mult=mult, i=i)
-                }
+            let line = if pool.rng_mut().next_range(0, 2) == 0 {
+                format!("{v_s}.{p_map}[{b}]={i};\n", v_s=v_s, p_map=p_map, b=b, i=i)
+            } else {
+                let mask = pool.rng_mut().next_range(1, 90) as u32;
+                let obf = b ^ mask;
+                format!("{v_s}.{p_map}[{v_q}:{m_bxor}({v_s},{obf},{mask})]={i};\n", v_s=v_s, p_map=p_map, v_q=v_q, m_bxor=m_bxor, obf=obf, mask=mask, i=i)
             };
             map_init.push_str(&line);
         }

@@ -322,9 +322,9 @@ impl Packer {
         let op_state8 = rng.range(901, 1000);
         let op_state9 = rng.range(1001, 1100);
 
-        // ㉕ pc 状态号运行时耦合：值域必须保持 1..10 的稠密排列（路由器用
-        // #s.insts 做越界哨兵、取指后还有 pc+1 快推），但产物文本零裸值——
-        // 每个表槽用混淆算式逐一填充（发射顺序也洗牌），引用走表/委托两形态。
+        // ㉕ pc 状态号运行时耦合：值域保持 1..10 的稠密排列（路由器用
+        // #s.insts 做越界哨兵、取指后还有 pc+1 快推）；表槽直接写入数值字面量，
+        // 发射顺序洗牌，引用走状态表/委托两形态。
         let mut pcs: Vec<usize> = (0..10).collect();
         for i in (1..10).rev() {
             let j = rng.range(0, i + 1);
@@ -334,7 +334,7 @@ impl Packer {
         let tamper_val = rng.range(10, 50);
 
         // ㉕ pc 状态表基建：在解码脚本所有方法之前声明，被各闭包按 upvalue 捕获。
-        // 槽位与值全部混淆算式下发，值只在运行时落表；稠密 1..10 保 #s.insts 语义。
+        // 槽位与值直接用数值字面量写入；状态仍经表访问，稠密 1..10 保持 #s.insts 语义。
         let (pct, pcdv) = (rng.name(), rng.name());
         let mut pc_fills: Vec<String> = Vec::new();
         for n in 0..10 {
@@ -371,8 +371,7 @@ impl Packer {
         let p_hk = rng.name(); let p_hs = rng.name();
 
         let mut insts_init = Vec::new();
-        // ㉕ pc 键走状态表引用；op 值改混淆算式（运行期仍为同一数值，
-        // 与句柄注册键 op+tamper 在运行时对齐）
+        // ㉕ pc 键走状态表引用；op 值直接写为数值字面量，运行期仍与句柄注册键 op+tamper 对齐。
         insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 0), ControlFlowBuilder::obf_num(op_state0 as i64, rng)));
         insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 1), ControlFlowBuilder::obf_num(op_state1 as i64, rng)));
         insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 2), ControlFlowBuilder::obf_num(op_state2 as i64, rng)));
@@ -472,15 +471,8 @@ impl Packer {
                 format!("s.w=q:{}(s);{}return true", m_next, fail_g("w", rng)),
                 format!("s.pc={};return true", pc_ref(rng, 8)),
             ], rng)));
-        // ⑥ 字节拼装算术化（真源=此文件；stub_generator 为旁支同款已同步）：
-        // s.p1*256+s.p2 的权重 256 改运行期随机恒等式（差一/零和/约简三选一）
-        // 位置权重 256 保值，只伪装拼写
-        let k6: u32 = rng.range(0x1100, 0xFFFFF) as u32;
-        let w256 = match rng.range(0, 3) {
-            0 => format!("s.p1*(0X{:X}-0X{:X})+s.p2", k6, k6 - 0x100),
-            1 => format!("(s.p1*(0X{:X})-s.p1*0X{:X})+s.p2", k6 + 0x100, k6),
-            _ => { let d6 = (k6 >> 8).max(1); format!("((s.p1*0X{:X})/0X{:X})+s.p2", d6 << 8, d6) }
-        };
+        // 字节拼装权重直接使用 0X100，不再包成加减乘除恒等式。
+        let w256 = "s.p1*0X100+s.p2".to_string();
         // H8：回引复制（循环体整组装进一个组，局部迭代器替代原形参）→ 落 pc9
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state8, rng),
             scramble_handler(vec![

@@ -33,7 +33,7 @@ impl ControlFlowBuilder {
         }
     }
 
-    /// ㉔ 状态转移四形态：①常量算式 / ②状态表引用 / ③惰性槽 / ④委托调用返回值。
+    /// ㉔ 状态转移四形态：①运行时查表表示 / ②状态表引用 / ③惰性槽 / ④委托调用返回值。
     /// 返回「把 var 写成 target」的完整语句（含尾分号）。
     fn transition_assign(var: &str, target: i64, keys: &CipherKeys, rng: &mut GenRng) -> String {
         let v = Self::obfuscate_num_depth(target, 1, keys, rng);
@@ -74,43 +74,13 @@ impl ControlFlowBuilder {
         }
     }
 
-    /// ㉕ 无键数值混淆：把任意数值发成恒等算式（±差和/自抵消/倍差/乘除恒等），
-    /// 产物里不再出现裸数字；供打包器解码脚本等没有 CipherKeys 的作用域使用。
-    /// 数值域约束：所有中间量 <0xFFFFFE（压缩管线截断 >24bit 十六进制字面量）。
+    /// 供打包器等没有 CipherKeys 的作用域使用，直接发射数值字面量。
+    /// 超过 24 位的数值使用十进制，兼容压缩管线的十六进制字面量范围。
     pub fn obf_num(v: i64, rng: &mut GenRng) -> String {
-        let hex = |x: i64, rng: &mut GenRng| -> String {
-            if rng.range(0, 2) == 0 { format!("0X{:X}", x) } else { x.to_string() }
-        };
-        let cap = (0xF0000i64).min(0xFFFFFE - v.abs());
-        let r = rng.range64(0x1000, cap.max(0x1002));
-        let core = match rng.range(0, 4) {
-            // ㉚④：v==0 时差式/和式都退化成同字面量自抵消——改 x%x 恒零
-            0 if v == 0 => format!("({}%{})", hex(r, rng), hex(r, rng)),
-            1 if v == 0 => format!("({}%{})", hex(r, rng), hex(r, rng)),
-            0 => format!("({}-{})", hex(v + r, rng), hex(r, rng)),
-            1 => format!("(-{}+{})", hex(r, rng), hex(r + v, rng)),
-            // ㉚④：旧形 ((r)-(r))+v 让 v 裸现——改乘法折叠：
-            // v = q*d + rem，rem 藏进 +(f)-((f)-rem) 拆分（v 可为负/零，
-            // div/rem_euclid 保证 rem≥0；f>rem 恒立）
-            2 => {
-                // ㉚④：rem==0 时 (f)-(f-0) 仍露同值对——强制 rem≠0
-                let d = rng.range64(3, 0x100);
-                let mut d = if v.rem_euclid(d) == 0 { rng.range64(3, 0x100) } else { d };
-                for _ in 0..8 { if v.rem_euclid(d) != 0 { break; } d = rng.range64(3, 0x100); }
-                let q = v.div_euclid(d);
-                let rem = v.rem_euclid(d);
-                let f = rng.range64(0x100, 0x8000);
-                format!("((({}*{})+{})-({}-{}))", hex(q, rng), hex(d, rng), hex(f, rng), hex(f, rng), hex(rem, rng))
-            }
-            _ => {
-                let q = rng.range64(3, 25);
-                format!("(({})/({}))", hex(v * q, rng), hex(q, rng))
-            }
-        };
-        if rng.range(0, 2) == 0 { core } else {
-            // ㉚④：外层零项不再用 (r2-r2) 同字面量自抵消——改 x%x 恒零
-            let r2 = rng.range64(0x100, 0xF000);
-            format!("({}+({}%{}))", core, hex(r2, rng), hex(r2, rng))
+        if v.unsigned_abs() > 0xFF_FFFF {
+            v.to_string()
+        } else {
+            Self::format_num(v, rng)
         }
     }
 
@@ -144,8 +114,8 @@ impl ControlFlowBuilder {
             }
         };
         let mut decl = format!("local {}={{}};local {}={{}};local {}=function(w,u) local z=w%0X2 return u+(z-z) end;", ct, sl, dv);
-        // ㉙① 去裸数字：公差除数 dm / 加数 db / 填表循环下界 1 全部混淆算式化
-        decl.push_str(&format!("local {}=({});local {}=(({})%(0X100*0X100))*{}+{};local {}=((({}))%{})*2+{};for {}={},{} do {}[{}]={};{}={}+{} end;",
+        // 状态表模数直接写为 0X10000，不用可静态折叠的乘积表达式。
+        decl.push_str(&format!("local {}=({});local {}=(({})%0X10000)*{}+{};local {}=((({}))%{})*2+{};for {}={},{} do {}[{}]={};{}={}+{} end;",
             sd, seed_src,
             cc, sd, Self::obf_num(k0 as i64, rng), Self::obf_num(k1, rng),
             dd, sd, Self::obf_num(dm as i64, rng), Self::obf_num(db as i64, rng),
@@ -174,24 +144,15 @@ impl ControlFlowBuilder {
             return Self::format_num(val, rng);
         }
 
-        // ㉚④：val==0 时禁走差式——`(x-x)` 是同字面量自抵消的暴露形态；
-        // 零值改走运行时查表分支（真·不可静态折叠）。
-        let style = rng.range(if val == 0 { 4 } else { 0 }, 10);
-        if style < 4 {
-            let huge = rng.range(0x100, 0x2FFF) as i64;
-            let offset = val.wrapping_add(huge);
-            format!("({}-{})", 
-                Self::obfuscate_num_depth(offset, depth - 1, keys, rng), 
-                Self::obfuscate_num_depth(huge, depth - 1, keys, rng)
-            )
-        } else if style < 7 {
+        // 仅保留依赖运行时查表的表示，移除纯数字差式。
+        if rng.range(0, 2) == 0 {
             let mask = rng.range(0x10, 0x2FFF) as i64;
             let xor_val = val ^ mask;
             format!("{}[{}][{}]({},{})", 
                 keys.tbl_p,
                 Self::format_num(keys.grp1 as i64, rng),
                 Self::format_num(keys.key_bx as i64, rng),
-                Self::obfuscate_num_depth(xor_val, depth - 1, keys, rng), 
+                Self::obfuscate_num_depth(xor_val, depth - 1, keys, rng),
                 Self::obfuscate_num_depth(mask, depth - 1, keys, rng)
             )
         } else {
@@ -201,7 +162,7 @@ impl ControlFlowBuilder {
                 keys.tbl_p,
                 Self::format_num(keys.grp1 as i64, rng),
                 Self::format_num(keys.key_add as i64, rng),
-                Self::obfuscate_num_depth(add_val, depth - 1, keys, rng), 
+                Self::obfuscate_num_depth(add_val, depth - 1, keys, rng),
                 Self::obfuscate_num_depth(mask, depth - 1, keys, rng)
             )
         }
@@ -426,7 +387,7 @@ impl ControlFlowBuilder {
         let init_val1 = rng.range(10, 1000) as i64;
         let init_val2 = rng.range(1, 1000) as i64;
 
-        // ㉙① 去裸数字：公差除数/加数（dm/db）与填表循环下界 1 全部混淆算式化
+        // 公差除数/加数（dm/db）与循环边界直接使用数值字面量。
         out.push_str(&format!(
             "local {}={{}};local {}=((#{}+#{}+({}))%0X100);local {}=(({})%0X40);local {}=({})*{}+({})*{}+{};local {}=((({}+({}))%{})*2+{});for {}={},{} do {}[{}]={};{}={}+{} end;",
             sv_t,
@@ -436,7 +397,7 @@ impl ControlFlowBuilder {
             sv_d, sv_m, sv_n, Self::obf_num(dm as i64, rng), Self::obf_num(db as i64, rng),
             sv_i, Self::obf_num(1, rng), Self::obf_num(112, rng), sv_t, sv_i, sv_f, sv_f, sv_f, sv_d));
 
-        // ㉙① 状态机三个辅助状态初值改混淆算式（原先 50% 概率裸十进制）
+        // 状态机三个辅助状态初值使用运行时查表表示。
         out.push_str(&format!("{},{},{}={},{},{};",
             s_state, t_shadow, d_junk,
             Self::obfuscate_num_depth(init_val1, 1, &keys, rng),
@@ -475,7 +436,7 @@ impl ControlFlowBuilder {
         // 条件走 state_cmp 四形态；else 尾支（返回语义）保持语法末位。
         let mut branches: Vec<(String, String)> = Vec::new();
 
-        // fetch 支：越界哨兵 + 取指 + 路由推导 + 转移（1/路由数均混淆算式）
+        // fetch 支：越界哨兵 + 取指 + 路由推导 + 转移（路由常量依赖运行时查表）
         let mut fetch_body = String::new();
         fetch_body.push_str(&format!("if {}>#{} then return end;", var_pc, var_insts));
         fetch_body.push_str(&format!("{},{}={}[{}],{}+{};", var_inst, var_pc, var_insts, var_pc, var_pc, Self::obfuscate_num_depth(1, 1, &keys, rng)));

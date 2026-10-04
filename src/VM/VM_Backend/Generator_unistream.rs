@@ -127,21 +127,12 @@ impl UniStream {
         };
         (stmt, format!("{}[{}]", self.tbl, kf))
     }
-    /// ㉓.2 数字伪装：恒等变形（差式/和式/直值），正数、无下划线、0X 大写。
-    /// ㉚④：v==0 禁走差式——(d-d) 是同字面量自抵消暴露形态，零值退直值。
+    /// ㉓.2 数字字面量格式：逐构建随机选择十进制或大写十六进制，不做纯算术伪装。
     fn mask_num(&self, rng: &mut GenRng, v: u64) -> String {
-        match rng.range(0, 3) {
-            0 => format!("{}", v),
-            1 => format!("0X{:X}", v),
-            _ if v == 0 => format!("0X{:X}", v),
-            _ => {
-                let d = rng.range(1, 0x1000) as u64;
-                if rng.range(0, 2) == 0 {
-                    format!("(0X{:X}-0X{:X})", v + d, d)
-                } else {
-                    format!("({}-{})", v + d, d)
-                }
-            }
+        if rng.range(0, 2) == 0 {
+            format!("{}", v)
+        } else {
+            format!("0X{:X}", v)
         }
     }
     /// 表 + 解码器声明（壳内一次；零字符串字面量）。

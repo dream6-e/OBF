@@ -178,8 +178,8 @@ pub fn build_scatter(
                 // 一旦漂移后续每个掩码全错（多原型载荷整包解坏）。
                 // upds 用的是链值（白化后的明文），与写侧 orig 一致——顺序不可颠倒。
                 let wq = rng.name();
-                // 模数 2^31-1（Lehmer）：以 (0X80000000-0X1) 算式拼写，无指数字面量
-                let wmod = format!("(0X{:X}-0X1)", 0x80000000u64);
+                // 模数 2^31-1（Lehmer）直接使用十进制字面量。
+                let wmod = "2147483647";
                 let (wmul, wadd) = (whiten_mul_s, whiten_add_s);
                 let whiten_step = format!(
                     "{pos}={cur}-0X1 local {wq}={pos} {wq}=({seed}+({wq}*{mul}))%{mod}; {wq}=({wq}*{mul}+{add})%{mod}; {wq}=({wq}*{mul}+0X1)%{mod}; {o}={bx}({o},{wq}%256); ",
@@ -212,7 +212,7 @@ pub fn build_readers(
                     match rng.range(0, 3) {
                         0 => {
                             // 霍纳（高字节在前进）：(((b4*W+b3)*W+b2)*W+b1)
-                            let w = if rng.range(0, 2) == 0 { "256" } else { "2^8" };
+                            let w = "256";
                             format!("((({x}*{w}+{y})*{w}+{z})*{w}+{r})", x = b[3], y = b[2], z = b[1], r = b[0], w = w)
                         }
                         1 => {
@@ -382,8 +382,8 @@ pub fn build_readers(
                 }
                 // a10（i32 符号还原）
                 {
-                    // ⑤ 2^31 拼写池去裸十进制项，换拆分乘积
-                let hexp = ["2^31", "2^30*2", "0X8000*0X10000", "2^16*2^15"][rng.range(0, 4)];
+                    // 2^31 直接使用十进制字面量，避免拆成乘积表达式。
+                    let hexp = "2147483648";
                     let cond = match rng.range(0, 3) {
                         0 => format!("{v}>=2*{h}-{h}", v = v_u32_v, h = v_a10_h),
                         1 => format!("not({v}<{h})", v = v_u32_v, h = v_a10_h),
@@ -760,8 +760,7 @@ lua.push_str(&format!(
                 let sal_sel = format!(
                     "({g}==0X0 and {s0} or {g}==0X1 and {s1} or {g}==0X2 and {s2} or {s3})",
                     g = gname, s0 = salt_names[0], s1 = salt_names[1], s2 = salt_names[2], s3 = salt_names[3]);
-                // 链公式常量逐位算术混淆（公共件 obf_const）：扫描重放不再以
-                // 干净常量清单暴露解码参数
+                // 链公式常量由公共格式器直接输出字面量，扫描重放时参数明确可读。
                 let mut ob1 = |v: u64| crate::VM::VM_Backend::Generator_kdf::obf_const(rng, v);
                 let (kmz, k100a, k2a, k100b, k100c, k100d, kma, kmb) = (ob1(0x100000000), ob1(0x100), ob1(0x2), ob1(0x100), ob1(0x100), ob1(0x100), ob1(0x100000000), ob1(0x100000000));
                 let (k10001, kmc, kmd, k80a, kme, k45d9, kmf, k80b, kmg) = (ob1(0x10001), ob1(0x100000000), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000), ob1(0x45D9), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000));

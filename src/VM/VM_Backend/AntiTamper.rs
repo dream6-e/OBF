@@ -21,73 +21,19 @@ impl AntiTamperResult {
     }
 }
 
-/// 把常量写成「运行期算出来」的形态（③ 守卫键/状态常量的派生算式）：
-/// `(0X<A>-0X<B>)` / `(0X<A>+0X<B>)` / `(0X<A>*0X2+0X<C>)`，
-/// 三种写法求值都恰好等于 val，但产物里再也看不到 val 本身，
-/// 同一个常量在不同位置也会被写成不同片段（无法搜索替换）。
-fn derived_num(val: u64, rng: &mut impl Rng) -> String {
-    // ㉚④：val==0 时差式退化成 (b-b) 同字面量自抵消——改 x%x 恒零
-    if val == 0 {
-        let b = rng.gen_range(0x1000u64..0xFF_FFFF);
-        return format!("(0X{:X}%0X{:X})", b, b);
-    }
-    match rng.gen_range(0..3) {
-        0 => {
-            let b = rng.gen_range(0x1000u64..0xFF_FFFF);
-            format!("(0X{:X}-0X{:X})", val + b, b)
-        }
-        1 => {
-            let b = rng.gen_range(1u64..0x8000);
-            if val > b {
-                format!("(0X{:X}+0X{:X})", val - b, b)
-            } else {
-                let c = rng.gen_range(0x1000u64..0xFF_FFFF);
-                format!("(0X{:X}-0X{:X})", val + c, c)
-            }
-        }
-        _ => format!("(0X{:X}*0X2+0X{:X})", val / 2, val % 2),
-    }
+/// 守卫键/状态常量直接以十进制字面量发射，不再包装成可静态折叠的算式。
+fn derived_num(val: u64, _rng: &mut impl Rng) -> String {
+    val.to_string()
 }
 
-/// ㉒族恒等转移式——㉚④ 去自曝：改非线性乘法折叠链。
-/// 旧形 `(r-r)+t`、`((2r)-(r+r))+t`、`-r+(r+t)` 把目标值 `t` 直接以字面量
-/// （或一眼可还原的形态）暴露在产物里；现在恒等式一律走
-/// `target = q*d + rem` 的乘法折叠，rem 的呈现三种轮换（直加 / 加拆 /
-/// 加减拆）——表达式里没有任何单字面量等于 target，静态读不出状态号。
-fn opq_ident<T: Rng>(rng: &mut T, target: u32) -> String {
-    // ㉚④：强制 rem≠0——rem==0 时装扮臂退化成 (f-f) 同值自抵消
-    let mut d: u32 = rng.gen_range(3..0x100);
-    for _ in 0..8 {
-        if target % d != 0 { break; }
-        d = rng.gen_range(3..0x100);
-    }
-    let q = target / d;
-    let rem = target % d;
-    if q == 0 {
-        // 兜底（当前调用方 target ≥ 0X10000，理论不可达）：
-        // 和差拆分同样不让 target 单独成字面量
-        let b: u32 = rng.gen_range(0x1000..0xFFFF);
-        return format!("(0X{:X}-0X{:X})", target + b, b);
-    }
-    match rng.gen_range(0..3) {
-        0 => format!("(0X{:X}*0X{:X}+0X{:X})", q, d, rem),
-        1 => {
-            let f: u32 = rng.gen_range(0x100..0x8000);
-            format!("((0X{:X}*0X{:X})+(0X{:X}-0X{:X}))", q, d, rem + f, f)
-        }
-        _ => {
-            let f: u32 = rng.gen_range(0x100..0x8000);
-            format!("((0X{:X}*0X{:X})+0X{:X}-0X{:X})", q, d, f, f - rem)
-        }
-    }
+/// 状态迁移目标直接以字面量发射，不再拆成可静态折叠的乘加式。
+fn opq_ident<T: Rng>(_rng: &mut T, target: u32) -> String {
+    target.to_string()
 }
-/// 常量伪装：值恒等的随机算式（内层异或循环的 8/2 等）
-fn opq_const<T: Rng>(rng: &mut T, v: u32) -> String {
-    match rng.gen_range(0..3) {
-        0 => { let a: u32 = rng.gen_range(0..v.max(1)); format!("(0X{:X}+0X{:X})", a, v - a) }
-        1 => { let k: u32 = rng.gen_range(v + 1..v + 0x1000); format!("(0X{:X}-0X{:X})", k, k - v) }
-        _ => format!("0X{:X}", v),
-    }
+
+/// 小型守卫常量直接发射。
+fn opq_const<T: Rng>(_rng: &mut T, v: u32) -> String {
+    v.to_string()
 }
 fn rand_state<T: Rng>(rng: &mut T, used: &mut Vec<u32>) -> u32 {
     loop {
@@ -232,20 +178,9 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     }
 ));
     setup.push_str(&format!("local {} = {{{}}};\n", v_pool, pool_data));
-    // 池解码器的「打乱线性逻辑 / 数据流」版本：
-    //   ① 循环写成 while + 自增下标（数字 for 太规整）；下标先取出来再自己加；
-    //   ② 解密算式写成 `(b - key + j - j) % 256`：j 是影子计数，前后抵消，
-    //      但读起来像在参与运算；常量 key 与 256 也被埋进这条链里；
-    //   ③ 拼接外面套一个恒真的判断（`(j+j)-j > 0` 即 j>0），打断线性阅读；
-    //   ④ 全部局部变量逐产物随机名。纯冷路径（只在守卫/池查表时走），不吃性能。
-    // 池解码器 v2「拆散打乱线性逻辑 / 数据流」：
-    //   ① 循环体拆成五态数值状态机（查长/自增/键流取数/谓词+异或拼装），转移走
-    //      三款恒等式，状态值逐产物随机；线性 while 阅读被彻底打散；
-    //   ② 循环携带数据（下标/累计串/长度/键流系数）全部经暂存表槽流动，
-    //      跨态共享的 a/b/r/p 提升到机器前声明（跨 elseif 块作用域）；
-    //   ③ 键流算式拆分 ((k0*i)%256 与 +k1 两步)、K 的拆解嵌差值恒等式、
-    //      判空改 return 原值（nil）；
-    //   ④ 内层异或 for 的常量（8/2）逐处独立伪装、谓词从恒真族随机取。
+    // 池解码器把线性逻辑与数据流打散：while 循环、自增下标、五态状态机、
+    // 暂存表槽和逐产物随机局部名组合使用；密钥拆分和字节解码仍按运行期数据计算。
+    // 数值状态、异或循环常量和模数直接使用数值字面量；谓词仍使用动态变量关系。
     // 纯冷路径（守卫/池查表时走），不吃性能。
     let v_dec = rand_var();
     let d_t = rand_var();
@@ -260,7 +195,6 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
     let d_xb = rand_var();
     let d_yb = rand_var();
     let d_st = rand_var();
-    let d_dl = rand_var();
     let d_c = rand_var();
     let mut used_states: Vec<u32> = Vec::new();
     let s1 = rand_state(&mut rng, &mut used_states);
@@ -288,8 +222,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         "local function {dec}(h) \
             local {t}={{i=0X0000,o=''}};local {e}={pool}[h]; \
             if not {e} then return {e} end; \
-            {t}.n=#{e};local {dl}=0X{dlx:X}; \
-            local {k1}=({K}+{dl}-{dl})%256;{t}.k=({K}-{k1})/256; \
+            {t}.n=#{e};local {k1}={K}%256;{t}.k=({K}-{k1})/256; \
             local {c}=string.char;local {a},{b},{r},{p},{j}=0X0,0X0,0X0,0X1,{j0}; \
             local {st}={init}; \
             while true do \
@@ -311,8 +244,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         end;\n",
         dec = v_dec, t = d_t, t2 = rand_var(), pool = v_pool, e = d_e, k1 = d_k1,
         j = d_j, j0 = rng.gen_range(1..64), c = d_c, a = d_a, b = d_b, r = d_r,
-        p = d_p, w = d_w, xb = d_xb, yb = d_yb, st = d_st, dl = d_dl,
-        dlx = rng.gen_range(0x1000..0xFFFFFu32),
+        p = d_p, w = d_w, xb = d_xb, yb = d_yb, st = d_st,
         init = st_init, S1 = s1, S2 = s2, S3 = s3, S4 = s4,
         tr12 = tr12, tr23 = tr23, tr34 = tr34, tr41b = tr41, tdone = s_done,
         opq = opq, E8 = e8, E2a = e2a, E2b = e2b, E2c = e2c, E2d = e2d, E2e = e2e,
@@ -386,7 +318,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         let guard_type = guards_indices[i];
 
         // 每块入口先推进共享状态，并把「实算状态 − 本步应有状态」混进令牌：
-        let st_m32 = { let a = rng.gen_range(8..25); format!("(0X{:X}*0X{:X})", 1u64 << a, 1u64 << (32 - a)) };
+        let st_m32 = "4294967296";
         let state_step = format!(
             "{}=({}*{}+{})%{};",
             v_state, v_state, derived_num(step_a[i], &mut rng), derived_num(step_b[i], &mut rng), st_m32
@@ -509,7 +441,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
                         next_bad,
                         hash_C, next_bad, next_good,
                         tab_lit = sc_tab,
-                        hm32 = { let a = rng.gen_range(8..25); format!("(0X{:X}*0X{:X})", 1u64 << a, 1u64 << (32 - a)) },
+                        hm32 = "4294967296",
                         hp_seed = format!("0X{:X}", hash_params().seed),
                         hp_mult = format!("0X{:X}", hash_params().mult),
                         hp_add = format!("0X{:X}", hash_params().add)
@@ -731,8 +663,7 @@ pub fn generate_split(use_debug: bool, key_var: &str) -> AntiTamperResult {
         }
         
         current_expected += delta;
-        // 定义处也写派生形态：同一个键在定义点/调用点各是一个不同算式；
-        // 状态推进语句块在最前（管线/链式两种形态都兼容）。
+        // 定义处直接发射键值字面量；状态推进语句块在最前（管线/链式两种形态都兼容）。
         let single_guard_raw = format!(
             "{}[{}]=function(k)\n{}{}end;\n",
             v_net, derived_num(keys[i], &mut rng), state_step, check_code

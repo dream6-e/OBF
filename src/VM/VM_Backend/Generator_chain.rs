@@ -293,7 +293,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             "local {xt}={{}}; {walk} ",
             xt = xor_tbl_var, walk = xor_walk
         ));
-        // ⑤ 字节权 2^16/2^24 逐构建拆分派生（xor32 内局部）
+        // ⑤ 字节权 2^16/2^24 直接以数值字面量发射（xor32 内局部）。
         let (x16, x24) = (rng.name(), rng.name());
         let (x16v, x24v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
         block_chacha_setup.push_str(&format!(
@@ -301,23 +301,17 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             xor32 = fn_xor32, xt = xor_tbl_var,
             p2 = x16, p3 = x24, p2v = x16v, p3v = x24v
         ));
-        // ㉔ 2^32 逐实例算式化（k-差式=k 恒等 2^32；各站点独立推导不同形）
-        let mk_m = |rng: &mut GenRng| -> String {
-            let k = rng.range(0x1000, 0xFFFFFF) as u64;
-            format!("(0X{:X}-0X{:X})", 4294967296u64 + k, k)
-        };
+        // ㉔ 2^32 模数直接发射数值字面量，不再生成可折叠差式。
+        let mk_m = |_rng: &mut GenRng| -> String { "4294967296".to_string() };
         let (m_rot1, m_rot2) = (mk_m(&mut rng), mk_m(&mut rng));
         block_chacha_setup.push_str(&format!(
             "local function {rotl32}(x,n) local m=2^n; return ((x*m)%{m1})+math_floor(x/({m2}/m)) end; ",
             rotl32 = fn_rotl32, m1 = m_rot1, m2 = m_rot2
         ));
-        // ㉔ quarter-round 去指纹：正文四臂结构池（0=教科书原版保留）+ 旋转常数
-        // 16/12/8/7 逐实例算式化 + 形参随机化（单字母 s,a,b,c,d 即参考实现指纹）。
+        // ㉔ quarter-round 形态池（0=教科书原版保留）+ 旋转常量直接输出数值字面量，
+        // 并随机化形参（单字母 s,a,b,c,d 即参考实现指纹）。
         // 各臂输出与标准 QR 恒等（A+=B;D^=A;D=rot(D,16);C+=D;B^=C;B=rot(B,12);×2 变体）。
-        let r_lit = |rng: &mut GenRng, v: u32| -> String {
-            let k = rng.range(0x10, 0xFFFF) as u32;
-            format!("(0X{:X}-0X{:X})", v + k, k)
-        };
+        let r_lit = |rng: &mut GenRng, v: u32| -> String { rng.format_num(v as i64) };
         let (qS, qA, qB, qC, qD) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let (r1e, r2e, r3e, r4e) = (r_lit(&mut rng, 16), r_lit(&mut rng, 12), r_lit(&mut rng, 8), r_lit(&mut rng, 7));
         // 第 3 项 D：单根 K0 与 KDF 函数——四组的全部密钥材料都从这一份
@@ -432,7 +426,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         block_chacha_setup.push_str(&format!("{}{}{}", qd0, qd1, qsel));
         // ㉔ 调用矩阵去指纹：列组/对角组内洗牌（4 列互不相交、4 对角互不相交，
         // 组内换序恒等；组间顺序固定保 ChaCha 语义），8 元组改数据表驱动，
-        // 元组数字部分裸写部分算式化；循环次数 4 同步算式化。
+        // 元组成员与循环次数均直接写成数值字面量。
         let mk_rounds = |rng: &mut GenRng, qrn: &str, ly: &crate::VM::VM_Backend::Generator_chacha::ChaChaLayout| -> String {
             let mut cols: Vec<(u32, u32, u32, u32)> = vec![(0,4,8,12),(1,5,9,13),(2,6,10,14),(3,7,11,15)];
             let mut dias: Vec<(u32, u32, u32, u32)> = vec![(0,5,10,15),(1,6,11,12),(2,7,8,13),(3,4,9,14)];
@@ -442,19 +436,15 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 // 第 2 项：元组走全状态置换 ρ——列/对角组内换序恒等（组内四元组
                 // 互不相交），映射后即物理位置；标准 ChaCha 的 {1,6,11,16} 形态消失
                 let m = |v: u32| (ly.rho[v as usize] + 1) as u32;
-                let f = |rng: &mut GenRng, v: u32| -> String {
-                    if rng.range(0, 2) == 0 { v.to_string() }
-                    else { let k = rng.range(0x10, 0xFFFF) as u32; format!("(0X{:X}-0X{:X})", v + k, k) }
-                };
+                let f = |rng: &mut GenRng, v: u32| -> String { rng.format_num(v as i64) };
                 ents.push(format!("{{{},{},{},{}}}", f(rng, m(a)), f(rng, m(b)), f(rng, m(c)), f(rng, m(d))));
             }
             let (tv, iv, ev) = (rng.name(), rng.name(), rng.name());
-            let kf = rng.range(0x10, 0xFFFF) as u32;
-            // 轮数逐簇（8/10/12 的半数 = 每个 QR 轮的 4 列 + 4 对角）
+            // 轮数逐簇（8/10/12 的半数 = 每个 QR 轮的 4 列 + 4 对角），直接输出字面量。
             let rounds = (ly.rounds / 2) as u32;
             format!(
-                "local {tv}={{{ents}}}; for _=1,(0X{:X}-0X{:X}) do for {iv}=1,#{tv} do local {ev}={tv}[{iv}]; {qrn}({sv},{ev}[1],{ev}[2],{ev}[3],{ev}[4]) end end; ",
-                kf + rounds, kf, tv = tv, iv = iv, ev = ev, ents = ents.join(","), qrn = qrn, sv = "s")
+                "local {tv}={{{ents}}}; for _=1,{rounds} do for {iv}=1,#{tv} do local {ev}={tv}[{iv}]; {qrn}({sv},{ev}[1],{ev}[2],{ev}[3],{ev}[4]) end end; ",
+                tv = tv, iv = iv, ev = ev, ents = ents.join(","), qrn = qrn, sv = "s", rounds = rounds)
         };
         // ⑰ 每组一个自包含簇：K/salt/sigma 排列/cblock/cstream + 专属 dec_str/dec_num
         // （无统一路由入口——四个簇打散插到产物不同位置，各原型按组直连本簇解码器）
@@ -478,7 +468,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             let out_dn = rng.name();
             let out_sl = rng.name();
             let mut cl = String::new();
-            // ⑤ sigma 还原模数逐构建拆分派生
+            // ⑤ sigma 还原模数直接发射数值字面量。
             let sm32 = rng.name();
             let sm32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let sigma_items: Vec<String> = (0..4)
@@ -527,12 +517,11 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             let (gp2, gp3) = (rng.name(), rng.name());
             let (gp2v, gp3v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
             // 第 2 项：输出字按 ρ⁻¹ 写回各自的输出字节位（物理槽 ≠ 逻辑字）。
-            // 物理槽 → 输出首字节下标 的映射落成一张小表（差式数字，看不出是置换）。
+            // 物理槽 → 输出首字节下标 的映射落成一张直接数值表。
             let gmap = rng.name();
-            let gbmap: Vec<String> = (0..16).map(|p| {
-                let k = rng.range(0x40, 0xFFFF) as u32;
-                format!("(0X{:X}-0X{:X})", (inv[p] * 4 + 1) as u32 + k, k)
-            }).collect();
+            let gbmap: Vec<String> = (0..16)
+                .map(|p| rng.format_num((inv[p] * 4 + 1) as i64))
+                .collect();
             cl.push_str(&format!("local {bmap}={{{lits}}}; ", bmap = gmap, lits = gbmap.join(",")));
             let bi_n = rng.name();
             let gs2_walk = {

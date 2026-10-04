@@ -40,17 +40,8 @@ impl ControlFlowBuilder {
             return Self::format_num(val, rng);
         }
 
-        // ㉚④：val==0 时禁走差式——`(x-x)` 是同字面量自抵消的暴露形态；
-        // 零值改走运行时查表分支（真·不可静态折叠）。
-        let style = rng.range(if val == 0 { 4 } else { 0 }, 10);
-        if style < 4 {
-            let huge = rng.range(0x100, 0x2FFF) as i64;
-            let offset = val.wrapping_add(huge);
-            format!("({}-{})", 
-                Self::obfuscate_num_depth(offset, depth - 1, keys, rng), 
-                Self::obfuscate_num_depth(huge, depth - 1, keys, rng)
-            )
-        } else if style < 7 {
+        // 只使用运行时表查找；不再发射可由纯数字常量折叠的加减式。
+        if rng.range(0, 2) == 0 {
             let mask = rng.range(0x10, 0x2FFF) as i64;
             let xor_val = val ^ mask;
             format!("{}[{}][{}]({},{})", 
@@ -67,7 +58,7 @@ impl ControlFlowBuilder {
                 keys.tbl_p,
                 Self::format_num(keys.grp1 as i64, rng),
                 Self::format_num(keys.key_add as i64, rng),
-                Self::obfuscate_num_depth(add_val, depth - 1, keys, rng), 
+                Self::obfuscate_num_depth(add_val, depth - 1, keys, rng),
                 Self::obfuscate_num_depth(mask, depth - 1, keys, rng)
             )
         }
@@ -621,12 +612,8 @@ impl GenRng {
     }
     pub fn obfuscate_num(&mut self, val: i64, depth: usize, keys: &CipherKeys) -> String {
         if depth == 0 { return self.format_num(val); }
-        // ㉚④：val==0 禁走差式——`(x-x)` 同字面量自抵消是暴露形态；零值走查表
-        let style = self.range(if val == 0 { 4 } else { 0 }, 10);
-        if style < 4 {
-            let huge = self.range64(0x10000000, 0x7FFFFFFF);
-            format!("({}-{})", self.obfuscate_num(val.wrapping_add(huge), depth - 1, keys), self.obfuscate_num(huge, depth - 1, keys))
-        } else if style < 7 {
+        // 深度大于零时仅使用运行时表查找，移除纯数字加减恒等式。
+        if self.range(0, 2) == 0 {
             let mask = self.range64(0x10000000, 0x3FFFFFFF);
             format!("{}[{}][{}]({},{})", keys.tbl_p, self.format_num(keys.grp1 as i64), self.format_num(keys.key_bx as i64), self.obfuscate_num(val ^ mask, depth - 1, keys), self.obfuscate_num(mask, depth - 1, keys))
         } else {
@@ -1079,10 +1066,6 @@ pub fn poly_hash(s: &str) -> u32 {
     h as u32
 }
 
-/// 常量算术混淆：同一常量逐次换形态（原值 / (v-a)+a / (v+b)-b），
-/// 让解码/扫描公式不以干净常量清单出现。值域 <2^33，double 精确，
-/// 5.1 与 Luau 行为一致。
-
 /// 随机取一对可用混合密钥（复用 mix_key：k0 非 0 且密文无 \000）。
 pub fn stream_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
     mix_key(plain, rng)
@@ -1151,10 +1134,10 @@ impl StreamTable {
 // ── ㉒ 控制流范畴消除：数值游标步行器 + 焊接缓存 ─────────────────────
 //
 // ① 数值游标+守卫的随机游走（打 CFG 重建）：把顺序批量工作改写为
-//    `while true do if G==K then …` 的游走——每条出边 G=<混淆常量表达式>，
+//    `while true do if G==K then …` 的游走——出边 G 使用字面量或运行时查表表达式，
 //    去平坦化退化成符号执行；全程游走 ≤10 次。不是循环，是扁平化游标机。
-// ② 焊接构造（打人读）：一个 if 同时干「惰性缓存 + 大随机数当键 + 校验恒等式」
-//    三件事——`if not X then X=f(…) end` 形态第二次执行在逻辑上无分支，
+// ② 焊接构造（打人读）：一个 if 同时干「惰性缓存 + 大随机数当键」
+//    两件事——`if not X then X=f(…) end` 形态第二次执行在逻辑上无分支，
 //    「这个分支会不会被走到」在文本上无法判定。长时状态只剩槽号，
 //    新增局部名压到单字母并故意重复遮蔽（ShadowNames）。
 
@@ -1176,7 +1159,7 @@ impl ShadowNames {
 
 /// 静态分段游标步行器：原 `for i=lo,hi do <unit> end` → 游标机（≤states+1 次游走）。
 /// `unit(idx)` 产出以 `idx` 为索引名的单次迭代体。keys=None（P 表尚不在作用域）
-/// 时状态常数退化为混合进制字面量；否则走 obfuscate_num depth=1 常量表达式。
+/// 时状态常数使用混合进制字面量；否则走 obfuscate_num depth=1 的运行时查表表示。
 pub(super) fn cursor_walk_static(
     rng: &mut GenRng, keys: Option<&CipherKeys>, off: usize,
     lo: i64, hi: i64, states: usize,
