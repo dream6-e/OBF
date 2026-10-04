@@ -17,7 +17,7 @@ pub(crate) static DBG_ARITH: bool = true;
 pub use super::Generator_util::{CipherKeys, GenRng};
 use super::Generator_util::{
     build_opcode_tree, rename_ident, rewrite_chunk,
-    scan_used_opcodes, uses_ident, write_string, PayloadReader,
+    scan_used_opcodes, uses_ident, write_string, PayloadReader, RuntimeStateMixer,
 };
 
 
@@ -527,15 +527,19 @@ impl Generator {
             parsed.push((current_ops.clone(), code_str));
         }
 
-        // 去重 + 分配随机方法名 / 随机状态号
+        // 去重 + 分配随机方法名 / 随机状态表键；状态值由共享 __index 运行时生成。
         let mut blocks: Vec<(Vec<u32>, String, String, u32, usize)> = Vec::new();
         let mut used_states: Vec<u32> = Vec::new();
+        let vm_state_values = rng.name();
+        let (state_mt_t, state_mt_k, state_mt_x, state_mt_lo, state_mt_hi) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let state_value_mixer = RuntimeStateMixer::random(&mut rng);
         for (ops, code) in parsed {
             if let Some(b) = blocks.iter_mut().find(|b| b.1 == code) { b.0.extend(ops); continue; }
             let name = rng.name();
             let st = loop {
-                let v = rng.range(0x0100_0000, 0x7FFF_0000) as u32;
-                if !used_states.contains(&v) { used_states.push(v); break v; }
+                let key = rng.range(0x0100_0000, 0x7FFF_0000) as u32;
+                if !used_states.contains(&key) { used_states.push(key); break key; }
             };
             let shard = rng.range(0, method_shard_count);
             blocks.push((ops, code, name, st, shard));
@@ -570,7 +574,8 @@ impl Generator {
         // 热块内联时要用的状态名 → 槽位号（驱动里声明成局部变量）
         let mut hot_locals: Vec<(String, String)> = Vec::new();
         for (ops, code, name, st, method_shard) in blocks.iter() {
-            let st_lua = rng.format_num(*st as i64);
+            let state_key = rng.obfuscate_num(*st as i64, 1, &keys);
+            let state_value = format!("{}[{}]", vm_state_values, state_key);
             // 预算：热路径（算术/比较/跳转/栈与表存取）保留**内联**，冷路径
             // （调用/返回/闭包/全局/上值/内建）才提升成方法。全量方法化会把每条
             // 指令都变成一次 Lua 函数调用 —— 实测慢 5.6 倍，超出预算
@@ -633,9 +638,8 @@ impl Generator {
                 // 校验恒先于任何写（体在后），跳错块照旧拒绝。常数经 obfuscate 去指纹。
                 let mut pre: Vec<String> = Vec::new();
                 pre.push("local rk1,rk2;".to_string());
-                // 状态号自校验：分发器刚把本块的状态号写进槽位，对不上说明跳错了块
-                // 状态值固定 depth=1，使用运行时查表表示，校验值仍保持完整 32 位。
-                let st_obf = rng.obfuscate_num(*st as i64, 1, &keys);
+                // 状态号自校验：与派发器使用同一个懒缓存 __index 状态值，错块即拒绝。
+                let st_obf = state_value.clone();
                 match rng.range(0, 4) {
                     0 => pre.push(format!("if {s}[{}]~={} then return end;", k_state, st_obf, s = p_self)),
                     1 => pre.push(format!("if {s}[{}]-{}~=0 then return end;", k_state, st_obf, s = p_self)),
@@ -661,8 +665,8 @@ impl Generator {
                     p_self, p_names[0], p_names[1], p_names[2], p_names[3], text));
                 // 冷路径才付同步代价：进出方法前后各存/取一次 pc 与 top
                 // 并把本块状态号写进槽位（方法入口自校验）。
-                // 同步语句：三连存乱序/分组 + 状态号常数去指纹（原两形态合流）
-                let st_o = if rng.range(0, 4) == 0 { st_lua.clone() } else { rng.obfuscate_num(*st as i64, 1, &keys) };
+                // 同步语句：三连存乱序/分组；状态值只经运行时状态表生成。
+                let st_o = state_value.clone();
                 let mut sync: Vec<(String, String)> = vec![
                     (format!("{}[{}]", var_vm, k_pc), var_pc.clone()),
                     (format!("{}[{}]", var_vm, k_top), var_top.clone()),
@@ -774,6 +778,9 @@ impl Generator {
         // 状态对象每个调用一个，方法通过 __index 原型共享，调用仍是 `V
         let mut block_methods = String::new();
         block_methods.push_str(&format!("local {}; ", fn_execute));
+        block_methods.push_str(&state_value_mixer.lua_metatable(
+            &vm_state_values, &state_mt_t, &state_mt_k, &state_mt_x, &state_mt_lo, &state_mt_hi,
+        ));
         // ㉓ 统一流取用：惰性解密语句+纯数字密文，替换原池调用
         let (hash_stmt, hash_expr) = {
             let id = uni.register("#");

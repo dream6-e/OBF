@@ -623,6 +623,90 @@ impl GenRng {
     }
 }
 
+/// 仅供控制流标签使用的运行期状态映射器。
+/// 两次奇数仿射变换与 16 位字交换在模 2^32 下均为置换，因此不同键对应互异且稳定的状态值。
+/// 中间整数乘积小于 2^49，在 Lua 5.1 的 double 数值表示中仍可精确计算。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RuntimeStateMixer {
+    mul_a: u32,
+    add_a: u32,
+    mul_b: u32,
+    add_b: u32,
+}
+
+impl RuntimeStateMixer {
+    pub(crate) fn new(mul_a: u32, add_a: u32, mul_b: u32, add_b: u32) -> Self {
+        debug_assert!(mul_a & 1 == 1 && mul_b & 1 == 1);
+        Self { mul_a, add_a, mul_b, add_b }
+    }
+
+    pub(crate) fn random(rng: &mut GenRng) -> Self {
+        let mul_a = (rng.range(3, 0x1_0000) as u32) | 1;
+        let add_a = rng.next();
+        let mul_b = (rng.range(3, 0x1_0000) as u32) | 1;
+        let add_b = rng.next();
+        Self::new(mul_a, add_a, mul_b, add_b)
+    }
+
+    #[cfg(test)]
+    fn value(&self, key: u32) -> u32 {
+        const MOD: u64 = 1u64 << 32;
+        let x = (key as u64 * self.mul_a as u64 + self.add_a as u64) % MOD;
+        let lo = x % 0x1_0000;
+        let hi = (x - lo) / 0x1_0000;
+        let swapped = lo * 0x1_0000 + hi;
+        ((swapped * self.mul_b as u64 + self.add_b as u64) % MOD) as u32
+    }
+
+    /// 发射会惰性缓存结果的 `__index` 状态表；表名、形参与临时量由调用方随机提供。
+    pub(crate) fn lua_metatable(
+        &self,
+        table: &str,
+        t: &str,
+        k: &str,
+        x: &str,
+        lo: &str,
+        hi: &str,
+    ) -> String {
+        format!(
+            "local {table}=setmetatable({{}},{{__index=function({t},{k}) local {x}=({k}*0X{mul_a:X}+0X{add_a:X})%0X100000000;local {lo}={x}%0X10000;local {hi}=({x}-{lo})/0X10000;{x}={lo}*0X10000+{hi};{x}=({x}*0X{mul_b:X}+0X{add_b:X})%0X100000000;rawset({t},{k},{x});return {x} end}});",
+            table = table,
+            t = t,
+            k = k,
+            x = x,
+            lo = lo,
+            hi = hi,
+            mul_a = self.mul_a,
+            add_a = self.add_a,
+            mul_b = self.mul_b,
+            add_b = self.add_b,
+        )
+    }
+}
+
+#[cfg(test)]
+mod runtime_state_mixer_tests {
+    use super::RuntimeStateMixer;
+    use std::collections::HashSet;
+
+    #[test]
+    fn odd_affine_rounds_and_word_swap_preserve_distinct_keys() {
+        let mixer = RuntimeStateMixer::new(0xA531, 0x83A4_2F19, 0xC8D5, 0x017B_992D);
+        let keys = [0, 1, 0x0100_0000, 0x7FFE_FFFF, 0x8000_0000, u32::MAX];
+        let values: HashSet<u32> = keys.iter().map(|key| mixer.value(*key)).collect();
+        assert_eq!(values.len(), keys.len());
+    }
+
+    #[test]
+    fn emitted_resolver_uses_lua_51_compatible_hex_integers() {
+        let mixer = RuntimeStateMixer::new(0xA531, 0x83A4_2F19, 0xC8D5, 0x017B_992D);
+        let lua = mixer.lua_metatable("states", "tab", "key", "value", "lo", "hi");
+        assert!(lua.contains("__index=function"));
+        assert!(lua.contains("rawset(tab,key,value)"));
+        assert!(!lua.contains(".0"));
+    }
+}
+
 pub(super) struct DispatchState {
     pub setup: String,
     pub guard: String,

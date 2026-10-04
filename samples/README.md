@@ -4,11 +4,17 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，212,060 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），99,462 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，266,258 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，215,870 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），92,740 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，277,884 B |
 
 前两个都通过 `luac5.1 -p` 与 `luau-compile --binary`，并在 `lua5.1`、`luau` 下运行验证；stdout 与原文件逐字节一致（19 行）。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。
+
+### 控制流状态值运行时生成（2026-10-04）
+
+- opcode 分段状态机与 VM 冷块 handler 状态标签现在通过带 `__index` 的本地状态表按需生成，并以 `rawset` 缓存；状态键、奇数仿射参数和 16 位字交换共同映射到互异的 32 位状态值。
+- 使用 Lua 5.1 可解析的十六进制整数，不使用十六进制浮点语法；解码器状态机、共享游标步行器和已经运行时生成状态的主 router 均未改动。
+- 验证：`cargo test --locked --all-targets` 92/92；Release 构建通过；`test/print.lua` 普通/MB 产物及 `test/Comptesting.lua` 产物在 Lua 5.1、Luau 下均通过语法检查并与原输出一致；三件样例均通过两种语法检查。
 
 ### 目标四：常量加密改进（2026-10-03）
 

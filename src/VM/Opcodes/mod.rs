@@ -1,4 +1,5 @@
 use rand::{rng, Rng};
+use crate::VM::VM_Backend::Generator_util::RuntimeStateMixer;
 
 pub mod arithmetic;
 pub mod builtins;
@@ -42,7 +43,7 @@ pub fn num_lit(rng: &mut OpcodesRng, v: u32) -> String {
     }
 }
 
-/// 状态标识使用直接数值字面量，不再生成纯算术恒等式。
+/// 为不属于状态标签的 opcode 操作数与协议常量生成数字字面量。
 pub fn ident(rng: &mut OpcodesRng, target: u32) -> String {
     num_lit(rng, target)
 }
@@ -195,7 +196,7 @@ impl<'a> OpcodeBuilder<'a> {
     }
 
     /// ㉒ 数值状态机化（仿 Luraph）：语句切顶层 → 随机分组 3~6 段 →
-    /// while true + if sm==随机态 转移（恒等算式），末段 break；
+    /// while true + if sm==状态表值 转移；状态表通过 __index 在运行时生成，末段 break；
     /// 语义严格保序，仅适用无 break/无中途 return 的纯算术 handler
     pub fn build_staged(&mut self, lua_template: &str) -> String {
         let stmts = split_top_stmts(lua_template);
@@ -252,26 +253,38 @@ impl<'a> OpcodeBuilder<'a> {
             }
             bounds.push(remaining);
         }
-        let mut states: Vec<u32> = Vec::new();
-        while states.len() < k {
-            let v = 0x10000 + self.rng.next() % 0xEDFFFF;
-            if !states.contains(&v) { states.push(v); }
+        let mut state_keys: Vec<u32> = Vec::new();
+        while state_keys.len() < k {
+            let key = self.rng.next();
+            if !state_keys.contains(&key) { state_keys.push(key); }
         }
+        let state_table = self.rng.name();
+        let (state_mt_t, state_mt_k, state_mt_x, state_mt_lo, state_mt_hi) =
+            (self.rng.name(), self.rng.name(), self.rng.name(), self.rng.name(), self.rng.name());
+        let state_mixer = RuntimeStateMixer::new(
+            (self.rng.next_range(3, 0x1_0000) as u32) | 1,
+            self.rng.next(),
+            (self.rng.next_range(3, 0x1_0000) as u32) | 1,
+            self.rng.next(),
+        );
+        let state_setup = state_mixer.lua_metatable(
+            &state_table, &state_mt_t, &state_mt_k, &state_mt_x, &state_mt_lo, &state_mt_hi,
+        );
         let sm = self.rng.name();
         let hoist_decl = if hoisted.is_empty() { String::new() } else { format!("local {}; ", hoisted.join(",")) };
-        // ㉒ 备忘录式不透明谓词（仿 Luraph 14.9：if not O[k] then O[k]=<式> end）——
-        // 目标态数值只在首次执行时算出并存入表槽，之后状态经表槽流动；
-        // 键为逐站点随机值，数据流经表单元格，挫败朴素常量折叠
+        // 备忘录只缓存目标状态表键；真正的状态值由 state_table 的 __index 运行时生成。
         let mm = self.rng.name();
-        let memo_tr = |rng: &mut OpcodesRng, target: u32| -> String {
+        let memo_tr = |rng: &mut OpcodesRng, target_key: u32| -> String {
             let keyv = 0x1000 + rng.next() % 0xEFF000;
-            let key = num_lit(rng, keyv);
-            format!("if {m}[{k}]==nil then {m}[{k}]={e}; end; {s2}={m}[{k}]; ",
-                m = mm, k = key, e = ident(rng, target), s2 = sm)
+            let memo_key = num_lit(rng, keyv);
+            let state_key = num_lit(rng, target_key);
+            format!("if {m}[{k}]==nil then {m}[{k}]={sv}[{sk}]; end; {s2}={m}[{k}]; ",
+                m = mm, k = memo_key, sv = state_table, sk = state_key, s2 = sm)
         };
         let mut out = String::new();
-        out.push_str(&format!("{}local {}={}; local {}={{}}; while true do ",
-            hoist_decl, sm, ident(self.rng, states[0]), mm));
+        let first_key = num_lit(self.rng, state_keys[0]);
+        out.push_str(&format!("{}{}local {}={}[{}]; local {}={{}}; while true do ",
+            hoist_decl, state_setup, sm, state_table, first_key, mm));
         let mut idx = 0;
         for si in 0..k {
             let mut chunk = String::new();
@@ -281,16 +294,19 @@ impl<'a> OpcodeBuilder<'a> {
                 idx += 1;
             }
             if si == 0 {
-                out.push_str(&format!("if {}=={} then {} {}",
-                    sm, num_lit(self.rng, states[0]), chunk,
-                    memo_tr(self.rng, states[1])));
+                let state_key = num_lit(self.rng, state_keys[0]);
+                out.push_str(&format!("if {}=={}[{}] then {} {}",
+                    sm, state_table, state_key, chunk,
+                    memo_tr(self.rng, state_keys[1])));
             } else if si + 1 < k {
-                out.push_str(&format!("elseif {}=={} then {} {}",
-                    sm, num_lit(self.rng, states[si]), chunk,
-                    memo_tr(self.rng, states[si + 1])));
+                let state_key = num_lit(self.rng, state_keys[si]);
+                out.push_str(&format!("elseif {}=={}[{}] then {} {}",
+                    sm, state_table, state_key, chunk,
+                    memo_tr(self.rng, state_keys[si + 1])));
             } else {
-                out.push_str(&format!("elseif {}=={} then {} break; end end ",
-                    sm, num_lit(self.rng, states[si]), chunk));
+                let state_key = num_lit(self.rng, state_keys[si]);
+                out.push_str(&format!("elseif {}=={}[{}] then {} break; end end ",
+                    sm, state_table, state_key, chunk));
             }
         }
         self.build(&out)
