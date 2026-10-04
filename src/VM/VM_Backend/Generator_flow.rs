@@ -942,14 +942,23 @@ pub fn build_decstr(
     let sm = (rng.range(0x101, 0xFFFF) as u32) | 1;
     let salt = rng.next();
     let stride = (rng.range(1, 0x100) as u32) | 1;
+    // 字符串 ChaCha 按 64 字节分块，下一块 counter 依赖当前块解密出的前 8 个明文字节。
+    // 只有后面确实还有一块时，才跳过本块前 8 个反馈字节的掩码；末块仍完整掩码。
+    // 否则反馈会改变、后续块使用错误 counter，长字符串会在 64 字节边界后损坏。
+    // 其余字节仍按运行期 path/count/slot 掩码，并在完整解密后对称撤销。
+    let mask_byte = |len: &str| format!(
+        "((({i}-0X1)%0X40)<0X8 and ({i}-(({i}-0X1)%0X40)+0X40)<=#{len} and 0X0 or (({seed}+{i}*0X{stride:X})%0X100))",
+        i = mask_i, seed = mask_seed, stride = stride, len = len);
+    let mask_pre_byte = mask_byte(&e);
+    let mask_out_byte = mask_byte(&plv);
     let mask_pre = format!(
-        "local {seed}=((({path} or 0X0)*0X{pm:X}+({count} or 0X0)*0X{cm:X}+({slot} or 0X0)*0X{sm:X}+0X{salt:X})%0X100000000); local {parts}={{}}; for {i}=0X1,#{e} do {parts}[{i}]=string_char({bx}({sb}({e},{i}),({seed}+{i}*0X{stride:X})%0X100)) end; local {masked}=table_concat({parts}); ",
+        "local {seed}=((({path} or 0X0)*0X{pm:X}+({count} or 0X0)*0X{cm:X}+({slot} or 0X0)*0X{sm:X}+0X{salt:X})%0X100000000); local {parts}={{}}; for {i}=0X1,#{e} do {parts}[{i}]=string_char({bx}({sb}({e},{i}),{mask})) end; local {masked}=table_concat({parts}); ",
         seed = mask_seed, path = path, count = count, slot = p, pm = pm, cm = cm, sm = sm,
         salt = salt, parts = mask_parts, i = mask_i, e = e, bx = fn_bxor, sb = fn_s_byte,
-        stride = stride, masked = mask_text);
+        mask = mask_pre_byte, masked = mask_text);
     let unmask = format!(
-        "for {i}=0X1,#{plv} do {plv}[{i}]={bx}({plv}[{i}],({seed}+{i}*0X{stride:X})%0X100) end; ",
-        i = mask_i, plv = plv, bx = fn_bxor, seed = mask_seed, stride = stride);
+        "for {i}=0X1,#{plv} do {plv}[{i}]={bx}({plv}[{i}],{mask}) end; ",
+        i = mask_i, plv = plv, bx = fn_bxor, mask = mask_out_byte);
     match form {
         0 => format!(
             "local function {fn_dec_str}({e},{p},{fd},{rl},{path},{count}) {pre} local {plv}={pl}({masked},{p},{kind_str},{fd},{rl}); {unmask} local {n}=#{plv}; \
