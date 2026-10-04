@@ -139,10 +139,10 @@ fn inst_junk(w: &mut Vec<u8>, mag_file: u32, rng: &mut StdRng) {
     for _ in 0..jn { w.push(rng.random_range(0..256u32) as u8); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, inverse_opcode_map: &[u8; 90], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) -> Vec<(usize, u32)> {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, inverse_opcode_map: &[u8; 90], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) {
     // ② 元数据剥离：chunk 名/lines/locals/upvalue 名在 VM 端零消费者
-    // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步、
-    // 落盘写空/零：反编译器失去变量命名、行号映射与源文件路径
+    // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步；
+    // name 槽改承载 4B 原型汇总校验，行号/局部名/upvalue 名不写入载荷。
     // ⑱.3 每原型随机参数：kp18=本原型线上 op 异或键（二级重映射，跨原型同全局码
     // 线上值不同）、pb18=pc↔槽仿射偏移（槽=pc+pb，随机死槽；所有 pc 运算皆相对=零模板改动）。
     // 目标二③（第二部分，共享指令空间）：pb18 不再是本原型自取的小偏移，而是调用方
@@ -171,7 +171,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             + fb0 as u64 + (fc0 as u64) * 0x11) % 0x1_0000_0000
     };
     let _ = nochain18;
-    let _ = r.read_string(); write_string(w, b"");
+    // 源 chunk 名是调试元数据，不落入最终载荷。复用原 name 字段保存 4B
+    // 原型常量汇总校验值；body_debug 从该字段校验，末尾不再保留可跳过的调试区。
+    let _ = r.read_string();
+    w.extend_from_slice(&4u32.to_le_bytes());
+    let checksum_offset = w.len();
+    w.extend_from_slice(&[0u8; 4]);
     let _ = r.read_u32(); let _ = r.read_u32();
     w.extend_from_slice(&kp18.to_le_bytes()); w.extend_from_slice(&pb18.to_le_bytes());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
@@ -628,48 +633,27 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
 
     let p_count = r.read_u32();
     w.extend_from_slice(&p_count.to_le_bytes());
-    // ⑱.2 尺寸前缀掩码：ln 站点收集（本层 w 内绝对偏移, 层内 1-based 序号），
-    // 子层站点偏移经 child_base 换算合并——根调用者拿到全量先序站点表
-    let mut proto_sites: Vec<(usize, u32)> = Vec::new();
-    let mut pidx18: u32 = 0;
+    // 子 proto 直接按序递归写入：线上不带长度、边界标记或可跳过填充。
+    // 读侧必须完整解析当前 proto（含其子树）才能抵达下一个兄弟 proto。
     for _ in 0..p_count {
-        // ⑱ 惰性原型：每个子块加 u32 长度前缀，Lua 侧 body_protos 按长跳过、
-        // CLOSURE 首调才递归解码——整棵原型树不再一次性展开成明文
-        pidx18 += 1;
-        let mut child: Vec<u8> = Vec::new();
         let g2 = rng.random_range(0..CONST_GROUPS);
-        let sub_sites = rewrite_chunk(r, &mut child, mapped_opcodes, fused_map, fused_used, inverse_opcode_map, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0, alloc18);
-        // 目标二③（函数边界模糊化，第一部分）：长度前缀计入随机尾部填充，
-        // 每个原型块尾部追加 0..16 字节随机诱饵——长度不再等于内容长度，边界处
-        // 出现的是指令样随机字节。读侧只按长度跳过（body_protos），无需同步改动；
-        // 子块内站点偏移基于 child_base，不受尾部填充影响。
-        let pad18 = rng.random_range(0..=16usize);
-        let ln_off = w.len();
-        w.extend_from_slice(&((child.len() + pad18) as u32).to_le_bytes());
-        let child_base = w.len();
-        w.extend_from_slice(&child);
-        for _ in 0..pad18 { w.push(rng.random_range(0..=255u8)); }
-        proto_sites.push((ln_off, pidx18));
-        for (so, si) in sub_sites { proto_sites.push((so + child_base, si)); }
+        rewrite_chunk(r, w, mapped_opcodes, fused_map, fused_used, inverse_opcode_map, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0, alloc18);
     }
-    // ② 元数据剥离（续）：lines/locals/upvalue 名只消费不落盘
+
+    // 目标五②：末尾行号、局部变量及 upvalue 调试区全部消费后丢弃。
+    // 汇总校验值已回填到 name 字段，不再依赖可识别的三段尾部结构。
     let l_count = r.read_u32();
-    // ③ 汇总校验：lines 槽写「计数 1 + 4B 聚合值」（读侧 debug 态读回、与常量态累计值比对）
-    w.extend_from_slice(&1u32.to_le_bytes());
-    // 目标一② 层间耦合：整函数汇总值再与「本原型 payload 明文头部字段」混一项
-    // （kp18/pb18 = 读侧 chunk.pf_ld/pf_lld 承载的两个值，只以密文形态存在于 payload）。
-    // 读侧在挂载 aggf 时同式混入相同分量 ⇒ 比对恒成立；但校验值本身不再能脱离
-    // 层间数据独立验证：改任一层的头部字段、只解一半管线都得不到一致的汇总值。
-    let mix18: u32 = kp18 ^ pb18.rotate_left(7);
-    w.extend_from_slice(&(agg18 ^ mix18).to_le_bytes());
     r.read_bytes((l_count * 4) as usize);
     let loc_count = r.read_u32();
-    w.extend_from_slice(&0u32.to_le_bytes());
     for _ in 0..loc_count { let _ = r.read_string(); let _ = r.read_u32(); let _ = r.read_u32(); }
     let upv_count = r.read_u32();
-    w.extend_from_slice(&0u32.to_le_bytes());
     for _ in 0..upv_count { let _ = r.read_string(); }
-    proto_sites
+
+    // 校验值与运行时 aggf 同式：整原型常量 MAC 混合 kp/pb，作为有意义的
+    // 4 字节 name-field 负载；源文件名和调试信息本身不会进入成品。
+    let mix18: u32 = kp18 ^ pb18.rotate_left(7);
+    let checksum = agg18 ^ mix18;
+    w[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
 }
 
 /// ④E：**加载器取用不再有标识符**——产物里不出现 `loadstring` / `load` 这两个词，

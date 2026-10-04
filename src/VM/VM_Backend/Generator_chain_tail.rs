@@ -67,17 +67,12 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         chain_delta,
         chain_m,
         chain_k0,
-        pm_r0,
-        pm_r1,
-        pm_r2,
-        pm_r3,
         sc_add,
         sc_add_k1,
         sc_mul_k2,
         sc_rot_in,
         sc_rot_k2,
         sc_rot_k4,
-        pm_s,
         tag_map18,
         fc18,
         block_decoder_script,
@@ -263,66 +258,44 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let body_consts = format!("{st}={nxt}; {ci_stmt}{gk_stmt} {bc_scatter} ",
             st = var_state, nxt = obf_s_protos);
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
-        // ⑱ 惰性原型：读取游标是 var_a2（fn_a3 读载荷子串 P[A2]），read_dec 是
-        // 滚动密钥流（k1..k4 随消费演化）——跳读须逐字节喂 rd() 推进外层密钥；
-        // 快照取在 len 之后（=子块首字节前的 A2 与滚动密钥），thunk 换入快照解码、
-        // 换出恢复；防篡改旗彼时为 false，同样保存/置位/恢复
-        let (ln18, p18, s1a, b1a, sv18, svf18, rr18) =
-            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-        // ⑱.2 读侧掩码还原：ln=u32d() 后与 f(u32d 前快照的 k1..k4, 层内序号) 异或。
-        // 公式与写侧 pm_g/pm_sb 同源：mask 字节=(rotl8(ka^kb)+盐)%256，
-        // rotl8(r)=fn_b_rotr 的 rotr8(8-r)，旋转位数在生成阶段预先计算并直接输出；
-        // 盐=(i*A+B)%256，A/B 逐产物随机（pm_s）。
-        let (qa18, qb18, qc18, qd18) = (rng.name(), rng.name(), rng.name(), rng.name());
-        let pm_lua = |x: &str, y: &str, r: u32, j: usize| -> String {
-            let rotation = 8 - r;
-            format!("({rt}({bx}({x},{y}),0X{rotation:X})+({i}*0X{a:X}+0X{b:X})%256)%256",
-                rt = fn_b_rotr, bx = fn_bxor, i = v_ch_i,
-                a = pm_s[j * 2], b = pm_s[j * 2 + 1], rotation = rotation)
-        };
-        let m18_0 = pm_lua(&qa18, &qd18, pm_r0, 0);
-        let m18_1 = pm_lua(&qb18, &qa18, pm_r1, 1);
-        let m18_2 = pm_lua(&qc18, &qb18, pm_r2, 2);
-        let m18_3 = pm_lua(&qd18, &qc18, pm_r3, 3);
+        // 目标五①：子 proto 没有长度前缀。先递归完整解析每个子树以顺序抵达
+        // 下一个兄弟的起点，再保存其起始游标/滚动密钥快照供 CLOSURE 按需重解。
+        let (p18, s1a, b1a, sv18, svf18, rr18, scan18, scan_flag18) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let body_protos = format!(
             "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); {md18}={c}.{pf_protos}; {np18}={n}; \
-             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; local {qa},{qb},{qc},{qd}=k1,k2,k3,k4; local {ln}={bx}({u32d}(),{m0}+{m1}*256+{m2}*65536+{m3}*16777216); \
-               local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; for _=0X1,{ln} do {rd}() end; \
+             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; \
+               local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan}={dc}(); {flg}={scan_flag}; {scan}=nil; \
                {c}.{pf_protos}[{i}]=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
                  {a2}={p0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
-                 {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end end else {i}={n}; {n}=0X0; end; ",
+                 {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end; {md18}={c}.{pf_protos}; {np18}={n}; \
+               end else {i}={n}; {n}=0X0; end; ",
             st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
             dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1,
-            u32d = fn_u32_dec, md18 = md21, np18 = np21,
-            a2 = var_a2, flg = var_state_flag, rd = fn_read_dec,
-            bx = fn_bxor, qa = qa18, qb = qb18, qc = qc18, qd = qd18,
-            m0 = m18_0, m1 = m18_1, m2 = m18_2, m3 = m18_3,
-            ln = ln18, p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18, rr = rr18,
+            md18 = md21, np18 = np21, a2 = var_a2, flg = var_state_flag,
+            p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18,
+            rr = rr18, scan = scan18, scan_flag = scan_flag18,
             tree9 = it9(&mut rng, var_state.as_str())
         );
-        // ⑭ 九元联合 nil 声明 + ⑦ repeat…until false 换皮 + ⑨ 区间树
-        let d14: Vec<String> = (0..9).map(|_| rng.name()).collect();
         // ③ 汇总校验：随机选中的采样点发现不符时只置共享投毒旗，不调用失败闭包。
         // 采样位来自局部对象地址哈希，不消耗用户 math.random 的状态。
-        let m32d = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 32);
-        let (go, gb, ga, gx, gs, gh, gi) =
-            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        // 目标五②：调试尾区已从载荷中删除；校验值改放在原 name 槽。
+        // 运行时仅在随机采样点把 4 个字节还原为 u32，并与常量态聚合值比较。
+        let (go, gb, ga, gx, gs, gh, gi, co, cm, b1, b2, b3, b4) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+             rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
         let verify_agg = format!(
-            "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}=pcall(function() return type({d0})~='number' or {d0}%{mod}~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
+            "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}=pcall(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or type({b1})~='number' or type({b2})~='number' or type({b3})~='number' or type({b4})~='number' or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
             go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
-            d0 = d14[0], mod = m32d, c = fn_c, aggf = agg_field, psn = psn_n, co = rng.name(), cm = rng.name()
+            co = co, cm = cm, b1 = b1, b2 = b2, b3 = b3, b4 = b4,
+            sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, psn = psn_n
         );
+        let dbg_locals: Vec<String> = (0..9).map(|_| rng.name()).collect();
         let body_debug = format!(
-            "{st}={nxt}; {tree9} repeat \
-             local {d0},{d1},{d2},{d3},{d4},{d5},{d6},{d7},{d8}; \
-             local {i}=0; local {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {d0}={a5}(); {verify} end; \
-             {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}(); {a5}(); {a5}() end; \
-             {i}=0; {n}={a5}(); while {i} < {n} do {i} = {i} + 1; {rs}() end; break; until false; ",
-            st = var_state, nxt = obf_s_ret, a5 = fn_a5, rs = fn_read_string, i = v_ch_i, n = v_ch_n,
-            d0 = d14[0], d1 = d14[1], d2 = d14[2], d3 = d14[3], d4 = d14[4],
-            d5 = d14[5], d6 = d14[6], d7 = d14[7], d8 = d14[8], verify = verify_agg,
-            tree9 = it9(&mut rng, var_state.as_str())
+            "{st}={nxt}; {tree9} repeat local {locals}; {verify} break; until false; ",
+            st = var_state, nxt = obf_s_ret, locals = dbg_locals.join(","),
+            verify = verify_agg, tree9 = it9(&mut rng, var_state.as_str())
         );
         // ⑦ while true 壳 + ⑭ return nil 兜底（ret 态跑完显式出）
         // ⑦ while true 壳 + ⑭ return nil 兜底（藏在恒假守卫内，真死代码）

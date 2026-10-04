@@ -210,7 +210,7 @@ impl Generator {
         // 目标二③（第二部分）：全文件共用指令空间基址游标——根原型从一个小随机基址
         // 起步，每个原型（先序遍历）分到一段互不重叠的记录区间，段间留随机死槽。
         let mut alloc18: u32 = rng.range(4, 64) as u32;
-        let mut proto_sites_root: Vec<(usize, u32)> = rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18);
+        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18);
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
@@ -231,14 +231,6 @@ impl Generator {
         let sc_mul_k2: u8 = rng.range(2, 8) as u8;
         let sc_rot_k2: u32 = rng.range(1, 8) as u32;
         let sc_rot_k4: u32 = rng.range(1, 8) as u32;
-        // ⑱.2 尺寸前缀掩码：ln=child_len ^ f(站点密钥状态, 层内序号)。站点=(payload
-        // 偏移(+4 种子), 层内 1-based 序号)；掩码在本循环里在线取站点首字节前的
-        // k1..k4 计算（与 Lua body_protos 读 ln 前快照同一状态），4 字节就地异或后
-        // 再走正常滚动变换——orig 取异或后的值，与 Lua 解出字节一致。
-        let (pm_r0, pm_r1, pm_r2, pm_r3) = (rng.range(1, 8) as u32, rng.range(1, 8) as u32, rng.range(1, 8) as u32, rng.range(1, 8) as u32);
-        let pm_s: [u64; 8] = [rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64, rng.range(1, 255) as u64, rng.range(0, 255) as u64];
-        for (off, _) in proto_sites_root.iter_mut() { *off += 4; }
-        proto_sites_root.sort_by_key(|e| e.0);
         // ㉛ 白化种子：kdf(根字, 专用组号, 字序号)——与 Lua 侧同一式（Generator_chain
         // 发射同一取值的 kdf 调用），产物里不落任何白化参数，只有运行期装出的根能重算。
         let whiten_seed: u64 = {
@@ -249,20 +241,8 @@ impl Generator {
         // 乘法器/加数逐构建随机（奇数乘法器；乘积仍 < 2^45，double 精确）
         let whiten_mul: u64 = (rng.range(0x1001, 0x100000) as u64) | 1;
         let whiten_add: u64 = rng.range(0x1000000, 0x7FFF_FFFF) as u64;
-        let pm_g = |x: u8, y: u8, r: u32, sv: u8| (x ^ y).rotate_left(r).wrapping_add(sv);
-        let pm_sb = |i: u64, j: usize| -> u8 { (i.wrapping_mul(pm_s[j * 2]).wrapping_add(pm_s[j * 2 + 1]) & 0xFF) as u8 };
-        let mut pm_cur: Option<(usize, [u8; 4])> = None;
-        let mut pm_i = 0usize;
         for (pos4, b) in combined_payload[4..].iter_mut().enumerate() {
             let pos = pos4 + 4;
-            if pm_cur.map_or(false, |(sp, _)| pos >= sp + 4) { pm_cur = None; }
-            if pm_i < proto_sites_root.len() && proto_sites_root[pm_i].0 == pos {
-                let idx18 = proto_sites_root[pm_i].1 as u64;
-                let sv = [pm_sb(idx18, 0), pm_sb(idx18, 1), pm_sb(idx18, 2), pm_sb(idx18, 3)];
-                pm_cur = Some((pos, [pm_g(k1, k4, pm_r0, sv[0]), pm_g(k2, k1, pm_r1, sv[1]), pm_g(k3, k2, pm_r2, sv[2]), pm_g(k4, k3, pm_r3, sv[3])]));
-                pm_i += 1;
-            }
-            if let Some((sp, mb)) = pm_cur { if pos < sp + 4 { *b ^= mb[pos - sp]; } }
             // ㉛ 载荷白化层（目标一之一）：种子 4 字节之外整段再叠一道**位置相关**掩码，
             // 密钥材料来自根 K0 的 KDF 派生（运行期才装得出来）——静态读者即便复刻了
             // 外层滚动流，解开的也只是白化后的随机字节，字段顺序/零/小整数全部不可读。
@@ -1098,7 +1078,7 @@ impl Generator {
             pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, poison_delay_key, var_a2,
             var_builtin_reg, var_p, var_raw_p, var_vc, np21,
             md21, th21, tw21, rk21, kreg_n,
-            fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, pm_r0, pm_r1, pm_r2, pm_r3, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, pm_s, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, const_path_key, sk_setup, t, x, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
+            fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, const_path_key, sk_setup, t, x, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
             weld,
             uni,
         })
