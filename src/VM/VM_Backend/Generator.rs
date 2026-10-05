@@ -670,16 +670,20 @@ impl Generator {
             // 预算：热路径（算术/比较/跳转/栈与表存取）保留**内联**，冷路径
             // （调用/返回/闭包/全局/上值/内建）才提升成方法。全量方法化会把每条
             // 指令都变成一次 Lua 函数调用 —— 实测慢 5.6 倍，超出预算
-            let cold = uses_ident(code, &var_vc)
-                || uses_ident(code, &var_builtin_reg)
-                || code.contains(&format!("self[{}]", k_breg))
-                || code.contains(&format!("self[{}]", k_bmask))
-                || uses_ident(code, &var_env)
-                || uses_ident(code, &var_protos)
-                || uses_ident(code, &var_varargs)
-                || code.contains(&pf_open_ups)
-                || code.contains("zm(")
-                || code.contains(&format!("{}(", fn_execute));
+            // n_kon 是 execute 作用域内从 KREG 取出的本原型密钥。引用它的 handler
+            // 必须内联在 execute 里；提升成共享方法会把局部名变成未绑定全局（nil），
+            // 而把密钥写进 VM 槽又会破坏密钥分驻约束。
+            let cold = !uses_ident(code, &n_kon)
+                && (uses_ident(code, &var_vc)
+                    || uses_ident(code, &var_builtin_reg)
+                    || code.contains(&format!("self[{}]", k_breg))
+                    || code.contains(&format!("self[{}]", k_bmask))
+                    || uses_ident(code, &var_env)
+                    || uses_ident(code, &var_protos)
+                    || uses_ident(code, &var_varargs)
+                    || code.contains(&pf_open_ups)
+                    || code.contains("zm(")
+                    || code.contains(&format!("{}(", fn_execute)));
             if cold {
                 let mut body = code.clone();
                 // ── 方法签名逐块随机化：原先每个冷块都是同一条
