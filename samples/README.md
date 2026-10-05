@@ -7,8 +7,8 @@
 | `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，212,496 B |
 | `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），96,028 B |
 | `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，271,862 B |
-| `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，215,236 B |
-| `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,500 B |
+| `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
+| `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 
 print 的普通与 MB 样本均通过 `luac5.1 -p`、`luau-compile --binary`，并在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（19 行）。嵌套 proto 的普通与 MB 样本通过相同两种语法检查及双运行时输出比对（`12 6 15 12 19`、`47`）；本轮另独立生成 40 份随机产物（普通/MB 各 20），每份在 Lua 5.1 和 Luau 各运行一次并与源码 stdout 比对，80 次检查均通过。最终收录的普通、MB 固定样本又各在两种运行时重复 100 次，均无失败或错输出。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。
 

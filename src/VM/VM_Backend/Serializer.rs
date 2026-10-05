@@ -305,7 +305,23 @@ fn reorder_basic_blocks(
     for (leader_pc, &is_leader) in leaders.iter().enumerate() {
         if !is_leader { continue; }
         let unit_index = *unit_of_pc.get(leader_pc)?;
-        if unit_index == usize::MAX || units[unit_index].start != leader_pc {
+        if unit_index == usize::MAX {
+            return None;
+        }
+        let unit = units[unit_index];
+        if unit.start != leader_pc {
+            // A jump may legally enter the instruction skipped by LOADBOOL. Keep the
+            // pair adjacent as one unit; an inner LOADBOOL C=0 has the same fallthrough
+            // as the pair, so the edge can target its mapped instruction directly.
+            let safe_loadbool_entry = instructions[unit.start].opcode == Opcode::LoadBool
+                && instructions[unit.start].c == 1
+                && unit.end == leader_pc
+                && leader_pc == unit.start + 1
+                && instructions[leader_pc].opcode == Opcode::LoadBool
+                && instructions[leader_pc].c == 0;
+            if safe_loadbool_entry {
+                continue;
+            }
             return None;
         }
         block_starts.push(unit_index);
@@ -425,6 +441,42 @@ mod cfg_tests {
 
     fn inst(opcode: Opcode, b: i32, c: i32) -> Instruction {
         make_instruction(opcode, 0, b, c, 1)
+    }
+
+    #[test]
+    fn jump_can_enter_loadbool_skipped_loadbool_without_splitting_pair() {
+        let instructions = vec![
+            inst(Opcode::LoadBool, 0, 1),
+            inst(Opcode::LoadBool, 0, 0),
+            inst(Opcode::Jmp, -2, -1),
+            inst(Opcode::LoadK, 0, 0),
+            inst(Opcode::Jmp, 0, -1),
+            inst(Opcode::Return0, 0, 0),
+        ];
+        let code = reorder_basic_blocks(&instructions, &[], 4, 0x51A9_EB00)
+            .expect("safe entry into the skipped LoadBool should remain reorderable");
+        let new_pc = |old_pc| code.source_pc.iter().position(|&source| source == old_pc).unwrap();
+        let loadbool = new_pc(0);
+        let alternate_entry = new_pc(1);
+        assert_eq!(alternate_entry, loadbool + 1, "LOADBOOL skip pair must stay adjacent");
+
+        let jump_pc = new_pc(2);
+        assert_eq!(
+            relative_target(jump_pc, &code.instructions[jump_pc], code.instructions.len()),
+            Some(alternate_entry),
+            "the incoming edge must still target the skipped instruction"
+        );
+    }
+
+    #[test]
+    fn jump_into_loadkx_extraarg_still_falls_back() {
+        let instructions = vec![
+            inst(Opcode::LoadKx, 0, 0),
+            inst(Opcode::ExtraArg, 0, 0),
+            inst(Opcode::Jmp, -2, -1),
+            inst(Opcode::Return0, 0, 0),
+        ];
+        assert!(reorder_basic_blocks(&instructions, &[], 4, 0x51A9_EB01).is_none());
     }
 
     #[test]
