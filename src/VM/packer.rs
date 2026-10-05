@@ -73,16 +73,40 @@ impl Packer {
 
         // 第二段单起一条流：解码器 stage2 会重放内核初始化——若续用第一段的收尾
         // 状态，两段之间任一字节的偏差都会让后续整条流错位（第一段未必吃满字节）。
-        let compressed_main = Self::encode_stream(input);
-        let (encrypted_main, _) = nat.encrypt(&keys, &n_sbox, &compressed_main);
-        let b86_main = Self::base86_encode_with_alpha(&encrypted_main, &alpha_str, &alpha_perm);
+        // 主载荷自适应选择：对原样字节与 LZ 流都走相同的 Native Stream / base86，
+        // 最后按 token 替换后的真实字符数择小。高熵主载荷不再承担 LZ 原始 token 的
+        // 每 8 字节标志位开销；压缩确有收益时仍沿用原解码路径。
+        let b86_compressed_main = {
+            let compressed_main = Self::encode_stream(input);
+            let (encrypted_main, _) = nat.encrypt(&keys, &n_sbox, &compressed_main);
+            Self::base86_encode_with_alpha(&encrypted_main, &alpha_str, &alpha_perm)
+        };
+        let b86_raw_main = {
+            let (encrypted_main, _) = nat.encrypt(&keys, &n_sbox, input);
+            Self::base86_encode_with_alpha(&encrypted_main, &alpha_str, &alpha_perm)
+        };
+
+        // 用字母表中未参与 0..85 编码的诱饵字符作逐产物随机转义前缀；原密文里
+        // 不可能自然出现此前缀。定长 5 字符码字避免歧义，且不生成 ']' 以保留 `[=[...]=]`。
+        let (symbol_marker, symbol_map) = Self::generate_symbol_codebook(&alpha_str, &alpha_perm, vm_rng);
+        let escaped_sb = Self::replace_symbols(&b86_sb, &symbol_map);
+        let escaped_compressed_main = Self::replace_symbols(&b86_compressed_main, &symbol_map);
+        let escaped_raw_main = Self::replace_symbols(&b86_raw_main, &symbol_map);
+        let (escaped_main, main_is_raw) = if escaped_raw_main.len() <= escaped_compressed_main.len() {
+            (escaped_raw_main, true)
+        } else {
+            (escaped_compressed_main, false)
+        };
 
         // 判据①修复：'~' 分隔符废除——载荷是连续一段，sb/main 边界由
-        // 解码器按字符运行点切分（split_pos 随解码脚本下发并混淆拼写）
-        let split_pos = b86_sb.len();
-        let lua_payload = format!("{}{}", b86_sb, b86_main);
+        // 解码器按字符运行点切分。split_pos 必须是 token 替换后的 sandbox 字符数。
+        let split_pos = escaped_sb.len();
+        let lua_payload = format!("{}{}", escaped_sb, escaped_main);
 
-        let (decoder_script, entry_func) = Self::build_decoder(&keys, &nat, &alpha_str, &alpha_perm, split_pos, vm_rng, uni);
+        let (decoder_script, entry_func) = Self::build_decoder(
+            &keys, &nat, &alpha_str, &alpha_perm, split_pos,
+            symbol_marker, &symbol_map, main_is_raw, vm_rng, uni,
+        );
         (lua_payload, decoder_script, entry_func)
     }
 
@@ -289,7 +313,83 @@ impl Packer {
         encoded
     }
 
-    fn build_decoder(keys: &[u8], nat: &crate::VM::VM_Backend::Generator_native::Native, alphabet: &str, perm: &[usize], split_pos: usize, rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream) -> (String, String) {
+    /// 为用户给出的特殊符号集合逐产物生成可逆码本。marker 取自字母表诱饵位，
+    /// 因而不可能自然出现在 base86 密文中；所有码字等长，解码无需模式匹配转义。
+    fn generate_symbol_codebook(alphabet: &str, perm: &[usize], rng: &mut GenRng) -> (u8, Vec<(u8, String)>) {
+        const TARGET_SYMBOLS: &[u8] = b"\"'%$!~#}& ";
+        let alphabet_bytes = alphabet.as_bytes();
+        let decoy_positions: Vec<usize> = (0..alphabet_bytes.len())
+            .filter(|position| !perm.contains(position))
+            .collect();
+
+        let mut marker_candidates: Vec<u8> = decoy_positions.iter()
+            .map(|&position| alphabet_bytes[position])
+            .filter(|symbol| !TARGET_SYMBOLS.contains(symbol))
+            .collect();
+        if marker_candidates.is_empty() {
+            marker_candidates = decoy_positions.iter()
+                .map(|&position| alphabet_bytes[position])
+                .collect();
+        }
+        let marker = marker_candidates[rng.range(0, marker_candidates.len())];
+
+        let used_symbols: Vec<u8> = perm.iter().map(|&position| alphabet_bytes[position]).collect();
+        let mut symbols: Vec<u8> = TARGET_SYMBOLS.iter().copied()
+            .filter(|symbol| *symbol != marker && used_symbols.contains(symbol))
+            .collect();
+        rng.shuffle(&mut symbols);
+
+        // 不含 ']'，避免替换结果关闭外层 Lua 长字符串；其余可见字符允许参与随机码字。
+        let token_chars: Vec<u8> = (33u8..=126u8)
+            .filter(|&byte| byte != b']' && byte != marker)
+            .collect();
+        let mut used_codes: Vec<String> = Vec::with_capacity(symbols.len());
+        let mut mapping = Vec::with_capacity(symbols.len());
+        for symbol in symbols {
+            loop {
+                let mut token = String::with_capacity(5);
+                token.push(marker as char);
+                for _ in 0..4 {
+                    token.push(token_chars[rng.range(0, token_chars.len())] as char);
+                }
+                if !used_codes.contains(&token) {
+                    used_codes.push(token.clone());
+                    mapping.push((symbol, token));
+                    break;
+                }
+            }
+        }
+        (marker, mapping)
+    }
+
+    fn replace_symbols(input: &str, mapping: &[(u8, String)]) -> String {
+        let mut lookup: [Option<&str>; 256] = [None; 256];
+        for (symbol, token) in mapping {
+            lookup[*symbol as usize] = Some(token.as_str());
+        }
+        let mut output = String::with_capacity(input.len());
+        for byte in input.bytes() {
+            if let Some(token) = lookup[byte as usize] {
+                output.push_str(token);
+            } else {
+                output.push(byte as char);
+            }
+        }
+        output
+    }
+
+    fn build_decoder(
+        keys: &[u8],
+        nat: &crate::VM::VM_Backend::Generator_native::Native,
+        alphabet: &str,
+        perm: &[usize],
+        split_pos: usize,
+        symbol_marker: u8,
+        symbol_map: &[(u8, String)],
+        main_is_raw: bool,
+        rng: &mut GenRng,
+        uni: &mut crate::VM::VM_Backend::Generator_util::UniStream,
+    ) -> (String, String) {
         // 原生流（Native Stream）解密内核：运行期指纹 + 现场构造 S-box + 每字节步进，
         // 闭包按 upvalue 捕获状态——密钥材料不以数据形态出现在产物里。
         let kern = crate::VM::VM_Backend::Generator_native::emit_decrypt_kernel(rng, nat, "pack");
@@ -361,8 +461,9 @@ impl Packer {
         // 被压缩器的保护名单挡住。这里在生成端统一换成随机短名。
         let p_data = rng.name(); let p_pc = rng.name(); let p_insts = rng.name(); let p_tamper = rng.name();
         let p_handlers = rng.name(); let p_r_flg = rng.name(); let p_r_vals = rng.name(); let p_r_len = rng.name();
-        let p_tail_flg = rng.name(); let p_map = rng.name(); let p_idx = rng.name(); let p_len = rng.name();
+        let p_tail_flg = rng.name(); let p_raw = rng.name(); let p_map = rng.name(); let p_idx = rng.name(); let p_len = rng.name();
         let p_k = rng.name(); let p_kidx = rng.name(); let p_buf = rng.name(); let p_memo = rng.name();
+        let raw_flag_num = ControlFlowBuilder::obf_num(255, rng);
         let p_unpack = rng.name(); let p_char = rng.name(); let p_byte = rng.name(); let p_floor = rng.name();
         let p_insert = rng.name(); let p_concat = rng.name(); let p_remove = rng.name(); let p_reverse = rng.name();
         let p_bc = rng.name(); let p_res = rng.name(); let p_f = rng.name(); let p_p1 = rng.name();
@@ -614,6 +715,7 @@ impl Packer {
             format!("{} = {{}}", p_r_vals),
             format!("{} = 0", p_r_len),
             format!("{} = false", p_tail_flg),
+            format!("{} = false", p_raw),
             format!("{} = {{}}", p_map),
             format!("{} = 1", p_idx),
             format!("{} = #data", p_len),
@@ -641,6 +743,42 @@ impl Packer {
         rng.shuffle(&mut pk_pairs);
         let pk_init_table = pk_pairs.join(", ");
 
+        let token_map_name = rng.name();
+        let token_decode_name = rng.name();
+        let (token_text, token_out, token_i, token_len, token_from, token_key, token_value) = (
+            rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+        );
+        let token_entries = symbol_map.iter()
+            .map(|(symbol, token)| format!(
+                "[{}]={}",
+                lua_string_literal(token),
+                lua_string_literal(&(*symbol as char).to_string()),
+            ))
+            .collect::<Vec<_>>()
+            .join(",");
+        let token_marker_num = ControlFlowBuilder::obf_num(symbol_marker as i64, rng);
+        let symbol_decoder_lua = format!(
+            "local {map}={{{entries}}};local {decode}=function({text},{out},{i},{len},{from},{key},{value}) {out}={{}};{i}=1;{len}=#{text};{from}=1;while {i}<={len} do if byte({text},{i})=={marker} then if {i}>{from} then {out}[#{out}+1]=sub({text},{from},{i}-1) end;{key}=sub({text},{i},{i}+4);{value}={map}[{key}];if {value} then {out}[#{out}+1]={value};{i}={i}+5;{from}={i} else {out}[#{out}+1]=sub({text},{i},{i});{i}={i}+1;{from}={i} end else {i}={i}+1 end end;if {from}<={len} then {out}[#{out}+1]=sub({text},{from}) end;return concat({out}) end;",
+            map = token_map_name,
+            entries = token_entries,
+            decode = token_decode_name,
+            text = token_text,
+            out = token_out,
+            i = token_i,
+            len = token_len,
+            from = token_from,
+            key = token_key,
+            value = token_value,
+            marker = token_marker_num,
+        );
+        let main_stage_run = if main_is_raw {
+            // 保留同一 VM LZ/反篡改状态机：m_next 在 raw 模式按需合成 0XFF 标志字节，
+            // 真实 Native Stream 字节仍逐个经原 handler 路由为 literal，不绕过校验状态。
+            format!("s.raw=true;return q:{}(s);", m_run)
+        } else {
+            format!("return q:{}(s);", m_run)
+        };
+
         // 注意：这里必须写源字段名（s.idx 等），重命名由后面的
         // rename_state_fields 统一处理（它按 "s." + 源名匹配），
         // 直接写最终随机名会导致该处字段漏改、运行时对不上。
@@ -660,6 +798,7 @@ impl Packer {
             "s.r_vals = {}".to_string(),
             "s.r_len = 0".to_string(),
             "s.tail_flg = false".to_string(),
+            "s.raw = false".to_string(),
             format!("{}(s.k)", kern_init_fn), // 第二段从头起流（第一段未必吃满字节）
         ];
         rng.shuffle(&mut pk_s2);
@@ -688,6 +827,7 @@ local function {f_entry}({v_data})
     return ({{
         {m_next} = function(q, s, r, c, e, v, x, y, z, i, d, m, b, k, B, F)
     B, F = s.byte, s.floor;
+    if s.raw and s.bc > 7 then return {raw_flag_num} end;
     local {p2}={p2v}; local {p3}={p3v}; local {w1}=86; local {w2}={w1}*86; local {w3}={w2}*86; local {w4}={w3}*86;
     i, d, m, b, k = s.idx, s.data, s.map, s.buf, s.kidx;
     if #b > 0 then
@@ -755,13 +895,14 @@ end,
             {router_code}
         end,
         {m_main} = function(q, data, split_at, unpack, char, byte, floor, insert, concat, remove, reverse, sub, load_func)
+            {symbol_decoder_lua}
             return (function(s)
                 q:{m_init_map}(s);
                 {hk_derive}
                 q:{m_init_insts}(s);
                 q:{m_init_handlers}(s);
                 
-                s.data = sub(data, 1, {split_lit});
+                s.data = {token_decode_name}(sub(data, 1, {split_lit}));
                 s.len = #s.data;
                 local sb_expr = q:{m_run}(s);
                 
@@ -771,9 +912,9 @@ end,
                 
                 local stage2 = function()
                     {pk_s2_assigns}
-                    s.data = sub(data, {split_lit} + 1);
+                    s.data = {token_decode_name}(sub(data, {split_lit} + 1));
                     s.len = #s.data;
-                    return q:{m_run}(s);
+                    {main_stage_run}
                 end
                 
                 local {pk_maker} = {pk_env} and {pk_env}(stage2) or stage2;
@@ -799,6 +940,7 @@ end
                 ("r_vals", p_r_vals),
                 ("r_len", p_r_len),
                 ("tail_flg", p_tail_flg),
+                ("raw", p_raw),
                 ("map", p_map),
                 ("idx", p_idx),
                 ("len", p_len),
@@ -828,6 +970,25 @@ end
         );
         (script, f_entry)
     }
+}
+
+/// 生成可安全嵌入 Lua 双引号字符串的 ASCII 字面量（码本只使用可打印 ASCII）。
+fn lua_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for byte in value.bytes() {
+        match byte {
+            b'"' => literal.push_str("\\\""),
+            b'\\' => literal.push_str("\\\\"),
+            b'\n' => literal.push_str("\\n"),
+            b'\r' => literal.push_str("\\r"),
+            b'\t' => literal.push_str("\\t"),
+            0..=31 | 127 => literal.push_str(&format!("\\{:03}", byte)),
+            _ => literal.push(byte as char),
+        }
+    }
+    literal.push('"');
+    literal
 }
 
 /// 把脚本里 `s.<旧名>` 形式的状态表字段访问换成随机名。
@@ -860,4 +1021,72 @@ fn rename_state_fields(script: &str, pairs: &[(&str, String)]) -> String {
         i += 1;
     }
     String::from_utf8(out).unwrap_or_else(|_| script.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Packer;
+    use crate::VM::VM_Backend::Generator::GenRng;
+
+    fn restore_symbol_codes(input: &str, marker: u8, mapping: &[(u8, String)]) -> Option<String> {
+        let bytes = input.as_bytes();
+        let mut output = Vec::with_capacity(bytes.len());
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            if bytes[cursor] == marker {
+                let end = cursor.checked_add(5)?;
+                let token = std::str::from_utf8(bytes.get(cursor..end)?).ok()?;
+                let (symbol, _) = mapping.iter().find(|(_, code)| code == token)?;
+                output.push(*symbol);
+                cursor = end;
+            } else {
+                output.push(bytes[cursor]);
+                cursor += 1;
+            }
+        }
+        String::from_utf8(output).ok()
+    }
+
+    #[test]
+    fn generated_symbol_codebook_is_unambiguous_and_reversible() {
+        let alphabet: String = (33u8..=126u8)
+            .filter(|&byte| byte != b'[' && byte != b']' && byte != b'~')
+            .map(char::from)
+            .collect();
+        let perm: Vec<usize> = (0..86).collect();
+        let mut rng = GenRng::new(0);
+        let (marker, mapping) = Packer::generate_symbol_codebook(&alphabet, &perm, &mut rng);
+
+        assert!(!perm.iter().any(|&position| alphabet.as_bytes()[position] == marker));
+        assert!(!mapping.is_empty());
+        assert!(mapping.iter().all(|(_, token)| {
+            token.len() == 5 && token.as_bytes()[0] == marker && !token.as_bytes().contains(&b']')
+        }));
+
+        let mut source = vec![alphabet.as_bytes()[perm[0]], alphabet.as_bytes()[perm[1]]];
+        source.extend(mapping.iter().map(|(symbol, _)| *symbol));
+        source.extend_from_slice(&[alphabet.as_bytes()[perm[2]], alphabet.as_bytes()[perm[3]]]);
+        let source = String::from_utf8(source).unwrap();
+        let encoded = Packer::replace_symbols(&source, &mapping);
+        assert_eq!(restore_symbol_codes(&encoded, marker, &mapping).as_deref(), Some(source.as_str()));
+        assert!(!encoded.contains("]=]"));
+    }
+
+    #[test]
+    fn main_stream_can_choose_raw_for_high_entropy_and_lz_for_repetition() {
+        let mut state = 2_654_435_769u32;
+        let noisy: Vec<u8> = (0..2048)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        assert!(Packer::encode_stream(&noisy).len() >= noisy.len());
+
+        let repeated = vec![90u8; 2048];
+        assert!(Packer::encode_stream(&repeated).len() < repeated.len());
+    }
+
 }

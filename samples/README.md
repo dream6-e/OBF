@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，214,122 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），103,504 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，306,003 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，215,335 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），101,719 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，326,895 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -135,7 +135,7 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 - Native Stream、UniStream、字符串流（含 AntiTamper 池）、整段 payload 白化/滚动层，以及旧 MB packer XOR 回退均改为项目自定义的耦合状态变换；旧 fallback 仍保留 base122 编码与压缩流程。
 - bytecode 序列化与常量池 ChaCha 算法未改；Native root 仍走兼容的旧 root 派生路径。压缩、base85/base122 只承担压缩/编码，不视为加密。
 - 验证：全量 `cargo test` **101/101**；Release 构建通过。`string_encryption` 普通与 MB 样本均通过 Lua 5.1 / Luau 语法检查，且两运行时的输出都与源输出逐字节一致（4,565 B）；另以 Lua 5.1 对普通和 MB 各做 3 次独立随机生成回归。更新后的 `print` 普通/MB 样本在 Lua 5.1、Luau 下均与源输出一致；伪装样本通过两种语法检查且不含 `U4f2a` / `Instance` / `WaitForChild` 明文。新增的旧 fallback stub 端到端 Lua 5.1 测试通过。
-- 当前固定样本：普通/MB `print` **210,665 / 100,596 B**，普通 `string_encryption` **223,062 B**、MB **109,499 B**，伪装 **273,241 B**。
+- 目标七当时的固定样本：普通/MB `print` **210,665 / 100,596 B**，普通 `string_encryption` **223,062 B**、MB **109,499 B**，伪装 **273,241 B**；当前样本尺寸见本文件顶部表格及目标九。
 - 这些自创变换用于提高静态分析成本，不是经密码学审计的标准密码算法；不对其作标准密码学安全性声明。
 
 ### 目标八：自定义 VM ISA 与 Lua 5.1 差分回归（进行中，2026-10-05）
@@ -144,3 +144,10 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 - 新增 `samples/lua51-semantics.lua` 与预期输出，当前覆盖多返回值、循环、元方法、闭包/upvalue、`getfenv`/`setfenv`、环境隔离，以及运行时将 `type`、`pairs`、`tonumber`、`error` 设为 `nil` 的情形。收录的普通模式产物已在 Lua 5.1 下与预期输出一致。
 - 当前验证：`cargo test --all-targets` 110/110；差分样本的 `process1.lua` 与最终普通模式产物均输出 `LUA51_SEMANTICS_OK\t4\t2\t4\t15\t10\t6\t34\t6\t6`。父帧环境独立回归通过。
 - **范围声明：** 这只是进行中的代表性回归，不是完整 Lua 5.1 语言级兼容验收；全面语义审计与差分覆盖仍未完成。
+
+### VM 主载荷自适应编码与随机符号码本（2026-10-05）
+
+- VM main 段同时评估原 LZ 流与原样字节流；两者经过相同的 Native Stream、base86 与随机 token 替换后，按实际字符长度择小。LZ 有收益时保留旧路径；原样路径由 `m_next` 按需合成 literal 标志字节，真实字节仍经原 LZ handler/router 和反篡改状态机处理。sandbox 段和加密/密钥/校验逻辑未改变。
+- 每次生成按本次 base86 字母表与密文内容随机选 marker、符号映射和定长 token；运行时先按码本还原，再按替换后的 sandbox 长度切段。marker 取自编码诱饵位且 token 不含 `]`，避免 Lua 长字符串闭合歧义。
+- 验证：`cargo test --locked --offline --all-targets` **112/112**；Release 构建通过。普通/MB `print` 样本通过 Lua 5.1、Luau 语法检查，并在两运行时与源输出逐字节一致；伪装样本不附加 `--rob`，通过 Lua 5.1 / Luau 语法检查，真实 Roblox 行为仍需用户验证。
+- 本次普通/MB `print` 样本为 **215,335 / 101,719 B**，伪装样本为 **326,895 B**。
