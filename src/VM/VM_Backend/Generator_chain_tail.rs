@@ -154,6 +154,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let var_cache = rng.name();
 
         let var_state = rng.name();
+        // 独立于反篡改旗的扫描模式：扫描子 proto 时使用临时数组，不污染持久 VM 指令区。
+        let var_scan_only = rng.name();
         let s_init = rng.range(0x100, 0xFFF) as i64;
         let s_insts = rng.range(0x1000, 0x1FFF) as i64;
         let s_consts = rng.range(0x2000, 0x2FFF) as i64;
@@ -201,14 +203,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki1 as i64),
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki2 as i64),
         );
-        // 目标二③（第二部分，共享指令空间）：所有原型共用同一批指令数组——它们是
-        // 解码器的持久 upvalue（跨 thunk 调用存活），每个原型只占其中一段互不重叠的
-        // 下标区间（基址 = payload 头 pf_lld，先序分配、段间随机死槽）。静态读者再也
-        // 不能靠「一个数组 = 一个函数」划边界；运行期入口把 pc 切到本原型基址，
-        // 相对跳转与记录条数语义不变。
-        // 注册表挂在既有的弱键长存表上（数字键，**零新增局部**——payload 顶层局部数
-        // 已接近 Lua 的 200 上限，多一枚都可能让整份产物编译失败）：首次取用时惰性
-        // 建 4 张表，此后所有原型共用同一批数组。
+        // 目标二③（第二部分，共享指令空间）：正常执行及闭包按需解码时，所有原型共用
+        // 同一批持久指令数组；每个原型只占其中一段互不重叠的下标区间（基址 = payload
+        // 头 pf_lld，先序分配、段间随机死槽）。子 proto 的边界扫描则使用下方独立临时表，
+        // 避免尚未执行的子原型预先填充共享区间。静态读者再也不能靠「一个数组 = 一个函数」
+        // 划边界；运行期入口把 pc 切到本原型基址，相对跳转与记录条数语义不变。
+        // 注册表挂在既有的弱键长存表上（数字键，注册表本身**零新增局部**——payload
+        // 顶层局部数已接近 Lua 的 200 上限，多一枚都可能让整份产物编译失败）：首次取用时
+        // 惰性建 4 张表，后续正常解码的原型共用同一批数组。
         let sh_key_v = rng.range(0x10000, 0xFFFFFFF) as i64;
         let sh_key = rng.obfuscate_num(sh_key_v, 1, &keys);
         let mut sh_idx: Vec<usize> = (1..=4).collect();
@@ -220,8 +222,15 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let sh_assign: String = sh_arrs.iter().zip(sh_idx.iter())
             .map(|(f, i)| format!("{c}.{f}={kr}[{k}][{i}]; ", c = fn_c, f = f, kr = kreg_n, k = sh_key, i = i))
             .collect();
+        // 边界扫描仍完整解码以重算常量 fold/R 链，但只挂临时 scratch 数组；
+        // 正常执行/闭包按需解码时才连接持久共享指令数组。
+        let arr_init = format!(
+            "if {scan_only} then {c}.{op}={{}}; {c}.{a}={{}}; {c}.{b}={{}}; {c}.{cc}={{}}; else {sh_get}{sh_assign} end; ",
+            scan_only = var_scan_only, c = fn_c, op = pf_opcodes, a = pf_a_arr,
+            b = pf_b_arr, cc = pf_c_arr, sh_get = sh_get, sh_assign = sh_assign
+        );
         let body_insts = format!(
-            "{st}={nxt}; {tree9} {sh_get}{sh_assign} \
+            "{st}={nxt}; {tree9} {arr_init} \
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+{m32v} end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>={m31v} then {w}={w}-{m32v} end return {w} end; \
              local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
              while {i} < {n} do {i} = {i} + 1; \
@@ -231,7 +240,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             m31v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 31),
             st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
-            sh_assign = sh_assign, sh_get = sh_get,
+            arr_init = arr_init,
             i = v_ch_i, n = v_ch_n, cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
             pb = rng.name(), ka = rng.name(), kb18 = rng.name(), kc18 = rng.name(),
             pf_ld = pf_ld, pf_lld = pf_lld,
@@ -260,12 +269,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
         // 目标五①：子 proto 没有长度前缀。先递归完整解析每个子树以顺序抵达
         // 下一个兄弟的起点，再保存其起始游标/滚动密钥快照供 CLOSURE 按需重解。
-        let (p18, s1a, b1a, sv18, svf18, rr18, scan18, scan_flag18) =
-            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        // 扫描模式独立于防篡改状态，并在递归返回后恢复；闭包 thunk 稍后实际解码时仍走共享表。
+        let (p18, s1a, b1a, sv18, svf18, rr18, scan18, scan_flag18, scan_mode_snapshot) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let body_protos = format!(
             "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); {md18}={c}.{pf_protos}; {np18}={n}; \
              if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; \
-               local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan}={dc}(); {flg}={scan_flag}; {scan}=nil; \
+               local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan_mode_snapshot}={scan_mode}; {scan_mode}=true; local {scan}={dc}(); {scan_mode}={scan_mode_snapshot}; {flg}={scan_flag}; {scan}=nil; \
                {c}.{pf_protos}[{i}]=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
                  {a2}={p0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
                  {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end; {md18}={c}.{pf_protos}; {np18}={n}; \
@@ -273,6 +283,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
             dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1,
             md18 = md21, np18 = np21, a2 = var_a2, flg = var_state_flag,
+            scan_mode = var_scan_only, scan_mode_snapshot = scan_mode_snapshot,
             p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18,
             rr = rr18, scan = scan18, scan_flag = scan_flag18,
             tree9 = it9(&mut rng, var_state.as_str())
@@ -429,12 +440,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         chain.push_str(&format!("else {} = {} + 1; end; ", v_ch_g, v_ch_g));
 
         let block_dec_chunk = format!(
-            "local function {fn_dec_chunk}() local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
+            "local {scan_mode}=false; local function {fn_dec_chunk}() local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
              local {g}, {out}, {i}, {n} = 0, nil, 0, 0; \
              while {g} < 1 do {chain} end; \
              return {out} end; ",
             fn_dec_chunk = fn_decode_chunk, fn_c = fn_c, t = t, var_state = var_state,
-            obf_s_init = obf_s_init, g = v_ch_g, out = v_ch_out, i = v_ch_i, n = v_ch_n,
+            scan_mode = var_scan_only, obf_s_init = obf_s_init,
+            g = v_ch_g, out = v_ch_out, i = v_ch_i, n = v_ch_n,
             chain = chain
         );
 
