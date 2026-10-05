@@ -45,6 +45,9 @@ impl StubGenerator {
         let p_len = pool.get();
         let p_k = pool.get();
         let p_kidx = pool.get();
+        let p_roll_a = pool.get();
+        let p_roll_b = pool.get();
+        let p_roll_prev = pool.get();
         let p_memo = pool.get();
         let p_bc = pool.get();
         let p_res = pool.get();
@@ -72,6 +75,13 @@ impl StubGenerator {
         let v_k = pool.get();
         let v_v = pool.get();
         let v_dec = pool.get();
+        let v_pos = pool.get();
+        let v_k1 = pool.get();
+        let v_k2 = pool.get();
+        let v_prev = pool.get();
+        let v_mask = pool.get();
+        let v_na = pool.get();
+        let v_nb = pool.get();
         let v_st = pool.get();
         let v_current = pool.get();
         let v_i = pool.get();
@@ -187,9 +197,13 @@ impl StubGenerator {
             map_init.push_str(&line);
         }
 
-        let m_init_map_body = format!("
-            {map_init}
-        ", map_init=map_init);
+        let roll_init = format!(
+            "local a=0X4C31; local b=0XA7D3; for i=1,#{v_s}.{p_k} do local x={v_s}.{p_k}[i]; local y={v_s}.{p_k}[#{v_s}.{p_k}+1-i]; \
+             a=(a*0X101+x+y*0X3+i*0X4D5+b*0X5)%0X10000; \
+             b=(b*0X107+y+a*0X7+i*0X529+x*0XB)%0X10000; end; \
+             {v_s}.{p_roll_a}=a; {v_s}.{p_roll_b}=b; {v_s}.{p_roll_prev}=0X0;",
+            v_s=v_s,p_k=p_k,p_roll_a=p_roll_a,p_roll_b=p_roll_b,p_roll_prev=p_roll_prev);
+        let m_init_map_body = format!("{map_init}{roll_init}", map_init=map_init, roll_init=roll_init);
 
         let m_bxor_body = format!("
             local {v_k} = {v_a} * 256 + {v_b};
@@ -210,9 +224,16 @@ impl StubGenerator {
 
         let m_next_body = format!("
             if #{v_s}.{p_buf} > 0 then
-                local {v_r} = {f_remove}({v_s}.{p_buf}, 1);
-                local {v_dec} = {v_q}:{m_bxor}({v_s}, {v_r}, {v_s}.{p_k}[{v_s}.{p_kidx} + 1]);
-                {v_s}.{p_kidx} = ({v_s}.{p_kidx} + 1) % 16;
+                local {v_c} = {f_remove}({v_s}.{p_buf}, 1);
+                local {v_pos} = {v_s}.{p_kidx} + 1;
+                local {v_k1} = {v_s}.{p_k}[(({v_pos}-1)%0X10)+0X1];
+                local {v_k2} = {v_s}.{p_k}[(({v_pos}+0X6)%0X10)+0X1];
+                local {v_a} = {v_s}.{p_roll_a}; local {v_b} = {v_s}.{p_roll_b}; local {v_prev} = {v_s}.{p_roll_prev};
+                local {v_mask} = ({v_a}%0X100+({v_b}%0X100)*0X3+({v_pos}%0X100)*0X5+{v_prev}*0X7+{v_k1}*0XB+{v_k2}*0XD+(({v_a}-{v_a}%0X100)/0X100)*0X11+(({v_b}-{v_b}%0X100)/0X100)*0X13)%0X100;
+                local {v_dec} = ({v_c}+0X100-{v_mask})%0X100;
+                local {v_na} = ({v_a}*(0X101+{v_k1})+{v_b}*0X11+{v_pos}*0X3FD+{v_dec}*0X1F+{v_c}*0X2B+{v_k2}*0X3B+{v_prev}*0X49)%0X10000;
+                local {v_nb} = ({v_b}*(0X107+{v_k2})+{v_na}*0X13+{v_pos}*0X4D5+{v_c}*0X25+{v_dec}*0X2F+{v_k1}*0X3D+{v_prev}*0X59)%0X10000;
+                {v_s}.{p_roll_a}={v_na}; {v_s}.{p_roll_b}={v_nb}; {v_s}.{p_roll_prev}={v_c}; {v_s}.{p_kidx}={v_pos};
                 return {v_dec};
             end
             if {v_s}.{p_idx} > {v_s}.{p_len} then return nil end
@@ -229,7 +250,10 @@ impl StubGenerator {
             {v_s}.{p_buf}[3] = {v_v} % 256;
             {v_s}.{p_buf}[4] = {f_floor}({v_v} / 256);
             return {v_q}:{m_next}({v_s});
-        ", v_s=v_s, p_buf=p_buf, v_r=v_r, f_remove=f_remove, v_dec=v_dec, v_q=v_q, m_bxor=m_bxor, p_k=p_k, p_kidx=p_kidx, p_idx=p_idx, p_len=p_len, v_v=v_v, p_map=p_map, f_byte=f_byte, p_data=p_data, f_floor=f_floor, m_next=m_next);
+        ", v_s=v_s, p_buf=p_buf, f_remove=f_remove, v_dec=v_dec, v_q=v_q, p_k=p_k, p_kidx=p_kidx,
+        p_roll_a=p_roll_a, p_roll_b=p_roll_b, p_roll_prev=p_roll_prev,
+        v_c=v_c, v_pos=v_pos, v_k1=v_k1, v_k2=v_k2, v_a=v_a, v_b=v_b, v_prev=v_prev, v_mask=v_mask, v_na=v_na, v_nb=v_nb,
+        p_idx=p_idx, p_len=p_len, v_v=v_v, p_map=p_map, f_byte=f_byte, p_data=p_data, f_floor=f_floor, m_next=m_next);
 
         let m_run_body = format!("
             local {v_current} = {v_s}.{p_pc};
@@ -317,6 +341,9 @@ return (function(...)
                     {p_len}=#{v_data},
                     {p_k}={k_str},
                     {p_kidx}=0,
+                    {p_roll_a}=0,
+                    {p_roll_b}=0,
+                    {p_roll_prev}=0,
                     {p_memo}={{}},
                     {p_bc}=0,
                     {p_res}={{}},
@@ -348,7 +375,8 @@ end)(...)
         m_run=m_run, m_run_body=m_run_body, m_main=m_main, p_data=p_data, p_pc=p_pc, p_insts=p_insts,
         p_tamper=p_tamper, tamper_tbl=ControlFlowBuilder::obf_num(tamper_val as i64, &mut srng),
         pc_state0x=pc_refs_a[0], p_handlers=p_handlers, p_r_flg=p_r_flg, p_r_vals=p_r_vals,
-        p_map=p_map, p_idx=p_idx, p_len=p_len, p_k=p_k, k_str=k_str, p_kidx=p_kidx, p_memo=p_memo, p_bc=p_bc, p_res=p_res,
+        p_map=p_map, p_idx=p_idx, p_len=p_len, p_k=p_k, k_str=k_str, p_kidx=p_kidx,
+        p_roll_a=p_roll_a,p_roll_b=p_roll_b,p_roll_prev=p_roll_prev,p_memo=p_memo,p_bc=p_bc,p_res=p_res,
         p_f=p_f, p_p1=p_p1, p_p2=p_p2, p_w=p_w, p_u=p_u, p_ptr=p_ptr, p_buf=p_buf, v_r=v_r, payload=payload
         )
     }

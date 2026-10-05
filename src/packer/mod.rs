@@ -7,9 +7,8 @@ pub mod shell;
 /// MB 模式：把已经处理好的最终脚本包一层自解压外壳。
 ///
 /// 用的是用户上传的 `压缩.rs` 的算法（DP/LZ + base85 + 折叠校验 + 自解码外壳）。
-/// 上一代实现是 `pack_lua_stub_v1`（LZ + 滚动 XOR + base122 + 生成式 stub），
-/// 保留在下面作对照：同一输入（`test/print.lua`）下新外壳产物 **51.8 KB / 122 ms**，
-/// 旧管线 **55.3 KB / 191 ms**（越小越快，故按用户要求换成新的）。
+/// 上一代实现 `pack_lua_stub_v1`（LZ + 自定义滚动流 + base122 + 生成式 stub）
+/// 仍用作压缩收益为负时的兼容回退。
 pub fn pack_lua(input: &str) -> String {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -22,20 +21,33 @@ pub fn pack_lua(input: &str) -> String {
     }
 }
 
-/// 上一代 MB 外壳：LZ 压缩 → 滚动 XOR → base122 → 生成的 stub。已不参与产物生成。
+/// 上一代 MB 外壳回退：LZ 压缩 → 自定义滚动变换 → base122 → 生成式 stub。
 #[allow(dead_code)]
 pub fn pack_lua_stub_v1(input: &str) -> String {
-    let compressed = compressor::Compressor::compress(input.as_bytes());
-    let (mut encrypted, keys) = encryptor::Encryptor::xor_stream(&compressed);
-    // 4 字节对齐的补位必须用「解密后为 0」的字节。
-    // 解码端会对**所有**字节（含补位）做一遍 XOR 再喂给 LZ 解码器：补 0 的话
-    // 补位会变成 keys[i%16]，偶尔被当成合法记号，多解出一段垃圾拼在源码尾巴上，
-    // 表现为产物偶发 "attempt to call a nil value"。补 keys[i%16] 则解出 0，
-    // 解码器读到 0 头字节后流已耗尽即正常收尾。
-    while encrypted.len() % 4 != 0 {
-        let i = encrypted.len();
-        encrypted.push(keys[i % 16]);
+    let mut compressed = compressor::Compressor::compress(input.as_bytes());
+    // 先在明文流补零，保证 base122 不会再添加未经滚动变换的字节。
+    // LZ 解码器以零结束标记收尾，因此这些字节不会成为源码尾部垃圾。
+    while compressed.len() % 4 != 0 {
+        compressed.push(0);
     }
+    let (encrypted, keys) = encryptor::Encryptor::custom_stream(&compressed);
     let (payload, alphabet) = encryptor::Encryptor::base122_encode(&encrypted);
     stub_generator::StubGenerator::build_decoder(&payload, &keys, &alphabet)
+}
+#[cfg(test)]
+mod fallback_stub_tests {
+    use super::pack_lua_stub_v1;
+    use std::path::Path;
+    use std::process::Command;
+
+    #[test]
+    fn generated_legacy_stub_executes_under_lua_51() {
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() { return; }
+        let source = "io.write('LEGACY_STUB_OK')";
+        let packed = pack_lua_stub_v1(source);
+        let out = Command::new(lua).arg("-e").arg(packed).output().expect("run bundled Lua 5.1");
+        assert!(out.status.success(), "legacy stub failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("LEGACY_STUB_OK"));
+    }
 }

@@ -26,15 +26,75 @@ pub struct Generator { ctx: VmContext }
 /// ㉛ 载荷白化层的专用派生组号/字序号（不与四组常量簇冲突）。
 pub(super) const WHITEN_GROUP: usize = 0x5A;
 pub(super) const WHITEN_WORD: u32 = 7;
-/// ㉛ 位置相关白化掩码（Rust 侧与产物内 Lua 侧逐位同式）：
-/// t=(seed+pos*mul)%(2^31-1)；再两次 Lehmer 步进（*mul+add、*mul+1）；取 t%256。
-/// mul/add 逐构建随机；所有中间量 < 2^52，Lua double 与 u64 同样精确。
+/// ㉛ 项目自定义的位置白化掩码：双残数态交替耦合，seed、绝对位置及
+/// 两个逐构建参数都参与每轮；Rust/Lua 中间整数均低于 2^50，可精确表示。
 pub(super) fn whiten_byte(seed: u64, pos: u64, mul: u64, add: u64) -> u8 {
-    const MOD: u64 = 2147483647;
-    let mut t = (seed + pos.wrapping_mul(mul)) % MOD;
-    t = (t.wrapping_mul(mul).wrapping_add(add)) % MOD;
-    t = (t.wrapping_mul(mul).wrapping_add(1)) % MOD;
-    (t % 256) as u8
+    const MOD: u64 = 2_147_483_647;
+    let p = pos % MOD;
+    let s = seed % MOD;
+    let wm = mul % 65_536;
+    let wa = add % 65_536;
+    let mut a = (s + p * wm + (add % MOD)) % MOD;
+    let mut b = (s * 257 + p * wa + wm * 17) % MOD;
+    for _ in 0..3 {
+        let x = (a * ((b % 65_536) + wm + 257)
+            + b * 257 + p * (17 + add % 31) + s) % MOD;
+        let y = (b * ((x % 65_536) + wa + 263)
+            + x * 129 + p * (23 + mul % 29) + add) % MOD;
+        a = x;
+        b = y;
+    }
+    ((a % 256 + (b % 256) * 3 + (p % 256) * 5
+        + (a / 256) % 256 + (b / 256) % 256) % 256) as u8
+}
+
+/// 整段载荷的滚动可逆变换参数。更新态会同时吸收白化字节和密文字节。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RollParams {
+    pub add: u8,
+    pub rot_in: u32,
+    pub add_k1: u8,
+    pub mul_k2: u8,
+    pub rot_k2: u32,
+    pub rot_k4: u32,
+}
+
+fn roll_update(state: &mut [u8; 4], pos: u64, plain: u8, cipher: u8, p: RollParams) {
+    let [k1, k2, k3, k4] = *state;
+    let at = pos as u8;
+    let n1 = k1.wrapping_add(plain).wrapping_add(k4).wrapping_add(at)
+        .rotate_left(p.rot_in) ^ cipher;
+    let n2 = k2.wrapping_mul(p.mul_k2).wrapping_add(cipher)
+        .wrapping_add(plain ^ n1).rotate_right(p.rot_k2);
+    let n3 = k3.wrapping_add(plain).wrapping_add(cipher).wrapping_add(n2)
+        .wrapping_add(p.add_k1).rotate_left(p.rot_in) ^ k4;
+    let n4 = k4.wrapping_add(cipher).wrapping_add(plain).wrapping_add(n1)
+        .wrapping_add(n3).wrapping_add(p.add_k1).rotate_right(p.rot_k4);
+    *state = [n1, n2, n3, n4];
+}
+
+/// 把白化后的 payload 字节滚动变换成密文（绝对 1-based 位置）。
+pub(super) fn roll_encrypt_byte(state: &mut [u8; 4], pos: u64, plain: u8, p: RollParams) -> u8 {
+    let [k1, k2, k3, k4] = *state;
+    let at = pos as u8;
+    let bias = k1.wrapping_add(k2).wrapping_add(at.wrapping_mul(p.add));
+    let mixed = plain.wrapping_add(bias) ^ k3;
+    let cipher = mixed.rotate_left(p.rot_in).wrapping_add(k4)
+        .wrapping_add(at.wrapping_mul(p.add_k1));
+    roll_update(state, pos, plain, cipher, p);
+    cipher
+}
+
+/// 逆变换；状态更新与写端同式，便于分段/惰性读取时续接。
+pub(super) fn roll_decrypt_byte(state: &mut [u8; 4], pos: u64, cipher: u8, p: RollParams) -> u8 {
+    let [k1, k2, k3, k4] = *state;
+    let at = pos as u8;
+    let mixed = cipher.wrapping_sub(k4).wrapping_sub(at.wrapping_mul(p.add_k1))
+        .rotate_right(p.rot_in) ^ k3;
+    let plain = mixed.wrapping_sub(k1).wrapping_sub(k2)
+        .wrapping_sub(at.wrapping_mul(p.add));
+    roll_update(state, pos, plain, cipher, p);
+    plain
 }
 
 impl Generator {
@@ -130,7 +190,7 @@ impl Generator {
         // 折成 K0（8 字），四组密钥/盐/kind 全部由 K0 经 KDF 现算：
         // 产物里不再有「一组 8 个密钥字」的独立材料，只剩这一份 token 化的根，
         // 而推导过程在运行期才发生（静态读者要先复刻 Lua 的异或表/旋转语义）。
-        let nat_k0 = crate::VM::VM_Backend::Generator_native::Native::new(&mut rng);
+        let nat_k0 = crate::VM::VM_Backend::Generator_native::LegacyRootNative::new(&mut rng);
         let k0_seeds: Vec<u8> = (0..16).map(|_| rng.range(0, 256) as u8).collect();
         let k0 = crate::VM::VM_Backend::Generator_chacha::native_root(&nat_k0, &k0_seeds);
         let mut chacha_keys: Vec<[u32; 8]> = Vec::with_capacity(CG);
@@ -214,7 +274,7 @@ impl Generator {
 
         // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
         let mut combined_payload = Vec::new();
-        let (mut k1, mut k2, mut k3, mut k4) = ((rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8);
+        let (k1, k2, k3, k4) = ((rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8);
         combined_payload.push(k1); combined_payload.push(k2); combined_payload.push(k3); combined_payload.push(k4);
         
         combined_payload.extend(rewritten_chunks);
@@ -223,8 +283,7 @@ impl Generator {
         // 共用一条连续的 keystream。指令流此前是明文追加的，固定 10 字节一条
         // 剥掉外层 base86 之后可以直接切片还原；现在和池一样被覆盖。
         // Lua 侧的 chunk 读取器相应改成走 fn_read_dec（见 block_dec_readers）。
-        // ⑤ 滚动层常数逐产物随机（正向这五个数在 Rust 侧，逆向在 Lua 读取器里
-        // 两边由下面这组变量同时生成 —— 抓产物的人看到的是另一组数）
+        // 自定义滚动层参数逐产物随机；写端与 Lua 逆变换共享这些值。
         let sc_add: u8 = (rng.range(0, 128) * 2 + 1) as u8; // 奇数 1..255
         let sc_rot_in: u32 = rng.range(1, 8) as u32;
         let sc_add_k1: u8 = rng.range(1, 8) as u8;
@@ -241,18 +300,15 @@ impl Generator {
         // 乘法器/加数逐构建随机（奇数乘法器；乘积仍 < 2^45，double 精确）
         let whiten_mul: u64 = (rng.range(0x1001, 0x100000) as u64) | 1;
         let whiten_add: u64 = rng.range(0x1000000, 0x7FFF_FFFF) as u64;
+        let roll_params = RollParams { add: sc_add, rot_in: sc_rot_in, add_k1: sc_add_k1,
+            mul_k2: sc_mul_k2, rot_k2: sc_rot_k2, rot_k4: sc_rot_k4 };
+        let mut roll_state = [k1, k2, k3, k4];
         for (pos4, b) in combined_payload[4..].iter_mut().enumerate() {
-            let pos = pos4 + 4;
-            // ㉛ 载荷白化层（目标一之一）：种子 4 字节之外整段再叠一道**位置相关**掩码，
-            // 密钥材料来自根 K0 的 KDF 派生（运行期才装得出来）——静态读者即便复刻了
-            // 外层滚动流，解开的也只是白化后的随机字节，字段顺序/零/小整数全部不可读。
+            let pos = pos4 + 4; // 0-based payload byte offset
+            // 先白化，再把白化字节与绝对位置送入自创的耦合滚动变换。
             *b ^= whiten_byte(whiten_seed, (pos + 1) as u64, whiten_mul, whiten_add);
-            let orig = *b;
-            *b = orig ^ k1; *b = b.wrapping_sub(k2); *b = b.rotate_left((k3 % 8) as u32); *b = *b ^ k4; *b = b.wrapping_add(sc_add);
-            k1 = k1.wrapping_add(orig).rotate_left(sc_rot_in).wrapping_add(sc_add_k1);
-            k2 = k2.wrapping_mul(sc_mul_k2).wrapping_add(*b).rotate_right(sc_rot_k2);
-            k3 = k3 ^ k1.wrapping_sub(k4);
-            k4 = k4.wrapping_add(k2).rotate_left(sc_rot_k4);
+            let white = *b;
+            *b = roll_encrypt_byte(&mut roll_state, (pos + 1) as u64, white, roll_params);
         }
         
         let key_kryvex = String::from("x1"); let p_out: Vec<String> = (0..6).map(|_| rng.name()).collect();
@@ -1085,3 +1141,33 @@ impl Generator {
     }
 }
 
+
+#[cfg(test)]
+mod payload_crypto_tests {
+    use super::{roll_decrypt_byte, roll_encrypt_byte, whiten_byte, RollParams};
+
+    #[test]
+    fn whitening_and_rolling_layers_round_trip_with_state_continuity() {
+        let params = RollParams { add: 0xA5, rot_in: 3, add_k1: 5, mul_k2: 7, rot_k2: 2, rot_k4: 6 };
+        let input: Vec<u8> = (0..=255).chain((0..=127).rev()).collect();
+        let (mul, add, seed) = (0x1_2345, 0x1234_5678, 0x6543_210);
+        let mut enc_state = [0x12, 0xA7, 0x5C, 0xE1];
+        let mut cipher = Vec::with_capacity(input.len());
+        for (idx, &plain) in input.iter().enumerate() {
+            let pos = idx as u64 + 5;
+            let white = plain ^ whiten_byte(seed, pos, mul, add);
+            cipher.push(roll_encrypt_byte(&mut enc_state, pos, white, params));
+        }
+
+        let mut dec_state = [0x12, 0xA7, 0x5C, 0xE1];
+        let mut recovered = Vec::with_capacity(input.len());
+        for (idx, &byte) in cipher.iter().enumerate() {
+            let pos = idx as u64 + 5;
+            let white = roll_decrypt_byte(&mut dec_state, pos, byte, params);
+            recovered.push(white ^ whiten_byte(seed, pos, mul, add));
+        }
+        assert_eq!(recovered, input);
+        assert_eq!(dec_state, enc_state);
+        assert_ne!(cipher, input);
+    }
+}

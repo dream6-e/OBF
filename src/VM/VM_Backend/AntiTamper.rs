@@ -56,15 +56,17 @@ fn random_string() -> String {
     (0..len).map(|_| chars[rng.gen_range(0..chars.len())]).collect()
 }
 
-/// 流加密密钥对（thread_rng 版，逻辑与 Generator_util::mix_key 一致）：
-/// k0 恒非 0，且保证密文里不出现 \000。
-fn sc_key(plain: &str) -> (u32, u32) {
+/// 四字节字符串流密钥；避免字符串字面量中的 NUL 密文转义。
+fn sc_key(plain: &str) -> u32 {
     let mut r = thread_rng();
     loop {
-        let k0 = r.gen_range(1..256u32);
-        let k1 = r.gen_range(1..256u32);
-        if mix_encrypt(plain.as_bytes(), k0, k1).iter().all(|&c| c != 0) {
-            return (k0, k1);
+        let q0 = r.gen_range(1..256u32);
+        let q1 = r.gen_range(1..256u32);
+        let q2 = r.gen_range(1..256u32);
+        let q3 = r.gen_range(1..256u32);
+        let key = (q0 << 24) | (q1 << 16) | (q2 << 8) | q3;
+        if mix_encrypt(plain.as_bytes(), key).iter().all(|&c| c != 0) {
+            return key;
         }
     }
 }
@@ -102,18 +104,17 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
         // 登记过，否则查表得 nil → 构造器 [nil]=… 直接「table index is nil」。
         "setmetatable".into(), "__index".into(),
     ];
-    // 池级密钥（16 位）逐产物随机；所有条目共用一组，解码器只需要带一个常量。
-    // 与探测串同一套混合：密文按位置相关密钥生成，不是单字节 XOR，肉眼算不出来。
-    let (pk0, pk1) = loop {
-        let (a, b) = (rng.gen_range(1..256) as u32, rng.gen_range(1..256) as u32);
-        let clean = strings
-            .iter()
-            .all(|t| mix_encrypt(t.as_bytes(), a, b).iter().all(|&c| c != 0));
-        if clean {
-            break (a, b);
+    // 池级四字节密钥逐产物随机；所有条目共用一组，解码器只需要带一个常量。
+    let pool_key = loop {
+        let q0 = rng.gen_range(1..256u32);
+        let q1 = rng.gen_range(1..256u32);
+        let q2 = rng.gen_range(1..256u32);
+        let q3 = rng.gen_range(1..256u32);
+        let key = (q0 << 24) | (q1 << 16) | (q2 << 8) | q3;
+        if strings.iter().all(|t| mix_encrypt(t.as_bytes(), key).iter().all(|&c| c != 0)) {
+            break key;
         }
     };
-    let pool_key = pk0 * 256 + pk1;
     // ⑤ 池键哈希参数逐产物随机（抹掉 djb2 的 5381/33 指纹）：
     //    多重抽几次参数，直到所有池条目的键互不相同（撞键会让池条目互相覆盖）。
     let _hp: HashParams = loop {
@@ -133,7 +134,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
     let mut pool_entries = Vec::new();
     for s in &strings {
         let hash = poly_hash(s);
-        let enc: Vec<String> = mix_encrypt(s.as_bytes(), pk0, pk1).iter().map(|c| c.to_string()).collect();
+        let enc: Vec<String> = mix_encrypt(s.as_bytes(), pool_key).iter().map(|c| c.to_string()).collect();
         pool_entries.push(format!("[{}]={{{}}}", hash, enc.join(",")));
     }
 
@@ -145,7 +146,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
             break (rs, h);
         }
     };
-    let enc: Vec<String> = mix_encrypt(rand_str.as_bytes(), pk0, pk1).iter().map(|c| c.to_string()).collect();
+    let enc: Vec<String> = mix_encrypt(rand_str.as_bytes(), pool_key).iter().map(|c| c.to_string()).collect();
     pool_entries.push(format!("[{}]={{{}}}", rand_hash, enc.join(",")));
     
     let pool_data = pool_entries.join(",");
@@ -173,10 +174,6 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
     let d_a = rand_var();
     let d_b = rand_var();
     let d_r = rand_var();
-    let d_p = rand_var();
-    let d_w = rand_var();
-    let d_xb = rand_var();
-    let d_yb = rand_var();
     let d_st = rand_var();
     let d_c = rand_var();
     let mut used_states: Vec<u32> = Vec::new();
@@ -201,44 +198,41 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
         1 => format!("({j}-{j})+{j}>0", j = d_j),
         _ => format!("{j}*{j}>={j}", j = d_j),
     };
+    let (dq0,dq1,dq2,dq3,dx,dy,dcipher,dmask,dna,dnb,dprev) =
+        (rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var());
     setup.push_str(&format!(
-        "local function {dec}(h) \
-            local {t}={{i=0X0000,o=''}};local {e}={pool}[h]; \
-            if not {e} then return {e} end; \
-            {t}.n=#{e};local {k1}={K}%256;{t}.k=({K}-{k1})/256; \
-            local {c}=string.char;local {a},{b},{r},{p},{j}=0X0,0X0,0X0,0X1,{j0}; \
-            local {st}={init}; \
-            while true do \
-                if {st}=={S1} then if {t}.i<{t}.n then {st}={tr12} else {st}={tdone} end \
-                elseif {st}=={S2} then {t}.i={t}.i+0X1;{st}={tr23} \
-                elseif {st}=={S3} then local {t2}=({t}.k*{t}.i)%256;{a}=({t2}+{k1})%256;{b}={e}[{t}.i];{st}={tr34} \
-                elseif {st}=={S4} then {j}={j}+0X1; \
-                    if {opq} then {r}=0X0;{p}=0X1; \
-                        for {w}=1,{E8} do local {xb},{yb}={a}%{E2a},{b}%{E2b}; \
-                            if {xb}~={yb} then {r}={r}+{p} end; \
-                            {a}=({a}-{xb})/{E2c};{b}=({b}-{yb})/{E2d};{p}={p}*{E2e}; \
-                        end; \
-                        {t}.o={t}.o..{c}(({r}-{k1}+0X100)%0X100) \
-                    end; \
-                    {st}={tr41b} \
-                else break end \
-            end; \
-            return {t}.o; \
-        end;\n",
-        dec = v_dec, t = d_t, t2 = rand_var(), pool = v_pool, e = d_e, k1 = d_k1,
-        j = d_j, j0 = rng.gen_range(1..64), c = d_c, a = d_a, b = d_b, r = d_r,
-        p = d_p, w = d_w, xb = d_xb, yb = d_yb, st = d_st,
-        init = st_init, S1 = s1, S2 = s2, S3 = s3, S4 = s4,
-        tr12 = tr12, tr23 = tr23, tr34 = tr34, tr41b = tr41, tdone = s_done,
-        opq = opq, E8 = e8, E2a = e2a, E2b = e2b, E2c = e2c, E2d = e2d, E2e = e2e,
-        K = format!("0X{:04X}", pool_key)
+        concat!(
+            "local function {dec}(h) ",
+            "local {t}={{i=0X0,o=''}}; local {e}={pool}[h]; if not {e} then return {e} end; ",
+            "{t}.n=#{e}; local {q0}=math.floor({K}/0X1000000)%0X100; local {q1}=math.floor({K}/0X10000)%0X100; ",
+            "local {q2}=math.floor({K}/0X100)%0X100; local {q3}={K}%0X100; ",
+            "local {a}=({q0}*0X101+{q1}*0X107+{q2}*0X10D+{q3}*0X10F+0X13579B)%0X7FFFFF01; ",
+            "local {b}=({q3}*0X115+{q2}*0X119+{q1}*0X11B+{q0}*0X125+0X2468AC)%0X7FFFFF01; ",
+            "local {prev}=0X0; local {c}=string.char; local {x},{y},{cipher},{mask},{na},{nb},{r}=0X0,0X0,0X0,0X0,0X0,0X0,0X0; ",
+            "local {j}={j0}; local {st}={init}; while true do ",
+            "if {st}=={S1} then if {t}.i<{t}.n then {st}={tr12} else {st}={tdone} end ",
+            "elseif {st}=={S2} then {t}.i={t}.i+0X1; {st}={tr23} ",
+            "elseif {st}=={S3} then local pos={t}.i; {cipher}={e}[{t}.i]; ",
+            "{x}=({a}*(({b}%0X10000)+0X25D)+{b}*0X3A7+pos*0X139+{prev}*0X2D5+{q0}*0X101+{q2}*0X107)%0X7FFFFF01; ",
+            "{y}=({b}*(({x}%0X10000)+0X317)+{x}*0X2B9+pos*0X1B3+{prev}*0X3D1+{q1}*0X10D+{q3}*0X113)%0X7FFFFF01; ",
+            "{mask}=({x}%0X100+({y}%0X100)*0X3+(pos%0X100)*0X5+(({x}-{x}%0X100)/0X100)%0X100+(({y}-{y}%0X100)/0X100)%0X100)%0X100; ",
+            "{r}=({cipher}+0X100-{mask})%0X100; ",
+            "{na}=({x}*(({y}%0X10000)+0X21D)+{y}*0X331+pos*0X12B+{r}*0X17+{prev}*0X2B+{cipher}*0X35+{q2})%0X7FFFFF01; ",
+            "{nb}=({y}*(({na}%0X10000)+0X2A7)+{na}*0X2F5+pos*0X1D3+{cipher}*0X3B+{r}*0X43+{q3})%0X7FFFFF01; ",
+            "{a}={na}; {b}={nb}; {prev}={cipher}; {st}={tr34} ",
+            "elseif {st}=={S4} then {j}={j}+0X1; if {opq} then {t}.o={t}.o..{c}({r}) end; {st}={tr41b} ",
+            "else break end end; return {t}.o end;"
+        ),
+        dec=v_dec,t=d_t,pool=v_pool,e=d_e,j=d_j,
+        q0=dq0,q1=dq1,q2=dq2,q3=dq3,a=d_a,b=d_b,prev=dprev,c=d_c,
+        x=dx,y=dy,cipher=dcipher,mask=dmask,na=dna,nb=dnb,r=d_r,
+        st=d_st,init=st_init,S1=s1,S2=s2,S3=s3,S4=s4,
+        tr12=tr12,tr23=tr23,tr34=tr34,tr41b=tr41,tdone=s_done,opq=opq,
+        j0=rng.gen_range(1..64),K=format!("0X{:08X}",pool_key)
     ));
     setup.push_str(&format!(
-        "local function {}(h) \
-            local xc,yu=true;local s = {}(h); if not s then return yu end; \
-             return xc and {}[s]; \
-         end;\n",
-         v_res, v_dec, v_env
+        "local function {}(h) local xc,yu=true; local s = {}(h); if not s then return yu end; return xc and {}[s]; end;",
+        v_res, v_dec, v_env
     ));
     setup.push_str(&format!(
     "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if te~=nil then if z(te)~=v then c(b,n) else g(1) end end;break;end;end;rt(typeof,raknet,error,print,_VERSION);\n"
@@ -318,8 +312,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                 let fnv_pcall = poly_hash("pcall");
                 let fnv_string = poly_hash("string");
                 let fnv_math = poly_hash("math");
-                let (k0n, k1n) = sc_key("nil");
-                let sc_nil = st.call("nil", k0n, k1n);
+                let k_nil = sc_key("nil");
+                let sc_nil = st.call("nil", k_nil);
                 // 用哈希组精确取值校验，避免受 pairs 迭代 __index 失效的影响
                 check_code = format!(
                     "local sc_val = 0; \
@@ -336,8 +330,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                 // 元方法名整串加密（连 __ 前缀一起），键表挂的就是运行期解出来的名字。
                 let mut mm_calls: Vec<String> = Vec::new();
                 for mm in ["__add", "__sub", "__mul", "__call"] {
-                    let (a, b) = sc_key(mm);
-                    mm_calls.push(st.call(mm, a, b));
+                    let key = sc_key(mm);
+                    mm_calls.push(st.call(mm, key));
                 }
                 check_code = format!(
                     "local z = setmetatable({{}}, {{ \
@@ -395,8 +389,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                     let hash_getinfo = poly_hash("getinfo");
                     let hash_info = poly_hash("info");
                     let hash_C = poly_hash("C");
-                    let (t0, t1) = sc_key("table");
-                    let sc_tab = st.call("table", t0, t1);
+                    let key = sc_key("table");
+                    let sc_tab = st.call("table", key);
                     check_code = format!(
                         "local d={}({}); local p={}({}); \
                          if not (d and p) then {} else \
@@ -490,8 +484,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                 let g_t = rand_var();
                 let g_flag = rand_var();
                 let g_mt = rand_var();
-                let (t70, t71) = sc_key("table");
-                let sc_tab = st.call("table", t70, t71);
+                let key = sc_key("table");
+                let sc_tab = st.call("table", key);
                 let g_pk = rand_var();
                 let g_j = rand_var();
                 let g_ok = rand_var();
@@ -504,8 +498,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                 let decoy = if rng.gen_bool(0.5) { "eq" } else { "concat" };
                 // 元方法名整串（含 __ 前缀）流加密；诱饵条目同样处理。
                 let mm_call = |mm: &str, st: &mut StreamTable| -> String {
-                    let (a, b) = sc_key(mm);
-                    st.call(mm, a, b)
+                    let key = sc_key(mm);
+                    st.call(mm, key)
                 };
                 for (idx, mm) in mms.iter().enumerate() {
                     if idx == 2 {
@@ -676,8 +670,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
         "local {} = setmetatable({{}}, {{ [{}] = function(...) {}=true; return function() end end }});\n",
         v_jump,
         {
-            let (a, b) = sc_key("__index");
-            st.call("__index", a, b)
+            let key = sc_key("__index");
+            st.call("__index", key)
         },
         poison_var
     ));

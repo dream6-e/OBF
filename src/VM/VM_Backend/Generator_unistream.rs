@@ -12,7 +12,7 @@ use crate::VM::VM_Backend::Generator::GenRng;
 pub struct UniStream {
     pub tbl: String,
     pub dec: String,
-    // ㉓.2 高频数字（256/模数/LCG a、c）提升为壳内局部常量，取用点只引名字
+    // ㉓.2 高频数字（256/模数）提升为壳内局部常量，取用点只引名字
     k_b: String, k_m: String,
     seed: u64, d_mul: u64, d_rounds: u64,
     // 原生流（Native Stream）内核：参数 + 种子表 + 运行期 S-box 的 Rust 镜像
@@ -68,28 +68,9 @@ impl UniStream {
     pub fn register_bytes(&mut self, plain: &[u8]) -> usize {
         let b = plain;
         let off = self.enc.len();
-        // 起始状态 = 种子表折叠值 + 偏移混合；再走 d_rounds 步推导
-        // （与运行期机器里 warmup 段逐位一致）
-        let base = self.nat.state(&self.stbl);
-        let mut s1 = (base.s1 + (off as u64) * self.d_mul) % crate::VM::VM_Backend::Generator_native::NMOD;
-        let mut s2 = (base.s2 + (off as u64) * self.d_mul) % crate::VM::VM_Backend::Generator_native::NMOD;
-        for _ in 0..self.d_rounds {
-            s1 = (s1.wrapping_mul(self.nat.a1).wrapping_add(self.nat.c1)) % crate::VM::VM_Backend::Generator_native::NMOD;
-            s2 = (s2.wrapping_mul(self.nat.a2).wrapping_add(self.nat.c2)) % crate::VM::VM_Backend::Generator_native::NMOD;
-        }
-        let mut pos: u64 = 0;
-        let mut prev: u64 = 0;
-        let mut ciph = Vec::with_capacity(b.len());
-        for &p in b.iter() {
-            s1 = (s1.wrapping_mul(self.nat.a1).wrapping_add(self.nat.c1)) % crate::VM::VM_Backend::Generator_native::NMOD;
-            s2 = (s2.wrapping_mul(self.nat.a2).wrapping_add(self.nat.c2)) % crate::VM::VM_Backend::Generator_native::NMOD;
-            let idx = ((s1 % 256) + (s2 % 256) + pos + prev) % 256;
-            let k = self.sbox[idx as usize] as u64;
-            let c = ((p as u64) + k) % 256;
-            pos += 1;
-            prev = c;
-            ciph.push(c as u8);
-        }
+        // 每串按全流偏移/盐派生状态，且与生成 Lua 的耦合预热完全相同。
+        let mut st = self.nat.state_at_offset(&self.stbl, off as u64, self.d_mul, self.d_rounds);
+        let ciph = self.nat.encrypt_cont(&self.sbox, &mut st, b);
         self.enc.extend(std::iter::repeat(0u8).take(b.len())); // 仅占偏移
         self.entries.push((ciph, off));
         self.entries.len() - 1
@@ -141,111 +122,147 @@ impl UniStream {
     /// 一串随机数键，派发循环逐键取方法执行，循环回卷由其中一枚「回卷方法」
     /// 改写游标完成；无 if/elseif 状态链，静态读不出在算什么。
     ///
-    /// 密钥流内核（原生流）：S-box 由种子表在**运行期现场构造**（Fisher-Yates），
-    /// 每字节密钥 = 双 LCG 状态 + 位置 + 前一密文字节 混合后查该 S-box；
-    /// 每串各自按偏移起流，互不相关。
+    /// 密钥流内核（原生流）：S-box 由种子表在**运行期现场构造**（耦合 Fisher-Yates），
+    /// 每字节掩码由双状态、位置与前一密文字节共同驱动；每串按偏移/盐起流。
     pub fn emit_prelude(&self, rng: &mut GenRng) -> String {
-        use crate::VM::VM_Backend::Generator_native::{NMOD, emit_sbox_builder};
-        // S-box 构造件（指纹 + kinit）；sb / st1 / st2 作为 upvalue 供方法与解码器复用
+        use crate::VM::VM_Backend::Generator_native::{emit_sbox_builder, NMOD};
+
+        // 内核声明负责指纹等价分支及运行期 S-box；状态/字节处理在下方与 Rust 镜像同式。
         let kern = emit_sbox_builder(rng, &self.nat, "uni");
         let (sb, fold1, fold2) = (kern.sb.clone(), kern.st1.clone(), kern.st2.clone());
-
-        // 种子表：混写数字落盘（运行期据此折叠 + 造 S-box）
         let stbl_name = rng.name();
-        let mut seed_lits: Vec<String> = Vec::new();
-        for i in 0..16 {
-            let v = self.stbl[i] as u64;
-            seed_lits.push(self.mask_num(rng, v));
-        }
-        // 注意：种子表字节顺序参与折叠（顺序敏感），不可洗牌。
+        let seed_lits: Vec<String> = self.stbl.iter()
+            .map(|v| self.mask_num(rng, *v as u64)).collect();
         let kdm = rng.name();
-        // ㉓.2 高频数字（256/模数）提升为**壳函数作用域**局部常量：解密器/方法/壳内
-        // 各取用点（嵌套函数里的密文数组换算）都只引名字；种子倍数只在机器内部用，
-        // 与内核局部一起留在 do 块里。
         let kb_decl = format!("local {}={}; local {}={}; ",
             self.k_b, self.mask_num(rng, 256), self.k_m, self.mask_num(rng, NMOD));
-        let mut consts = vec![
-            format!("local {}={}; ", kdm, self.mask_num(rng, self.d_mul)),
-        ];
-        rng.shuffle(&mut consts);
+        let consts = format!("local {}={}; ", kdm, self.mask_num(rng, self.d_mul));
         let stbl_src = format!("{consts}local {stbl_name}={{{lits}}}; {call}; ",
-            consts = consts.join(""), stbl_name = stbl_name, lits = seed_lits.join(","),
+            consts = consts, stbl_name = stbl_name, lits = seed_lits.join(","),
             call = format!("{}({})", kern.init_fn, stbl_name));
 
         let tt = self.tbl.clone();
         let drv = rng.name();
         let (sv, pl, dp, fv, pc, o, of, tb) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-        // 状态表字段（含中转槽 ix/k、垃圾槽 z/w）
-        let (f_s1, f_s2, f_ix, f_k, f_pos, f_prev, f_d2, f_z, f_w) =
-            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let (f_s1, f_s2, f_tw, f_fb, f_ix, f_k, f_pos, f_prev, f_d2, f_z, f_w) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+             rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+
         let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut nk = |rng: &mut GenRng| -> u32 {
-            loop { let k = rng.range(0x0200_0000, 0x7FFF_FFFF) as u32; if used.insert(k) { return k; } }
+        let mut fresh_key = |rng: &mut GenRng| -> u32 {
+            loop {
+                let k = rng.range(0x0200_0000, 0x7FFF_FFFF) as u32;
+                if used.insert(k) { return k; }
+            }
         };
+        let method_names: Vec<String> = (0..11).map(|_| rng.name()).collect();
+        let method_keys: Vec<u32> = (0..11).map(|_| fresh_key(rng)).collect();
         let bnum = |rng: &mut GenRng, v: u32| -> String {
             if rng.range(0, 2) == 0 { format!("0X{:X}", v) } else { format!("{}", v) }
         };
-        let mn: Vec<String> = (0..10).map(|_| rng.name()).collect();
-        let mk: Vec<u32> = (0..10).map(|_| nk(rng)).collect();
-        let t = sv.clone();
         let num = |rng: &mut GenRng, v: u64| self.mask_num(rng, v);
-        let (a1, c1, a2, c2, mm, bb) = (
-            num(rng, self.nat.a1), num(rng, self.nat.c1),
-            num(rng, self.nat.a2), num(rng, self.nat.c2),
+        let (m1, m2, m3, m4, m5, m6, m7, m8, i1, i2, mm, bb) = (
+            num(rng, self.nat.m1), num(rng, self.nat.m2),
+            num(rng, self.nat.m3), num(rng, self.nat.m4),
+            num(rng, self.nat.m5), num(rng, self.nat.m6),
+            num(rng, self.nat.m7), num(rng, self.nat.m8),
+            num(rng, self.nat.i1), num(rng, self.nat.i2),
             self.k_m.clone(), self.k_b.clone(),
         );
-        let defs_src: Vec<String> = vec![
-            format!("{d}.{m}=function(_,{t}) {t}.{s1}=({t}.{s1}*{a1}+{c1})%{mm} end; ", d = drv, t = t, m = mn[0], s1 = f_s1, a1 = a1, c1 = c1, mm = mm),
-            format!("{d}.{m}=function(_,{t}) {t}.{s2}=({t}.{s2}*{a2}+{c2})%{mm} end; ", d = drv, t = t, m = mn[1], s2 = f_s2, a2 = a2, c2 = c2, mm = mm),
-            format!("{d}.{m}=function(_,{t}) {t}.{ix}=({t}.{s1}%{bb}+{t}.{s2}%{bb}+{t}.{pos}+{t}.{prev})%{bb} end; ", d = drv, t = t, m = mn[2], ix = f_ix, s1 = f_s1, s2 = f_s2, pos = f_pos, prev = f_prev, bb = bb),
-            format!("{d}.{m}=function(_,{t}) {t}.{k}={sb}[{t}.{ix}+0X1] end; ", d = drv, t = t, m = mn[3], k = f_k, sb = sb, ix = f_ix),
-            format!("{d}.{m}=function(_,{t}) {t}.{o}={t}.{o}..string.char(({t}.{d2}[{t}.{pos}+0X1]-{t}.{k})%{bb}) end; ", d = drv, t = t, m = mn[4], o = o, d2 = f_d2, pos = f_pos, k = f_k, bb = bb),
-            format!("{d}.{m}=function(_,{t}) {t}.{prev}={t}.{d2}[{t}.{pos}+0X1] end; ", d = drv, t = t, m = mn[5], prev = f_prev, d2 = f_d2, pos = f_pos),
-            format!("{d}.{m}=function(_,{t}) {t}.{pos}={t}.{pos}+0X1 end; ", d = drv, t = t, m = mn[6], pos = f_pos),
-            format!("{d}.{m}=function(_,{t}) {t}.{z}=(({t}.{z} or 0X0)+{t}.{s1})%{bb} end; ", d = drv, t = t, m = mn[7], z = f_z, s1 = f_s1, bb = bb),
-            format!("{d}.{m}=function(_,{t}) {t}.{w}=({t}.{w}+{t}.{pos})-{t}.{pos} end; ", d = drv, t = t, m = mn[8], w = f_w, pos = f_pos),
-            String::new(), // 回卷方法稍后装配（依赖程序表长度）
+
+        // Methods: offset prep, coupled transition, warmup prep, byte prep,
+        // index, S-box lookup, output, ciphertext feedback, cursor, decoys, loop check.
+        let mut defs: Vec<String> = vec![
+            format!("{d}.{m}=function(_,{t}) {t}.{w}=({t}.{w}+0X1)-0X1 end; ",
+                d=drv,m=method_names[0],t=sv,w=f_w),
+            format!("{d}.{m}=function(_,{t}) local x={t}.{s1}; local y={t}.{s2}; local tw={t}.{tw}%{mm}; local fb={t}.{fb}; local nx=(x*((y%0X10000)+{m1})+y*{m2}+tw*{m3}+fb*{m4}+{i1})%{mm}; local ny=(y*((nx%0X10000)+{m5})+nx*{m6}+tw*{m7}+fb*{m8}+{i2})%{mm}; {t}.{s1}=nx; {t}.{s2}=ny end; ",
+                d=drv,m=method_names[1],t=sv,s1=f_s1,s2=f_s2,tw=f_tw,fb=f_fb,mm=mm,
+                m1=m1,m2=m2,m3=m3,m4=m4,m5=m5,m6=m6,m7=m7,m8=m8,i1=i1,i2=i2),
+            format!("{d}.{m}=function(_,{t}) {t}.{tw}=0X1; {t}.{fb}=0X0 end; ",
+                d=drv,m=method_names[2],t=sv,tw=f_tw,fb=f_fb),
+            format!("{d}.{m}=function(_,{t}) {t}.{tw}={t}.{pos}+0X1; {t}.{fb}={t}.{prev} end; ",
+                d=drv,m=method_names[3],t=sv,tw=f_tw,pos=f_pos,fb=f_fb,prev=f_prev),
+            format!("{d}.{m}=function(_,{t}) {t}.{ix}=({t}.{s1}%{bb}+({t}.{s2}%{bb})*0X3+({t}.{pos}%{bb})*0X5+{t}.{prev}*0X7)%{bb} end; ",
+                d=drv,m=method_names[4],t=sv,ix=f_ix,s1=f_s1,s2=f_s2,pos=f_pos,prev=f_prev,bb=bb),
+            format!("{d}.{m}=function(_,{t}) {t}.{k}={sb}[{t}.{ix}+0X1] end; ",
+                d=drv,m=method_names[5],t=sv,k=f_k,sb=sb,ix=f_ix),
+            format!("{d}.{m}=function(_,{t}) {t}.{o}={t}.{o}..string.char(({t}.{d2}[{t}.{pos}+0X1]+{bb}-{t}.{k})%{bb}) end; ",
+                d=drv,m=method_names[6],t=sv,o=o,d2=f_d2,pos=f_pos,k=f_k,bb=bb),
+            format!("{d}.{m}=function(_,{t}) {t}.{prev}={t}.{d2}[{t}.{pos}+0X1] end; ",
+                d=drv,m=method_names[7],t=sv,prev=f_prev,d2=f_d2,pos=f_pos),
+            format!("{d}.{m}=function(_,{t}) {t}.{pos}={t}.{pos}+0X1 end; ",
+                d=drv,m=method_names[8],t=sv,pos=f_pos),
+            format!("{d}.{m}=function(_,{t}) {t}.{z}=({t}.{z}+{t}.{s1})%{bb}; {t}.{w}=({t}.{w}+{t}.{pos})-{t}.{pos} end; ",
+                d=drv,m=method_names[9],t=sv,z=f_z,s1=f_s1,bb=bb,w=f_w,pos=f_pos),
+            String::new(),
         ];
-        // 程序表：推导段（d_rounds 个推进对）+ 字节段（含两枚垃圾步）
-        let mut prog: Vec<u32> = Vec::new();
-        for _ in 0..self.d_rounds { prog.push(mk[0]); prog.push(mk[1]); }
-        let loop_at = prog.len() + 1; // `pc` 是 1-based 游标
-        for &idx in &[0usize, 1, 2, 3, 4, 5, 6, 7, 8] { prog.push(mk[idx]); }
-        prog.push(mk[9]);
+
+        // 初始化：先把全流 offset 与 salt 混入；随后 d_rounds 轮 (1,0) 耦合预热。
+        let mut prog: Vec<u32> = vec![method_keys[0], method_keys[1], method_keys[2]];
+        for _ in 0..self.d_rounds { prog.push(method_keys[1]); }
+        let loop_at = prog.len() + 1;
+        for &idx in &[3usize, 1, 4, 5, 6, 7, 8, 9, 10] {
+            prog.push(method_keys[idx]);
+        }
         let end_at = prog.len() + rng.range(5, 60);
-        let chk = format!("{d}.{m}=function(_,{t}) if {t}.{pos}<#{t}.{d2} then {t}.{pc}={lv} else {t}.{pc}={ev} end end; ",
-            d = drv, m = mn[9], t = t, pos = f_pos, d2 = f_d2, pc = pc,
-            lv = self.mask_num(rng, (loop_at - 1) as u64), ev = self.mask_num(rng, end_at as u64));
-        let mut defs = defs_src;
-        defs[9] = chk;
+        defs[10] = format!("{d}.{m}=function(_,{t}) if {t}.{pos}<#{t}.{d2} then {t}.{pc}={loop_at} else {t}.{pc}={end_at} end end; ",
+            d=drv,m=method_names[10],t=sv,pos=f_pos,d2=f_d2,pc=pc,
+            loop_at=self.mask_num(rng,(loop_at-1) as u64),end_at=self.mask_num(rng,end_at as u64));
         rng.shuffle(&mut defs);
-        let mut disp: Vec<String> = (0..10).map(|j| format!("[{}]={}.{}", bnum(rng, mk[j]), drv, mn[j])).collect();
+        let mut disp: Vec<String> = (0..11)
+            .map(|j| format!("[{}]={}.{}", bnum(rng,method_keys[j]),drv,method_names[j]))
+            .collect();
         rng.shuffle(&mut disp);
-        let prog_lit = prog.iter().map(|k| bnum(rng, *k)).collect::<Vec<_>>().join(",");
-        // 状态表构造（字段顺序也洗牌）
+        let prog_lit = prog.iter().map(|k| bnum(rng,*k)).collect::<Vec<_>>().join(",");
+
         let mut flds = vec![
-            format!("{}=({}+({}*{})%{})%{mm}", f_s1, fold1, of, kdm, mm, mm = mm),
-            format!("{}=({}+({}*{})%{})%{mm}", f_s2, fold2, of, kdm, mm, mm = mm),
-            format!("{}=0X0", f_ix),
-            format!("{}=0X0", f_k),
-            format!("{}=0X0", f_pos),
-            format!("{}=0X0", f_prev),
-            format!("{}={}", f_d2, tb),
-            format!("{}=string.char()", o),
-            format!("{}=0X0", f_z),
-            format!("{}=0X0", f_w),
-            format!("{}=0X1", pc),
+            format!("{}={}",f_s1,fold1), format!("{}={}",f_s2,fold2),
+            format!("{}={}",f_tw,of), format!("{}={}",f_fb,kdm),
+            format!("{}=0X0",f_ix), format!("{}=0X0",f_k),
+            format!("{}=0X0",f_pos), format!("{}=0X0",f_prev),
+            format!("{}={}",f_d2,tb), format!("{}=string.char()",o),
+            format!("{}=0X0",f_z), format!("{}=0X0",f_w), format!("{}=0X1",pc),
         ];
         rng.shuffle(&mut flds);
         format!(
-            // 整段前导落在独立 do 块内：块内局部（内核/常量/方法名/程序表/调度表/
-            // 状态字段名）随块结束释放——壳函数活动局部数不被撑爆（lua5.1 上限 200），
-            // 解密器与各方法以 upvalue 捕获它们，块外只暴露解密器一个名字。
-            "{kbd}local {dec}; do {kdecl}{stbl}{tt}={{}}; local {d}={{}}; {defs}local {pl}={{{prog}}}; local {dp}={{{disp}}}; {dec}=function({tb},{of}) local {s}={{ {flds} }}; while true do local {fv}={dp}[{pl}[{s}.{pc}]]; if {fv} then {fv}({d},{s}) {s}.{pc}={s}.{pc}+0X1 else break end end; if {s}.{prv} > {kb} then {d}.{j}({d},{s}) end; return {s}.{o} end; end; ",
-            kbd = kb_decl, kdecl = kern.decl, stbl = stbl_src, tt = tt, d = drv, defs = defs.join(""),
-            pl = pl, prog = prog_lit, dp = dp, disp = disp.join(","),
-            dec = self.dec, tb = tb, of = of, s = sv, flds = flds.join(","),
-            fv = fv, pc = pc, kb = self.k_b, prv = f_prev, j = mn[7], o = o)
+            "{kbd}local {dec}; do {kdecl}{stbl}{tt}={{}}; local {d}={{}}; {defs}local {pl}={{{prog}}}; local {dp}={{{disp}}}; {dec}=function({tb},{of}) local {s}={{{flds}}}; while true do local {fv}={dp}[{pl}[{s}.{pc}]]; if {fv} then {fv}({d},{s}); {s}.{pc}={s}.{pc}+0X1 else break end end; if {s}.{z}>{bb} then {d}.{noop}({d},{s}) end; return {s}.{o} end; end; ",
+            kbd=kb_decl,kdecl=kern.decl,stbl=stbl_src,tt=tt,d=drv,defs=defs.join(""),
+            pl=pl,prog=prog_lit,dp=dp,disp=disp.join(","),dec=self.dec,tb=tb,of=of,
+            s=sv,flds=flds.join(","),fv=fv,pc=pc,z=f_z,bb=self.k_b,noop=method_names[9],o=o)
+    }
+}
+
+#[cfg(test)]
+mod custom_unistream_tests {
+    use super::UniStream;
+    use crate::VM::VM_Backend::Generator_util::GenRng;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn table(bytes: &[u8]) -> String {
+        bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+    }
+
+    #[test]
+    fn emitted_unistream_matches_rust_cipher_for_offset_entries() {
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() { return; }
+        let mut rng = GenRng::new(0x51_7EA_123);
+        let mut stream = UniStream::new(&mut rng);
+        let first: Vec<u8> = (0..=255).collect();
+        let second: Vec<u8> = b"offset-bound entry with binary tail\0\xFF".to_vec();
+        let id0 = stream.register_bytes(&first);
+        let id1 = stream.register_bytes(&second);
+        let (stmt0, expr0) = stream.fetch(&mut rng, id0);
+        let (stmt1, expr1) = stream.fetch(&mut rng, id1);
+        let prelude = stream.emit_prelude(&mut rng);
+        let script = format!(
+            "{prelude}{stmt0} local a={expr0}; {stmt1} local b={expr1}; local pa={{{pa}}}; local pb={{{pb}}}; assert(#a==#pa and #b==#pb); for i=1,#pa do assert(string.byte(a,i)==pa[i],i) end; for i=1,#pb do assert(string.byte(b,i)==pb[i],i) end; print('UNISTREAM_OK')",
+            prelude=prelude,stmt0=stmt0,expr0=expr0,stmt1=stmt1,expr1=expr1,
+            pa=table(&first),pb=table(&second));
+        let out = Command::new(lua).arg("-e").arg(script).output().expect("run bundled Lua 5.1");
+        assert!(out.status.success(), "UniStream Lua failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("UNISTREAM_OK"));
     }
 }

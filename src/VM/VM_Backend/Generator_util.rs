@@ -969,22 +969,70 @@ pub(super) fn rename_ident(body: &str, from: &str, to: &str) -> String {
 
 /// 把明文按密钥异或后写成 Lua 的 `\ddd` 十进制转义字符串字面量。
 /// 全三位定宽，所以后面跟数字也不会被读成别的转义。
-/// 字符串加密（探测串与守卫池共用同一套）：
-/// ```text
-/// c[i] = ((p[i] + k1) % 256) XOR ((k0 * i + k1) % 256)      i 从 1 开始计
-/// ```
-/// 解密反过来两步走：先按该位置的密钥异或，再减 k1。
-/// 这里刻意不用 ChaCha 之类：只有两个字节的密钥，但密钥**随下标变化**，
-/// 于是「密文 − 明文」不再是一个常量，拿两条调用比对也看不出规律。
-pub fn mix_encrypt(plain: &[u8], k0: u32, k1: u32) -> Vec<u8> {
-    plain
-        .iter()
-        .enumerate()
-        .map(|(idx, &b)| {
-            let i = (idx + 1) as u32;
-            (((((b as u32) + k1) % 256) ^ ((k0 * i + k1) % 256)) & 0xFF) as u8
-        })
-        .collect()
+/// 字符串加密（探测串、StreamTable 与守卫池共用）：四字节 key 初始化双态，
+/// 每字节以位置、前一密文、当前明文共同耦合；反解端在取得明文后同步续态。
+/// 这是项目自定义的可逆变换，不宣称具备标准密码算法的安全性。
+pub fn mix_encrypt(plain: &[u8], key: u32) -> Vec<u8> {
+    const MOD: u64 = 0x7FFF_FF01;
+    let q0 = ((key >> 24) & 0xFF) as u64;
+    let q1 = ((key >> 16) & 0xFF) as u64;
+    let q2 = ((key >> 8) & 0xFF) as u64;
+    let q3 = (key & 0xFF) as u64;
+    let mut a = (q0 * 257 + q1 * 263 + q2 * 269 + q3 * 271 + 0x13579B) % MOD;
+    let mut b = (q3 * 277 + q2 * 281 + q1 * 283 + q0 * 293 + 0x2468AC) % MOD;
+    let mut prev = 0u64;
+    let mut out = Vec::with_capacity(plain.len());
+    for (idx, &p) in plain.iter().enumerate() {
+        let pos = (idx as u64 + 1) % MOD;
+        let x = (a * ((b % 65_536) + 0x25D) + b * 0x3A7 + pos * 0x139
+            + prev * 0x2D5 + q0 * 0x101 + q2 * 0x107) % MOD;
+        let y = (b * ((x % 65_536) + 0x317) + x * 0x2B9 + pos * 0x1B3
+            + prev * 0x3D1 + q1 * 0x10D + q3 * 0x113) % MOD;
+        let mask = (x % 256 + (y % 256) * 3 + (pos % 256) * 5
+            + (x / 256) % 256 + (y / 256) % 256) % 256;
+        let c = (p as u64 + mask) % 256;
+        let na = (x * ((y % 65_536) + 0x21D) + y * 0x331 + pos * 0x12B
+            + (p as u64) * 0x17 + prev * 0x2B + c * 0x35 + q2) % MOD;
+        let nb = (y * ((na % 65_536) + 0x2A7) + na * 0x2F5 + pos * 0x1D3
+            + c * 0x3B + (p as u64) * 0x43 + q3) % MOD;
+        a = na;
+        b = nb;
+        prev = c;
+        out.push(c as u8);
+    }
+    out
+}
+
+/// Rust 侧逆变换规格，供逐字节往返及状态续接测试。
+pub fn mix_decrypt(cipher: &[u8], key: u32) -> Vec<u8> {
+    const MOD: u64 = 0x7FFF_FF01;
+    let q0 = ((key >> 24) & 0xFF) as u64;
+    let q1 = ((key >> 16) & 0xFF) as u64;
+    let q2 = ((key >> 8) & 0xFF) as u64;
+    let q3 = (key & 0xFF) as u64;
+    let mut a = (q0 * 257 + q1 * 263 + q2 * 269 + q3 * 271 + 0x13579B) % MOD;
+    let mut b = (q3 * 277 + q2 * 281 + q1 * 283 + q0 * 293 + 0x2468AC) % MOD;
+    let mut prev = 0u64;
+    let mut out = Vec::with_capacity(cipher.len());
+    for (idx, &c) in cipher.iter().enumerate() {
+        let pos = (idx as u64 + 1) % MOD;
+        let x = (a * ((b % 65_536) + 0x25D) + b * 0x3A7 + pos * 0x139
+            + prev * 0x2D5 + q0 * 0x101 + q2 * 0x107) % MOD;
+        let y = (b * ((x % 65_536) + 0x317) + x * 0x2B9 + pos * 0x1B3
+            + prev * 0x3D1 + q1 * 0x10D + q3 * 0x113) % MOD;
+        let mask = (x % 256 + (y % 256) * 3 + (pos % 256) * 5
+            + (x / 256) % 256 + (y / 256) % 256) % 256;
+        let p = (c as u64 + 256 - mask) % 256;
+        let na = (x * ((y % 65_536) + 0x21D) + y * 0x331 + pos * 0x12B
+            + p * 0x17 + prev * 0x2B + (c as u64) * 0x35 + q2) % MOD;
+        let nb = (y * ((na % 65_536) + 0x2A7) + na * 0x2F5 + pos * 0x1D3
+            + (c as u64) * 0x3B + p * 0x43 + q3) % MOD;
+        a = na;
+        b = nb;
+        prev = c as u64;
+        out.push(p as u8);
+    }
+    out
 }
 
 /// 把加密结果写成 Lua 的定宽八进制转义字面量（`\ddd` 三位，解码端不用猜宽度）。
@@ -1005,33 +1053,29 @@ pub fn lua_mixed(bytes: &[u8]) -> String {
     out
 }
 
-pub fn mix_lit(plain: &str, k0: u32, k1: u32) -> String {
-    format!("\"{}\"", lua_mixed(&mix_encrypt(plain.as_bytes(), k0, k1)))
+pub fn mix_lit(plain: &str, key: u32) -> String {
+    format!("\"{}\"", lua_mixed(&mix_encrypt(plain.as_bytes(), key)))
 }
 
-/// 取一组 16 位密钥（k0 恒非 0，否则退化成单字节密钥），
-/// 并保证密文里不出现 `\000`：Lua 装得下 NUL，但没必要给词法器找麻烦。
-pub fn mix_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
+/// 生成四字节密钥，并避免 Lua 字符串字面量中的 NUL 密文转义。
+pub fn mix_key(plain: &str, rng: &mut GenRng) -> u32 {
     loop {
-        let k0 = rng.range(1, 256) as u32;
-        let k1 = rng.range(1, 256) as u32;
-        if mix_encrypt(plain.as_bytes(), k0, k1).iter().all(|&c| c != 0) {
-            return (k0, k1);
+        let q0 = rng.range(1, 256) as u32;
+        let q1 = rng.range(1, 256) as u32;
+        let q2 = rng.range(1, 256) as u32;
+        let q3 = rng.range(1, 256) as u32;
+        let key = (q0 << 24) | (q1 << 16) | (q2 << 8) | q3;
+        if mix_encrypt(plain.as_bytes(), key).iter().all(|&c| c != 0) {
+            return key;
         }
     }
 }
 
-/// ── 自定义流加密（独立于池）──
-/// 用途：把产物里还剩的明文字符串（类型名、元方法名、模式串等）就地加密。
-/// 与池的区别：不做「明文 → 哈希键」的查找（那是指纹）；这里是
-/// **密文与密钥一起存进一张随机键表**，调用点只出现 `T[dk](T[a],T[b])` ——
-/// 解码器本身匿名挂在表里（`[dk]=function(s,k)…end`），产物里没有解码器的名字。
-/// 密码本体与探测块/池同一族（位置相关双字节混合，纯算术 XOR，不用位库）：
-///   c[i] = ((p[i] + k1) % 256) XOR ((k0*i + k1) % 256)
-/// 「没法一下算出来」靠的是密钥随下标走；也刻意保持简单，不堆轮数。
-/// 解码器函数体（`function(s,k) … end`，不含 local 前缀——方便匿名挂进表）。
+/// ── 自定义字符串流（与探测串/AntiTamper 池逐位同规格）──
+/// 密钥由 4 个字节组成；字节递推同时吸收位置、前一密文、当前密文与明文。
+/// 本算法是项目自创的可逆变换，不等同于经审计的标准密码算法。
 pub fn stream_dec_body() -> String {
-    "function(s,k) local o,i='',0; local n=#s; local k1=k%256; local k0=(k-k1)/256; while i<n do i=i+1; local a=(k0*i+k1)%256; local b=string.byte(s,i); local r,p=0,1; for w=1,8 do local x,y=a%2,b%2; if x~=y then r=r+p end; a=(a-x)/2; b=(b-y)/2; p=p*2 end; o=o..string.char((r-k1)%256) end; return o end".to_string()
+    r#"function(s,k) local M=0X7FFFFF01; local q0=math.floor(k/0X1000000)%0X100; local q1=math.floor(k/0X10000)%0X100; local q2=math.floor(k/0X100)%0X100; local q3=k%0X100; local a=(q0*0X101+q1*0X107+q2*0X10D+q3*0X10F+0X13579B)%M; local b=(q3*0X115+q2*0X119+q1*0X11B+q0*0X125+0X2468AC)%M; local o,i,prev='',0,0; local n=#s; while i<n do i=i+1; local pos=i%M; local c=string.byte(s,i); local x=(a*((b%0X10000)+0X25D)+b*0X3A7+pos*0X139+prev*0X2D5+q0*0X101+q2*0X107)%M; local y=(b*((x%0X10000)+0X317)+x*0X2B9+pos*0X1B3+prev*0X3D1+q1*0X10D+q3*0X113)%M; local mask=(x%0X100+(y%0X100)*0X3+(pos%0X100)*0X5+((x-x%0X100)/0X100)%0X100+((y-y%0X100)/0X100)%0X100)%0X100; local p=(c+0X100-mask)%0X100; local na=(x*((y%0X10000)+0X21D)+y*0X331+pos*0X12B+p*0X17+prev*0X2B+c*0X35+q2)%M; local nb=(y*((na%0X10000)+0X2A7)+na*0X2F5+pos*0X1D3+c*0X3B+p*0X43+q3)%M; a=na; b=nb; prev=c; o=o..string.char(p) end; return o end"#.to_string()
 }
 
 /// ── ⑤ 池键哈希的参数：逐产物随机 ──
@@ -1072,7 +1116,7 @@ pub fn poly_hash(s: &str) -> u32 {
 }
 
 /// 随机取一对可用混合密钥（复用 mix_key：k0 非 0 且密文无 \000）。
-pub fn stream_key(plain: &str, rng: &mut GenRng) -> (u32, u32) {
+pub fn stream_key(plain: &str, rng: &mut GenRng) -> u32 {
     mix_key(plain, rng)
 }
 
@@ -1105,11 +1149,11 @@ impl StreamTable {
 
     /// 注册一个调用点：密文与 16 位混合密钥各自占一个随机表键。
     /// 返回的调用表达式在三种等价拼写里轮换，避免同形连排。
-    pub fn call(&mut self, plain: &str, k0: u32, k1: u32) -> String {
+    pub fn call(&mut self, plain: &str, key: u32) -> String {
         let ck = Self::fresh_key(&mut self.used);
         let kk = Self::fresh_key(&mut self.used);
-        self.entries.push((ck, mix_lit(plain, k0, k1)));
-        self.entries.push((kk, format!("0X{:X}", k0 * 256 + k1)));
+        self.entries.push((ck, mix_lit(plain, key)));
+        self.entries.push((kk, format!("0X{:08X}", key)));
         let t = &self.name;
         let dk = self.dec_key;
         match self.entries.len() % 3 {
@@ -1247,3 +1291,32 @@ pub(super) fn cursor_walk_dyn(
 
 // ㉓ UniStream 已拆至 Generator_unistream.rs（80 KB 规则）；再导出保路径不变。
 pub use crate::VM::VM_Backend::Generator_unistream::UniStream;
+
+#[cfg(test)]
+mod custom_string_stream_tests {
+    use super::{mix_decrypt, mix_encrypt, stream_dec_body};
+    use std::path::Path;
+    use std::process::Command;
+
+    fn table(bytes: &[u8]) -> String {
+        bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+    }
+
+    #[test]
+    fn custom_string_transform_round_trips_and_lua_decoder_matches() {
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        let key = 0x91A2_B3C4;
+        let plain: Vec<u8> = (0..=255).chain((0..=127).rev()).collect();
+        let cipher = mix_encrypt(&plain, key);
+        assert_eq!(mix_decrypt(&cipher, key), plain);
+        assert_ne!(cipher, plain);
+        if !lua.exists() { return; }
+
+        let script = format!(
+            "local dec={decoder}; local c={{{cipher}}}; local t={{}}; for i=1,#c do t[i]=string.char(c[i]) end; local out=dec(table.concat(t),0X{key:08X}); local expected={{{plain}}}; assert(#out==#expected); for i=1,#expected do assert(string.byte(out,i)==expected[i],i) end; print('STRING_STREAM_OK')",
+            decoder=stream_dec_body(),cipher=table(&cipher),plain=table(&plain),key=key);
+        let out = Command::new(lua).arg("-e").arg(script).output().expect("run bundled Lua 5.1");
+        assert!(out.status.success(), "string stream Lua failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("STRING_STREAM_OK"));
+    }
+}

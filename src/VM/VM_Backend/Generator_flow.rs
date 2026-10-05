@@ -83,6 +83,25 @@ pub fn build_k(rng: &mut GenRng, kt_name: &str) -> KConsts {
     }
 }
 
+fn emit_whiten_step(
+    rng: &mut GenRng,
+    fn_bxor: &str,
+    out: &str,
+    pos: &str,
+    seed: &str,
+    mul: &str,
+    add: &str,
+) -> String {
+    let (wp, wm, wa, ws, aa, bb, xx, yy, wi, mask) =
+        (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let modv = "0X7FFFFFFF";
+    format!(
+        "local {wp}={pos}%{modv}; local {wm}={mul}%0X10000; local {wa}={add}%0X10000; local {ws}={seed}%{modv}; local {aa}=({ws}+{wp}*{wm}+({add}%{modv}))%{modv}; local {bb}=({ws}*0X101+{wp}*{wa}+{wm}*0X11)%{modv}; for {wi}=1,0X3 do local {xx}=({aa}*(({bb}%0X10000)+{wm}+0X101)+{bb}*0X101+{wp}*(0X11+{add}%0X1F)+{ws})%{modv}; local {yy}=({bb}*(({xx}%0X10000)+{wa}+0X107)+{xx}*0X81+{wp}*(0X17+{mul}%0X1D)+{add})%{modv}; {aa}={xx}; {bb}={yy}; end; local {mask}=({aa}%0X100+({bb}%0X100)*0X3+({wp}%0X100)*0X5+(({aa}-{aa}%0X100)/0X100)%0X100+(({bb}-{bb}%0X100)/0X100)%0X100)%0X100; {out}={bx}({out},{mask});",
+        wp=wp, wm=wm, wa=wa, ws=ws, aa=aa, bb=bb, xx=xx, yy=yy, wi=wi, mask=mask,
+        pos=pos, modv=modv, mul=mul, add=add, seed=seed, out=out, bx=fn_bxor,
+    )
+}
+
 /// 滚动读取器打散：逆运算四步+状态更新三组拆随机键调度表（形态⑥循环壳）
 pub fn build_scatter(
     rng: &mut GenRng, fn_bxor: &str, fn_b_rotr: &str, fn_read_dec: &str, fn_a3: &str,
@@ -92,104 +111,81 @@ pub fn build_scatter(
     v_rd_c3: &str, v_rd_c4: &str, v_rd_c5: &str,
     sc_add: u8, sc_rot_in: u32, sc_add_k1: u8, sc_mul_k2: u8, sc_rot_k2: u32, sc_rot_k4: u32,
     var_whiten: &str, whiten_mul_s: &str, whiten_add_s: &str, var_pos: &str, var_cursor: &str,
-) -> String {                // ──⑥ 滚动读取器打散
-                // 真实顺序只在键名/调度表
-                // 循环壳与假出口逐产物随机 —— 静态读产物看不出解密链
-                // 铁律：k1 吃解后字节、k2 吃原始字节、k34 最后跑。
-                // 键用随机整数（不引入新名字——未声明的标识符在 Lua 里是全局 nil
-                // aE[名字]=… 直接 table index is nil）
-                let mut ikeys: Vec<u32> = Vec::new();
-                while ikeys.len() < 7 {
-                    let k = rng.range(1, 100) as u32;
-                    if !ikeys.contains(&k) { ikeys.push(k); }
-                }
-                let (d1, d2, d3, d4) = (ikeys[0], ikeys[1], ikeys[2], ikeys[3]);
-                let (u1, u2, u34) = (ikeys[4], ikeys[5], ikeys[6]);
-                let inv_add_v = 256 - sc_add as i32;
-                let mut defs = vec![
-                    format!("{}[{}]=function(e) return (e+{})%256 end; ", v_rd_c4, d1, inv_add_v),
-                    format!("{}[{}]=function(e) return {}(e,k4) end; ", v_rd_c4, d2, fn_bxor),
-                    format!("{}[{}]=function(e) return {}(e,k3%8) end; ", v_rd_c4, d3, fn_b_rotr),
-                    format!("{}[{}]=function(e) return {}((e+k2)%256,k1) end; ", v_rd_c4, d4, fn_bxor),
-                    format!("{}[{}]=function(e) k1=(k1+e)%256; k1=((k1*{})%256)+((k1-(k1%{}))/{}); k1=(k1+{})%256 end; ",
-                        v_rd_c4, u1, 1u32 << sc_rot_in, 1u32 << (8 - sc_rot_in), 1u32 << (8 - sc_rot_in), sc_add_k1),
-                    format!("{}[{}]=function(e) k2=(k2*{}+e)%256; k2=((k2*{})%256)+((k2-(k2%{}))/{}); end; ",
-                        v_rd_c4, u2, sc_mul_k2, 1u32 << (8 - sc_rot_k2), 1u32 << sc_rot_k2, 1u32 << sc_rot_k2),
-                    format!("{}[{}]=function() k3={}(k3,(k1-k4+256)%256); k4=(k4+k2)%256; k4=((k4*{})%256)+((k4-(k4%{}))/{}); end; ",
-                        v_rd_c4, u34, fn_bxor, 1u32 << sc_rot_k4, 1u32 << (8 - sc_rot_k4), 1u32 << (8 - sc_rot_k4)),
-                ];
-                rng.shuffle(&mut defs);
-                let (fupd, farg, supd, sarg) = if rng.range(0, 2) == 0 {
-                    (u1.clone(), v_rd_c1.clone(), u2.clone(), v_rd_e.clone())
-                } else {
-                    (u2.clone(), v_rd_e.clone(), u1.clone(), v_rd_c1.clone())
-                };
-                let (s0, sl) = [(0i32, 1i32), (5, 6), (17, 18), (-3, -2)][rng.range(0, 4)];
-                let big = rng.range(9, 99);
-                let mut lua = format!("local {}={{}}", v_rd_c4);
-                for d in &defs { lua.push_str(d); }
-                // 调度表：键序即执行序 —— 键是随机名，静态看不出对应哪步
-                lua.push_str(&format!("local {}={{{},{},{},{}}}; ", v_rd_c5, d1, d2, d3, d4));
-                // 形态⑥：for 序列跳转——怪异 start/step 随机路径，区间二分派发 4 步
-                let chain = if rng.range(0, 3) == 0 {
-                    format!(
-                        "local {e}={raw} local {j}=1 while {j}<=4 do {e}={st}[{seq}[{j}]]({e}) {j}={j}+1 end {o}={e} ",
-                        e = v_rd_c1, raw = v_rd_e, j = v_rd_c2, st = v_rd_c4, seq = v_rd_c5, o = v_rd_o
-                    )
-                } else {
-                    let s6 = rng.range(0x50, 0xFFFF0) as i64;
-                    let p6 = (rng.range(1, 0xFFFF) as i64) * 2 + 1;
-                    let (q1, q2, q3, qe) = (s6 + p6, s6 + 2 * p6, s6 + 3 * p6, s6 + 3 * p6);
-                    format!(
-                        "local {e}={raw} for {j}=0X{SS:X},0X{QE:X},0X{PP:X} do if {j}<0X{Q2:X} then if {j}<0X{Q1:X} then {e}={st}[({seq}[(0X1)])]({e}) else {e}={st}[({seq}[(0X2)])]({e}) end else if {j}<0X{Q3:X} then {e}={st}[({seq}[(0X3)])]({e}) else {e}={st}[({seq}[(0X4)])]({e}) end end end {o}={e} ",
-                        e = v_rd_c1, raw = v_rd_e, j = v_rd_c2, st = v_rd_c4, seq = v_rd_c5, o = v_rd_o,
-                        SS = s6, QE = qe, PP = p6, Q1 = q1, Q2 = q2, Q3 = q3
-                    )
-                };
-                let upds = format!(
-                    "{st}[{fu}]({fa}) {st}[{su}]({sa}) {st}[{u34}]() ",
-                    st = v_rd_c4, fu = fupd, fa = farg, su = supd, sa = sarg, u34 = u34
-                );
-                let (open, close, inc) = match rng.range(0, 3) {
-                    0 => (
-                        format!("local {g}={s0} while {g}<{sl} do ", g = v_rd_c3, s0 = s0, sl = sl),
-                        "end; ".to_string(),
-                        format!("{g}={g}+1; ", g = v_rd_c3),
-                    ),
-                    1 => (
-                        format!("local {g}={s0} repeat ", g = v_rd_c3, s0 = s0),
-                        format!("until {g}>={sl} ", g = v_rd_c3, sl = sl),
-                        format!("{g}={g}+1; ", g = v_rd_c3),
-                    ),
-                    _ => (
-                        format!("for {g}={s0},{s1} do ", g = v_rd_c3, s0 = s0, s1 = s0),
-                        "end; ".to_string(),
-                        String::new(),
-                    ),
-                };
-                let fake = if inc.is_empty() { String::new() } else {
-                    format!("if {g}>{big} then {g}={sl} end; ", g = v_rd_c3, big = big, sl = sl)
-                };
-                // ㉛ 载荷白化步：位置相关掩码，密钥=根 KDF 派生（运行期才有）。
-                // 位置**必须**取 a3() 读到的那个字节在载荷里的绝对 1-based 下标
-                // （= 原始字节游标 A2），不能用一个自增计数器：惰性原型会跳读/
-                // 回读（子块前移 A2、恢复链值），计数器与绝对下标必然漂移，
-                // 一旦漂移后续每个掩码全错（多原型载荷整包解坏）。
-                // upds 用的是链值（白化后的明文），与写侧 orig 一致——顺序不可颠倒。
-                let wq = rng.name();
-                // 模数 2^31-1（Lehmer）直接使用十进制字面量。
-                let wmod = "2147483647";
-                let (wmul, wadd) = (whiten_mul_s, whiten_add_s);
-                let whiten_step = format!(
-                    "{pos}={cur}-0X1 local {wq}={pos} {wq}=({seed}+({wq}*{mul}))%{mod}; {wq}=({wq}*{mul}+{add})%{mod}; {wq}=({wq}*{mul}+0X1)%{mod}; {o}={bx}({o},{wq}%256); ",
-                    wq = wq, pos = var_pos, cur = var_cursor, seed = var_whiten, mul = wmul, mod = wmod, add = wadd,
-                    o = v_rd_o, bx = fn_bxor);
-                lua.push_str(&format!(
-                    "local function {rd}() local {o}=0; {open}local {raw}={a3}() {chain}{whiten}{upds}{fake}{inc}{close}return {o} end; ",
-                    rd = fn_read_dec, o = v_rd_o, open = open, raw = v_rd_e, a3 = fn_a3,
-                    chain = chain, whiten = whiten_step, upds = upds, fake = fake, inc = inc, close = close
-                ));
-                lua
+) -> String {
+    // 读取逆变换按「减位置偏置 → 反旋转 → 异或 → 减状态偏置」执行；
+    // 四个滚动状态随后依次吸收白化字节与原密文字节。
+    let mut ikeys: Vec<u32> = Vec::new();
+    while ikeys.len() < 8 {
+        let k = rng.range(1, 100) as u32;
+        if !ikeys.contains(&k) { ikeys.push(k); }
+    }
+    let (d1, d2, d3, d4) = (ikeys[0], ikeys[1], ikeys[2], ikeys[3]);
+    let (u1, u2, u3, u4) = (ikeys[4], ikeys[5], ikeys[6], ikeys[7]);
+    let mut defs = vec![
+        format!("{st}[{key}]=function(e) return (e+0X100-((k4+({pos}%0X100)*{add})%0X100))%0X100 end; ",
+            st=v_rd_c4,key=d1,pos=var_pos,add=sc_add_k1),
+        format!("{st}[{key}]=function(e) return {rot}(e,{n}) end; ",
+            st=v_rd_c4,key=d2,rot=fn_b_rotr,n=sc_rot_in),
+        format!("{st}[{key}]=function(e) return {bx}(e,k3) end; ",
+            st=v_rd_c4,key=d3,bx=fn_bxor),
+        format!("{st}[{key}]=function(e) return (e+0X100-((k1+k2+({pos}%0X100)*{add})%0X100))%0X100 end; ",
+            st=v_rd_c4,key=d4,pos=var_pos,add=sc_add),
+        format!("{st}[{key}]=function(e,c) k1={bx}({rot}((k1+e+k4+({pos}%0X100))%0X100,0X{lr:X}),c) end; ",
+            st=v_rd_c4,key=u1,bx=fn_bxor,rot=fn_b_rotr,pos=var_pos,lr=8-sc_rot_in),
+        format!("{st}[{key}]=function(e,c) k2={rot}((k2*{mul}+c+{bx}(e,k1))%0X100,{r}) end; ",
+            st=v_rd_c4,key=u2,rot=fn_b_rotr,mul=sc_mul_k2,bx=fn_bxor,r=sc_rot_k2),
+        format!("{st}[{key}]=function(e,c) k3={bx}({rot}((k3+e+c+k2+{add})%0X100,0X{lr:X}),k4) end; ",
+            st=v_rd_c4,key=u3,bx=fn_bxor,rot=fn_b_rotr,add=sc_add_k1,lr=8-sc_rot_in),
+        format!("{st}[{key}]=function(e,c) k4={rot}((k4+c+e+k1+k3+{add})%0X100,{r}) end; ",
+            st=v_rd_c4,key=u4,rot=fn_b_rotr,add=sc_add_k1,r=sc_rot_k4),
+    ];
+    rng.shuffle(&mut defs);
+    let mut lua = format!("local {}={{}}; ",v_rd_c4);
+    for d in &defs { lua.push_str(d); }
+    let seq_lit = format!("{{{},{},{},{}}}",
+        ikeys[0],ikeys[1],ikeys[2],ikeys[3]);
+    lua.push_str(&format!("local {}={}; ",v_rd_c5,seq_lit));
+
+    // 对密文字节执行四段逆变换；采用两种等价调度形状之一。
+    let chain = if rng.range(0, 3) == 0 {
+        format!(
+            "local {plain}={raw}; local {j}=1; while {j}<=4 do {plain}={st}[{seq}[{j}]]({plain}); {j}={j}+1 end; {out}={plain}; ",
+            plain=v_rd_c1,raw=v_rd_e,j=v_rd_c2,st=v_rd_c4,seq=v_rd_c5,out=v_rd_o)
+    } else {
+        let s6 = rng.range(0x50, 0xFFFF0) as i64;
+        let p6 = (rng.range(1, 0xFFFF) as i64) * 2 + 1;
+        let (q1,q2,q3,qe)=(s6+p6,s6+2*p6,s6+3*p6,s6+3*p6);
+        format!(
+            "local {plain}={raw}; for {j}=0X{SS:X},0X{QE:X},0X{PP:X} do if {j}<0X{Q2:X} then if {j}<0X{Q1:X} then {plain}={st}[{seq}[0X1]]({plain}) else {plain}={st}[{seq}[0X2]]({plain}) end else if {j}<0X{Q3:X} then {plain}={st}[{seq}[0X3]]({plain}) else {plain}={st}[{seq}[0X4]]({plain}) end end end; {out}={plain}; ",
+            plain=v_rd_c1,raw=v_rd_e,j=v_rd_c2,st=v_rd_c4,seq=v_rd_c5,out=v_rd_o,
+            SS=s6,QE=qe,PP=p6,Q1=q1,Q2=q2,Q3=q3)
+    };
+    let upds = format!(
+        "{st}[{u1}]({white},{cipher}); {st}[{u2}]({white},{cipher}); {st}[{u3}]({white},{cipher}); {st}[{u4}]({white},{cipher}); ",
+        st=v_rd_c4,u1=u1,u2=u2,u3=u3,u4=u4,white=v_rd_c1,cipher=v_rd_e);
+
+    let (s0, sl) = [(0i32,1i32),(5,6),(17,18),(-3,-2)][rng.range(0,4)];
+    let big = rng.range(9,99);
+    let (open,close,inc)=match rng.range(0,3) {
+        0 => (format!("local {g}={s0}; while {g}<{sl} do ",g=v_rd_c3,s0=s0,sl=sl),
+              "end; ".to_string(),format!("{g}={g}+1; ",g=v_rd_c3)),
+        1 => (format!("local {g}={s0}; repeat ",g=v_rd_c3,s0=s0),
+              format!("until {g}>={sl}; ",g=v_rd_c3,sl=sl),format!("{g}={g}+1; ",g=v_rd_c3)),
+        _ => (format!("for {g}={s0},{s0} do ",g=v_rd_c3,s0=s0),"end; ".to_string(),String::new()),
+    };
+    let fake=if inc.is_empty(){String::new()}else{format!("if {g}>{big} then {g}={sl} end; ",g=v_rd_c3,big=big,sl=sl)};
+
+    // 白化掩码由 seed、绝对位置及两参数经三轮双态耦合产生；没有 LCG 步进。
+    let whiten_step = emit_whiten_step(
+        rng, fn_bxor, v_rd_o, var_pos, var_whiten, whiten_mul_s, whiten_add_s,
+    );
+
+    lua.push_str(&format!(
+        "local function {rd}() local {out}=0; {open}local {raw}={a3}(); {pos}={cursor}-0X1; {chain}{whiten}{upds}{fake}{inc}{close}return {out} end; ",
+        rd=fn_read_dec,out=v_rd_o,open=open,raw=v_rd_e,a3=fn_a3,pos=var_pos,cursor=var_cursor,
+        chain=chain,whiten=whiten_step,upds=upds,fake=fake,inc=inc,close=close));
+    let _ = (v_bx_a,v_bx_b,v_bx_r,v_bx_w,v_bx_g,v_bx_s,v_rt_x,v_rt_n,v_rt_d,v_rt_g,v_rt_t,v_rd_g);
+    lua
 }
 
 /// 读取族（u32/a5/rS/a10）状态梯子：形态③④⑤ + ⑥ for 区间跳转 + ⑬ 包裹索引
@@ -1013,5 +1009,63 @@ pub fn build_decstr(
             unmask = unmask, path = path, count = count,
             s = v_str_s, i = v_str_i, g = v_str_g
         ),
+    }
+}
+
+#[cfg(test)]
+mod payload_whiten_tests {
+    use super::emit_whiten_step;
+    use crate::VM::VM_Backend::Generator::whiten_byte;
+    use crate::VM::VM_Backend::Generator_util::GenRng;
+    use std::path::Path;
+    use std::process::Command;
+
+    #[test]
+    fn emitted_lua_whitening_matches_rust_at_payload_positions() {
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() {
+            return;
+        }
+
+        let cases = [
+            (1, 0x6543_210, 0x1_2345, 0x1234_5678),
+            (4, 0x7FFF_FFFE, 0xFFFF, 0x7FFF_FFFF),
+            (5, 1, 0x1001, 0x0100_0000),
+            (256, 0x7654_3210, 0xABCDE, 0x2345_6789),
+            (257, 0x7654_3210, 0xABCDE, 0x2345_6789),
+            (6758, 0x7FFF_FFFD, 0xFFFFF, 0x7FFF_FFFE),
+        ];
+        let rows = cases
+            .iter()
+            .map(|&(pos, seed, mul, add)| {
+                format!(
+                    "{{{pos},{seed},{mul},{add},{mask}}}",
+                    pos = pos,
+                    seed = seed,
+                    mul = mul,
+                    add = add,
+                    mask = whiten_byte(seed, pos, mul, add),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut rng = GenRng::new(0x31_7E_57);
+        let step = emit_whiten_step(&mut rng, "bx", "out", "pos", "seed", "mul", "add");
+        let script = format!(
+            "local function bx(a,b) local r,p=0,1; for i=1,8 do local x,y=a%2,b%2; if x~=y then r=r+p end; a=(a-x)/2; b=(b-y)/2; p=p*2 end; return r end; local function mask(pos,seed,mul,add) local out=0; {step} return out end; local cases={{{rows}}}; for i=1,#cases do local c=cases[i]; assert(mask(c[1],c[2],c[3],c[4])==c[5],i) end; print('WHITEN_OK')",
+            step = step,
+            rows = rows,
+        );
+        let out = Command::new(lua)
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("run bundled Lua 5.1");
+        assert!(
+            out.status.success(),
+            "whitening Lua failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("WHITEN_OK"));
     }
 }

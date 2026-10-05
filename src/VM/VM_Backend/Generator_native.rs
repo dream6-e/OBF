@@ -4,9 +4,8 @@
 //!
 //! - 落盘的只是「种子碎片」（数字/字符，混写拼写），运行期才用 Lua 原生操作合成；
 //! - S-box 不是常量表，而是生成代码在运行期用 Fisher-Yates **现场构造**出来的
-//!   （表内容由种子 + LCG 决定，静态读产物读不到 S-box）；
-//! - 每字节密钥 = 两条 LCG 状态 + 位置 + 前一密文字节 混合后查 S-box，
-//!   没有闭式密钥流公式，也没有固定周期；
+//!   （表内容由种子与双状态耦合洗牌决定，静态读产物读不到 S-box）；
+//! - 每字节掩码由双残数态、位置与前一密文字节共同驱动，再查 S-box；
 //! - **运行期指纹**（`tostring(function() end)` 的地址串、`collectgarbage("count")`、
 //!   宿主原生报错文本）只用于两处：
 //!   ① 选择**等价**的代码形态（不同 Lua 宿主走不同分支，解出的明文完全一致）；
@@ -20,77 +19,104 @@
 
 use super::Generator_util::GenRng;
 
-/// 模数：奇数、< 2^31（x*a < 2^47，double 精确）
+/// 共享状态范围。乘积上限保持在 Lua 5.1 double 的精确整数域内。
 pub const NMOD: u64 = 0x7FFF_FF01;
 
+/// 项目自定义的耦合残数流。每轮的乘数取决于另一状态字，
+/// 状态同时吸收位置与前一密文字节；不是固定乘加型 LCG。
 pub struct Native {
-    pub a1: u64,
-    pub c1: u64,
-    pub a2: u64,
-    pub c2: u64,
-    pub pf: u64,
-    pub pa: u64,
-    pub pf2: u64,
-    pub pa2: u64,
-    pub i1: u64,
-    pub i2: u64,
-    pub za: u64,
-    pub zc: u64,
+    pub i1: u64, pub i2: u64,
+    pub m1: u64, pub m2: u64, pub m3: u64, pub m4: u64,
+    pub m5: u64, pub m6: u64, pub m7: u64, pub m8: u64,
 }
 
 impl Native {
     pub fn new(rng: &mut GenRng) -> Self {
-        let odd = |rng: &mut GenRng, lo: i64, hi: i64| -> u64 { ((rng.range64(lo, hi) as u64) | 1).max(3) };
+        // 保持旧 Native 构造器的 12 次抽样顺序与范围，使 Native 派生的 UniStream
+        // 参数变化不会推进/扰动后续 RNG 流；随机材料映射到新耦合更新参数。
+        let odd = |rng: &mut GenRng, lo: i64, hi: i64| -> u64 {
+            ((rng.range64(lo, hi) as u64) | 1).max(3)
+        };
+        let a1 = odd(rng, 3, 0x7FFF);
+        let c1 = rng.range64(1, 0x7FFF) as u64;
+        let a2 = odd(rng, 3, 0x7FFF);
+        let c2 = rng.range64(1, 0x7FFF) as u64;
+        let pf = odd(rng, 3, 0xFFFF);
+        let pa = rng.range64(1, 0xFFFF) as u64;
+        let pf2 = odd(rng, 3, 0xFFFF);
+        let pa2 = rng.range64(1, 0xFFFF) as u64;
+        let i1 = rng.range64(1, 0xFFFF) as u64;
+        let i2 = rng.range64(1, 0xFFFF) as u64;
+        let za = odd(rng, 3, 0xFFFF);
+        let zc = rng.range64(1, 0xFFFF) as u64;
         Self {
-            a1: odd(rng, 3, 0x7FFF),
-            c1: (rng.range64(1, 0x7FFF) as u64),
-            a2: odd(rng, 3, 0x7FFF),
-            c2: (rng.range64(1, 0x7FFF) as u64),
-            pf: odd(rng, 3, 0xFFFF),
-            pa: (rng.range64(1, 0xFFFF) as u64),
-            pf2: odd(rng, 3, 0xFFFF),
-            pa2: (rng.range64(1, 0xFFFF) as u64),
-            i1: (rng.range64(1, 0xFFFF) as u64),
-            i2: (rng.range64(1, 0xFFFF) as u64),
-            za: odd(rng, 3, 0xFFFF),
-            zc: (rng.range64(1, 0xFFFF) as u64),
+            i1: (i1 + za * 0x1_0000) % NMOD,
+            i2: (i2 + zc * 0x1_0000) % NMOD,
+            m1: a1, m2: c1, m3: a2, m4: c2,
+            m5: pf, m6: pa, m7: pf2, m8: pa2,
         }
     }
 
-    /// 种子折叠：与 Lua 侧同一个循环式（Rust 侧 16 字节固定长）。
+    /// 两个残数态的耦合更新。最大中间值低于 2^50，Rust/Lua 双方都精确。
+    #[inline]
+    pub fn mix_pair(&self, s1: u64, s2: u64, tweak: u64, feedback: u64) -> (u64, u64) {
+        let t = tweak % NMOD;
+        let x = (s1 * ((s2 % 0x1_0000) + self.m1)
+            + s2 * self.m2 + t * self.m3 + feedback * self.m4 + self.i1) % NMOD;
+        let y = (s2 * ((x % 0x1_0000) + self.m5)
+            + x * self.m6 + t * self.m7 + feedback * self.m8 + self.i2) % NMOD;
+        (x, y)
+    }
+
+    /// 种子折叠：顺序与反序字节成对进入耦合更新。
     fn fold(&self, seeds: &[u8]) -> (u64, u64) {
-        let (mut x1, mut x2) = (self.i1 % NMOD, self.i2 % NMOD);
+        let (mut s1, mut s2) = (self.i1, self.i2);
         let n = seeds.len();
         for i in 0..n {
-            x1 = (x1.wrapping_mul(self.pf).wrapping_add(seeds[i] as u64).wrapping_add(self.pa)) % NMOD;
-            let b = seeds[n - 1 - i] as u64;
-            x2 = (x2.wrapping_mul(self.pf2).wrapping_add(b).wrapping_add(self.pa2)) % NMOD;
+            let feedback = seeds[i] as u64 + (seeds[n - 1 - i] as u64) * 256;
+            (s1, s2) = self.mix_pair(s1, s2, (i + 1) as u64, feedback);
         }
-        (x1, x2)
+        (s1, s2)
     }
 
-    /// 运行期 S-box（Fisher-Yates）：与生成的 Lua 构造代码逐位一致。
+    /// 运行期现场构造 256 项置换表。洗牌驱动器也使用同一耦合态。
     pub fn sbox(&self, seeds: &[u8]) -> [u8; 256] {
         let mut sb = [0u8; 256];
-        for i in 0..256 {
-            sb[i] = i as u8;
-        }
-        let (x1, _) = self.fold(seeds);
-        let mut z = (x1.wrapping_mul(self.za).wrapping_add(self.zc)) % NMOD;
-        let mut i = 255usize;
-        while i >= 1 {
-            z = (z.wrapping_mul(self.a1).wrapping_add(self.c1)) % NMOD;
-            let j = (z % (i as u64 + 1)) as usize;
+        for (i, slot) in sb.iter_mut().enumerate() { *slot = i as u8; }
+        let (mut s1, mut s2) = self.fold(seeds);
+        for i in (1..256).rev() {
+            let feedback = (i as u64) * 257;
+            (s1, s2) = self.mix_pair(s1, s2, i as u64, feedback);
+            let mixed = (s1 % 0x1_0000) * (s2 % 0x1_0000)
+                + s1 * 3 + s2 * 5 + i as u64;
+            let j = (mixed % (i as u64 + 1)) as usize;
             sb.swap(i, j);
-            i -= 1;
         }
         sb
     }
 
-    /// 逐字节密钥流状态
+    /// 一条新流的初始状态。
     pub fn state(&self, seeds: &[u8]) -> NState {
         let (s1, s2) = self.fold(seeds);
         NState { s1, s2, pos: 0, prev: 0 }
+    }
+
+    /// UniStream 每个条目按全流偏移派生独立状态，再做若干耦合预热轮。
+    pub fn state_at_offset(&self, seeds: &[u8], offset: u64, salt: u64, rounds: u64) -> NState {
+        let (mut s1, mut s2) = self.fold(seeds);
+        (s1, s2) = self.mix_pair(s1, s2, offset, salt);
+        for _ in 0..rounds { (s1, s2) = self.mix_pair(s1, s2, 1, 0); }
+        NState { s1, s2, pos: 0, prev: 0 }
+    }
+
+    /// 取下一字节的掩码。反馈只读前一密文，写读两侧可同步重建。
+    pub fn next_key(&self, sb: &[u8; 256], st: &mut NState) -> u8 {
+        let tweak = st.pos + 1;
+        (st.s1, st.s2) = self.mix_pair(st.s1, st.s2, tweak, st.prev);
+        let ix = (st.s1 % 256 + (st.s2 % 256) * 3
+            + (st.pos % 256) * 5 + st.prev * 7) % 256;
+        st.pos += 1;
+        sb[ix as usize]
     }
 
     /// 加密一串（新开流）。返回 (密文, 收尾状态)。
@@ -103,13 +129,9 @@ impl Native {
     /// 加密一串（续流，状态跨段保持）。
     pub fn encrypt_cont(&self, sb: &[u8; 256], st: &mut NState, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(data.len());
-        for &b in data {
-            st.s1 = (st.s1.wrapping_mul(self.a1).wrapping_add(self.c1)) % NMOD;
-            st.s2 = (st.s2.wrapping_mul(self.a2).wrapping_add(self.c2)) % NMOD;
-            let idx = ((st.s1 % 256) + (st.s2 % 256) + st.pos + st.prev) % 256;
-            let k = sb[idx as usize] as u64;
-            let c = ((b as u64) + k) % 256;
-            st.pos += 1;
+        for &p in data {
+            let key = self.next_key(sb, st) as u64;
+            let c = ((p as u64) + key) % 256;
             st.prev = c;
             out.push(c as u8);
         }
@@ -119,15 +141,11 @@ impl Native {
     /// 解密一串（Rust 侧自检用；与生成的 Lua 逐位一致）。
     pub fn decrypt_cont(&self, sb: &[u8; 256], st: &mut NState, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(data.len());
-        for &c in data {
-            st.s1 = (st.s1.wrapping_mul(self.a1).wrapping_add(self.c1)) % NMOD;
-            st.s2 = (st.s2.wrapping_mul(self.a2).wrapping_add(self.c2)) % NMOD;
-            let idx = ((st.s1 % 256) + (st.s2 % 256) + st.pos + st.prev) % 256;
-            let k = sb[idx as usize] as u64;
-            let b = ((c as u64) + 256 - k) % 256;
-            st.pos += 1;
-            st.prev = c as u64;
-            out.push(b as u8);
+        for &cipher in data {
+            let key = self.next_key(sb, st) as u64;
+            let p = ((cipher as u64) + 256 - key) % 256;
+            st.prev = cipher as u64;
+            out.push(p as u8);
         }
         out
     }
@@ -138,6 +156,71 @@ pub struct NState {
     pub s2: u64,
     pub pos: u64,
     pub prev: u64,
+}
+
+/// 只供常量池根 K0 派生保持既有 ChaCha 输入不变。
+/// VM/sandbox payload、UniStream 不得使用此兼容实现。
+pub struct LegacyRootNative {
+    a1: u64, c1: u64, a2: u64, c2: u64,
+    pf: u64, pa: u64, pf2: u64, pa2: u64,
+    i1: u64, i2: u64, za: u64, zc: u64,
+}
+
+impl LegacyRootNative {
+    pub fn new(rng: &mut GenRng) -> Self {
+        let odd = |rng: &mut GenRng, lo: i64, hi: i64| -> u64 {
+            ((rng.range64(lo, hi) as u64) | 1).max(3)
+        };
+        Self {
+            a1: odd(rng, 3, 0x7FFF), c1: rng.range64(1, 0x7FFF) as u64,
+            a2: odd(rng, 3, 0x7FFF), c2: rng.range64(1, 0x7FFF) as u64,
+            pf: odd(rng, 3, 0xFFFF), pa: rng.range64(1, 0xFFFF) as u64,
+            pf2: odd(rng, 3, 0xFFFF), pa2: rng.range64(1, 0xFFFF) as u64,
+            i1: rng.range64(1, 0xFFFF) as u64, i2: rng.range64(1, 0xFFFF) as u64,
+            za: odd(rng, 3, 0xFFFF), zc: rng.range64(1, 0xFFFF) as u64,
+        }
+    }
+
+    fn fold(&self, seeds: &[u8]) -> (u64, u64) {
+        let (mut x1, mut x2) = (self.i1 % NMOD, self.i2 % NMOD);
+        let n = seeds.len();
+        for i in 0..n {
+            x1 = (x1 * self.pf + seeds[i] as u64 + self.pa) % NMOD;
+            x2 = (x2 * self.pf2 + seeds[n - 1 - i] as u64 + self.pa2) % NMOD;
+        }
+        (x1, x2)
+    }
+
+    fn sbox(&self, seeds: &[u8]) -> [u8; 256] {
+        let mut sb = [0u8; 256];
+        for (i, slot) in sb.iter_mut().enumerate() { *slot = i as u8; }
+        let (x1, _) = self.fold(seeds);
+        let mut z = (x1 * self.za + self.zc) % NMOD;
+        for i in (1..256).rev() {
+            z = (z * self.a1 + self.c1) % NMOD;
+            sb.swap(i, (z % (i as u64 + 1)) as usize);
+        }
+        sb
+    }
+
+    /// The original Native derivation is retained solely as the ChaCha K0 input.
+    pub fn keystream(&self, seeds: &[u8], len: usize) -> Vec<u8> {
+        let sb = self.sbox(seeds);
+        let (mut s1, mut s2) = self.fold(seeds);
+        let mut pos = 0u64;
+        let mut prev = 0u64;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            s1 = (s1 * self.a1 + self.c1) % NMOD;
+            s2 = (s2 * self.a2 + self.c2) % NMOD;
+            let idx = ((s1 % 256) + (s2 % 256) + pos + prev) % 256;
+            let c = sb[idx as usize] as u64;
+            out.push(c as u8);
+            pos += 1;
+            prev = c;
+        }
+        out
+    }
 }
 
 /// 运行期指纹：三路宿主熵（函数地址串 / GC 计数 / 宿主原生报错文本）折叠成 h。
@@ -281,126 +364,148 @@ fn emit_kernel_ex(rng: &mut GenRng, nat: &Native, tag: &str, with_step: bool) ->
     let st2 = rng.name();
     let pos = rng.name();
     let prev = rng.name();
-    let z = rng.name();
     let i = rng.name();
     let j = rng.name();
-    let x1 = rng.name();
-    let x2 = rng.name();
+    let x = rng.name();
+    let y = rng.name();
     let f = rng.name();
-    let ix = rng.name();
-    let k = rng.name();
-    let t = rng.name();
     let v = rng.name();
     let seedv = rng.name();
+    let ix = rng.name();
+    let k = rng.name();
 
     let num = |rng: &mut GenRng, v: u64| rng.format_num(v as i64);
     let nmod = format!("0X{:X}", NMOD);
-
-    // 折叠两条种子（同式与 Rust 侧 fold 一致）
-    let fold_src = format!(
-        "local {x1}={i1}; local {x2}={i2}; for {i}=0X1,#{seedv} do \
-           {x1}=({x1}*{pf}+{seedv}[{i}]+{pa})%{nm}; \
-           {x2}=({x2}*{pf2}+{seedv}[#{seedv}+0X1-{i}]+{pa2})%{nm}; end; ",
-        x1 = x1,
-        x2 = x2,
-        i = i,
-        i1 = num(rng, nat.i1),
-        i2 = num(rng, nat.i2),
-        pf = num(rng, nat.pf),
-        pa = num(rng, nat.pa),
-        pf2 = num(rng, nat.pf2),
-        pa2 = num(rng, nat.pa2),
-        nm = nmod,
-        seedv = seedv
+    let low = "0X10000";
+    let (m1, m2, m3, m4, m5, m6, m7, m8, i1, i2) = (
+        num(rng, nat.m1), num(rng, nat.m2), num(rng, nat.m3), num(rng, nat.m4),
+        num(rng, nat.m5), num(rng, nat.m6), num(rng, nat.m7), num(rng, nat.m8),
+        num(rng, nat.i1), num(rng, nat.i2),
     );
 
-    // S-box 现场构造：两套等价形态（for 递减 / while 递减），由指纹选路；
-    // 循环内混入 +h-h（自抵消，运行期值逐宿主不同，结果不变）。
+    // Rust/Lua 完全同式：每个种子字节与反向位置的字节成对混入。
+    let fold_src = format!(
+        "local {x}={i1}; local {y}={i2}; for {i}=0X1,#{seedv} do \
+         local {f}={seedv}[{i}]+{seedv}[#{seedv}+0X1-{i}]*0X100; \
+         local {ix}=({x}*(({y}%{low})+{m1})+{y}*{m2}+{i}*{m3}+{f}*{m4}+{i1})%{nm}; \
+         local {k}=({y}*(({ix}%{low})+{m5})+{ix}*{m6}+{i}*{m7}+{f}*{m8}+{i2})%{nm}; \
+         {x}={ix}; {y}={k}; end; ",
+        x = x, y = y, i = i, seedv = seedv, f = f, ix = ix, k = k,
+        i1 = i1, i2 = i2, m1 = m1, m2 = m2, m3 = m3, m4 = m4,
+        m5 = m5, m6 = m6, m7 = m7, m8 = m8, low = low, nm = nmod);
+
     let mk_loop = |rng: &mut GenRng, while_form: bool| -> String {
-        let init = format!("for {i}=0X0,0XFF do {sb}[{i}+0X1]={i} end; {z}=({x1}*{za}+{zc})%{nm}; ",
-            i = i, sb = sb, z = z, x1 = x1, za = num(rng, nat.za), zc = num(rng, nat.zc), nm = nmod);
+        let init = format!("for {i}=0X0,0XFF do {sb}[{i}+0X1]={i} end; ", i = i, sb = sb);
         let body = format!(
-            "{z}=({z}*{a1}+{c1}+{h}-{h})%{nm}; {j}={z}%({i}+0X1); {t}={sb}[{i}+0X1]; {sb}[{i}+0X1]={sb}[{j}+0X1]; {sb}[{j}+0X1]={t}; ",
-            z = z, a1 = num(rng, nat.a1), c1 = num(rng, nat.c1), h = h, nm = nmod,
-            j = j, i = i, t = t, sb = sb
-        );
+            "local {f}={i}*0X101; local {ix}=({x}*(({y}%{low})+{m1})+{y}*{m2}+{i}*{m3}+{f}*{m4}+{i1})%{nm}; \
+             local {k}=({y}*(({ix}%{low})+{m5})+{ix}*{m6}+{i}*{m7}+{f}*{m8}+{i2})%{nm}; \
+             {x}={ix}; {y}={k}; {j}=(({x}%{low})*({y}%{low})+{x}*0X3+{y}*0X5+{i})%({i}+0X1); \
+             local tmp={sb}[{i}+0X1]; {sb}[{i}+0X1]={sb}[{j}+0X1]; {sb}[{j}+0X1]=tmp; ",
+            i = i, f = f, x = x, y = y, ix = ix, k = k, j = j, sb = sb,
+            m1 = m1, m2 = m2, m3 = m3, m4 = m4, m5 = m5, m6 = m6, m7 = m7, m8 = m8,
+            i1 = i1, i2 = i2, low = low, nm = nmod);
         if while_form {
-            format!(
-                "{init}{i}=0XFF; while {i}>=0X1 do {body}{i}={i}-0X1 end; ",
-                init = init, i = i, body = body
-            )
+            format!("{init}{i}=0XFF; while {i}>=0X1 do {body}{i}={i}-0X1 end; ", init = init, i = i, body = body)
         } else {
             format!("{init}for {i}=0XFF,0X1,-0X1 do {body}end; ", init = init, i = i, body = body)
         }
     };
     let l0 = mk_loop(rng, false);
     let l1 = mk_loop(rng, true);
-    let pick_r = rng.range64(2, 0xFFFFF);
-    let pick = rng.format_num(pick_r);
-    let build = format!(
-        "if ({h}%0X2)==0X0 then {a} else {b} end; ",
-        h = h,
-        a = l0,
-        b = l1
-    );
-
+    let pick_raw = rng.range64(2, 0xFFFFF);
+    let pick = rng.format_num(pick_raw);
+    let build = format!("if ({h}%0X2)==0X0 then {a} else {b} end; ", h = h, a = l0, b = l1);
     let pickv = rng.name();
     let decl = format!(
-        "local {sb},{st1},{st2},{pos},{prev};{fp_src}local {pickv}={pick}; ",
-        sb = sb,
-        st1 = st1,
-        st2 = st2,
-        pos = pos,
-        prev = prev,
-        fp_src = fp_src,
-        pickv = pickv,
-        pick = pick
-    );
+        "local {sb},{st1},{st2},{pos},{prev}; {fp_src}local {pickv}={pick}; ",
+        sb = sb, st1 = st1, st2 = st2, pos = pos, prev = prev,
+        fp_src = fp_src, pickv = pickv, pick = pick);
 
     let init_fn = rng.name();
     let init_def = format!(
-        "local function {kf}({seedv}) {sb}={{}}; local {z},{i},{j},{t}; {fold}{build}local {st1v},{st2v}={x1},{x2}; {st1}={st1v}%{nm}; {st2}={st2v}%{nm}; {pos}=0X0; {prev}=0X0; end; ",
-        kf = init_fn,
-        seedv = seedv,
-        sb = sb,
-        z = z,
-        i = i,
-        j = j,
-        t = t,
-        fold = fold_src,
-        build = build,
-        st1v = rng.name(),
-        st2v = rng.name(),
-        x1 = x1,
-        x2 = x2,
-        st1 = st1,
-        st2 = st2,
-        nm = nmod,
-        pos = pos,
-        prev = prev
-    );
+        "local function {kf}({seedv}) {sb}={{}}; local {i},{j},{f},{ix},{k},{x},{y}; {fold} \
+         {st1}={x}; {st2}={y}; {build} {pos}=0X0; {prev}=0X0; end; ",
+        kf = init_fn, seedv = seedv, sb = sb, i = i, j = j, f = f, ix = ix, k = k,
+        x = x, y = y, fold = fold_src, build = build, st1 = st1, st2 = st2, pos = pos, prev = prev);
 
     let step = format!(
-        "local function {f}({v}) {st1}=({st1}*{a1}+{c1})%{nm}; {st2}=({st2}*{a2}+{c2})%{nm}; \
-         local {ix}=({st1}%0X100+{st2}%0X100+{pos}+{prev})%0X100; local {k}={sb}[{ix}+0X1]; \
-         {pos}={pos}+0X1; {prev}={v}; return ({v}-{k})%0X100 end; ",
-        f = f,
-        v = v,
-        st1 = st1,
-        a1 = num(rng, nat.a1),
-        c1 = num(rng, nat.c1),
-        nm = nmod,
-        st2 = st2,
-        a2 = num(rng, nat.a2),
-        c2 = num(rng, nat.c2),
-        ix = ix,
-        pos = pos,
-        prev = prev,
-        k = k,
-        sb = sb
-    );
+        "local function {fn}({v}) local tw=({pos}+0X1)%{nm}; \
+         local nx=({st1}*(({st2}%{low})+{m1})+{st2}*{m2}+tw*{m3}+{prev}*{m4}+{i1})%{nm}; \
+         local ny=({st2}*((nx%{low})+{m5})+nx*{m6}+tw*{m7}+{prev}*{m8}+{i2})%{nm}; \
+         {st1}=nx; {st2}=ny; local {ix}=({st1}%0X100+({st2}%0X100)*0X3+({pos}%0X100)*0X5+{prev}*0X7)%0X100; \
+         local {k}={sb}[{ix}+0X1]; {pos}={pos}+0X1; {prev}={v}; return ({v}+0X100-{k})%0X100 end; ",
+        fn = f, v = v, pos = pos, nm = nmod, st1 = st1, st2 = st2, prev = prev,
+        ix = ix, k = k, sb = sb, low = low, m1 = m1, m2 = m2, m3 = m3, m4 = m4,
+        m5 = m5, m6 = m6, m7 = m7, m8 = m8, i1 = i1, i2 = i2);
     let _ = tag;
-    // 步进函数必须与声明同处一个作用域（闭包按 upvalue 捕获状态）
     let body = if with_step { format!("{decl}{init_def}{step}") } else { format!("{decl}{init_def}") };
-    Kernel { decl: body, init_fn: init_fn.clone(), step: if with_step { f.clone() } else { String::new() }, sb: sb.clone(), st1: st1.clone(), st2: st2.clone() }
+    Kernel {
+        decl: body, init_fn: init_fn.clone(), step: if with_step { f.clone() } else { String::new() },
+        sb: sb.clone(), st1: st1.clone(), st2: st2.clone(),
+    }
+}
+
+#[cfg(test)]
+mod custom_stream_tests {
+    use super::*;
+
+    fn sample_native() -> Native {
+        Native { i1: 0x12345, i2: 0x6789A, m1: 0x113, m2: 0x527, m3: 0xA31, m4: 0xD27,
+            m5: 0x1B3, m6: 0x733, m7: 0xC15, m8: 0xE57 }
+    }
+
+    #[test]
+    fn coupled_stream_round_trips_across_continuations() {
+        let nat = sample_native();
+        let seeds = *b"0123456789ABCDEF";
+        let sb = nat.sbox(&seeds);
+        let input: Vec<u8> = (0..=255).chain(0..=255).collect();
+        let mut enc_state = nat.state(&seeds);
+        let mut cipher = nat.encrypt_cont(&sb, &mut enc_state, &input[..173]);
+        cipher.extend(nat.encrypt_cont(&sb, &mut enc_state, &input[173..]));
+        let mut dec_state = nat.state(&seeds);
+        let mut plain = nat.decrypt_cont(&sb, &mut dec_state, &cipher[..99]);
+        plain.extend(nat.decrypt_cont(&sb, &mut dec_state, &cipher[99..]));
+        assert_eq!(plain, input);
+        assert_ne!(cipher, input);
+    }
+
+    #[test]
+    fn offset_streams_diverge_and_round_trip() {
+        let nat = sample_native();
+        let seeds = *b"0123456789ABCDEF";
+        let sb = nat.sbox(&seeds);
+        let input = b"same plaintext";
+        let mut a = nat.state_at_offset(&seeds, 12, 0x1234, 9);
+        let mut b = nat.state_at_offset(&seeds, 57, 0x1234, 9);
+        let ct_a = nat.encrypt_cont(&sb, &mut a, input);
+        let ct_b = nat.encrypt_cont(&sb, &mut b, input);
+        assert_ne!(ct_a, ct_b);
+        let mut dec = nat.state_at_offset(&seeds, 12, 0x1234, 9);
+        assert_eq!(nat.decrypt_cont(&sb, &mut dec, &ct_a), input);
+    }
+
+    #[test]
+    fn emitted_lua_kernel_matches_rust_cipher_byte_for_byte() {
+        use crate::VM::VM_Backend::Generator_util::GenRng;
+        use std::path::Path;
+        use std::process::Command;
+
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() { return; }
+        let nat = sample_native();
+        let seeds = *b"0123456789ABCDEF";
+        let sb = nat.sbox(&seeds);
+        let plain: Vec<u8> = (0..=255).collect();
+        let (cipher, _) = nat.encrypt(&seeds, &sb, &plain);
+        let mut rng = GenRng::new(0xC0FF_EE12);
+        let kernel = emit_decrypt_kernel(&mut rng, &nat, "test");
+        let table = |bytes: &[u8]| bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+        let script = format!(
+            "local seed={{{}}}; {} {}(seed); local c={{{}}}; local p={{{}}}; for i=1,#c do assert({}(c[i])==p[i],i) end; print('NATIVE_OK')",
+            table(&seeds), kernel.decl, kernel.init_fn, table(&cipher), table(&plain), kernel.step);
+        let out = Command::new(lua).arg("-e").arg(script).output().expect("run bundled Lua 5.1");
+        assert!(out.status.success(), "Lua kernel failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("NATIVE_OK"));
+    }
 }

@@ -139,9 +139,8 @@ pub(super) fn group_keys(k0: &[u32; 8], g: u32) -> GroupKeys {
 /// 独立种子，取 32 字节密钥流（加密全零即密钥流本身）折成 8 个 u32。
 /// 产物里落盘的只有这份根（且是 token 化掩码形态），四组密钥材料全部由
 /// 它在运行期经 KDF 现算——不再有「每组一套密钥材料」可循。
-pub(super) fn native_root(nat: &super::Generator_native::Native, seeds: &[u8]) -> [u32; 8] {
-    let sb = nat.sbox(seeds);
-    let (ks, _) = nat.encrypt(seeds, &sb, &[0u8; 32]);
+pub(super) fn native_root(nat: &super::Generator_native::LegacyRootNative, seeds: &[u8]) -> [u32; 8] {
+    let ks = nat.keystream(seeds, 32);
     let mut k0 = [0u32; 8];
     for w in 0..8 {
         k0[w] = u32::from_le_bytes([ks[w * 4], ks[w * 4 + 1], ks[w * 4 + 2], ks[w * 4 + 3]]);
