@@ -2,6 +2,7 @@ use crate::BytecodeCompiler::ir::chunk::{Chunk, Constant};
 use crate::BytecodeCompiler::ir::instruction::Instruction;
 use crate::BytecodeCompiler::ir::opcode::Opcode;
 use crate::VM::VM_Backend::Context::VmContext;
+use crate::VM::VM_Backend::CustomIsa::lower_to_custom;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -38,6 +39,19 @@ impl Serializer {
             .as_ref()
             .map(|code| code.instructions.as_slice())
             .unwrap_or(&chunk.instructions);
+        let source_lines: Vec<i32> = if let Some(code) = &reordered {
+            if chunk.lines.len() == chunk.instructions.len() {
+                code.source_pc.iter().map(|&pc| chunk.lines[pc]).collect()
+            } else {
+                code.instructions.iter().map(|inst| inst.line).collect()
+            }
+        } else if chunk.lines.len() == chunk.instructions.len() {
+            chunk.lines.clone()
+        } else {
+            chunk.instructions.iter().map(|inst| inst.line).collect()
+        };
+        let lowered = lower_to_custom(instructions, &chunk.protos)
+            .unwrap_or_else(|err| panic!("{err}"));
         let mut bytes = Vec::new();
 
         Self::write_string(&mut bytes, chunk.name.as_bytes());
@@ -50,11 +64,11 @@ impl Serializer {
         bytes.push(chunk.is_vararg);
         bytes.push(chunk.max_stack);
 
-        let inst_count = instructions.len() as u32;
+        let inst_count = lowered.len() as u32;
         bytes.extend_from_slice(&inst_count.to_le_bytes());
 
-        for inst in instructions {
-            let mapped_op = ctx.opcode_map[inst.opcode as usize];
+        for inst in &lowered {
+            let mapped_op = ctx.opcode_map[inst.op.global_id()];
             bytes.push(mapped_op);
             bytes.push(inst.a);
             bytes.extend_from_slice(&inst.b.to_le_bytes());
@@ -91,15 +105,10 @@ impl Serializer {
             bytes.extend(Self::serialize_proto(proto, ctx, child_seed));
         }
 
-        let lines: Vec<i32> = if let Some(code) = &reordered {
-            if chunk.lines.len() == chunk.instructions.len() {
-                code.source_pc.iter().map(|&pc| chunk.lines[pc]).collect()
-            } else {
-                chunk.lines.clone()
-            }
-        } else {
-            chunk.lines.clone()
-        };
+        let lines: Vec<i32> = lowered
+            .iter()
+            .map(|inst| source_lines.get(inst.source_pc).copied().unwrap_or(0))
+            .collect();
         bytes.extend_from_slice(&(lines.len() as u32).to_le_bytes());
         for line in lines {
             bytes.extend_from_slice(&line.to_le_bytes());

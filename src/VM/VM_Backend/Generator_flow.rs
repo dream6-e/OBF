@@ -359,6 +359,9 @@ pub fn build_readers(
                             crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(keys), off, v_rs_l, 2, 3, &unit)
                         }
                     };
+                    // cursor_walk_dyn 的随机形态可能自带尾随分号，而下方模板还会追加
+                    // 一个语句分隔符；剥掉尾部分号，避免偶发生成 `;;` 使 Lua 5.1 拒绝解析。
+                    let shell = shell.trim_end().trim_end_matches(';').trim_end().to_string();
                     let sv = rng.name();
                     let (lit_a, lit_b, lit_c) = (e_a, e_b, e_c);
                     let pk2 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
@@ -411,7 +414,8 @@ pub fn build_consts(
     rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, pj_name: &str, fn_bxor: &str,
     sc_index2: &str, sc_kobf: &str, var_state_flag: &str, var_idx_chunk: &str,
     var_tbl: &str, var_e: &str, ds: &[String; 4], dn: &[String; 4], fn_read_string: &str, fn_s_byte: &str,
-    fn_a5: &str, fn_read_dec: &str, var_enc_c: &str, var_cache: &str,
+    fn_a5: &str, fn_read_dec: &str, native_type: &str, native_pairs: &str,
+    var_enc_c: &str, var_cache: &str,
     fn_c: &str, pf_consts: &str, const_path_key: &str,
     v_ch_i: &str, v_ch_n: &str, t: &str,
     pf_opcodes: &str, pf_a_arr: &str, pf_b_arr: &str, pf_c_arr: &str, fn_rotl: &str,
@@ -644,11 +648,11 @@ pub fn build_consts(
                     "local {m32}={m32v}; local {agg}=0X0; local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
                      do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
                      local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
-                     local {pfn}=function(q) local tq=type(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then local {ps}=tostring({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+string.byte({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=='boolean' then return not q end return q end; ",
+                     local {pfn}=function(q) local tq={nt}(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then local {ps}=tostring({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+string.byte({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=='boolean' then return not q end return q end; ",
                     m32 = m32, m32v = m32v, agg = agg_name,
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
-                    wctr = wctr, pfn = pfn_n, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
+                    wctr = wctr, pfn = pfn_n, nt = native_type, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
                     ps = poison_s, ph = poison_h, pi = poison_i,
                     m1 = rng.name(), m2 = rng.name(),
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
@@ -660,8 +664,8 @@ pub fn build_consts(
                 // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
                 // ——乘数域均 <2^40，Lua double 全精确；串/表两种 blob 分支取字节
                 lua.push_str(&format!(
-                    "local {vm}=function({vb},{vl},{vf},{vr}) if {vl}==nil then {vl}=0X0 end; if {vf}==nil then {vf}=0X0 end; if {vr}==nil then {vr}=0X0 end; if type({vb})~='string' and type({vb})~='table' then {vb}={kobf}..({vb} or 0X0) end; local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if type({vb})=='string' then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
-                    vm = vm, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
+                    "local {vm}=function({vb},{vl},{vf},{vr}) if {vl}==nil then {vl}=0X0 end; if {vf}==nil then {vf}=0X0 end; if {vr}==nil then {vr}=0X0 end; if {nt}({vb})~='string' and {nt}({vb})~='table' then {vb}={kobf}..({vb} or 0X0) end; local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if {nt}({vb})=='string' then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
+                    vm = vm, nt = native_type, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
                     mc1 = mc1, mc2 = mc2, mc3 = mc3, mc4 = mc4, mc5 = mc5,
                     kobf = sc_kobf, bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte, m32 = m32));
                 // ③-4 变体化的常量表基建——必须在 vmac 之后（V2/V3 的分派闭包
@@ -670,8 +674,8 @@ pub fn build_consts(
                 for x in &dsp_defs { lua.push_str(x); }
                 // 缓存前哨：非字符串常量命中后短路；字符串必须在每次取用时重解密。
                 lua.push_str(&format!(
-                    "local {memo}=function({ddm},{ix}) local ev={ec}[({ix})]; if type(ev)=='table' and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
-                    memo = memo_name, ix = var_idx_chunk, ca = var_cache, ddm = ddm,
+                    "local {memo}=function({ddm},{ix}) local ev={ec}[({ix})]; if {nt}(ev)=='table' and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
+                    memo = memo_name, nt = native_type, ix = var_idx_chunk, ca = var_cache, ddm = ddm,
                     ec = var_enc_c, strtag = three));
                 lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
                                 // ③-4：记录解码调用点随调用制变体（表制走闭包表，函数制直调）
@@ -686,13 +690,13 @@ pub fn build_consts(
                 };
 lua.push_str(&format!(
                     "local {hh}={{}}; \
-                     {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in pairs({cab}) do {cab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
+                     {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in {np}({cab}) do {cab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else if {psn} and {delay}<=0 then return {x_ret1},{pfn}(g) end; return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
-                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[({ix})] if type({ev})~='table' then {fake} return {x_nil1} end; \
+                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[({ix})] if {nt}({ev})~='table' then {fake} return {x_nil1} end; \
                        {ev}[(0X4)]={tba}[{pathkey}] or 0X0; {ev}[(0X5)]=(({ev}[(0X5)] or 0X0)+0X1)%{m32}; {kbh}\
-                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if type({pv})~='string' then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
+                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~='string' then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
-                    wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, pv = rng.name(),
+                    wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, np = native_pairs, nt = native_type, pv = rng.name(),
                     pfn = pfn_n, psn = psn, delay = poison_delay,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     memo = memo_name,
@@ -806,7 +810,8 @@ lua.push_str(&format!(
 pub fn build_header(
     rng: &mut GenRng, keys: &CipherKeys, fn_s_byte: &str, fn_s_sub: &str, var_raw_p: &str,
     payload_str: &str, var_vc: &str, var_p: &str, var_a2: &str, entry_func: &str, fn_a3: &str, x: &str,
-    fn_lit: &str, mode_lit: &str, k_lit: &str, var_whiten: &str, var_whiten_pos: &str, psn: &str,
+    fn_lit: &str, mode_lit: &str, k_lit: &str, var_whiten: &str, var_whiten_pos: &str,
+    native_type: &str, psn: &str,
 ) -> String {
     // ㉓-D 去 KRYVEX 包裹标记后，载荷从第 1 字节开始读取。
     let mut lua = format!(
@@ -823,9 +828,9 @@ pub fn build_header(
     let gate_seed = rng.range64(0x1000, 0x7FFF_FF00);
     lua.push_str(&format!(
         "local {ok},{bit}=pcall(function() local {a},{b}={{}},{{}}; local {s}=tostring({a})..tostring({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+string.byte({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
-         local {tok},{tr}=pcall(function() return type({byte})=={fn_lit} end); {psn}={psn} or ({ok} and {bit}==0X0 and {tok} and not {tr}); ",
+         local {tok},{tr}=pcall(function() return {nt}({byte})=={fn_lit} end); {psn}={psn} or ({ok} and {bit}==0X0 and {tok} and not {tr}); ",
         ok = gate_ok, bit = gate_bit, a = gate_a, b = gate_b, s = gate_s, h = gate_h, i = gate_i,
-        seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, psn = psn
+        seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, nt = native_type, psn = psn
     ));
     lua.push_str(&format!(
         "local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {vc}=setmetatable({{}},mt_vc); \

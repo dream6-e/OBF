@@ -1,11 +1,11 @@
 use super::{OpcodeBuilder, OpcodeConfig, OpcodesRng};
 
-// Shared by GETGLOBAL, GETGLOBALSTR and GETIMPORT: decode a normal string constant,
-// look it up in the current VM frame's environment, and proxy numeric getfenv/setfenv
-// levels back to that frame's writable environment slot. Function targets use native APIs.
-fn global_lookup_body(const_slot: &str, dst: &str) -> String {
+// Shared by GETGLOBAL, GETGLOBALSTR and GETIMPORT: resolve only through the active Lua
+// environment. getfenv/setfenv are intercepted at the VM call boundary so the caller's
+// virtual frame is known even when the function value was saved and invoked later.
+pub(super) fn global_lookup_body(const_slot: &str, dst: &str) -> String {
     format!(
-        "local k = {{CONSTS}}[{const_slot}+1]; local e = {{ENV}}; local v = e[k]; if v == nil and getgenv then v = getgenv()[k] end; if getfenv and v == getfenv then local f = v; v = function(level) if level == nil or type(level) == 'number' then return {{ENV_REF}} end; return f(level) end elseif setfenv and v == setfenv then local f = v; local wrapped; wrapped = function(target, new_env) if type(target) == 'number' then if type(new_env) ~= 'table' then return f(target, new_env) end; {{ENV_REF}} = new_env; return wrapped end; return f(target, new_env) end; v = wrapped end; {{STK}}[{dst}] = v",
+        "local k = {{CONSTS}}[{const_slot}+1]; local e = {{ENV}}; {{STK}}[{dst}] = e[k]",
         const_slot = const_slot,
         dst = dst,
     )
@@ -40,8 +40,8 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let sg_b = setglobal.raw_inst(3);
     let sg_a = setglobal.raw_inst(2);
     out.push_str(&setglobal.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]; if getgenv then getgenv()[k] = {{STK}}[{}] end",
-        sg_b, sg_a, sg_a
+        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]",
+        sg_b, sg_a
     )));
 
     let mut setupval = OpcodeBuilder::new(m[8].clone(), cfg, rng);
@@ -76,14 +76,14 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let sl_b = setlist.raw_inst(3);
     let sl_c = setlist.raw_inst(4);
     out.push_str(&setlist.build(&format!(
-        "local c = {}; if c == 0 then c = {{INSTS}}[{{PC}}][2]; {{PC}} = {{PC}} + 1 end; local b = {}; if b == 0 then b = {{TOP}} - {} end; local offset = (c - 1) * 50; for j = 1, b do {{STK}}[{}][offset + j] = {{STK}}[{} + j] end; for j = {} + 1, {} + b do {{STK}}[j] = nil end",
-        sl_c, sl_b, sl_a, sl_a, sl_a, sl_a, sl_a
+        "local c = {c}; if c == 0 then c = {{INSTS}}[{{PC}}][2]; {{PC}} = {{PC}} + 1 end; local b = {b}; if b == 0 then b = {{TOP}} - {a}; if b < 0 then b = 0 end end; local offset = (c - 1) * 50; for j = 1, b do {{STK}}[{a}][offset + j] = {{STK}}[{a} + j] end; if {b} == 0 then {{TOP}} = {a} end",
+        c = sl_c, b = sl_b, a = sl_a
     )));
 
     let mut close = OpcodeBuilder::new(m[35].clone(), cfg, rng);
     let cl_a = close.raw_inst(2);
     out.push_str(&close.build(&format!(
-        "if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in pairs({{STK}}.{{OPEN_UPS}}) do if reg >= {} then uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; {{STK}}.{{OPEN_UPS}}[reg] = nil end end end",
+        "if {{STK}}.{{OPEN_UPS}} then for reg, uv_obj in {{NATIVE_PAIRS}}({{STK}}.{{OPEN_UPS}}) do if reg >= {} then uv_obj[1] = {{uv_obj[1][uv_obj[2]]}}; uv_obj[2] = 1; {{STK}}.{{OPEN_UPS}}[reg] = nil end end end",
         cl_a
     )));
 
@@ -98,7 +98,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let check_str = all_checks.join(" or ");
 
     out.push_str(&closure.build(&format!(
-        "local p = {{PROTOS}}[{}+1]; if type(p) == 'function' then p = p(); {{PROTOS}}[{}+1] = p end; local uv = {{}}; {{STK}}.{{OPEN_UPS}} = {{STK}}.{{OPEN_UPS}} or {{}}; for j = 1, p.{{PROTO_NUPS}} do local uv_inst = {{INSTS}}[{{PC}}]; {{PC}} = {{PC}} + 1; if {} then local reg = uv_inst[3]; if not {{STK}}.{{OPEN_UPS}}[reg] then {{STK}}.{{OPEN_UPS}}[reg] = {{{{STK}}, reg}} end; uv[j] = {{STK}}.{{OPEN_UPS}}[reg] else uv[j] = {{UPVALS}}[uv_inst[3]+1] end end; {{STK}}[{}] = function(...) return execute(p, getfenv and getfenv(1) or env, uv, ...) end",
+        "local p = {{PROTOS}}[{}+1]; if {{NATIVE_TYPE}}(p) == 'function' then p = p(); {{PROTOS}}[{}+1] = p end; local uv = {{}}; {{STK}}.{{OPEN_UPS}} = {{STK}}.{{OPEN_UPS}} or {{}}; for j = 1, p.{{PROTO_NUPS}} do local uv_inst = {{INSTS}}[{{PC}}]; {{PC}} = {{PC}} + 1; if {} then local reg = uv_inst[3]; if not {{STK}}.{{OPEN_UPS}}[reg] then {{STK}}.{{OPEN_UPS}}[reg] = {{{{STK}}, reg}} end; uv[j] = {{STK}}.{{OPEN_UPS}}[reg] else uv[j] = {{UPVALS}}[uv_inst[3]+1] end end; {{STK}}[{}] = function(...) return execute(p, env, uv, nil, nil, ...) end",
         cl_b, cl_b, check_str, cl_a
     )));
 
@@ -106,7 +106,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let va_a = vararg.raw_inst(2);
     let va_b = vararg.raw_inst(3);
     out.push_str(&vararg.build(&format!(
-        "if {} > 0 then for j = 1, {} - 1 do {{STK}}[{}+j-1] = {{VARARGS}}[j] end else local old_top = {{TOP}}; {{TOP}} = {} - 1; for j = 1, {{VARARGS_LEN}} do {{STK}}[{}+j-1] = {{VARARGS}}[j]; {{TOP}} = {{TOP}} + 1 end; for j = {{TOP}} + 1, old_top do {{STK}}[j] = nil end end",
+        "if {} > 0 then for j = 1, {} - 1 do {{STK}}[{}+j-1] = {{VARARGS}}[j] end else {{TOP}} = {} - 1; for j = 1, {{VARARGS_LEN}} do {{STK}}[{}+j-1] = {{VARARGS}}[j]; {{TOP}} = {{TOP}} + 1 end end",
         va_b, va_b, va_a, va_a, va_a
     )));
 
@@ -142,8 +142,8 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let sgs_b = setglobalstr.raw_inst(3);
     let sgs_a = setglobalstr.raw_inst(2);
     out.push_str(&setglobalstr.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]; if getgenv then getgenv()[k] = {{STK}}[{}] end",
-        sgs_b, sgs_a, sgs_a
+        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]",
+        sgs_b, sgs_a
     )));
 
     let mut newtablearr = OpcodeBuilder::new(m[77].clone(), cfg, rng);

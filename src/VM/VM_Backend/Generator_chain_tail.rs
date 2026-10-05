@@ -53,6 +53,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         whiten_mul,
         whiten_add,
         var_builtin_reg,
+        native_type,
+        native_pairs,
         np21,
         md21,
         th21,
@@ -257,7 +259,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
-                fn_a5.as_str(), fn_read_dec.as_str(), var_enc_c.as_str(), var_cache.as_str(),
+                fn_a5.as_str(), fn_read_dec.as_str(), native_type.as_str(), native_pairs.as_str(),
+                var_enc_c.as_str(), var_cache.as_str(),
                 fn_c.as_str(), pf_consts.as_str(), const_path_key.as_str(),
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
@@ -297,10 +300,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
              rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
         let verify_agg = format!(
-            "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}=pcall(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or type({b1})~='number' or type({b2})~='number' or type({b3})~='number' or type({b4})~='number' or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
+            "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}=pcall(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or {nt}({b1})~='number' or {nt}({b2})~='number' or {nt}({b3})~='number' or {nt}({b4})~='number' or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
             go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
             co = co, cm = cm, b1 = b1, b2 = b2, b3 = b3, b4 = b4,
-            sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, psn = psn_n
+            sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, nt = native_type, psn = psn_n
         );
         let dbg_locals: Vec<String> = (0..9).map(|_| rng.name()).collect();
         let body_debug = format!(
@@ -314,10 +317,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let body_ret = format!("while true do if not(not {pj}[({pkx1})]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; local {r14}=nil; if {r14} then return nil end; break; end; ",
             out = v_ch_out, c = fn_c, g = v_ch_g, pj = pj_name, pkx1 = pkx1, r14 = r14);
 
-        // ⑳ 行完整性守卫：运行期抽样探测行位置；失配只置共享投毒旗并继续。
-        // 每个采样点以对象地址哈希选取，不调用 math.random，也不改变脚本的随机序列。
-        // 定义式/内联两形态仍保留随机化探针与错误消息针式，但不再制造固定报错。
-        // ㉓ inline=true 的 fu 与 wai 是兄弟闭包；共享 poison 已移到二者共同的外围作用域。
+        // ⑳ 行信息探针仅作兼容性检查：宿主错误栈格式/行号不同或不可用时必须 fail-open，
+        // 不得把正常 Lua 运行环境判成篡改。采样位来自对象地址，不消费 math.random。
+        // 定义式/内联两形态仍保留随机化探针与错误消息针式，但不制造固定报错。
         let line_guard = |rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream, inline: bool| -> String {
             let tbl = rng.name();
             let probe_body = |rng: &mut GenRng| -> String {
@@ -346,10 +348,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let needle = format!("{s}({c})..(0X2)..{s}({c})", s = sc, c = c58);
             let pb = probe_body(rng);
             let (ts, tolerant) = trig_stmt(rng, &p_u);
-            // 失败时只置共享 poison；填充语句及探针仍按产物随机化，且脚本继续运行。
+            // 若宿主没有预期行号信息则 fail-open；填充语句及探针仍按产物随机化。
             let (f1, f2) = (rng.name(), rng.name());
-            let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}=type({u}); ",
-                u = p_u, h = p_hit, tol = tolerant, f1 = f1);
+            let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}={nt}({u}); ",
+                u = p_u, h = p_hit, tol = tolerant, f1 = f1, nt = native_type);
             // ㉓ 填充语型别串：壳内守卫走统一流惰性解密；fu 内守卫（inline）
             // 用 string.char 数字拼装自足表达，二者都零字面量。
             let (jf_stmt, jf_expr) = if inline {
@@ -388,9 +390,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let hn = 1 + rng.range(0, 2);
             for i in 0..hn { ht_body.push_str(&hopts[i]); }
             if rng.range(0, 2) == 0 {
-                ht_body.push_str(&format!("if not {u} then {psn}={psn} or not {u} else {ts} end; ", u = p_u, psn = psn_n, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {u}={u} else {ts} end; ", u = p_u, ts = ts));
             } else {
-                ht_body.push_str(&format!("if not {u} then {psn}={psn} or not {u} end; if {u} then {ts} end; ", u = p_u, psn = psn_n, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {u}={u} end; if {u} then {ts} end; ", u = p_u, ts = ts));
             }
             let mut ms = vec![
                 format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",
@@ -400,8 +402,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                     t = tbl, pc = m_pcall, s = p_self, pb = m_probe),
                 format!("{t}.{pb}=function({s}){body} end; ",
                     t = tbl, pb = m_probe, s = p_self, body = pb),
-                format!("{t}.{ck}=function({s},{e})local {sc}=string.char;return type({e})==\"string\"and {e}:find({ndl})end; ",
-                    t = tbl, ck = m_chk, s = p_self, e = p_err, sc = sc, ndl = needle),
+                format!("{t}.{ck}=function({s},{e})local {sc}=string.char;return {nt}({e})==\"string\"and {e}:find({ndl})end; ",
+                    t = tbl, ck = m_chk, s = p_self, e = p_err, sc = sc, ndl = needle, nt = native_type),
                 format!("{t}.{ht}=function({s},{h}){hb} end; ",
                     t = tbl, ht = m_hit, s = p_self, h = p_hit, hb = ht_body),
                 format!("{t}.{d1}=function({s},{q})return {q} end; ",
@@ -486,6 +488,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         // fu 与 wai 是兄弟闭包；共享投毒旗必须位于二者共同可见的词法作用域。
         // 保持与 return 壳同一物理行，不影响行完整性探针的目标行号。
         out.push_str(&format!("local {}=false; ", psn_n));
+        out.push_str(&format!("local {}=type; local {}=pairs; ", native_type, native_pairs));
         out.push_str(&header_block);
         // ㉓ 统一流前导（表+惰性解码器）：直接落在主 return({}) 壳内——header_block
         // 打开的 wai 函数体开头（用户指示，不另起壳）；壳内所有取用点（守卫/散点/
@@ -591,7 +594,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         out.push_str(&line_guard(&mut rng, &mut uni, false));
         out.push_str(&line_guard(&mut rng, &mut uni, false));
         out.push_str(" ");
-        out.push_str(&format!("return {}(main_chunk, {}, {{}}, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni, true), wai));
+        out.push_str(&format!("return {}(main_chunk, {}, {{}}, nil, nil, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni, true), wai));
         out.push_str(&format!(" }}):{}()", fu));
         out
 }

@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use rand::{Rng, rngs::StdRng};
 use crate::compiler::instructions::{OpArgMask, OpCode, OpMode};
+use super::CustomIsa::{VM_OPCODE_COUNT, VmOp};
 use super::Generator_chacha::{ChaChaLayout, SIGMA as CHACHA_SIGMA, stream_xor as chacha_xor_layout};
 use super::Generator_util::{GenRng, UniStream};
 
@@ -139,7 +140,7 @@ fn inst_junk(w: &mut Vec<u8>, mag_file: u32, rng: &mut StdRng) {
     for _ in 0..jn { w.push(rng.random_range(0..256u32) as u8); }
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; 90], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, inverse_opcode_map: &[u8; 90], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) {
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; VM_OPCODE_COUNT], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, inverse_opcode_map: &[u8; VM_OPCODE_COUNT], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) {
     // ② 元数据剥离：chunk 名/lines/locals/upvalue 名在 VM 端零消费者
     // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步；
     // name 槽改承载 4B 原型汇总校验，行号/局部名/upvalue 名不写入载荷。
@@ -216,29 +217,23 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     }).collect();
 
     const BITRK: u32 = 128;
-    // Per-Proto 独立平移。A 恒为寄存器；IABC 的 B/C 按操作码模式表平移。
+    // Per-Proto 独立平移。这里按自定义 ISA 的字段定义移动寄存器，绝不借用
+    // Lua 5.1 的 OpMode/B/C 操作数掩码。
     if gshift_p != 0 {
         for (op, a, b, c) in raw_insts.iter_mut() {
-            let real_op = OpCode::from_u8(inverse_opcode_map[*op as usize]);
-            // Eq/Lt/Le 的 A 域是「期望比较结果」旗标（0/1），不是寄存器——不平移
-            // （模板：if (rk_b == rk_c) ~= (inst_A ~= 0) then pc+=1）
-            let a_is_flag = matches!(real_op, Some(OpCode::Eq) | Some(OpCode::Lt) | Some(OpCode::Le));
-            if !a_is_flag {
+            let canonical = inverse_opcode_map[*op as usize];
+            let vop = VmOp::from_global(canonical)
+                .unwrap_or_else(|| panic!("非自定义 opcode 落入 VM 载荷：{canonical}"));
+            if vop.has_register_a() {
                 *a = (*a as u32 + gshift_p as u32) as u8;
             }
-            if let Some(real_op) = real_op {
-                if real_op.mode() == OpMode::IABC {
-                    match real_op.b_mode() {
-                        OpArgMask::R => *b += gshift_p as u32,
-                        OpArgMask::K => if *b < BITRK { *b += gshift_p as u32; },
-                        _ => {}
-                    }
-                    match real_op.c_mode() {
-                        OpArgMask::R => *c += gshift_p as u32,
-                        OpArgMask::K => if *c < BITRK { *c += gshift_p as u32; },
-                        _ => {}
-                    }
-                }
+            if vop.has_register_b() {
+                *b += gshift_p as u32;
+            } else if vop.has_rk_b() && *b < BITRK {
+                *b += gshift_p as u32;
+            }
+            if vop.has_register_c() {
+                *c += gshift_p as u32;
             }
         }
     }
@@ -279,7 +274,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     const SKIP_NEXT_OPS: &[u8] = &[23, 24, 25, 26, 27, 33];        // Eq Lt Le Test TestSet TForLoop
     const NO_FALLTHROUGH_OPS: &[u8] = &[29, 30, 85, 86, 87];       // TailCall Return Return0 Return1 Return2
     let mut jump_targets: HashSet<usize> = HashSet::new();
-    for (i, (op, _a, b, _c)) in raw_insts.iter().enumerate() {
+    for (i, (op, _a, b, c)) in raw_insts.iter().enumerate() {
         let real = inverse_opcode_map[*op as usize];
         if REL_JUMP_OPS.contains(&real) {
             let t = i as i64 + 1 + *b as i32 as i64;
@@ -290,13 +285,21 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         if SKIP_NEXT_OPS.contains(&real) {
             jump_targets.insert(i + 1);
         }
+        if let Some(vop) = VmOp::from_global(real) {
+            if let Some(offset) = vop.branch_offset(*b, *c) {
+                let target = i as i64 + 1 + offset as i64;
+                if target >= 0 {
+                    jump_targets.insert(target as usize);
+                }
+            }
+        }
     }
 
     // 反混淆判据③续（死指令）：真实指令流末尾（最后一条 RETURN 之后，永不执行）
     // 追加少量死指令，A 域取高于活跃寄存器区的随机值——解码后的 A 集合不再是
     // 「恰好铺满 0..maxstack」的干净区间。dead_count 先于循环抽签（inst_count 写头要用）。
-    let dead_min = decoy_count18.max(2);
-    let dead_max = std::cmp::min(24, 4 + raw_insts.len() / 18).max(dead_min);
+    let dead_min = (decoy_count18 * 2).max(2); // 每个常量诱饵由 PushRk/Drop 两条自定义指令引用并回收栈项
+    let dead_max = std::cmp::min(48, 4 + raw_insts.len() / 18).max(dead_min);
     let dead_count: usize = rng.random_range(dead_min..=dead_max);
     // 目标二③（第二部分）：本原型的记录段是 [pb18+1, pb18+inst_count+dead_count]，
     // 游标推到段尾再留一段随机死槽——下一个原型（先序遍历）的基址必落在其后，
@@ -473,15 +476,17 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 }
             }
         }
-        // ③ 槽位洗牌：K 域操作数按模式重映射（RK→perm，IABx-K→perm）；
-        // 寄存器/跳转域不动
-        let real_op18 = OpCode::from_u8(inverse_opcode_map[op as usize]);
-        let (mut be18, mut ce18) = match real_op18 {
-            Some(ro) if ro.mode() == OpMode::IABC => (
-                if ro.b_mode() == OpArgMask::K { remap_rk(b) } else { b },
-                if ro.c_mode() == OpArgMask::K { remap_rk(c) } else { c }),
-            Some(ro) if ro.mode() == OpMode::IABx && ro.b_mode() == OpArgMask::K => (remap_bx(b), c),
-            _ => (b, c),
+        // ③ 自定义 ISA 的常量槽重排：只有 PushConst/GetGlobal/SetGlobal 的 B
+        // 域是普通常量索引，PushRk 的 B 域是 RK；其他字段属于寄存器、偏移或立即数。
+        let canonical = inverse_opcode_map[op as usize];
+        let real_op18 = VmOp::from_global(canonical)
+            .unwrap_or_else(|| panic!("非自定义 opcode 落入 VM 载荷：{canonical}"));
+        let (mut be18, mut ce18) = if real_op18.has_constant_b() {
+            (remap_bx(b), c)
+        } else if real_op18.has_rk_b() {
+            (remap_rk(b), c)
+        } else {
+            (b, c)
         };
         // ---- 目标三②③：普通 JMP → 族六「计算式跳转」----
         // 随机挑一部分 JMP 改成：真实后继与诱饵后继都以密文落盘（密钥 = 运行期
@@ -490,7 +495,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         // 的入边（实际永不执行）。
         let mut a_log: u32 = a as u32;
         let mut cj_sel: Option<u32> = None;
-        if real_op18 == Some(OpCode::Jmp) && dead_count > 0 && rng.random_range(0..10) < 7 {
+        if real_op18 == VmOp::Jump && dead_count > 0 && rng.random_range(0..10) < 7 {
             let fam6 = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 3;
             let fv = fused_map.get(fam6).map(|v| v.as_slice()).unwrap_or(&[]);
             // 目标记录下标 = 本记录下标(pb18+pc18+1) + 1 + sBx（Jmp 取指后 pc 已自增）
@@ -512,7 +517,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
         let selected_op = match cj_sel {
             Some(v) => v,
-            None => if !mapped_vals.is_empty() { mapped_vals[rng.random_range(0..mapped_vals.len())] } else { op as u32 },
+            None => {
+                assert!(!mapped_vals.is_empty(), "自定义 opcode 缺少线上别名");
+                mapped_vals[rng.random_range(0..mapped_vals.len())]
+            }
         };
         let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
         let a_enc = a_log.wrapping_add(mag);
@@ -542,25 +550,31 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             }
         }
         if alias_mags.is_empty() { alias_mags.push(0x0123_4567); }
-        let add_opcode = inverse_opcode_map.iter().position(|&real| real == OpCode::Add as u8);
-        let add_alias = add_opcode
-            .and_then(|idx| mapped_opcodes.get(idx))
-            .and_then(|aliases| aliases.first())
-            .copied()
-            .unwrap_or(OpCode::Add as u32);
-        let add_mag = op_magic.get(&add_alias).copied().unwrap_or(add_alias);
+        let push_rk_wire = inverse_opcode_map
+            .iter()
+            .position(|&canonical| canonical as usize == VmOp::PushRk.global_id())
+            .expect("PushRk 缺少 opcode 映射");
+        let drop_wire = inverse_opcode_map
+            .iter()
+            .position(|&canonical| canonical as usize == VmOp::Drop.global_id())
+            .expect("Drop 缺少 opcode 映射");
+        let push_rk_alias = mapped_opcodes[push_rk_wire][0];
+        let drop_alias = mapped_opcodes[drop_wire][0];
         let lo = (max_stack as u32 + gshift_p as u32 + 1).min(120);
         for dead_idx in 0..dead_count {
             let a_dead = rng.random_range(lo..128u32);
-            let (mag, b_dead, c_dead) = if let Some(&decoy_slot) = decoy_slots.get(dead_idx) {
-                // ADD 的 C 域指向一个混排数字诱饵；指令只存在于不可达尾段。
-                // B 保持寄存器域，C 使用 BITRK+槽号，因此读写两侧折叠扫描会
-                // 将该引用与真实 RK 引用完全同样地纳入 fold/R 链。
-                (add_mag, gshift_p as u32, BITRK + decoy_slot)
+            let (alias, b_dead, c_dead) = if dead_idx < decoy_count18 * 2 {
+                if dead_idx % 2 == 0 {
+                    // PushRk 的常量直接指向混排后的诱饵槽；下一条 Drop 配对回收。
+                    (push_rk_alias, BITRK + decoy_slots[dead_idx / 2], 0)
+                } else {
+                    (drop_alias, rng.random_range(0..128u32), 0)
+                }
             } else {
                 (alias_mags[rng.random_range(0..alias_mags.len())],
                  rng.random_range(0..128u32), rng.random_range(0..128u32))
             };
+            let mag = op_magic.get(&alias).copied().unwrap_or(alias);
             let a_enc = a_dead.wrapping_add(mag);
             let (fb0, fc0) = if mag % 2 == 1 { (c_dead, b_dead) } else { (b_dead, c_dead) };
             let (eo18, ca18, cb18, cc18) = ch_split(chain18);

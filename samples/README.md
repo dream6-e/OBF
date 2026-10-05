@@ -11,8 +11,11 @@
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
 | `string_encryption.obfuscated.MB.lua` | 同一加密回归夹具的 MB 模式产物，109,499 B |
+| `lua51-semantics.lua` / `lua51-semantics.expected.txt` | Lua 5.1 差分回归源与预期输出，覆盖多返回值、循环、元方法、upvalue、环境及禁用部分全局函数 |
+| `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，273,906 B；Lua 5.1 输出与预期一致 |
+| `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，254,829 B；Lua 5.1 输出与预期一致 |
 
-`print` 普通/MB 固定样本通过 `luac5.1 -p`、`luau-compile --binary`，并在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（19 行）；目标七再次验证了当前样本。嵌套 proto 的普通与 MB 样本曾通过相同两种语法检查及双运行时输出比对（`12 6 15 12 19`、`47`）；序列化格式回归另独立生成 40 份随机产物（普通/MB 各 20），每份在 Lua 5.1 和 Luau 各运行一次并与源码 stdout 比对，80 次检查通过。历史上 print/nested 固定样本也曾在两种运行时重复 100 次；该次数不代表目标七之后的随机加密产物。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。
+`print` 普通/MB 固定样本通过 `luac5.1 -p`、`luau-compile --binary`，并在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（19 行）；目标七再次验证了当前样本。嵌套 proto 的普通与 MB 样本曾通过相同两种语法检查及双运行时输出比对（`12 6 15 12 19`、`47`）；序列化格式回归另独立生成 40 份随机产物（普通/MB 各 20），每份在 Lua 5.1 和 Luau 各运行一次并与源码 stdout 比对，80 次检查通过。历史上 print/nested 固定样本也曾在两种运行时重复 100 次；该次数不代表目标七之后的随机加密产物。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。Lua 5.1 差分夹具目前仅验证表中列出的语义子集，不等同完整 Lua 5.1 语言级兼容验收。
 
 ### 目标四：常量加密改进（2026-10-03）
 
@@ -134,3 +137,10 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 - 验证：全量 `cargo test` **101/101**；Release 构建通过。`string_encryption` 普通与 MB 样本均通过 Lua 5.1 / Luau 语法检查，且两运行时的输出都与源输出逐字节一致（4,565 B）；另以 Lua 5.1 对普通和 MB 各做 3 次独立随机生成回归。更新后的 `print` 普通/MB 样本在 Lua 5.1、Luau 下均与源输出一致；伪装样本通过两种语法检查且不含 `U4f2a` / `Instance` / `WaitForChild` 明文。新增的旧 fallback stub 端到端 Lua 5.1 测试通过。
 - 当前固定样本：普通/MB `print` **210,665 / 100,596 B**，普通 `string_encryption` **223,062 B**、MB **109,499 B**，伪装 **273,241 B**。
 - 这些自创变换用于提高静态分析成本，不是经密码学审计的标准密码算法；不对其作标准密码学安全性声明。
+
+### 目标八：自定义 VM ISA 与 Lua 5.1 差分回归（进行中，2026-10-05）
+
+- 前端 Proto 在载入运行时前经 `CustomIsa` 降级到独立指令集；表达式操作、分支、调用参数/结果收集和尾调用使用自定义指令协议，不把 Lua 5.1 标准 opcode 直接作为 VM 分派指令。
+- 新增 `samples/lua51-semantics.lua` 与预期输出，当前覆盖多返回值、循环、元方法、闭包/upvalue、`getfenv`/`setfenv`、环境隔离，以及运行时将 `type`、`pairs`、`tonumber`、`error` 设为 `nil` 的情形。收录的普通模式产物已在 Lua 5.1 下与预期输出一致。
+- 当前验证：`cargo test --all-targets` 110/110；差分样本的 `process1.lua` 与最终普通模式产物均输出 `LUA51_SEMANTICS_OK\t4\t2\t4\t15\t10\t6\t34\t6\t6`。父帧环境独立回归通过。
+- **范围声明：** 这只是进行中的代表性回归，不是完整 Lua 5.1 语言级兼容验收；全面语义审计与差分覆盖仍未完成。

@@ -9,6 +9,7 @@ pub mod Generator_rewrite;
 pub mod Generator_kdf;
 pub mod Generator_native;
 pub mod Generator_chacha;
+pub mod CustomIsa;
 pub mod Lua_core;
 pub mod Serializer;
 pub mod AntiTamper;

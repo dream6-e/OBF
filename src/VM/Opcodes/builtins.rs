@@ -1,6 +1,7 @@
 use super::{OpcodeBuilder, OpcodeConfig, OpcodesRng};
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use crate::VM::VM_Backend::CustomIsa::VM_OPCODE_COUNT;
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "print", "type", "tostring", "tonumber", "pairs", "ipairs", "next", "select",
@@ -12,7 +13,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "UDim2", "Vector2",
 ];
 
-pub const BUILTIN_OP_BASE: usize = 90;
+pub const BUILTIN_OP_BASE: usize = VM_OPCODE_COUNT;
 pub const BUILTIN_OP_COUNT: usize = BUILTIN_NAMES.len();
 pub const TOTAL_OPCODES: usize = BUILTIN_OP_BASE + BUILTIN_OP_COUNT;
 

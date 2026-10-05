@@ -51,6 +51,8 @@ pub(super) struct ChainIn {
     pub var_p: String,
     pub var_raw_p: String,
     pub var_vc: String,
+    pub native_type: String,
+    pub native_pairs: String,
     pub np21: String,
     pub md21: String,
     pub th21: String,
@@ -162,6 +164,8 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         var_p,
         var_raw_p,
         var_vc,
+        native_type,
+        native_pairs,
         np21,
         md21,
         th21,
@@ -663,7 +667,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
             var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
             sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str(), var_whiten.as_str(), var_whiten_pos.as_str(),
-            psn_n.as_str());
+            native_type.as_str(), psn_n.as_str());
         let block_dec_header = format!("{fun_stmt}{mode_stmt}{k_stmt}") + &block_dec_header;
         // ㉛ 白化参数（逐构建随机）的产物侧拼写——read_dec 内每字节现算掩码用
         let rng_whiten_mul_s = rng.obfuscate_num(whiten_mul as i64, 1, &keys);
@@ -763,6 +767,8 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             var_p,
             var_raw_p,
             var_vc,
+            native_type,
+            native_pairs,
             np21,
             md21,
             th21,

@@ -1,12 +1,13 @@
 use rand::Rng;
 use rand::seq::SliceRandom;
+use super::CustomIsa::VM_OPCODE_COUNT;
 
 pub struct VmContext {
     pub seed: u64,
     pub lcg_a: u64,
     pub lcg_c: u64,
     pub lcg_m: u64,
-    pub opcode_map: [u8; 90],
+    pub opcode_map: [u8; VM_OPCODE_COUNT],
     pub state_sequence: Vec<usize>,
     pub xor_keys: [u8; 4],
 }
@@ -20,8 +21,8 @@ impl VmContext {
         let lcg_c = rng.random_range(10000..110000);
         let lcg_m = rng.random_range(100000000..1100000000);
 
-        let mut opcode_map = [0u8; 90];
-        for i in 0..90 {
+        let mut opcode_map = [0u8; VM_OPCODE_COUNT];
+        for i in 0..VM_OPCODE_COUNT {
             opcode_map[i] = i as u8;
         }
 

@@ -2,11 +2,11 @@ use crate::VM::VM_Backend::Context::VmContext;
 use crate::VM::VM_Backend::Lua_core;
 use crate::VM::Opcodes::{self, OpcodeConfig};
 use crate::VM::packer::Packer;
-use crate::compiler::instructions::{OpCode, OpMode, OpArgMask};
 use std::collections::HashSet;
 use rand::{rng, Rng, SeedableRng};
 use rand::rngs::StdRng;
 use super::AntiTamper;
+use super::CustomIsa::{CUSTOM_OPCODE_BASE, VM_OPCODE_COUNT};
 use super::Generator_chain;
 pub(crate) static DBG_MASK: bool = true;
 pub(crate) static DBG_PROXY: bool = true;
@@ -139,18 +139,26 @@ impl Generator {
         let mut used_ops = HashSet::new();
         { let mut scan_reader = PayloadReader { data: payload, pos: 0 }; scan_used_opcodes(&mut scan_reader, &mut used_ops); }
 
-        let mut inverse_opcode_map = [0u8; 90];
-        for i in 0..90 { inverse_opcode_map[self.ctx.opcode_map[i] as usize] = i as u8; }
+        let mut inverse_opcode_map = [0u8; VM_OPCODE_COUNT];
+        for i in 0..VM_OPCODE_COUNT { inverse_opcode_map[self.ctx.opcode_map[i] as usize] = i as u8; }
 
         let mut mapped_opcodes: [Vec<u32>; Opcodes::builtins::TOTAL_OPCODES] = std::array::from_fn(|_| Vec::new());
         let mut fused_opcodes: [Vec<u32>; Opcodes::builtins::FUSED_OP_COUNT] = std::array::from_fn(|_| Vec::new());
-        let mut transpile_map: [Vec<u32>; 90] = std::array::from_fn(|_| Vec::new());
+        let mut transpile_map: [Vec<u32>; VM_OPCODE_COUNT] = std::array::from_fn(|_| Vec::new());
         {
             let mut map_rng = StdRng::seed_from_u64(self.ctx.seed);
             let mut used = std::collections::HashSet::new();
-            for i in 0..90 {
+            for i in 0..VM_OPCODE_COUNT {
                 let shuffled_val = self.ctx.opcode_map[i];
-                let count = if used_ops.contains(&shuffled_val) { map_rng.random_range(3..=6) } else { 1 };
+                // 不再发射旧 Lua opcode handler；自定义指令每种至少保留一个别名，
+                // 以覆盖不可达尾段中的 PushRk/Drop/Noop 诱饵处理器。
+                let count = if used_ops.contains(&shuffled_val) {
+                    map_rng.random_range(3..=6)
+                } else if i >= CUSTOM_OPCODE_BASE {
+                    1
+                } else {
+                    0
+                };
                 for _ in 0..count {
                     loop {
                         let val = map_rng.random_range(80000..99999);
@@ -158,7 +166,7 @@ impl Generator {
                     }
                 }
             }
-            for i in 90..Opcodes::builtins::TOTAL_OPCODES {
+            for i in VM_OPCODE_COUNT..Opcodes::builtins::TOTAL_OPCODES {
                 let count = map_rng.random_range(3..=6);
                 for _ in 0..count {
                     loop {
@@ -380,6 +388,13 @@ impl Generator {
         let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng, &mut uni);
         let var_vc = rng.name(); let var_builtin_reg = rng.name();
         let var_builtin_view = rng.name(); let var_builtin_mask = rng.name(); let var_builtin_i = rng.name(); let var_builtin_xor = rng.name();
+        let closure_env_registry = rng.name();
+        let native_tonumber = rng.name();
+        let native_type = rng.name();
+        let native_pairs = rng.name();
+        let native_error = rng.name();
+        let native_getfenv = rng.name();
+        let native_setfenv = rng.name();
         let block_packer_vars = format!("local {}, {}; ", var_vc, var_builtin_reg);
 
         let fn_execute = "execute";
@@ -389,6 +404,7 @@ impl Generator {
         let mut at = AntiTamper::generate_split(true, &key_seed_var, &psn_n);
         let var_pc = rng.name();
         let var_stk = rng.name();
+        let var_vstack = rng.name();
         let var_top = rng.name();
         let var_inst = rng.name();
         let var_varargs = rng.name();
@@ -403,6 +419,8 @@ impl Generator {
         let var_protos = rng.name();
         let var_upvals = rng.name();
         let var_env = rng.name();
+        let var_current_fn = rng.name();
+        let var_parent_frame = rng.name();
         let var_vm = rng.name();      // VM 对象（方法 + 状态槽位都挂在它上面）
         let var_r1 = rng.name();
         let var_r2 = rng.name();
@@ -420,7 +438,7 @@ impl Generator {
         let var_proto = rng.name();   // 状态对象的元表（__index → 分发表链）
         let ret_shards = [rng.range(0, method_shard_count), rng.range(0, method_shard_count), rng.range(0, method_shard_count)];
         let mut block_execute_def = String::new();
-        let (sk, sk_setup) = rng.slot_key_block(25);
+        let (sk, sk_setup) = rng.slot_key_block(28);
         let k_pc = sk[0].clone(); let k_stk = sk[1].clone(); let k_top = sk[2].clone();
         let k_ops = sk[3].clone(); let k_aa = sk[4].clone(); let k_bb = sk[5].clone(); let k_cc = sk[6].clone();
         // ⑱.4 掩码槽键：execute 入口派生后写槽，冷块（CLOSURE 等）中程读自取——
@@ -428,6 +446,7 @@ impl Generator {
         let k_mk1 = sk[20].clone(); let k_mk2 = sk[21].clone(); let k_mk3 = sk[22].clone();
         let k_dc = sk[23].clone(); // ㉚ DC 缓存表槽位（冷块中程读自取）
         let k_bmask = sk[24].clone(); // 每个原型独立的内建表 XOR 掩码
+        let k_vstack = sk[25].clone(); // 每个 VM 帧独立的装箱表达式栈
         // 中危刀1 密钥分驻：kp/pb/cnt 不入 chunk 表也不入 VM 槽（嵌套闭包交错会串），
         // 存弱键注册表 KREG（键=chunk 表）——与被掩码数组异表分驻，重解原型自动回收
         let k_consts = sk[7].clone(); let k_protos = sk[8].clone();
@@ -436,11 +455,51 @@ impl Generator {
         let k_vc = sk[13].clone(); let k_breg = sk[14].clone();
         let k_state = sk[15].clone(); let k_mode = sk[16].clone();
         let k_retv = sk[17].clone(); let k_retf = sk[18].clone(); let k_rett = sk[19].clone();
+        let k_parent = sk[26].clone(); // 虚拟调用栈的父帧
+        let k_current_fn = sk[27].clone(); // 当前 Lua 闭包对象（setfenv/getfenv）
         
         // 目标三②：计算式跳转的密钥源——n_kon 是 execute 入口从 KREG 取出的本原型
         // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
         let (n_kon, n_ka) = (rng.name(), rng.name());
-        let cfg = OpcodeConfig { pc: var_pc.clone(), stk: var_stk.clone(), consts: var_consts.clone(), top: var_top.clone(), insts: var_insts.clone(), inst: var_inst.clone(), upvals: var_upvals.clone(), env: var_env.clone(), env_ref: format!("self[{}]", k_env), protos: var_protos.clone(), handlers: String::new(), varargs: var_varargs.clone(), varargs_len: var_varargs_len.clone(), virtual_closures: var_vc.clone(), builtin_reg: format!("self[{}]", k_breg), builtin_mask: format!("self[{}]", k_bmask), builtin_bxor: fn_bxor2.clone(), ld_key: n_kon.clone(), vararg_count: pf_vn.clone(), proto_nups: pf_nups.clone(), open_ups: pf_open_ups.clone(), ret0: format!("{}:{}", var_vm, fn_ret0), ret1: format!("{}:{}", var_vm, fn_ret1), ret2: format!("{}:{}", var_vm, fn_ret2) };
+        let cfg = OpcodeConfig {
+            pc: var_pc.clone(),
+            stk: var_stk.clone(),
+            vstack: var_vstack.clone(),
+            consts: var_consts.clone(),
+            top: var_top.clone(),
+            insts: var_insts.clone(),
+            inst: var_inst.clone(),
+            upvals: var_upvals.clone(),
+            env: var_env.clone(),
+            env_ref: format!("self[{}]", k_env),
+            protos: var_protos.clone(),
+            handlers: String::new(),
+            varargs: var_varargs.clone(),
+            varargs_len: var_varargs_len.clone(),
+            virtual_closures: var_vc.clone(),
+            execute: fn_execute.to_string(),
+            closure_env_registry: closure_env_registry.clone(),
+            frame: "self".to_string(),
+            frame_env_key: k_env.clone(),
+            frame_parent_key: k_parent.clone(),
+            frame_function_key: k_current_fn.clone(),
+            native_tonumber: native_tonumber.clone(),
+            native_type: native_type.clone(),
+            native_pairs: native_pairs.clone(),
+            native_error: native_error.clone(),
+            native_getfenv: native_getfenv.clone(),
+            native_setfenv: native_setfenv.clone(),
+            builtin_reg: format!("self[{}]", k_breg),
+            builtin_mask: format!("self[{}]", k_bmask),
+            builtin_bxor: fn_bxor2.clone(),
+            ld_key: n_kon.clone(),
+            vararg_count: pf_vn.clone(),
+            proto_nups: pf_nups.clone(),
+            open_ups: pf_open_ups.clone(),
+            ret0: format!("{}:{}", var_vm, fn_ret0),
+            ret1: format!("{}:{}", var_vm, fn_ret1),
+            ret2: format!("{}:{}", var_vm, fn_ret2),
+        };
         let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
 
         
@@ -592,6 +651,7 @@ impl Generator {
             (var_b_arr.clone(), k_bb.clone(), false),
             (var_c_arr.clone(), k_cc.clone(), false),
             (var_stk.clone(), k_stk.clone(), false),
+            (var_vstack.clone(), k_vstack.clone(), false),
             (var_consts.clone(), k_consts.clone(), false),
             (var_protos.clone(), k_protos.clone(), false),
             (var_upvals.clone(), k_upv.clone(), false),
@@ -807,6 +867,14 @@ impl Generator {
         // 状态对象每个调用一个，方法通过 __index 原型共享，调用仍是 `V
         let mut block_methods = String::new();
         block_methods.push_str(&format!("local {}; ", fn_execute));
+        block_methods.push_str(&format!(
+            "local {to_num}=tonumber;local {err_fn}=error;local {getenv}=getfenv;local {setenv}=setfenv;local {closure_env}=setmetatable({{}},{{__mode='k'}}); ",
+            to_num = native_tonumber,
+            err_fn = native_error,
+            getenv = native_getfenv,
+            setenv = native_setfenv,
+            closure_env = closure_env_registry,
+        ));
         // ㉓ 统一流取用：惰性解密语句+纯数字密文，替换原池调用
         let (hash_stmt, hash_expr) = {
             let id = uni.register("#");
@@ -831,15 +899,27 @@ impl Generator {
         }
         block_methods.push_str(&format!("{}[{}]={};", var_proto, idx_expr, method_shards[method_order[0]]));
 
-        block_execute_def.push_str(&format!("{} = function(chunk, env, upvals, ...) ", fn_execute));
+        block_execute_def.push_str(&format!(
+            "{} = function(chunk, env, upvals, {}, {}, ...) ",
+            fn_execute, var_current_fn, var_parent_frame
+        ));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
         block_execute_def.push_str(&format!("local {} = setmetatable({{}}, {}); ", var_vm, var_proto));
         let builtin_count = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len();
         block_execute_def.push_str(&format!("local {bxv}={bx};local {bm}=chunk.{cbm};local {bv}=chunk.{cbv};if not {bv} then {bm}={bxv}({bxv}(chunk.{lld},chunk.{nups}),chunk.{ms})%0X40;{bv}={{}};for {bi}=0,{last} do {bv}[{bxv}({bi},{bm})+1]={src}[{bi}+1] end;chunk.{cbm}={bm};chunk.{cbv}={bv};end;", bxv=var_builtin_xor, bm=var_builtin_mask, bv=var_builtin_view, cbm=pf_builtin_mask, cbv=pf_builtin_view, bx=fn_bxor2, lld=pf_lld, nups=pf_nups, ms=pf_maxstack, bi=var_builtin_i, last=builtin_count-1, src=var_builtin_reg));
-        block_execute_def.push_str(&format!("{}[{}]={}.{}+{};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, "chunk", pf_lld, obf1, var_vm, k_stk, var_vm, k_top, obf0));
+        block_execute_def.push_str(&format!("{}[{}]={}.{}+{};{}[{}]={{}};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, "chunk", pf_lld, obf1, var_vm, k_stk, var_vm, k_vstack, var_vm, k_top, obf0));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_ops, pf_opcodes, var_vm, k_aa, pf_a_arr, var_vm, k_bb, pf_b_arr, var_vm, k_cc, pf_c_arr));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_consts, pf_consts, var_vm, k_protos, pf_protos));
-        block_execute_def.push_str(&format!("{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};{}[{}]={};", var_vm, k_upv, var_vm, k_env, var_vm, k_vc, var_vc, var_vm, k_breg, var_builtin_view, var_vm, k_bmask, var_builtin_mask));
+        block_execute_def.push_str(&format!(
+            "{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};{}[{}]={};{}[{}]={};{}[{}]={};",
+            var_vm, k_upv,
+            var_vm, k_env,
+            var_vm, k_parent, var_parent_frame,
+            var_vm, k_current_fn, var_current_fn,
+            var_vm, k_vc, var_vc,
+            var_vm, k_breg, var_builtin_view,
+            var_vm, k_bmask, var_builtin_mask
+        ));
         block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1+chunk.{}] = {}[{}](_,...) end; ", pf_numparams, var_vm, k_stk, pf_maxstack, var_s, hex_select_idx));
         block_execute_def.push_str(&format!("local {} = {} - chunk.{}; local {} = {{{}[{}](chunk.{} + 1, ...)}}; ", var_varargs_len, var_L, pf_numparams, var_varargs, var_s, hex_select_idx, pf_numparams));
         block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};", var_vm, k_va, var_varargs, var_vm, k_valen, var_varargs_len));
@@ -1076,7 +1156,7 @@ impl Generator {
             let md_walk = {
                 let (md2, th2) = (md21.clone(), th21.clone());
                 let off = rng.range(0, 100);
-                let unit = |iv: &str| format!("if type({md}[{iv}])=='table' then {md}[{iv}]={th}[{iv}] end; ", md = md2, th = th2, iv = iv);
+                let unit = |iv: &str| format!("if {nt}({md}[{iv}])=='table' then {md}[{iv}]={th}[{iv}] end; ", nt = native_type, md = md2, th = th2, iv = iv);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &format!("#{}", md21), 2, 3, &unit)
             };
             let rot_walk = {
@@ -1089,7 +1169,7 @@ impl Generator {
             block_execute_def.push_str(&format!(
                 "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; {mdw} \
                  {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
-                   local {kmt}=getmetatable({kreg}); local {kold}={kreg}; {kreg}=setmetatable({{}},{{}}); setmetatable({kreg},{kmt}); for {kc1},{kv1} in pairs({kold}) do {kreg}[{kc1}]={kv1} end; \
+                   local {kmt}=getmetatable({kreg}); local {kold}={kreg}; {kreg}=setmetatable({{}},{{}}); setmetatable({kreg},{kmt}); for {kc1},{kv1} in {pairs_fn}({kold}) do {kreg}[{kc1}]={kv1} end; \
                    local {lv}={c}.{lld}; {w2} local {nk1}={bx}({kon},{pc}%{m32})%{m32}; {nn} \
                    {dline} \
                    {rotw} \
@@ -1103,7 +1183,7 @@ impl Generator {
                 w2 = w2_stmt, m32 = w2_dst,
                 nk1 = nk1_n, lv = lv_n,
                 nn = nn_seg, dline = dline_seg, rk_tail = rk_tail_seg,
-                kreg = kreg_n, c = "chunk", rotw = rot_walk,
+                kreg = kreg_n, c = "chunk", rotw = rot_walk, pairs_fn = native_pairs,
                 kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
@@ -1132,7 +1212,7 @@ impl Generator {
             whiten_add,
             fn_a3, fn_bxor, fn_c, fn_decode_chunk, fn_s_byte, fn_s_sub, pf_a_arr, pf_b_arr, pf_c_arr, pf_is_vararg,
             pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, poison_delay_key, var_a2,
-            var_builtin_reg, var_p, var_raw_p, var_vc, np21,
+            var_builtin_reg, var_p, var_raw_p, var_vc, native_type, native_pairs, np21,
             md21, th21, tw21, rk21, kreg_n,
             fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, const_path_key, sk_setup, t, x, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
             weld,

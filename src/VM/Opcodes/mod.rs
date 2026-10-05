@@ -1,6 +1,8 @@
 use rand::{rng, Rng};
+use crate::VM::VM_Backend::CustomIsa::{CUSTOM_OPCODE_BASE, VM_OPCODE_COUNT};
 
 pub mod arithmetic;
+pub mod custom;
 pub mod builtins;
 pub mod control_flow;
 pub mod environment;
@@ -111,6 +113,8 @@ pub fn split_top_stmts(lua: &str) -> Vec<String> {
 pub struct OpcodeConfig {
     pub pc: String,
     pub stk: String,
+    /// 自定义 ISA 的装箱表达式栈；与寄存器窗口分离，nil 也能安全入栈。
+    pub vstack: String,
     pub consts: String,
     pub top: String,
     pub insts: String,
@@ -127,6 +131,23 @@ pub struct OpcodeConfig {
     pub proto_nups: String,
     pub open_ups: String,
     pub virtual_closures: String,
+    /// 当前 VM 的自定义字节码解释入口（闭包执行会递归调用）。
+    pub execute: String,
+    /// 闭包函数对象到原型/上值/环境元数据的弱键注册表。
+    pub closure_env_registry: String,
+    /// 当前执行帧及其调用链字段的运行期槽键。
+    pub frame: String,
+    pub frame_env_key: String,
+    pub frame_parent_key: String,
+    pub frame_function_key: String,
+    /// 在混淆脚本初始化阶段捕获的 Lua 5.1 原生辅助函数，避免源代码重写全局名后
+    /// 改变 VM 自身的数值 for、getfenv/setfenv 和类型检查语义。
+    pub native_tonumber: String,
+    pub native_type: String,
+    pub native_pairs: String,
+    pub native_error: String,
+    pub native_getfenv: String,
+    pub native_setfenv: String,
     pub builtin_reg: String,
     /// 运行期的逐原型内建槽掩码表达式（由 Generator 在方法体生成时绑定）。
     pub builtin_mask: String,
@@ -297,10 +318,14 @@ impl<'a> OpcodeBuilder<'a> {
     }
 
     pub fn build(&mut self, lua_template: &str) -> String {
+        if self.opcodes.is_empty() {
+            return String::new();
+        }
         let mut code = format!("{}{}", self.pre_statements, lua_template);
         
         code = code.replace("{PC}", &self.cfg.pc);
         code = code.replace("{STK}", &self.cfg.stk);
+        code = code.replace("{VSTACK}", &self.cfg.vstack);
         code = code.replace("{CONSTS}", &self.cfg.consts);
         code = code.replace("{TOP}", &self.cfg.top);
         code = code.replace("{INSTS}", &self.cfg.insts);
@@ -317,6 +342,17 @@ impl<'a> OpcodeBuilder<'a> {
         code = code.replace("{VARARG_COUNT}", &self.cfg.vararg_count);
         code = code.replace("{PROTO_NUPS}", &self.cfg.proto_nups);
         code = code.replace("{OPEN_UPS}", &self.cfg.open_ups);
+        code = code.replace("{CLOSURE_ENV_REGISTRY}", &self.cfg.closure_env_registry);
+        code = code.replace("{FRAME}", &self.cfg.frame);
+        code = code.replace("{FRAME_ENV_KEY}", &self.cfg.frame_env_key);
+        code = code.replace("{FRAME_PARENT_KEY}", &self.cfg.frame_parent_key);
+        code = code.replace("{FRAME_FUNCTION_KEY}", &self.cfg.frame_function_key);
+        code = code.replace("{NATIVE_TONUMBER}", &self.cfg.native_tonumber);
+        code = code.replace("{NATIVE_TYPE}", &self.cfg.native_type);
+        code = code.replace("{NATIVE_PAIRS}", &self.cfg.native_pairs);
+        code = code.replace("{NATIVE_ERROR}", &self.cfg.native_error);
+        code = code.replace("{NATIVE_GETFENV}", &self.cfg.native_getfenv);
+        code = code.replace("{NATIVE_SETFENV}", &self.cfg.native_setfenv);
         
         let conditions: Vec<String> = self.opcodes.iter().map(|op| format!("op == {}", op)).collect();
         let condition = conditions.join(" or ");
@@ -330,7 +366,7 @@ pub fn generate_opcode_map() -> [Vec<u32>; builtins::TOTAL_OPCODES] {
     let mut map: [Vec<u32>; builtins::TOTAL_OPCODES] = std::array::from_fn(|_| Vec::new());
     let mut used = std::collections::HashSet::new();
 
-    for i in 0..builtins::TOTAL_OPCODES {
+    for i in CUSTOM_OPCODE_BASE..builtins::TOTAL_OPCODES {
         let count = rng.random_range(3..=6);
         for _ in 0..count {
             loop {
@@ -342,6 +378,8 @@ pub fn generate_opcode_map() -> [Vec<u32>; builtins::TOTAL_OPCODES] {
             }
         }
     }
+    debug_assert!(map[..CUSTOM_OPCODE_BASE].iter().all(Vec::is_empty));
+    debug_assert!(map[VM_OPCODE_COUNT..].iter().all(|aliases| !aliases.is_empty()));
     map
 }
 
@@ -354,6 +392,7 @@ pub fn generate_handlers(opcode_map: &[Vec<u32>; builtins::TOTAL_OPCODES], fused
     out.push_str(&arithmetic::generate(opcode_map, cfg, &mut rng));
     out.push_str(&control_flow::generate(opcode_map, cfg, &mut rng));
     out.push_str(&environment::generate(opcode_map, cfg, &mut rng));
+    out.push_str(&custom::generate(opcode_map, cfg, &mut rng));
     out.push_str(&builtins::generate(opcode_map, cfg, &mut rng, &perm));
     out.push_str(&builtins::generate_fused(fused_map, cfg, &mut rng, &perm, fused_used));
     out
