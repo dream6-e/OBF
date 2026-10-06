@@ -255,6 +255,25 @@ fn is_lua_keyword(name: &str) -> bool {
     )
 }
 
+/// 值为 0/1 的十六进制字面量写成最短形式：`0X0` / `0X00` / `0X0001` → `0` / `1`。
+/// 只处理纯十六进制整数，其它写法（十进制、浮点、带指数）原样保留。
+/// 与 `RadixSieve` 的配合：该阶段不再把 0/1 转回十六进制，否则这里白做。
+fn normalize_short_hex(text: &str) -> String {
+    let bytes = text.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'0' || !(bytes[1] == b'X' || bytes[1] == b'x') {
+        return text.to_string();
+    }
+    let digits = &text[2..];
+    if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return text.to_string();
+    }
+    match u64::from_str_radix(digits, 16) {
+        Ok(0) => "0".to_string(),
+        Ok(1) => "1".to_string(),
+        _ => text.to_string(),
+    }
+}
+
 pub struct CodegenContext {
     pub mapping: HashMap<VarId, String>,
     pub shuffled_chars: Vec<char>,
@@ -567,7 +586,7 @@ impl Expr {
                 tokens.push(Token { text: text.to_string(), token_type: TokenType::Keyword });
             }
             Expr::Number(n) => {
-                tokens.push(Token { text: n.clone(), token_type: TokenType::Number });
+                tokens.push(Token { text: normalize_short_hex(n), token_type: TokenType::Number });
             }
             Expr::String(s) => {
                 tokens.push(Token { text: s.clone(), token_type: TokenType::StringLiteral });

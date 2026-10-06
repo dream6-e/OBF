@@ -4,6 +4,7 @@ pub mod ast;
 pub mod parser;
 pub mod scope;
 pub mod codegen;
+pub mod hoist;
 pub mod renamer;
 pub mod packer;
 
@@ -36,7 +37,11 @@ impl Compressor {
         
         let mut pars = parser::Parser::new(tokens);
         let mut root_block = pars.parse_block()?;
-        
+
+        // README 规则：某个数字在一个作用域使用次数大于两次就 local 为一个变量。
+        // 提升发生在作用域解析之前，占位名会被后面的 renamer 统一改名。
+        hoist::hoist_constants(&mut root_block);
+
         let mut resolver = scope::ScopeResolver::new();
         root_block.resolve(&mut resolver);
         

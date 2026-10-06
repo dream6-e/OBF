@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，215,335 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），101,719 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，326,895 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，215,743 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），101,334 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，321,355 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -15,7 +15,7 @@
 | `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，273,906 B；Lua 5.1 输出与预期一致 |
 | `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，254,829 B；Lua 5.1 输出与预期一致 |
 
-`print` 普通/MB 固定样本通过 `luac5.1 -p`、`luau-compile --binary`，并在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（19 行）；目标七再次验证了当前样本。嵌套 proto 的普通与 MB 样本曾通过相同两种语法检查及双运行时输出比对（`12 6 15 12 19`、`47`）；序列化格式回归另独立生成 40 份随机产物（普通/MB 各 20），每份在 Lua 5.1 和 Luau 各运行一次并与源码 stdout 比对，80 次检查通过。历史上 print/nested 固定样本也曾在两种运行时重复 100 次；该次数不代表目标七之后的随机加密产物。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。Lua 5.1 差分夹具目前仅验证表中列出的语义子集，不等同完整 Lua 5.1 语言级兼容验收。
+`print` 普通/MB 固定样本通过 `luac5.1 -p`、`luau-compile --binary`，并在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（19 行）；目标七再次验证了当前样本；2026-10-06 的体积优化 A2/A5 之后重新生成了这三件固定样本，仍全部通过。嵌套 proto 的普通与 MB 样本曾通过相同两种语法检查及双运行时输出比对（`12 6 15 12 19`、`47`）；序列化格式回归另独立生成 40 份随机产物（普通/MB 各 20），每份在 Lua 5.1 和 Luau 各运行一次并与源码 stdout 比对，80 次检查通过。历史上 print/nested 固定样本也曾在两种运行时重复 100 次；该次数不代表目标七之后的随机加密产物。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。Lua 5.1 差分夹具目前仅验证表中列出的语义子集，不等同完整 Lua 5.1 语言级兼容验收。
 
 ### 目标四：常量加密改进（2026-10-03）
 
@@ -151,3 +151,12 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 - 每次生成按本次 base86 字母表与密文内容随机选 marker、符号映射和定长 token；运行时先按码本还原，再按替换后的 sandbox 长度切段。marker 取自编码诱饵位且 token 不含 `]`，避免 Lua 长字符串闭合歧义。
 - 验证：`cargo test --locked --offline --all-targets` **112/112**；Release 构建通过。普通/MB `print` 样本通过 Lua 5.1、Luau 语法检查，并在两运行时与源输出逐字节一致；伪装样本不附加 `--rob`，通过 Lua 5.1 / Luau 语法检查，真实 Roblox 行为仍需用户验证。
 - 本次普通/MB `print` 样本为 **215,335 / 101,719 B**，伪装样本为 **326,895 B**。
+
+### 体积优化 A2 / A5（2026-10-06）
+
+- **A2（同作用域重复数字 local 化）**：新增 `src/compressor/hoist.rs`，在作用域解析前按函数统计重复数字字面量，出现 **≥3 次且收益为正**才提升为函数首部 `local`（每函数上限 12 个，预算 170）。实现依据 README 长期约束第 7 条。
+- **A5（0/1 字面量去膨胀）**：`codegen.rs` 新增 `normalize_short_hex`，把 `0X0`/`0X00`/`0X0001` 一类写回 `0`/`1`；`src/VM/RadixSieve/convert.rs` 对 `"0"`/`"1"` 早返回不转换。根因是第 ⑤ 步把 `0X0`/`0X1` 膨胀成 `0X00`/`0X01` 等长串。
+- **A4（冗余分号）已证伪**：产物中 2,757 个分号全部来自 `packer.rs` 的 `can_use_semi`（等长 1 字节顶替空格），真冗余仅 1 处，无可省空间，不实施。
+- **实测收益**（N=31，取中位数；同一二进制、同批输入回放）：普通模式 218,894 → **218,214 B（−680 B / −0.31%）**；MB 模式 101,074 → **101,700 B（+626 B / +0.62%）**，即 A2 在 MB 下净亏；A5 单独约 **−1.4%**。阈值 12/3/1 对比无实质差异，保留 12。收益远小于早期滑窗估计，已按实测口径记录。
+- **验证**：`cargo test --all-targets` **118/118**；快速集 21 个夹具 × 普通/MB 各一轮，语法 **42/42**、双运行时输出比对 **42/42** 全过（历史首次零失败）。三件固定样本已按本节重新生成。
+- 本次普通/MB `print` 样本为 **215,743 / 101,334 B**，伪装样本为 **321,355 B**。
