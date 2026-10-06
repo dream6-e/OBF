@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，245,816 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），124,325 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，362,845 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，225,887 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），119,955 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，350,933 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -200,3 +200,25 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 - 验证：`cargo test --offline --all-targets` **143/143**；语法门（`luac5.1 -p` + `luau-compile`，含真 MB 模式）**52/52**、回退 0（`test/Katchi.lua` 两模式均为既有生成失败：Luau 端 `function or expression too complex`）；本改动前后二进制 A/B（普通 50 项 + MB 7 夹具）除既有偶发外行为一致（`Prometheus/metatables.lua` 普通 旧 4/60 vs 新 2/60；`test/roblox.lua` MB 旧 2/15 vs 新 1/15，均属已知「MB/随机产物偶发损坏」）。
 - 本次普通/MB `print` 样本为 **245,816 / 124,325 B**，伪装样本 **362,845 B**；三份均过两种语法检查，普通/MB 两件在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（各连测 3 次）。尺寸与上一版同水平（随机种子抖动 ±3%），本改动**不以省体积为目的**。
 - 边界：产物外层仍保留 21 B 明文头与自解压/解密壳，本改动只是让**顶层**不再出现工具声明；「一个明文字符都没有」仍不可能，运行性以用户在 Roblox 实测为准。
+
+### 目标十一：VM 派发热区提速（常量折叠 + 循环不变式局部化，2026-10-06）
+
+- 动机（用户指示）：用用户给的 12 项基准（arith / table_ops / calls / string_ops / closure / fib）测运行速度并优化 VM 运行速度。
+- 先量后改（实测，`test/perf_bench.lua` + 插桩产物）：
+  - 混淆产物 vs 原生：**500×–6400×**（Luau 侧 fib 658→1,058,000 µs 级；原生 lua5.1/ Luau 均在微秒级）。
+  - 插桩计数（12 项负载、缩放后）：VM 指令 **2,113,409** 条、指令缓存填充 **2,047,340** 次、`execute` 调用 **132,934** 次
+    ⇒ **平均每次调用只执行约 16 条指令，却要重新填充 15 次**：95% 的派发开销花在「每次调用重建指令缓存」上。
+- 性能 A/B 定位（同一产物、只改一处，输出逐字节一致）：
+  | 方案 | Luau | lua5.1 | 结论 |
+  |---|---|---|---|
+  | ① 热区常量调用折叠 | 1.12× | 1.39× | 无机制改动 |
+  | ② 指令缓存跨调用复用（原型） | 1.97× | 2.45× | 触及换钥/防篡改链，**未实施**（待用户点头） |
+  | ①+② | 3.16× | 4.11× | 同上 |
+- 本次实施（**只做①与循环内局部化**，用户选定）：
+  - ① `Generator_util::fold_const_keycalls`：派发环（`block_execute_def`）里 `表[组][键](A,B)` 的**参数全是字面量**，属一次性常量运算却被每条指令重算；折叠成字面量后语义逐位等价（`key_bx→A^B`、`key_add→A+B`、`key_ba→A&B`；含变量/非三类键/组号不符一律保留）。
+  - ② `build_dispatch_state` 的守卫改为**每指令只读一次延迟计数器**（原来读两次写一次），表内值与语义逐位一致。
+  - 新增单元测试 `fold_const_keycalls_matches_runtime_semantics`（含 lua5.1 实跑校验）。**它当场抓到一个真 bug**：`key_ba` 在 `grp1` 下是二元 `band`，初版误按「与 0xFFFFFFFF 掩码」折叠。
+- 效果（多代产物 × 各 2 次，取中位）：**Luau 5.29→4.48 s（1.18×）、lua5.1 13.40→10.78 s（1.24×）**；单代波动较大（产物结构随机）。
+  产物同时更小：`print` 245,816→**225,887 B**、MB 124,325→**119,955 B**、伪装 362,845→**350,933 B**（约 −8%，折叠掉了热区约 500 处常量调用）。
+- 验证：`cargo test --offline --all-targets` **144/144**；语法门（`luac5.1 -p` + `luau-compile`，含真 MB 模式）**52/52**、回退 0；三件套双语法门 + 双运行时与源 stdout 逐字节一致（各连测 3 次）；伪装件明文命中 0。
+- 未做（需用户点头）：指令缓存**跨调用复用**（预估再快 ~2×，需给换钥路径加「密钥纪元」失效守卫）；表驱动操作码分发（再快 1.5–3×，但会暴露操作码→处理器映射）。

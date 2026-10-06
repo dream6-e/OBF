@@ -1191,6 +1191,8 @@ impl Generator {
                 kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
+            // ① 热区常量折叠（派发环里参数全为字面量的键表调用；语义逐位等价）
+            block_execute_def = crate::VM::VM_Backend::Generator_util::fold_const_keycalls(&block_execute_def, &keys);
         }
 
         let block_decoder_script = decoder_script.replace("\n", " ");
