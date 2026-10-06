@@ -60,6 +60,10 @@ pub fn encrypt_strings(source: &str) -> String {
     let n_o = rand_name(&mut rng, &mut used);
     let n_a = rand_name(&mut rng, &mut used);
     let n_b = rand_name(&mut rng, &mut used);
+    let n_st2 = rand_name(&mut rng, &mut used);
+    let n_a2 = rand_name(&mut rng, &mut used);
+    let n_b2 = rand_name(&mut rng, &mut used);
+    let n_mi = rand_name(&mut rng, &mut used);
 
     let mut out_tokens: Vec<Tok> = Vec::with_capacity(tokens.len());
     let mut slots: Vec<Slot> = Vec::with_capacity(tokens.len());
@@ -77,8 +81,8 @@ pub fn encrypt_strings(source: &str) -> String {
         let in_type_slot = matches!(prev, Some(p) if p.kind == Kind::Op && p.text == "::");
         match plain {
             Some(value) if !value.is_empty() && !in_type_slot => {
-                let seed: u32 = rng.random();
-                let cipher = codec::seal_literal(&value, &stream, &alpha, seed);
+                let (seed1, seed2): (u32, u32) = (rng.random(), rng.random());
+                let cipher = codec::seal_literal(&value, &stream, &alpha, seed1, seed2);
                 // 前一个记号若是 prefixexp 的结尾，这个字面量本来会被当成「调用实参糖」
                 // （`f "s"` == `f("s")`）吃掉，必须补一层括号让它继续充当实参。
                 let slot = if takes_sugar_args(prev) {
@@ -125,6 +129,10 @@ pub fn encrypt_strings(source: &str) -> String {
             o: &n_o,
             a: &n_a,
             b: &n_b,
+            st2: &n_st2,
+            a2: &n_a2,
+            b2: &n_b2,
+            mi: &n_mi,
         },
         &alpha,
         &stream,
@@ -249,6 +257,11 @@ struct DecryptorNames<'a> {
     o: &'a str,
     a: &'a str,
     b: &'a str,
+    // 第二条流与乘法替换常数
+    st2: &'a str,
+    a2: &'a str,
+    b2: &'a str,
+    mi: &'a str,
 }
 
 /// 生成解密函数（纯算术：只用 `%`、`/`、`^`、`math.floor`、`string.byte/char`、`table.concat`）
@@ -271,11 +284,17 @@ fn decryptor_parts(n: DecryptorNames<'_>, alpha: &[u8; 86], stream: &codec::Stre
         ),
         format!("local {f}=math.floor", f = n.floor),
         format!(
-            "local {a},{b}={av},{bv} local {c}={{}} return function({s}) local {r}={c}[{s}] if {r} then return {r} end",
+            "local {a},{b},{a2},{b2},{mi}={av},{bv},{a2v},{b2v},{miv} local {c}={{}} return function({s}) local {r}={c}[{s}] if {r} then return {r} end",
             a = n.a,
             b = n.b,
-            av = stream.a,
-            bv = stream.b,
+            a2 = n.a2,
+            b2 = n.b2,
+            mi = n.mi,
+            av = stream.a1,
+            bv = stream.b1,
+            a2v = stream.a2,
+            b2v = stream.b2,
+            miv = stream.mul_inv,
             c = n.cache,
             s = n.s,
             r = n.r
@@ -294,15 +313,19 @@ fn decryptor_parts(n: DecryptorNames<'_>, alpha: &[u8; 86], stream: &codec::Stre
             q = n.n,
             f = n.floor
         ),
-        // 前 4 字节是种子；其余按流解密
+        // 前 8 字节是两条流的种子；其余：双流推进取混合密钥字节 → 乘法替换求逆 → 减密钥
         format!(
-            "local {x}={t}[1]+{t}[2]*256+{t}[3]*65536+{t}[4]*16777216 local {o}={{}} for {k}=5,#{t} do {x}=({x}*{a}+{b})%4294967296 {o}[#{o}+1]=string.char(({t}[{k}]+256-{f}({x}/65536)%256)%256) end",
+            "local {x}={t}[1]+{t}[2]*256+{t}[3]*65536+{t}[4]*16777216 local {st2}={t}[5]+{t}[6]*256+{t}[7]*65536+{t}[8]*16777216 local {o}={{}} for {k}=9,#{t} do {x}=({x}*{a}+{b})%4294967296 {st2}=({st2}*{a2}+{b2})%4294967296 {o}[#{o}+1]=string.char(((({t}[{k}]+1)*{mi})%257-1+256-{f}(({x}+{st2}*256)%4294967296/16777216))%256) end",
             x = n.x,
+            st2 = n.st2,
             t = n.t,
             o = n.o,
             k = n.k,
             a = n.a,
             b = n.b,
+            a2 = n.a2,
+            b2 = n.b2,
+            mi = n.mi,
             f = n.floor
         ),
         format!(
@@ -390,6 +413,10 @@ mod tests {
             o: "oQ7",
             a: "aq7",
             b: "bQ7",
+            st2: "S2Q7",
+            a2: "A2Q7",
+            b2: "B2Q7",
+            mi: "MIQ7",
         }
     }
 
@@ -405,9 +432,9 @@ mod tests {
             let n = sample_names();
             let mut v = vec![
                 n.dec, n.alpha, n.map, n.floor, n.cache, n.s, n.r, n.t, n.p, n.g, n.v, n.j, n.n,
-                n.k, n.x, n.o, n.a, n.b, "local", "end", "for", "do", "if", "then", "return",
-                "while", "function", "math", "string", "table", "floor", "byte", "char",
-                "concat",
+                n.k, n.x, n.o, n.a, n.b, n.st2, n.a2, n.b2, n.mi,
+                "local", "end", "for", "do", "if", "then", "return", "while", "function", "math",
+                "string", "table", "floor", "byte", "char", "concat",
             ];
             v.sort_unstable();
             v
@@ -436,6 +463,47 @@ mod tests {
         }
         assert!(code.contains("(function()"), "解密壳结构缺失");
         assert!(code.ends_with("end)()"), "解密壳结构缺失: {code}");
+    }
+
+    #[test]
+    fn substitution_matches_lua_formula() {
+        // 乘法替换是逐产物随机的，必须 Rust 加密端与 Lua 解密端**逐项相同**：
+        // 用与壳里完全一样的表达式在 lua5.1 / luau 下算 0..255 全表，与 Rust 比对。
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut rng = rand::rng();
+        for _ in 0..8 {
+            let stream = crate::strcrypt::codec::Stream::random(&mut rng);
+            let expect: Vec<u8> = (0..=255u8)
+                .map(|x| crate::strcrypt::codec::substitute(x, stream.mul_inv))
+                .collect();
+            let code = format!(
+                "local o={{}} for k=0,255 do o[#o+1]=((k+1)*{mi})%257-1 end print(table.concat(o,\",\"))",
+                mi = stream.mul_inv
+            );
+            for bin in [
+                root.join("toolchains/bin/lua5.1"),
+                root.join("toolchains/bin/luau"),
+            ] {
+                if !bin.exists() {
+                    continue;
+                }
+                let got = run_code(&bin, &code, root).expect("解释器可执行");
+                assert_eq!(got.0, 0, "替换公式执行失败:\n{code}");
+                let text = String::from_utf8_lossy(&got.1);
+                let vals: Vec<u8> = text
+                    .trim()
+                    .split(',')
+                    .map(|x| x.trim().parse::<u8>().expect("表项必须是 0..255"))
+                    .collect();
+                assert_eq!(vals.len(), 256, "替换表长度不对");
+                assert_eq!(vals, expect, "Lua 侧替换与 Rust 不一致（解密会失败）");
+            }
+        }
+        // 常数必须是双射（素数模保证），且逆元互逆
+        for mul in 1u64..=256 {
+            let inv = crate::strcrypt::codec::mod_inverse_257(mul);
+            assert_eq!((mul * inv) % 257, 1, "逆元不对: {mul}");
+        }
     }
 
     fn run_code(bin: &Path, code: &str, root: &Path) -> Option<(i32, Vec<u8>)> {

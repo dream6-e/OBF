@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，240,185 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），119,992 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，402,332 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，238,941 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），127,042 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，409,769 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -177,7 +177,14 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 
 - 编译成字节码之前，源码里每个字符串字面量都换成 `解密函数("密文")`：
   `local msg = "Hello"` → `local msg = YJL("_)O,w]g{y?]o")`。运行期用注入的纯算术解密壳解回原值。
+- **算法（2026-10-06 强度升级）**：两条随机 LCG 进位耦合出密钥字节（`((s1+256*s2) mod 2^32) >> 24`），
+  再经逐产物随机的**模 257 乘法替换** `x ↦ (x+1)*M mod 257 - 1`（257 为素数 ⇒ 双射）；
+  每字面量 8 字节随机种子。全程只用 `%`、`/`、`math.floor`、`string.byte/char`、`table.concat`，
+  不依赖 bit/bit32（Luau 无 bit 库）。
+- 强度定位：**混淆级**（不是密码学）。相比此前的单流加法，逆向者不再能靠"一对明密文解个方程"批量还原，
+  需要同时重建两条流的状态与替换常数。
 - 自动生效，无需任何命令行开关；`--rob` 的 `samples/Check.lua` 检测脚手架按既有约定不参与本步骤（也不参与最小化）。
-- 本次普通/MB `print` 样本为 **240,185 / 119,992 B**，伪装样本为 **402,332 B**；
-  三份均过 `luac5.1 -p` 与 `luau-compile`，普通/MB 两件在 `lua5.1`、`luau` 下与源 stdout 逐字节一致。
-- 体积代价：注入壳约 **+23 KB / 产物**（固定），另有每个字面量约 +0.7 KB；详见 `项目交接总结.md` 末节。
+- 本次普通/MB `print` 样本为 **238,941 / 127,042 B**，伪装样本为 **409,769 B**；
+  三份均过 `luac5.1 -p` 与 `luau-compile`，普通/MB 两件在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（各连测 3 次）。
+- 体积代价：注入壳约 **+23 KB / 产物**（固定），另有每个字面量约 +0.5 KB；解密耗时约为上一版的
+  **1.2–1.5 倍**（逐字面量、首次使用时一次）。详见 `项目交接总结.md` 末节。
