@@ -21,10 +21,164 @@ use kryvex_ob::VM::VM_Backend::Generator::Generator;
 use kryvex_ob::compressor::Compressor;
 use kryvex_ob::VM::RadixSieve;
 use kryvex_ob::packer;
+use kryvex_ob::secure_io;
+
+/// 命令行开关：`--key <口令>` / `--key-file <路径>` / 环境变量 `KRYVEX_KEY`。
+fn resolve_passphrase(args: &[String]) -> Option<String> {
+    if let Some(pos) = args.iter().position(|a| a == "--key") {
+        return args.get(pos + 1).cloned();
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--key-file") {
+        if let Some(path) = args.get(pos + 1) {
+            return std::fs::read_to_string(path)
+                .ok()
+                .map(|s| s.trim_end_matches(['\n', '\r']).to_string());
+        }
+    }
+    std::env::var("KRYVEX_KEY").ok().filter(|s| !s.is_empty())
+}
+
+/// 读取输入：若文件是我们封存的容器则要求口令并解封，否则按普通文本读取。
+fn load_source(path: &str, pass: Option<&str>) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("无法读取输入文件: {:?}", e))?;
+    let plain = if secure_io::is_sealed(&bytes) {
+        let pass = pass.ok_or_else(|| {
+            "输入是封存文件，需要用 --key <口令>、--key-file <路径> 或环境变量 KRYVEX_KEY 提供口令".to_string()
+        })?;
+        secure_io::open_with_limit(&bytes, pass)?
+    } else {
+        bytes
+    };
+    String::from_utf8(plain).map_err(|_| "输入不是合法 UTF-8 文本".to_string())
+}
+
+/// `--seal <in.lua> [out]`：把源码封存成密文文件（默认写到 <in>.sealed）
+fn run_seal(args: &[String]) -> i32 {
+    let pos = match args.iter().position(|a| a == "--seal") {
+        Some(p) => p,
+        None => return -1,
+    };
+    let input = match args.get(pos + 1).filter(|a| !a.starts_with("--")) {
+        Some(v) => v.clone(),
+        None => {
+            eprintln!("用法: kryvex-simple --seal <源码.lua> [输出.sealed] [--key <口令>]");
+            return 1;
+        }
+    };
+    let output = args
+        .get(pos + 2)
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| format!("{}.sealed", input));
+    let pass = match resolve_passphrase(args) {
+        Some(p) => p,
+        None => {
+            eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 封存必须提供口令：--key <口令> / --key-file <路径> / 环境变量 KRYVEX_KEY");
+            return 1;
+        }
+    };
+    let plain = match std::fs::read(&input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 无法读取源码: {:?}", e);
+            return 1;
+        }
+    };
+    if secure_io::is_sealed(&plain) {
+        eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 输入已经是封存文件，无需重复封存");
+        return 1;
+    }
+    let sealed = secure_io::seal(&plain, &pass);
+    if let Err(e) = std::fs::write(&output, &sealed) {
+        eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 写出封存文件失败: {:?}", e);
+        return 1;
+    }
+    println!(
+        "\x1b[1;33mKRYVEX: \x1b[0m 已封存 \x1b[1m{}\x1b[0m → \x1b[1m{}\x1b[0m（{} B → {} B）",
+        input,
+        output,
+        plain.len(),
+        sealed.len()
+    );
+    0
+}
+
+/// `--open <in.sealed> [out.lua]`：解封回明文源码（默认去掉 .sealed 后缀）
+fn run_open(args: &[String]) -> i32 {
+    let pos = match args.iter().position(|a| a == "--open") {
+        Some(p) => p,
+        None => return -1,
+    };
+    let input = match args.get(pos + 1).filter(|a| !a.starts_with("--")) {
+        Some(v) => v.clone(),
+        None => {
+            eprintln!("用法: kryvex-simple --open <源码.sealed> [输出.lua] [--key <口令>]");
+            return 1;
+        }
+    };
+    let output = args
+        .get(pos + 2)
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| match input.strip_suffix(".sealed") {
+            Some(base) => base.to_string(),
+            None => format!("{}.lua", input),
+        });
+    let pass = match resolve_passphrase(args) {
+        Some(p) => p,
+        None => {
+            eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 解封必须提供口令：--key <口令> / --key-file <路径> / 环境变量 KRYVEX_KEY");
+            return 1;
+        }
+    };
+    let bytes = match std::fs::read(&input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 无法读取封存文件: {:?}", e);
+            return 1;
+        }
+    };
+    let explicit_out = args.get(pos + 2).filter(|a| !a.starts_with("--")).is_some();
+    if !explicit_out && std::path::Path::new(&output).exists() {
+        eprintln!(
+            "\x1b[1;31mKRYVEX: \x1b[0m 默认输出 {} 已存在，避免覆盖源码——请显式指定输出路径",
+            output
+        );
+        return 1;
+    }
+    match secure_io::open_with_limit(&bytes, &pass) {
+        Ok(plain) => {
+            if let Err(e) = std::fs::write(&output, &plain) {
+                eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 写出源码失败: {:?}", e);
+                return 1;
+            }
+            println!(
+                "\x1b[1;33mKRYVEX: \x1b[0m 已解封 \x1b[1m{}\x1b[0m → \x1b[1m{}\x1b[0m（{} B）",
+                input,
+                output,
+                plain.len()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 解封失败：{}", e);
+            1
+        }
+    }
+}
 
 fn main() {
     let start_time = Instant::now();
     let args: Vec<String> = std::env::args().collect();
+
+    // 先拦截封存/解封子命令；未命中直接返回 -1 继续走混淆流程。
+    for sub in [run_seal, run_open] {
+        let code = sub(&args);
+        if code >= 0 {
+            std::process::exit(code);
+        }
+    }
+
     let source_code;
     let mut current_file = String::new();
 
@@ -36,14 +190,15 @@ fn main() {
             return;
         }
 
-        if !input_path.ends_with(".lua") {
+        // 补后缀只在按原名找不到文件时进行（封存件是 .sealed，不能补成 .sealed.lua）
+        if !input_path.ends_with(".lua") && !std::path::Path::new(&input_path).exists() {
             input_path.push_str(".lua");
         }
         current_file = input_path.clone();
-        source_code = match std::fs::read_to_string(&input_path) {
+        source_code = match load_source(&input_path, resolve_passphrase(&args).as_deref()) {
             Ok(content) => content,
             Err(e) => {
-                eprintln!("\x1b[1;31mKRYVEX: \x1b[0m 无法读取输入文件: {:?}", e);
+                eprintln!("\x1b[1;31mKRYVEX: \x1b[0m {}", e);
                 return;
             }
         };
@@ -62,11 +217,11 @@ fn main() {
                 continue;
             }
 
-            if !input_path.ends_with(".lua") {
+            if !input_path.ends_with(".lua") && !std::path::Path::new(&input_path).exists() {
                 input_path.push_str(".lua");
             }
 
-            match std::fs::read_to_string(&input_path) {
+            match load_source(&input_path, resolve_passphrase(&args).as_deref()) {
                 Ok(content) => {
                     current_file = input_path;
                     loop_source = content;

@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，214,684 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），102,239 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，321,910 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，218,992 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），101,485 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，318,701 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -172,3 +172,15 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
   原因：字节码不含局部名/空白/行号，载荷只受指令数与字符串常量池影响。
 - 原计划的「重命名器压源码」已实测**不可用**（会改名全局/成员，破坏 Roblox API 与字符串键；且对载荷 0 收益），未采用。
 - 本次普通/MB `print` 样本为 **214,684 / 102,239 B**，伪装样本为 **321,910 B**。
+
+### 源码封存（--seal / --open，2026-10-06）
+
+- 新增「源码封存」：`kryvex-simple --seal <源码.lua> [输出.sealed] --key <口令>` 把源码以密文形式存放；
+  直接把 `.sealed` 文件当作输入即可混淆（自动识别、内存内解封）；`--open` 可解封回明文。
+- 口令来源三选一：`--key <口令>`、`--key-file <路径>`、环境变量 `KRYVEX_KEY`。
+- 容器：ChaCha20 流加密 + HMAC-SHA256 完整性标签 + 迭代式 SHA-256 口令派生（30 万次）；
+  每次封存随机盐/一次性数，同一输入两次封存结果不同；口令错/被改动一律拒绝，不会产出半截明文。
+- 纯 Rust 手写实现，无新增依赖；密码学标准常量以掩码形式存放，不在二进制里落明文。
+- 定位说明：产物侧本来就没有源码明文（实测源码字符串/标识符/数字标记在产物与全部中间产物里 0 命中），
+  本功能解决的是**源码文件在磁盘与传输中的暴露**，不改变产物格式与体积。
+- 本次普通/MB `print` 样本为 **218,992 / 101,485 B**，伪装样本为 **318,701 B**（混淆路径未变，尺寸差异属逐产物随机）。

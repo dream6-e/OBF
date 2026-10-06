@@ -17,4 +17,5 @@ pub mod VM;
 
 pub mod compressor;
 pub mod minifier;
+pub mod secure_io;
 pub mod packer;
