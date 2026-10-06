@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use super::ast::{Block, LastStmt, Stmt, Expr, PrefixExpr, Var, Call, LocalVar, VarId};
 
 pub struct ScopeResolver {
@@ -10,6 +10,11 @@ pub struct ScopeResolver {
     pub var_scopes: HashMap<VarId, usize>,
     pub scope_parents: Vec<Option<usize>>,
     scope_stack: Vec<usize>,
+    /// 每个作用域**直接**引用到的绑定 id（外层绑定记在最内层作用域上，再上滚）。
+    /// 名字分配据此判断「某祖先的名字能否被内层复用」：只有被真正引用的才必须避开。
+    scope_refs: Vec<HashSet<VarId>>,
+    /// 形参绑定 id：分配名字时优先拿最短名（用户要求：形参尽量单字母）。
+    pub param_ids: HashSet<VarId>,
 }
 
 impl ScopeResolver {
@@ -23,6 +28,8 @@ impl ScopeResolver {
             var_scopes: HashMap::new(),
             scope_parents: vec![None],
             scope_stack: vec![0],
+            scope_refs: vec![HashSet::new()],
+            param_ids: HashSet::new(),
         }
     }
 
@@ -33,6 +40,7 @@ impl ScopeResolver {
         self.scope_stack.push(id);
         self.scopes.push(HashMap::new());
         self.scope_var_counts.push(0);
+        self.scope_refs.push(HashSet::new());
     }
 
     pub fn exit_scope(&mut self) {
@@ -67,10 +75,13 @@ impl ScopeResolver {
         if let Some(cur) = self.scopes.last() {
             if let Some(&id) = cur.get(name) {
                 self.record_usage(id);
+                self.param_ids.insert(id);
                 return id;
             }
         }
-        self.declare_local(name)
+        let id = self.declare_local(name);
+        self.param_ids.insert(id);
+        id
     }
 
     pub fn resolve_var(&self, name: &str) -> Option<VarId> {
@@ -80,6 +91,28 @@ impl ScopeResolver {
             }
         }
         None
+    }
+
+    /// 记下「当前作用域引用到了哪个绑定」。
+    pub fn record_ref(&mut self, id: VarId) {
+        if let Some(&cur) = self.scope_stack.last() {
+            if let Some(set) = self.scope_refs.get_mut(cur) {
+                set.insert(id);
+            }
+        }
+    }
+
+    /// 把直接引用集合上滚到全部祖先，得到「该作用域子树里引用到的所有绑定 id」。
+    /// 只被引用到的祖先绑定才需要在内层避名；没被引用的名字可以安全复用（形参复用靠它）。
+    pub fn subtree_refs(&self) -> Vec<HashSet<VarId>> {
+        let mut out = self.scope_refs.clone();
+        for scope in (1..out.len()).rev() {
+            if let Some(parent) = self.scope_parents.get(scope).copied().flatten() {
+                let child = out[scope].clone();
+                out[parent].extend(child);
+            }
+        }
+        out
     }
 
     pub fn record_usage(&mut self, id: VarId) {
@@ -271,6 +304,7 @@ impl Var {
                 if let Some(resolved_id) = r.resolve_var(name) {
                     *id = resolved_id;
                     r.record_usage(resolved_id);
+                    r.record_ref(resolved_id);
                 }
             }
             Var::Index(prefix, expr) => {

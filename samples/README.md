@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，225,887 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），119,955 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，350,933 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，209,746 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），115,367 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，331,094 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -222,3 +222,37 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
   产物同时更小：`print` 245,816→**225,887 B**、MB 124,325→**119,955 B**、伪装 362,845→**350,933 B**（约 −8%，折叠掉了热区约 500 处常量调用）。
 - 验证：`cargo test --offline --all-targets` **144/144**；语法门（`luac5.1 -p` + `luau-compile`，含真 MB 模式）**52/52**、回退 0；三件套双语法门 + 双运行时与源 stdout 逐字节一致（各连测 3 次）；伪装件明文命中 0。
 - 未做（需用户点头）：指令缓存**跨调用复用**（预估再快 ~2×，需给换钥路径加「密钥纪元」失效守卫）；表驱动操作码分发（再快 1.5–3×，但会暴露操作码→处理器映射）。
+
+### 目标十二：变量名分配改为「精确避名 + 形参复用单字母」（2026-10-06）
+
+- 动机（用户指示）：让所有 `function(a,b,c)` 的形参复用同一批短名，尽量单字母。
+- 改前机制（`src/compressor/mod.rs`）：名字池是 52 个单字母 + 52×52 双字母，但封锁规则是
+  **「祖先作用域用过的名字，后代一律不能用」**——不管内层是否真的引用了那个外层绑定。
+  产物里 300+ 个嵌套函数层层加码，单字母很快被祖先"占位"耗尽，形参普遍落到 `pn`/`pq`/`pd` 这类双字母。
+- 改后机制（`src/compressor/scope.rs` + `mod.rs`）：
+  - 解析期记录**每个作用域子树里真正引用到的绑定 id**（`record_ref` + `subtree_refs` 上滚），
+    封锁集合改成「这些被引用绑定已分配的名字」。没被引用的祖先名字可以安全复用——
+    内层复用不会改变任何引用的解析结果（同名绑定不可达）。
+  - 分配顺序加入「形参优先」：同作用域内形参排在其它绑定之前拿最短名（单字母池只有 52 个，
+    绑定一多必须有人拿双字母时先保形参）。
+- 效果（`test/print.lua` 产物实测）：
+  - 形参实例 488 个，**全部单字母**；不同形参名从 51 个（47 个双字母）降到 **19 个**，
+    且被 314 个函数复用（Top：`J` 158 次、`_` 156 次、`A` 76 次、`K` 47 次）。
+  - 形参名占用的字符总量 35,423 → 21,936（−38%）。
+  - 产物：`print` 225,887→**209,746 B**（−7.1%）、MB 119,955→**115,367 B**（−3.8%）、
+    伪装 350,933→**331,094 B**（−5.6%）；`luac5.1 -p` 解析耗时 1.02×/1.14×（样本不同略有差异）。
+- 验证：`cargo test --offline --all-targets` **146/146**（新增 2 个测试：
+  `name_reuse_preserves_semantics_under_lua` 用 lua5.1 实跑比对遮蔽类危险写法、
+  `function_params_are_single_letter_and_reused` 断言形参恒为单字母且确实复用）；
+  语法门（`luac5.1 -p` + `luau-compile`，含真 MB 模式）**50/50** 产物全部合法；
+  9 个复杂夹具 × 普通/MB × 3 代共 54 次「生成 + 运行 + 与源 stdout 比对」，除既有偶发外全过；
+  三件套各连续 3 次通过（语法门 + 双运行时逐字节一致）。
+- 顺带发现（**既有问题，未改**，等用户定夺）：
+  1. `function t:get()` 形态的目标名不参与变量改名（`Stmt::Function { path: Vec<String> }` 只走字符串映射，
+     长度 ≤4 的名字原样保留），局部变量改名后会对不上。真实管线只处理生成代码
+     （全是 `local function` / `X.y=function` 形态，实测 56 处 `function 名字(` 全部带 `local`），
+     所以该缺陷在管线里**潜伏不触发**。
+  2. 生成器偶发产出**解析不过的 VM 代码**（压缩器在解析步中止，报 `期望获得 结束标识符 'end'，却发现 elseif`）
+     与**运行期偶发失败**（如 `'for' limit must be a number`）。已用分层判据确认与本次改名无关：
+     失败样本的 `process/process1.lua`（压缩器**之前**的 VM Lua）就已失败，且新旧二进制同量级
+     （fibonacci MB 旧 28/30、新 29/30；matrix MB 旧 29/30、新 28/30；string_encryption 普通旧 37/40、新 39/40）。
