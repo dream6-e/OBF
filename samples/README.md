@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，238,941 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），127,042 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，409,769 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，245,816 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），124,325 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，362,845 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -188,3 +188,15 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
   三份均过 `luac5.1 -p` 与 `luau-compile`，普通/MB 两件在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（各连测 3 次）。
 - 体积代价：注入壳约 **+23 KB / 产物**（固定），另有每个字面量约 +0.5 KB；解密耗时约为上一版的
   **1.2–1.5 倍**（逐字面量、首次使用时一次）。详见 `项目交接总结.md` 末节。
+
+### 目标十：顶层前置声明移入 `return({})` 壳（2026-10-06）
+
+- 动机（用户指示）：产物开头的 `local K=... local Y=false; local G=type; local a=pairs;` 中，**除 `...` 捕获外全部移入 `return({})` 壳内**，顶层只留主 chunk 的 vararg 捕获。
+- 实现（`src/VM/VM_Backend/Generator_chain_tail.rs`，纯改生成顺序，不动 VM 语义）：
+  - 顶层只发一条 `local <var_l> = ...;`（主 chunk vararg，供壳内 `execute` 第 6 参使用），紧接开壳 `return ({ <wai>=function(...)`；投毒旗 / `type` / `pairs` 三条声明改在 `wai` 函数体开头发出（其后才是原有的沙箱与 select 桩）。
+  - `fu`（壳尾表字段）改为**自带一份 `local <native_type>=type`**：它原本依赖顶层 `type` 局部，现在与 `wai` 是壳内兄弟字段，共享不了词法作用域；实测 `fu` 只用到 `type`（2 处），不涉及投毒旗与 `pairs`。
+  - 物理行结构不变（压缩前 3 行、压缩后 2 行），`⑳ MB` 的「解压后 VM 逻辑为第 2 行」行守卫假设不受影响。
+- 效果：成品开头由 `local K=...local Y=false;...return({...` 变为 `local K=...return({...`，`type`/`pairs`/投毒旗在顶层不再有任何痕迹。
+- 验证：`cargo test --offline --all-targets` **143/143**；语法门（`luac5.1 -p` + `luau-compile`，含真 MB 模式）**52/52**、回退 0（`test/Katchi.lua` 两模式均为既有生成失败：Luau 端 `function or expression too complex`）；本改动前后二进制 A/B（普通 50 项 + MB 7 夹具）除既有偶发外行为一致（`Prometheus/metatables.lua` 普通 旧 4/60 vs 新 2/60；`test/roblox.lua` MB 旧 2/15 vs 新 1/15，均属已知「MB/随机产物偶发损坏」）。
+- 本次普通/MB `print` 样本为 **245,816 / 124,325 B**，伪装样本 **362,845 B**；三份均过两种语法检查，普通/MB 两件在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（各连测 3 次）。尺寸与上一版同水平（随机种子抖动 ±3%），本改动**不以省体积为目的**。
+- 边界：产物外层仍保留 21 B 明文头与自解压/解密壳，本改动只是让**顶层**不再出现工具声明；「一个明文字符都没有」仍不可能，运行性以用户在 Roblox 实测为准。
