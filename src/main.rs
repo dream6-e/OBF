@@ -251,24 +251,36 @@ fn main() {
             body.to_string()
         }
     };
-    let source_code = with_check(&minified_source);
+    // 第 ⓪′ 步：源码字符串加密——编译成字节码之前，把每个字符串字面量换成
+    // `解密函数("密文")`，并在源码顶部注入纯算术解密壳，运行期再解回原值。
+    // 自带结构自检：与「仅把字面量替换成调用」不符时原样放行，宁少压不压坏。
+    let encrypted_source = kryvex_ob::strcrypt::encrypt_strings(&minified_source);
+
+    // --rob 的 Check.lua 是混淆器自带的检测脚手架：按既有约定不最小化、不加密。
+    let source_code = with_check(&encrypted_source);
 
     // 指令布局逐产物随机化（种子会写进容器头部，反序列化端据此恢复）
     instructions::randomize_global_seed();
 
-    // 编译：先编最小化后的源码；若失败则用原始源码再编一次（用户真正写错语法时，
-    // 报错仍取原始源码，行号才有意义；最小化若有意外也会在此处被兜住）。
+    // 编译：先编「最小化 + 字符串加密」的源码；编不过依次回退到最小化源码、
+    // 原始源码（用户真正写错语法时，报错仍取原始源码，行号才有意义）。
     let chunk_name = format!("@{}", current_file);
     let compiled = match codegen::compile(source_code.as_bytes(), &chunk_name) {
         Ok(proto) => Ok(proto),
-        Err(_) => match codegen::compile(with_check(&raw_source).as_bytes(), &chunk_name) {
-            // 最小化版本编不过、原文能编：静默回退（并提示一句），用户无感。
+        Err(_) => match codegen::compile(with_check(&minified_source).as_bytes(), &chunk_name) {
             Ok(proto) => {
-                eprintln!("\x1b[1;33mKRYVEX: \x1b[0m 最小化源码编译失败，已回退到原始源码");
+                eprintln!("\x1b[1;33mKRYVEX: \x1b[0m 源码字符串加密后编译失败，已回退到仅最小化");
                 Ok(proto)
             }
-            // 两边都编不过：报原始源码的错误——行号是用户真正能对上的那个。
-            Err(original_err) => Err(original_err),
+            Err(_) => match codegen::compile(with_check(&raw_source).as_bytes(), &chunk_name) {
+                // 最小化版本编不过、原文能编：静默回退（并提示一句），用户无感。
+                Ok(proto) => {
+                    eprintln!("\x1b[1;33mKRYVEX: \x1b[0m 最小化源码编译失败，已回退到原始源码");
+                    Ok(proto)
+                }
+                // 都编不过：报原始源码的错误——行号是用户真正能对上的那个。
+                Err(original_err) => Err(original_err),
+            },
         },
     };
 

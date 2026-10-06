@@ -59,7 +59,7 @@ pub fn minify_source(source: &str) -> String {
         return source.to_string();
     }
 
-    let joined = join(&tokens);
+    let joined = join_tokens(&tokens);
 
     // ② 自检：重新分词必须得到完全相同的令牌序列，否则放弃（返回原文）。
     match lex(&joined) {
@@ -84,8 +84,8 @@ fn split_shebang(source: &str) -> (&str, &str) {
     }
 }
 
-/// 按最少空格规则把令牌拼成单行
-fn join(tokens: &[Tok]) -> String {
+/// 按最少空格规则把令牌拼成单行（也供字符串加密步骤复用）
+pub fn join_tokens(tokens: &[Tok]) -> String {
     let mut out = String::with_capacity(tokens.iter().map(|t| t.text.len() + 1).sum());
     let mut prev: Option<&Tok> = None;
     for tok in tokens {
