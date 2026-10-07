@@ -485,8 +485,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
 
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
-        // fu 与 wai 是兄弟闭包；共享投毒旗必须位于二者共同可见的词法作用域。
-        // 保持与 return 壳同一物理行，不影响行完整性探针的目标行号。
+        // fu 与 wai 共享的投毒旗及原生别名放在 return 表壳的即时外围函数内，
+        // 只有 varargs 捕获留在壳外；同一物理行不改变行完整性探针的目标行号。
+        out.push_str("return (function() ");
         out.push_str(&format!("local {}=false; ", psn_n));
         out.push_str(&format!("local {}=type; local {}=pairs; ", native_type, native_pairs));
         out.push_str(&header_block);
@@ -595,6 +596,6 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         out.push_str(&line_guard(&mut rng, &mut uni, false));
         out.push_str(" ");
         out.push_str(&format!("return {}(main_chunk, {}, {{}}, nil, nil, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni, true), wai));
-        out.push_str(&format!(" }}):{}()", fu));
+        out.push_str(&format!(" }}) end)():{}()", fu));
         out
 }
