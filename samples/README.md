@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，209,746 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），115,367 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，331,094 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，211,777 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），115,376 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，332,772 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -15,7 +15,7 @@
 | `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，273,906 B；Lua 5.1 输出与预期一致 |
 | `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，254,829 B；Lua 5.1 输出与预期一致 |
 
-`print` 普通/MB 固定样本通过 `luac5.1 -p`、`luau-compile --binary`，并在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（19 行）；目标七再次验证了当前样本；2026-10-06 的体积优化 A2/A5 之后重新生成了这三件固定样本，仍全部通过。嵌套 proto 的普通与 MB 样本曾通过相同两种语法检查及双运行时输出比对（`12 6 15 12 19`、`47`）；序列化格式回归另独立生成 40 份随机产物（普通/MB 各 20），每份在 Lua 5.1 和 Luau 各运行一次并与源码 stdout 比对，80 次检查通过。历史上 print/nested 固定样本也曾在两种运行时重复 100 次；该次数不代表目标七之后的随机加密产物。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。Lua 5.1 差分夹具目前仅验证表中列出的语义子集，不等同完整 Lua 5.1 语言级兼容验收。
+`print` 普通/MB 固定样本通过 `luac5.1 -p`、`luau-compile --binary`，并在 `lua5.1`、`luau` 下与源 stdout 逐字节一致（19 行）；目标七再次验证了当前样本；2026-10-06 的体积优化 A2/A5 之后重新生成了这三件固定样本，仍全部通过。 2026-10-07 修复 `function X:y()` 目标名不随局部改名、以及生成器分块器的 `elseif op` 边界误命中之后，重新生成了这三件固定样本：双语法门（`luac5.1 -p` / `luau-compile --binary`）通过，`print` 两种模式在 Lua 5.1 与 Luau 下与源 stdout 仍逐字节一致（19 行）。嵌套 proto 的普通与 MB 样本曾通过相同两种语法检查及双运行时输出比对（`12 6 15 12 19`、`47`）；序列化格式回归另独立生成 40 份随机产物（普通/MB 各 20），每份在 Lua 5.1 和 Luau 各运行一次并与源码 stdout 比对，80 次检查通过。历史上 print/nested 固定样本也曾在两种运行时重复 100 次；该次数不代表目标七之后的随机加密产物。伪装脚本通过两种语法检查；实际 Roblox 行为由用户验证。Lua 5.1 差分夹具目前仅验证表中列出的语义子集，不等同完整 Lua 5.1 语言级兼容验收。
 
 ### 目标四：常量加密改进（2026-10-03）
 

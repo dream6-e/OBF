@@ -265,16 +265,29 @@ repeat
 until k >= 3
 print(k)
 
--- 注意：这里不用 `function t:get()` 写法——解析器把该形态的目标名当纯名字串
---（`Stmt::Function { path: Vec<String> }`，见 scope.rs 中该分支不解析 path），
--- 局部变量改名后会对不上；真实管线只处理生成代码（全是 `local function` /
--- `X.y=function` 形态），所以该缺陷潜伏。测试改用等价的赋值写法。
+-- `function t:get()` 形态：解析期脱糖成 `t.get = function(self)`，
+-- 目标名按变量改名（曾只做字符串映射，导致局部 `t` 改名后这里仍读全局 t）。
 local t = {v = 41}
-t.get = function(self)
+function t:get()
   local function add(x) return self.v + x end
   return add(1)
 end
 print(t:get())
+
+-- 带点路径 + 方法糖 + 多参：`function obj.inner.mul(a) … end`
+local obj = {inner = {}}
+function obj.inner.mul(a, b)
+  return a * b
+end
+print(obj.inner.mul(6, 7))
+
+-- 方法糖的隐式 self 与显式同名形参混用
+local counter = {n = 0}
+function counter:bump(step)
+  self.n = self.n + (step or 1)
+  return self.n
+end
+print(counter:bump(), counter:bump(4))
 
 local obj = {n = 5}
 obj.inc = function(self, d)
@@ -356,5 +369,37 @@ print(f1(1, 2) + f2(3, 4) + f3(9, 5), obj.m1(obj, 1), h(1, 2, 3))
         }
         let distinct: std::collections::HashSet<&String> = params.iter().collect();
         assert!(distinct.len() < params.len(), "params are not reused: {:?}", params);
+    }
+
+    /// `function a.b:c()` 的脱糖回归：带路径的写法必须与源语义一致，
+    /// 且目标名要与同名局部引用**指向同一名字**（旧实现只做字符串映射，
+    /// 局部 `t` 改了名而这里没改，会去读全局 `t`）。
+    #[test]
+    fn function_statement_paths_are_renamed_consistently() {
+        let lua = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        let src = r#"
+local t = {v = 41}
+function t:get() return self.v end
+function t.plain(a) return a + 1 end
+local reg = {inner = {}}
+function reg.inner.mul(a, b) return a * b end
+print(t:get(), t.plain(1), reg.inner.mul(3, 4))
+"#;
+        let out = Compressor::compress(src).expect("compress method forms");
+        // 脱糖后不应再出现 `function 目标名` 形态（全部变成赋值 + 匿名函数）
+        assert!(!out.contains("function t:"), "method target was not renamed: {}", out);
+        if lua.exists() {
+            let dir = std::env::temp_dir().join(format!("kryvex_path_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("tmp dir");
+            let sp = dir.join("s.lua");
+            let op = dir.join("o.lua");
+            std::fs::write(&sp, src).expect("write");
+            std::fs::write(&op, &out).expect("write");
+            let a = std::process::Command::new(&lua).arg(&sp).output().expect("run src");
+            let b = std::process::Command::new(&lua).arg(&op).output().expect("run out");
+            assert!(a.status.success(), "source failed: {}", String::from_utf8_lossy(&a.stderr));
+            assert!(b.status.success(), "compressed failed: {}\n{}", String::from_utf8_lossy(&b.stderr), out);
+            assert_eq!(String::from_utf8_lossy(&a.stdout), String::from_utf8_lossy(&b.stdout));
+        }
     }
 }

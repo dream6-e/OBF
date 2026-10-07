@@ -604,7 +604,27 @@ impl Generator {
         let mut parsed: Vec<(Vec<u32>, String)> = Vec::new();
         let mut remaining = raw_handlers.as_str();
         let mut current_ops: Vec<u32> = Vec::new(); let mut current_code = String::new();
-        while let Some(idx) = remaining.find("elseif op") {
+        // 边界匹配：只认「elseif op 」/「elseif op==」形态的派发标记。
+        // 直接 find("elseif op") 会误命中 `elseif op<随机名><…>then`（随机局部名可能
+        // 以 op 开头），随后到下一个 then 之间若含数字，就会把真实标记前缀连同
+        // 一段源码吞掉——轻则分块报错（期望 end 却发现 elseif），重则把 handler
+        // 绑到错误的 op 集合上，运行期派发到错的处理器。
+        let find_marker = |s: &str| -> Option<usize> {
+            let b = s.as_bytes();
+            let mut at = 0usize;
+            while let Some(rel) = s[at..].find("elseif op") {
+                let i = at + rel;
+                let j = i + 9;
+                match b.get(j) {
+                    Some(&c) if c == b' ' || c == b'\t' || c == b'\r' || c == b'\n' || c == b'=' => {
+                        return Some(i);
+                    }
+                    _ => { at = j; }
+                }
+            }
+            None
+        };
+        while let Some(idx) = find_marker(remaining) {
             let before = &remaining[..idx];
             if !current_ops.is_empty() {
                 current_code.push_str(before); let code_str = current_code.trim().to_string();
