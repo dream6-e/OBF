@@ -464,7 +464,23 @@ impl Parser {
                 self.consume(")")?;
                 let block = self.parse_block()?;
                 self.consume("end")?;
-                Ok(Stmt::Function { path, method, params, is_vararg, block: Box::new(block) })
+                // 脱糖：`function a.b:c(ps) … end` ≡ `a.b.c = function(self, ps) … end`。
+                // 两种写法在 Lua 里语义完全一致（前缀表达式只求值一次），但脱糖后目标走
+                // 标准变量/成员路径：局部变量会被正式改名，全局名与其它引用共享同一映射。
+                // 旧实现把 path 当纯字符串、只对长度 >4 的名字做字符串映射，于是
+                // `local t={} function t:get() end` 里局部 `t` 改了名而这里没改——
+                // 运行期变成读全局 `t`（nil）。真实管线只处理生成代码（全是
+                // `local function` / `X.y=function` 形态），所以该缺陷一直潜伏。
+                let mut target = Var::Name(path[0].clone(), VarId(0));
+                for name in path.iter().skip(1) {
+                    target = Var::Member(Box::new(PrefixExpr::Var(target)), name.clone());
+                }
+                if let Some(m) = method {
+                    target = Var::Member(Box::new(PrefixExpr::Var(target)), m);
+                    // `:` 语法糖的隐式 self 变成显式首参（同样是普通形参，会被改名）
+                    params.insert(0, LocalVar { name: "self".to_string(), id: VarId(0) });
+                }
+                Ok(Stmt::Assign(vec![target], vec![Expr::FuncDef(params, is_vararg, Box::new(block))]))
             }
             "do" => {
                 self.advance();

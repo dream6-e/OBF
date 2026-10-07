@@ -600,29 +600,8 @@ impl Generator {
             raw_handlers = raw_handlers.replace(&comp_old, &comp_new);
         }
 
-        if raw_handlers.trim_start().starts_with("if op") { raw_handlers = raw_handlers.replacen("if op", "elseif op", 1); }
-
         // handlers 成块：多个 op 共用一个方法（省体积）
-        let mut parsed: Vec<(Vec<u32>, String)> = Vec::new();
-        let mut remaining = raw_handlers.as_str();
-        let mut current_ops: Vec<u32> = Vec::new(); let mut current_code = String::new();
-        while let Some(idx) = remaining.find("elseif op") {
-            let before = &remaining[..idx];
-            if !current_ops.is_empty() {
-                current_code.push_str(before); let code_str = current_code.trim().to_string();
-                parsed.push((current_ops.clone(), code_str));
-                current_code.clear();
-            }
-            remaining = &remaining[idx + 9..];
-            if let Some(then_idx) = remaining.find("then") {
-                let ops: Vec<u32> = remaining[..then_idx].split(|c: char| !c.is_numeric()).filter_map(|s| s.parse::<u32>().ok()).collect();
-                if !ops.is_empty() { current_ops = ops; remaining = &remaining[then_idx + 4..]; } else { current_code.push_str("elseif op"); current_code.push_str(&remaining[..then_idx]); current_code.push_str("then"); remaining = &remaining[then_idx + 4..]; }
-            }
-        }
-        if !current_ops.is_empty() {
-            current_code.push_str(remaining); let code_str = current_code.trim().to_string();
-            parsed.push((current_ops.clone(), code_str));
-        }
+        let parsed = crate::VM::VM_Backend::Generator_util::split_dispatch_handlers(&raw_handlers);
 
         // 去重 + 分配随机方法名 / 随机状态号
         let mut blocks: Vec<(Vec<u32>, String, String, u32, usize)> = Vec::new();
@@ -1193,6 +1172,8 @@ impl Generator {
                 kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
             block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
             block_execute_def.push_str("end end ");
+            // ① 热区常量折叠（派发环里参数全为字面量的键表调用；语义逐位等价）
+            block_execute_def = crate::VM::VM_Backend::Generator_util::fold_const_keycalls(&block_execute_def, &keys);
         }
 
         let block_decoder_script = decoder_script.replace("\n", " ");

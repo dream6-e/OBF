@@ -484,13 +484,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         }
 
         let mut out = String::new();
+        // 顶层只留「捕获 ...」这一条：投毒旗/type/pairs 三条声明按用户指示搬进 return({}) 壳，
+        // 落在 wai 函数体开头（wai 是唯一真正用它们的闭包，见下方 fu 只自带 type）。
+        // 物理行数不变（仍是 3 行），行完整性探针的目标行号不受影响。
         out.push_str(&format!("local {} = ...;\n", var_l));
-        // fu 与 wai 共享的投毒旗及原生别名放在 return 表壳的即时外围函数内，
-        // 只有 varargs 捕获留在壳外；同一物理行不改变行完整性探针的目标行号。
-        out.push_str("return (function() ");
+        out.push_str(&header_block);
         out.push_str(&format!("local {}=false; ", psn_n));
         out.push_str(&format!("local {}=type; local {}=pairs; ", native_type, native_pairs));
-        out.push_str(&header_block);
         // ㉓ 统一流前导（表+惰性解码器）：直接落在主 return({}) 壳内——header_block
         // 打开的 wai 函数体开头（用户指示，不另起壳）；壳内所有取用点（守卫/散点/
         // 打乱 parts/解码脚本）都在其后，解码脚本以 upvalue 捕获。fu 是兄弟字段且在
@@ -595,7 +595,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         out.push_str(&line_guard(&mut rng, &mut uni, false));
         out.push_str(&line_guard(&mut rng, &mut uni, false));
         out.push_str(" ");
-        out.push_str(&format!("return {}(main_chunk, {}, {{}}, nil, nil, {}) end,{}=function(x) {} x:{}() end", fn_execute, var_boot_env, var_l, fu, line_guard(&mut rng, &mut uni, true), wai));
-        out.push_str(&format!(" }}) end)():{}()", fu));
+        // fu 是壳内 wai 的兄弟字段（顶层已无 type 局部）：自带给守卫用的 type 捕获，
+        // 投毒旗只在 wai 体内读写，不再需要兄弟共享作用域。
+        out.push_str(&format!("return {}(main_chunk, {}, {{}}, nil, nil, {}) end,{}=function(x) local {}=type; {} x:{}() end", fn_execute, var_boot_env, var_l, fu, native_type, line_guard(&mut rng, &mut uni, true), wai));
+        out.push_str(&format!(" }}):{}()", fu));
         out
 }

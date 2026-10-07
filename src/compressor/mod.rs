@@ -4,6 +4,7 @@ pub mod ast;
 pub mod parser;
 pub mod scope;
 pub mod codegen;
+pub mod hoist;
 pub mod renamer;
 pub mod packer;
 
@@ -36,10 +37,18 @@ impl Compressor {
         
         let mut pars = parser::Parser::new(tokens);
         let mut root_block = pars.parse_block()?;
-        
+
+        // README 规则：某个数字在一个作用域使用次数大于两次就 local 为一个变量。
+        // 提升发生在作用域解析之前，占位名会被后面的 renamer 统一改名。
+        hoist::hoist_constants(&mut root_block);
+
         let mut resolver = scope::ScopeResolver::new();
         root_block.resolve(&mut resolver);
-        
+        // 名字复用判据：只有「在该作用域子树里被真正引用到的祖先绑定」才必须避名。
+        // 之前的规则是「祖先用过的名字一律封锁」，导致内层（尤其是形参）只能用长名；
+        // 改判据后，未被引用的祖先名字可以安全复用——形参因此普遍拿到单字母。
+        let subtree_refs = resolver.subtree_refs();
+
         let ren = renamer::Renamer::new();
         
         let mut rng = rng();
@@ -77,7 +86,12 @@ impl Compressor {
         used_vars.sort_by(|a, b| {
             let scope_a = resolver.var_scopes.get(&a.0).copied().unwrap_or(0);
             let scope_b = resolver.var_scopes.get(&b.0).copied().unwrap_or(0);
+            // 形参排在同作用域其它绑定之前：用户要求「function(a,b,c) 里的参数尽量单字母」，
+            // 而单字母池只有 52 个，作用域内绑定一多就必须有人拿双字母——先保形参。
+            let param_a = resolver.param_ids.contains(&a.0);
+            let param_b = resolver.param_ids.contains(&b.0);
             scope_depths[scope_a].cmp(&scope_depths[scope_b])
+                .then(param_b.cmp(&param_a))
                 .then(b.1.cmp(&a.1))
                 .then(a.0.0.cmp(&b.0.0))
         });
@@ -106,11 +120,15 @@ impl Compressor {
         let mut fallback_index = 0usize;
         for (id, _) in used_vars {
             let scope = resolver.var_scopes.get(&id).copied().unwrap_or(0);
+            // 只封锁「本作用域子树里真的引用到、且已经分到名字」的绑定名：
+            // 未被引用的祖先绑定不可达，内层复用其名字不会改变任何引用的解析结果。
             let mut blocked = HashSet::new();
-            let mut parent = resolver.scope_parents[scope];
-            while let Some(parent_scope) = parent {
-                blocked.extend(names_by_scope[parent_scope].iter().cloned());
-                parent = resolver.scope_parents[parent_scope];
+            if let Some(refs) = subtree_refs.get(scope) {
+                for rid in refs {
+                    if let Some(name) = mapping.get(rid) {
+                        blocked.insert(name.clone());
+                    }
+                }
             }
 
             let name = if let Some(name) = valid_names.iter()
@@ -205,5 +223,183 @@ mod tests {
     fn unused_local_uses_single_character_placeholder() {
         let names = declared_names("local unused=1;return 7");
         assert_eq!(names, vec!["_".to_string()]);
+    }
+
+    /// 遮蔽/复用语义回归：名字复用放宽后，最容易出事的是「内层复用了外层仍在被引用的名字」。
+    /// 这个夹具把几类危险写法凑齐：捕获外层局部、同名形参遮蔽、`local x = x` 自引用、
+    /// 循环变量被闭包捕获、repeat-until 体内局部、方法形参与嵌套闭包、兄弟作用域复用。
+    /// 判据：压缩前后交给 lua5.1 跑，stdout 必须逐字节一致。
+    #[test]
+    fn name_reuse_preserves_semantics_under_lua() {
+        let lua = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() {
+            return;
+        }
+        let src = r#"
+local function outer(a)
+  local b = a + 1
+  local function inner(b)
+    return function(c) return a + b + c end
+  end
+  return inner(b)(10)
+end
+print(outer(5))
+
+local n = 7
+local function bump()
+  local n = n + 1
+  return n
+end
+print(bump(), n)
+
+local fns = {}
+for i = 1, 3 do
+  fns[i] = function() return i end
+end
+print(fns[1](), fns[2](), fns[3]())
+
+local k = 0
+repeat
+  local step = k + 1
+  k = step
+until k >= 3
+print(k)
+
+-- `function t:get()` 形态：解析期脱糖成 `t.get = function(self)`，
+-- 目标名按变量改名（曾只做字符串映射，导致局部 `t` 改名后这里仍读全局 t）。
+local t = {v = 41}
+function t:get()
+  local function add(x) return self.v + x end
+  return add(1)
+end
+print(t:get())
+
+-- 带点路径 + 方法糖 + 多参：`function obj.inner.mul(a) … end`
+local obj = {inner = {}}
+function obj.inner.mul(a, b)
+  return a * b
+end
+print(obj.inner.mul(6, 7))
+
+-- 方法糖的隐式 self 与显式同名形参混用
+local counter = {n = 0}
+function counter:bump(step)
+  self.n = self.n + (step or 1)
+  return self.n
+end
+print(counter:bump(), counter:bump(4))
+
+local obj = {n = 5}
+obj.inc = function(self, d)
+  local function step() return self.n + d end
+  return step()
+end
+print(obj.inc(obj, 3))
+
+local function mk(v) return function() return v end end
+local g1, g2 = mk(1), mk(2)
+print(g1(), g2())
+
+local u = 1
+do
+  local u = 2
+  print(u)
+end
+print(u)
+"#;
+        let out = Compressor::compress(src).expect("compress tricky source");
+        let dir = std::env::temp_dir().join(format!("kryvex_shadow_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let src_path = dir.join("src.lua");
+        let out_path = dir.join("out.lua");
+        std::fs::write(&src_path, src).expect("write src");
+        std::fs::write(&out_path, &out).expect("write out");
+        let ra = std::process::Command::new(&lua).arg(&src_path).output().expect("run source");
+        let rb = std::process::Command::new(&lua).arg(&out_path).output().expect("run compressed");
+        assert!(ra.status.success(), "source failed: {}", String::from_utf8_lossy(&ra.stderr));
+        assert!(rb.status.success(), "compressed failed: {}\n{}", String::from_utf8_lossy(&rb.stderr), out);
+        assert!(!ra.stdout.is_empty(), "fixture produced no output");
+        assert_eq!(
+            String::from_utf8_lossy(&ra.stdout),
+            String::from_utf8_lossy(&rb.stdout),
+            "compressed output differs from source"
+        );
+    }
+
+    /// 用户要求：所有 `function(a,b,c)` 的形参复用同一批短名，且尽量单字母。
+    /// 这里断言「形参名全部为单字符」，并且不同函数确实在复用同一批名字（不是每处新造一个）。
+    #[test]
+    fn function_params_are_single_letter_and_reused() {
+        let src = r#"
+local function f1(alpha, beta) return alpha + beta end
+local function f2(gamma, delta) return gamma * delta end
+local function f3(e1, e2) return e1 - e2 end
+local obj = {}
+obj.m1 = function(self2, q1) return self2 end
+local h = function(x1, y1, z1) local function inner(w1) return w1 end return inner(x1) + y1 + z1 end
+print(f1(1, 2) + f2(3, 4) + f3(9, 5), obj.m1(obj, 1), h(1, 2, 3))
+"#;
+        let out = Compressor::compress(src).expect("compress");
+        let mut params: Vec<String> = Vec::new();
+        let bytes = out.as_bytes();
+        let mut i = 0usize;
+        while let Some(pos) = out[i..].find("function") {
+            let mut j = i + pos + "function".len();
+            // 跳过函数名（`function name.more:method` 形态）
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'.' || bytes[j] == b':') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                let start = j + 1;
+                let end = out[start..].find(')').map(|k| start + k).unwrap_or(start);
+                for p in out[start..end].split(',') {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        params.push(p.to_string());
+                    }
+                }
+                i = end;
+            } else {
+                i = j;
+            }
+        }
+        assert!(!params.is_empty(), "no params parsed from {:?}", out);
+        for p in &params {
+            assert_eq!(p.chars().count(), 1, "param {:?} is not single letter (out={:?})", p, out);
+        }
+        let distinct: std::collections::HashSet<&String> = params.iter().collect();
+        assert!(distinct.len() < params.len(), "params are not reused: {:?}", params);
+    }
+
+    /// `function a.b:c()` 的脱糖回归：带路径的写法必须与源语义一致，
+    /// 且目标名要与同名局部引用**指向同一名字**（旧实现只做字符串映射，
+    /// 局部 `t` 改了名而这里没改，会去读全局 `t`）。
+    #[test]
+    fn function_statement_paths_are_renamed_consistently() {
+        let lua = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        let src = r#"
+local t = {v = 41}
+function t:get() return self.v end
+function t.plain(a) return a + 1 end
+local reg = {inner = {}}
+function reg.inner.mul(a, b) return a * b end
+print(t:get(), t.plain(1), reg.inner.mul(3, 4))
+"#;
+        let out = Compressor::compress(src).expect("compress method forms");
+        // 脱糖后不应再出现 `function 目标名` 形态（全部变成赋值 + 匿名函数）
+        assert!(!out.contains("function t:"), "method target was not renamed: {}", out);
+        if lua.exists() {
+            let dir = std::env::temp_dir().join(format!("kryvex_path_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("tmp dir");
+            let sp = dir.join("s.lua");
+            let op = dir.join("o.lua");
+            std::fs::write(&sp, src).expect("write");
+            std::fs::write(&op, &out).expect("write");
+            let a = std::process::Command::new(&lua).arg(&sp).output().expect("run src");
+            let b = std::process::Command::new(&lua).arg(&op).output().expect("run out");
+            assert!(a.status.success(), "source failed: {}", String::from_utf8_lossy(&a.stderr));
+            assert!(b.status.success(), "compressed failed: {}\n{}", String::from_utf8_lossy(&b.stderr), out);
+            assert_eq!(String::from_utf8_lossy(&a.stdout), String::from_utf8_lossy(&b.stdout));
+        }
     }
 }

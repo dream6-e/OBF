@@ -652,10 +652,13 @@ pub(super) fn build_dispatch_state(rng: &mut GenRng, poison: &str, poison_delay:
         modulus=modulus, mask=mask, seed=seed_lit, mul_v=mul_v, ca_v=ca_v,
         cb_v=cb_v, cc_v=cc_v, mask_v=mask_v,
     );
+    // ②a 循环内不变式局部化：延迟计数器原本每条指令要读两次、写一次；
+    // 现在每指令只读一次到局部，命中才写回，表里的值与语义保持逐位一致。
+    let pd = rng.name();
     let guard = format!(
-        "{poison}={poison} or ({acc}~={check});if {poison} and {poison_delay}>0 then {poison_delay}={poison_delay}-1 end;if {poison} and {poison_delay}>0 then {bias}={check} else {bias}=({acc}+({acc}-{check})*{damage})%{mask} end;",
+        "{poison}={poison} or ({acc}~={check});local {pd}={poison_delay};if {poison} and {pd}>0 then {pd}={pd}-1;{poison_delay}={pd} end;if {poison} and {pd}>0 then {bias}={check} else {bias}=({acc}+({acc}-{check})*{damage})%{mask} end;",
         poison = poison, poison_delay = poison_delay, acc = acc, check = check,
-        bias = bias, damage = damage_v, mask = mask
+        bias = bias, damage = damage_v, mask = mask, pd = pd
     );
     let route = route_op.clone();
     let update = format!(
@@ -923,6 +926,187 @@ pub(super) fn build_inst_decoder_lua(
     (factory_prefix, init_dc_stmt)
 }
 
+
+/// 热区分发环里的「键表调用」常量折叠：`<tbl>[组][键](A,B)` → `(0X…)`。
+///
+/// 背景：产物里的数字常量有两种表示——字面量，或 `表[组][键](A,B)`（A、B 也是
+/// 字面量，由 `obfuscate_num(_, 1, _)` 发出）。后者的参数**全是不变的字面量**，
+/// 却落在每条 VM 指令都要走的派发路径上，等价于把一次性的常量算法重复算 200 万次。
+/// 折叠只是把「生成期就能算出的值」算好：语义逐位等价，产物变短也变快。
+///
+/// 折叠规则（与产物内辅助函数的运行时语义一致）：
+///   - `key_bx`  → `A ^ B`（A、B 均为非负且 < 2^31 时才折；与 bit32.bxor 的 32 位语义一致）
+///   - `key_add` → `A + B`（A、B、和都 < 2^52 时才折，避开双精度整数精度边界）
+///   - `key_ba`  → `A & B`（A、B 均为非负且 < 2^52 时；grp1 下是二元 band）
+/// 组号不等于 `grp1`、键不在上述三种、参数含变量或为负、解析失败——一律原样保留。
+pub(super) fn fold_const_keycalls(region: &str, keys: &CipherKeys) -> String {
+    const SAFE: i64 = 1 << 52;
+    let b = region.as_bytes();
+    let tbl = keys.tbl_p.as_bytes();
+    let mut out = String::with_capacity(region.len());
+    let mut i = 0usize;
+
+    // 解析一个非负十进制/十六进制字面量；返回 (值, 结束位置)。
+    fn parse_num(b: &[u8], mut p: usize) -> Option<(i64, usize)> {
+        let start = p;
+        let mut v: i64 = 0;
+        if p + 1 < b.len() && b[p] == b'0' && (b[p + 1] == b'X' || b[p + 1] == b'x') {
+            p += 2;
+            let hs = p;
+            let mut hv: i64 = 0;
+            while p < b.len() {
+                let d = match b[p] {
+                    c @ b'0'..=b'9' => (c - b'0') as i64,
+                    c @ b'A'..=b'F' => (c - b'A' + 10) as i64,
+                    c @ b'a'..=b'f' => (c - b'a' + 10) as i64,
+                    _ => break,
+                };
+                hv = hv.saturating_mul(16).saturating_add(d);
+                p += 1;
+            }
+            if p == hs { return None; }
+            v = hv;
+        } else {
+            let ds = p;
+            while p < b.len() && b[p].is_ascii_digit() {
+                v = v.saturating_mul(10).saturating_add((b[p] - b'0') as i64);
+                p += 1;
+            }
+            if p == ds { return None; }
+        }
+        if p == start { return None; }
+        Some((v, p))
+    }
+
+    fn skip_sp(b: &[u8], mut p: usize) -> usize {
+        while p < b.len() && (b[p] == b' ' || b[p] == b'\t') { p += 1; }
+        p
+    }
+
+    while i < b.len() {
+        // 找出 tbl_p 的出现位置（前面不能是标识符字符，避免命中更长的名字）
+        if b[i..].starts_with(tbl) && (i == 0 || !ident_byte(b[i - 1])) {
+            let mut p = i + tbl.len();
+            let mut ok = false;
+            if p < b.len() && b[p] == b'[' {
+                if let Some((g, p1)) = parse_num(b, p + 1) {
+                    let p1 = skip_sp(b, p1);
+                    if p1 < b.len() && b[p1] == b']' && p1 + 1 < b.len() && b[p1 + 1] == b'[' {
+                        if let Some((k, p2)) = parse_num(b, p1 + 2) {
+                            let p2 = skip_sp(b, p2);
+                            if p2 < b.len() && b[p2] == b']' && p2 + 1 < b.len() && b[p2 + 1] == b'(' {
+                                if let Some((a, p3)) = parse_num(b, p2 + 2) {
+                                    let p3 = skip_sp(b, p3);
+                                    if p3 < b.len() && b[p3] == b',' {
+                                        if let Some((c, p4)) = parse_num(b, skip_sp(b, p3 + 1)) {
+                                            let p4 = skip_sp(b, p4);
+                                            if p4 < b.len() && b[p4] == b')' {
+                                                if g == keys.grp1 as i64 {
+                                                    let folded = if k == keys.key_bx as i64
+                                                        && a < (1 << 31) && c < (1 << 31)
+                                                    {
+                                                        Some((a ^ c) as u64)
+                                                    } else if k == keys.key_add as i64
+                                                        && a < SAFE && c < SAFE
+                                                        && a.saturating_add(c) < SAFE
+                                                    {
+                                                        Some((a + c) as u64)
+                                                    } else if k == keys.key_ba as i64
+                                                        && a < SAFE && c < SAFE
+                                                    {
+                                                        // grp1 的 key_ba 是二元 band（见 Generator 的键表构造：
+                                                        // `tbl[g1][ba]=fn_ba`），按位与逐位等价。
+                                                        Some((a & c) as u64)
+                                                    } else {
+                                                        None
+                                                    };
+                                                    if let Some(v) = folded {
+                                                        out.push_str(&format!("(0X{:X})", v));
+                                                        i = p4 + 1;
+                                                        ok = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if ok { continue; }
+        }
+        let ch = region[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// 将生成器发出的 `elseif op... then` handler 链切分为 opcode 集合与 Lua 代码块。
+///
+/// `elseif op` 后只接受空白或 `=` 作为派发标记边界；否则可能误命中名为 `opX...` 的
+/// 随机局部变量，进而把 handler 绑到错误的 opcode 集合。
+pub(super) fn split_dispatch_handlers(raw_handlers: &str) -> Vec<(Vec<u32>, String)> {
+    let normalized = if raw_handlers.trim_start().starts_with("if op") {
+        raw_handlers.replacen("if op", "elseif op", 1)
+    } else {
+        raw_handlers.to_string()
+    };
+    let mut parsed: Vec<(Vec<u32>, String)> = Vec::new();
+    let mut remaining = normalized.as_str();
+    let mut current_ops: Vec<u32> = Vec::new();
+    let mut current_code = String::new();
+
+    while let Some(idx) = find_dispatch_marker(remaining) {
+        let before = &remaining[..idx];
+        if !current_ops.is_empty() {
+            current_code.push_str(before);
+            let code_str = current_code.trim().to_string();
+            parsed.push((current_ops.clone(), code_str));
+            current_code.clear();
+        }
+        remaining = &remaining[idx + 9..];
+        if let Some(then_idx) = remaining.find("then") {
+            let ops: Vec<u32> = remaining[..then_idx]
+                .split(|c: char| !c.is_numeric())
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+            if !ops.is_empty() {
+                current_ops = ops;
+                remaining = &remaining[then_idx + 4..];
+            } else {
+                current_code.push_str("elseif op");
+                current_code.push_str(&remaining[..then_idx]);
+                current_code.push_str("then");
+                remaining = &remaining[then_idx + 4..];
+            }
+        }
+    }
+    if !current_ops.is_empty() {
+        current_code.push_str(remaining);
+        let code_str = current_code.trim().to_string();
+        parsed.push((current_ops, code_str));
+    }
+    parsed
+}
+
+fn find_dispatch_marker(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut at = 0usize;
+    while let Some(relative) = s[at..].find("elseif op") {
+        let index = at + relative;
+        let next = index + 9;
+        match bytes.get(next) {
+            Some(&byte) if byte == b' ' || byte == b'\t' || byte == b'\r' || byte == b'\n' || byte == b'=' => {
+                return Some(index);
+            }
+            _ => at = next,
+        }
+    }
+    None
+}
 
 /// 标识符字节判定（与 Lua 的 [A-Za-z0-9_] 一致）。
 fn ident_byte(c: u8) -> bool { c.is_ascii_alphanumeric() || c == b'_' }
@@ -1294,7 +1478,7 @@ pub use crate::VM::VM_Backend::Generator_unistream::UniStream;
 
 #[cfg(test)]
 mod custom_string_stream_tests {
-    use super::{mix_decrypt, mix_encrypt, stream_dec_body};
+    use super::{mix_decrypt, mix_encrypt, stream_dec_body, CipherKeys};
     use std::path::Path;
     use std::process::Command;
 
@@ -1318,5 +1502,38 @@ mod custom_string_stream_tests {
         let out = Command::new(lua).arg("-e").arg(script).output().expect("run bundled Lua 5.1");
         assert!(out.status.success(), "string stream Lua failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("STRING_STREAM_OK"));
+    }
+
+    #[test]
+    fn fold_const_keycalls_matches_runtime_semantics() {
+        // 三个辅助键（异或/与/加）各造一条常量调用；参数全为字面量。
+        let keys = CipherKeys {
+            grp1: 0x46, grp2: 0x11, key_bx: 0x51, key_ba: 0x63, key_add: 0x1B,
+            key_bs: 0x53, key_ba2: 0x71, key_bs2: 0x22, tbl_p: "K".to_string(),
+        };
+        let src = "if K[0X46][0X51](0X5C07F492,607577790)<=x then y=K[70][27](1000,2000)+K[0X46][0X63](0XFFFFFFFF,1) end;                    K[0X46][0X51](v,1); local z=K[0X46][0X51](0X10,0X20)";
+        let out = super::fold_const_keycalls(src, &keys);
+        // 常量调用被折成字面量（用括号包住，避免和左邻右舍粘连）
+        assert!(out.contains(&format!("(0X{:X})", 0x5C07F492u64 ^ 607577790)), "{}", out);
+        assert!(out.contains(&format!("(0X{:X})", 1000u64 + 2000)), "{}", out);
+        // 二元 band：0XFFFFFFFF & 1 == 1（曾误按「掩码」折成 0XFFFFFFFF，测试就是为此加的）
+        assert!(out.contains(&format!("(0X{:X})", 0xFFFF_FFFFu64 & 1)), "{}", out);
+        assert!(out.contains(&format!("(0X{:X})", 0x10u64 ^ 0x20)), "{}", out);
+        // 含变量的调用、非三类键、组号不符：一律原样保留
+        assert!(out.contains("K[0X46][0X51](v,1)"));
+        let noop = super::fold_const_keycalls("K[0X11][0X51](1,2)", &keys);
+        assert_eq!(noop, "K[0X11][0X51](1,2)");
+        let noop2 = super::fold_const_keycalls("K[0X46][0X53](1,2)", &keys);
+        assert_eq!(noop2, "K[0X46][0X53](1,2)");
+        // 折叠后必须是合法 Lua 表达式片段（与一个占位符拼接后交给 lua5.1 校验）
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if lua.exists() {
+            // K 用桩表顶上：片段里的调用在探针里只需能解析/可调用
+            let probe = format!(
+                "local K={{[0X46]={{[0X51]=function(a,b) return 0 end,[27]=function(a,b) return 0 end,[0X63]=function(a,b) return 0 end}}}} local x=7 local v=3 local y=0 {out} print('FOLD_OK')");
+            let r = Command::new(lua).arg("-e").arg(&probe).output().expect("run lua");
+            assert!(r.status.success(), "folded Lua failed: {}", String::from_utf8_lossy(&r.stderr));
+            assert!(String::from_utf8_lossy(&r.stdout).contains("FOLD_OK"));
+        }
     }
 }
