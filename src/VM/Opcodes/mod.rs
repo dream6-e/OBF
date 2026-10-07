@@ -146,6 +146,9 @@ pub struct OpcodeConfig {
     pub native_type: String,
     pub native_pairs: String,
     pub native_error: String,
+    /// (惰性解密语句, 解密后表达式)，分别对应数值 for 的初值/上限/步长错误。
+    /// 文本由 Generator 的 UniStream 加密，不以明文写入产物。
+    pub numeric_for_errors: [(String, String); 3],
     pub native_getfenv: String,
     pub native_setfenv: String,
     pub builtin_reg: String,

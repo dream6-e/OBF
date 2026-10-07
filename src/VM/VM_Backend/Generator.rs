@@ -461,6 +461,7 @@ impl Generator {
         // 目标三②：计算式跳转的密钥源——n_kon 是 execute 入口从 KREG 取出的本原型
         // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
         let (n_kon, n_ka) = (rng.name(), rng.name());
+        let numeric_for_errors = uni.register_numeric_for_errors(&mut rng);
         let cfg = OpcodeConfig {
             pc: var_pc.clone(),
             stk: var_stk.clone(),
@@ -487,6 +488,7 @@ impl Generator {
             native_type: native_type.clone(),
             native_pairs: native_pairs.clone(),
             native_error: native_error.clone(),
+            numeric_for_errors,
             native_getfenv: native_getfenv.clone(),
             native_setfenv: native_setfenv.clone(),
             builtin_reg: format!("self[{}]", k_breg),

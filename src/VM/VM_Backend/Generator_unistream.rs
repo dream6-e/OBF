@@ -108,6 +108,19 @@ impl UniStream {
         };
         (stmt, format!("{}[{}]", self.tbl, kf))
     }
+    /// 注册数值 for 的标准 Lua 5.1 错误文本；调用侧拿到惰性解密语句与取值表达式，
+    /// 生成产物中只保留 UniStream 密文，不泄露错误消息明文。
+    pub fn register_numeric_for_errors(&mut self, rng: &mut GenRng) -> [(String, String); 3] {
+        [
+            "'for' initial value must be a number",
+            "'for' limit must be a number",
+            "'for' step must be a number",
+        ]
+        .map(|message| {
+            let id = self.register(message);
+            self.fetch(rng, id)
+        })
+    }
     /// ㉓.2 数字字面量格式：逐构建随机选择十进制或大写十六进制，不做纯算术伪装。
     fn mask_num(&self, rng: &mut GenRng, v: u64) -> String {
         if rng.range(0, 2) == 0 {
@@ -264,5 +277,32 @@ mod custom_unistream_tests {
         let out = Command::new(lua).arg("-e").arg(script).output().expect("run bundled Lua 5.1");
         assert!(out.status.success(), "UniStream Lua failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("UNISTREAM_OK"));
+    }
+
+    #[test]
+    fn numeric_for_error_texts_are_lazily_emitted_without_plaintext() {
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() { return; }
+        let expected = [
+            "'for' initial value must be a number",
+            "'for' limit must be a number",
+            "'for' step must be a number",
+        ];
+        let mut rng = GenRng::new(0xF04_5EA_123);
+        let mut stream = UniStream::new(&mut rng);
+        let entries = stream.register_numeric_for_errors(&mut rng);
+        let mut script = stream.emit_prelude(&mut rng);
+        for (stmt, expr) in entries {
+            script.push_str(&stmt);
+            script.push_str(&format!("print({expr});"));
+        }
+        for message in expected {
+            assert!(!script.contains(message), "plaintext message in emitted UniStream");
+        }
+        let out = Command::new(lua).arg("-e").arg(script).output().expect("run bundled Lua 5.1");
+        assert!(out.status.success(), "numeric-for UniStream failed: {}", String::from_utf8_lossy(&out.stderr));
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let actual: Vec<_> = stdout.lines().collect();
+        assert_eq!(actual, expected.to_vec());
     }
 }
