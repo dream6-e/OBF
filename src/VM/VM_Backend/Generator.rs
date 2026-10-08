@@ -175,9 +175,14 @@ impl Generator {
                     }
                 }
             }
-            // 融合指令（SuperOperator）也各分一组别名，和 builtin-load 一样按 slot 索引
+            // 融合指令按 slot 分配别名。性能型超级指令只用一个别名，避免为了少量
+            // 新 handler 显著扩张每条指令都要走的 opcode 派发树。
             for i in 0..Opcodes::builtins::FUSED_OP_COUNT {
-                let count = map_rng.random_range(3..=6);
+                let count = if i >= Opcodes::builtins::FUSED_SUPER_BASE {
+                    1
+                } else {
+                    map_rng.random_range(3..=6)
+                };
                 for _ in 0..count {
                     loop {
                         let val = map_rng.random_range(80000..99999);
