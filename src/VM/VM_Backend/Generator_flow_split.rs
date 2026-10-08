@@ -36,6 +36,7 @@ pub(super) fn wrap_for_build(
         &suffix("dispatch_gate"),
         &suffix("dispatch_index"),
         style_seed & 2 != 0,
+        style_seed,
     )
 }
 
@@ -52,49 +53,113 @@ pub(super) fn wrap_dispatcher(
     gate_name: &str,
     index_name: &str,
     invert_route: bool,
+    flow_seed: u64,
 ) -> String {
-    let core_body = if !has_handlers {
+    let step_name = format!("{}_dispatch_step", core_name);
+    let exit_a = format!("{}_return_a", route_name);
+    let exit_b = format!("{}_return_b", route_name);
+    let state_name = format!("{}_state", route_name);
+    let base = (flow_seed as u32) & 0x3FFF_FF00;
+    let state = |offset: u32| format!("0X{:X}", base + offset);
+    let (s0, s1, s2, s3, s4, s5, s6, s7) = (
+        state(0x11),
+        state(0x27),
+        state(0x3D),
+        state(0x53),
+        state(0x69),
+        state(0x7F),
+        state(0x95),
+        state(0xAB),
+    );
+
+    // Keep setup in its original position; the nested step closure captures its locals.
+    let loop_body = if !has_handlers {
         // Preserve the previous empty-tree behavior: enter once, break, and return no values.
         "while true do break end".to_string()
     } else {
-        let (loop_open, loop_close) = match loop_form {
+        let (open, close) = match loop_form {
             LoopForm::While => ("while not ((true or false)==false) do ", " end;"),
             LoopForm::Repeat => ("repeat ", " until (false and not true) or false;"),
         };
-        format!("{}{}{}{}", setup, loop_open, body, loop_close)
+        format!("{}{}{}", open, body, close)
     };
+    let core_body = format!(
+        "{setup}local function {step}(...) {loop_body} end; return {step}(...);",
+        setup = setup,
+        step = step_name,
+        loop_body = loop_body,
+    );
 
-    let first_test = if invert_route {
+    // Two state-machine entry paths converge only through return-preserving relays.
+    let start_test = if invert_route {
         format!("not {}", gate_name)
     } else {
         gate_name.to_string()
     };
-    let second_test = if invert_route {
-        gate_name.to_string()
-    } else {
-        format!("not {}", gate_name)
+    let route_form = match loop_form {
+        LoopForm::While => LoopForm::Repeat,
+        LoopForm::Repeat => LoopForm::While,
+    };
+    let (route_open, route_close) = match route_form {
+        LoopForm::While => ("while not ((true or false)==false) do", "end;"),
+        LoopForm::Repeat => ("repeat", "until (false and not true) or false;"),
     };
 
     format!(
-        "local function {core}(...) {core_body} end; \
-         local function {route}(...) \
-           local {gate}=({chunk}~=nil and true) or false; \
-           for {index}=0X1,0X1 do \
-             if {first} then return {core}(...) \
-             elseif {second} then return {core}(...) \
-             else break end \
-           end; \
-           return {core}(...) \
-         end; \
-         return {route}(...);",
+        r#"local function {core}(...) {core_body} end;
+local function {exit_a}(...) return {core}(...) end;
+local function {exit_b}({gate},...)
+  if {gate} and not (false or false) then return {exit_a}(...)
+  elseif not {gate} or (false and {gate}) then return {core}(...)
+  else return {exit_a}(...) end
+end;
+local function {route}(...)
+  local {gate}=({chunk}~=nil and true) or false;
+  local {state}={start} and {s0} or {s1};
+  {route_open}
+    if {state}=={s0} then
+      if {gate} and not (false or false) then {state}={s2}
+      elseif not {gate} or (false and {gate}) then {state}={s3} else break end
+    elseif {state}=={s1} then
+      if not {gate} or (false and {gate}) then {state}={s5}
+      elseif {gate} and not (false or false) then {state}={s4} else break end
+    elseif {state}=={s2} then
+      repeat {state}={s6} until (false and not {gate}) or true
+    elseif {state}=={s3} then {state}={s7}
+    elseif {state}=={s4} then {state}={s6}
+    elseif {state}=={s5} then
+      for {index}=0X1,0X1 do
+        if not {gate} or (false and {gate}) then {state}={s7}
+        elseif {gate} and (true or false) then {state}={s6}
+        else {state}={s7} end; break
+      end
+    elseif {state}=={s6} then return {exit_a}(...)
+    elseif {state}=={s7} then return {exit_b}({gate},...)
+    else break end
+  {route_close}
+  return {exit_a}(...)
+end;
+return {route}(...);"#,
         core = core_name,
         core_body = core_body,
+        exit_a = exit_a,
+        exit_b = exit_b,
         route = route_name,
         gate = gate_name,
         chunk = chunk_name,
+        state = state_name,
         index = index_name,
-        first = first_test,
-        second = second_test,
+        start = start_test,
+        s0 = s0,
+        s1 = s1,
+        s2 = s2,
+        s3 = s3,
+        s4 = s4,
+        s5 = s5,
+        s6 = s6,
+        s7 = s7,
+        route_open = route_open,
+        route_close = route_close,
     )
 }
 
@@ -128,25 +193,34 @@ mod tests {
 
         for form in [LoopForm::While, LoopForm::Repeat] {
             for invert in [false, true] {
-                let loop_body = "local total=0; for i=1,4 do total=total+i; if i==2 then break end end; if chunk and chunk.stop then break end; if chunk then return total,chunk.label,nil else return total,\"none\",nil end;";
+                let setup = "local flow_bias=0;";
+                let loop_body = "local total=flow_bias; for i=1,4 do total=total+i; if i==2 then break end end; if chunk and chunk.stop then break end; if chunk then return total,chunk.label,nil,... else return total,\"none\",nil,... end;";
                 let core = "flow_core";
                 let route = "flow_route";
                 let gate = "flow_gate";
                 let index = "flow_index";
+                let flow_seed = (u64::from(invert) << 1) | u64::from(form == LoopForm::Repeat);
                 let wrapped = wrap_dispatcher(
-                    "", loop_body, true, form, "chunk", core, route, gate, index, invert,
+                    setup, loop_body, true, form, "chunk", core, route, gate, index, invert,
+                    flow_seed,
                 );
+                assert!(wrapped.matches("local function").count() >= 5);
+                for keyword in [
+                    "while", "repeat", "for ", "break", "elseif", "not", "and", "or", "return",
+                ] {
+                    assert!(wrapped.contains(keyword), "missing Lua keyword: {keyword}");
+                }
                 let source = format!(
-                    "local function original(chunk) while true do {body} end end; \
+                    "local function original(chunk, ...) local flow_bias=0; while true do {body} end end; \
                      local function transformed(chunk, ...) {wrapped} end; \
-                     local a,b,c=original({{stop=false,label='ok'}}); \
-                     local x,y,z=transformed({{stop=false,label='ok'}}); \
-                     assert(a==x and b==y and c==z); \
-                     local d,e,f=original({{stop=true,label='early'}}); \
-                     local u,v,w=transformed({{stop=true,label='early'}}); \
-                     assert(d==u and e==v and f==w); \
-                     local g,h,j=original(nil); local p,q,r=transformed(nil); \
-                     assert(g==p and h==q and j==r); io.write('FLOW_OK')",
+                     local a,b,c,d,e,f=original({{stop=false,label='ok'}},'x',nil,'z'); \
+                     local x,y,z,u,v,w=transformed({{stop=false,label='ok'}},'x',nil,'z'); \
+                     assert(a==x and b==y and c==z and d==u and e==v and f==w); \
+                     local g,h,j=original({{stop=true,label='early'}}); \
+                     local m,n,o=transformed({{stop=true,label='early'}}); \
+                     assert(g==m and h==n and j==o); \
+                     local p,q,r=original(nil); local s,t,u=transformed(nil); \
+                     assert(p==s and q==t and r==u); io.write('FLOW_OK')",
                     body = loop_body,
                     wrapped = wrapped,
                 );
