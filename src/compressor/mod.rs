@@ -86,27 +86,24 @@ impl Compressor {
         used_vars.sort_by(|a, b| {
             let scope_a = resolver.var_scopes.get(&a.0).copied().unwrap_or(0);
             let scope_b = resolver.var_scopes.get(&b.0).copied().unwrap_or(0);
-            // 形参排在同作用域其它绑定之前：用户要求「function(a,b,c) 里的参数尽量单字母」，
-            // 而单字母池只有 52 个，作用域内绑定一多就必须有人拿双字母——先保形参。
-            let param_a = resolver.param_ids.contains(&a.0);
-            let param_b = resolver.param_ids.contains(&b.0);
+            // 形参池（单字母）与非形参池（双字母）互不挤占，排序不再需要形参优先；
+            // 仍按作用域深度从外向内分配，保证外层先拿名字、内层避名有据可依。
             scope_depths[scope_a].cmp(&scope_depths[scope_b])
-                .then(param_b.cmp(&param_a))
                 .then(b.1.cmp(&a.1))
                 .then(a.0.0.cmp(&b.0.0))
         });
 
-        // 候选池：52 个单字母名 + 52×52 个双字母名，严格只使用字母。
-        let mut valid_names: Vec<String> = single_letters
-            .iter()
-            .map(|c| c.to_string())
-            .collect();
+        // 候选池（用户判据）：`function(...)` 的形参拿 52 个单字母；其余所有绑定
+        // 一律拿两个随机大小写字母的名字。复用判据不变：名字只在可能发生词法
+        // 遮蔽的作用域链中保持唯一，不相交的兄弟作用域继续复用同名。
+        let param_pool: Vec<String> = single_letters.iter().map(|c| c.to_string()).collect();
+        let mut var_pool: Vec<String> = Vec::with_capacity(base * base);
         for first in &single_letters {
             for second in &single_letters {
-                valid_names.push(format!("{}{}", first, second));
+                var_pool.push(format!("{}{}", first, second));
             }
         }
-        valid_names.retain(|name| !ren.is_keyword(name) && !ren.is_safe_global(name));
+        var_pool.retain(|name| !ren.is_keyword(name) && !ren.is_safe_global(name));
 
         let mut names_by_scope: Vec<HashSet<String>> =
             (0..resolver.scope_parents.len()).map(|_| HashSet::new()).collect();
@@ -131,21 +128,21 @@ impl Compressor {
                 }
             }
 
-            let name = if let Some(name) = valid_names.iter()
+            // 形参 → 单字母池；其余绑定 → 双字母池。两池各自找第一个未被遮蔽、
+            // 本作用域未占用的名字；池耗尽才落到计数兜底（生成更长的名字）。
+            let is_param = resolver.param_ids.contains(&id);
+            let pool: &Vec<String> = if is_param { &param_pool } else { &var_pool };
+            let name = if let Some(name) = pool.iter()
                 .find(|name| !blocked.contains(*name) && !names_by_scope[scope].contains(*name))
                 .cloned()
             {
                 name
             } else {
+                // 池耗尽（同一作用域链要 2700+ 个活跃名字才会到这一步）：
+                // 计数兜底从双字母起编（0..52²→两字母，之后三字母……），
+                // 与 codegen 的字符串表改名计数同编号语义。
                 loop {
-                    let mut n = fallback_index;
-                    let mut candidate = String::new();
-                    loop {
-                        candidate.push(single_letters[n % base]);
-                        n /= base;
-                        if n == 0 { break; }
-                    }
-                    candidate = candidate.chars().rev().collect();
+                    let candidate = codegen::nth_short_name(&single_letters, fallback_index);
                     fallback_index += 1;
                     if !ren.is_keyword(&candidate) && !ren.is_safe_global(&candidate)
                         && !blocked.contains(&candidate) && !names_by_scope[scope].contains(&candidate)
@@ -198,7 +195,34 @@ mod tests {
     fn used_local_names_fit_in_two_characters() {
         let names = declared_names("local descriptive_name=1;return descriptive_name");
         assert_eq!(names.len(), 1);
-        assert!(names[0].len() <= 2, "generated local name was {:?}", names[0]);
+        // 非形参绑定必须恰好两个字母（大小写随机），不再是单字母。
+        assert_eq!(names[0].len(), 2, "generated local name was {:?}", names[0]);
+        assert!(
+            names[0].chars().all(|c| c.is_ascii_alphabetic()),
+            "generated local name was {:?}",
+            names[0],
+        );
+    }
+
+    #[test]
+    fn params_single_letter_and_locals_two_letters_mix() {
+        // 形参单字母、普通局部双字母，同一产物内并存且复用。
+        let src = "local total=0\nlocal add=function(first, second) local carry=first+second; return carry end\nfor idx=1,2 do total=total+add(idx,idx) end\nreturn total";
+        let out = Compressor::compress(src).expect("compress");
+        // 所有 `local 名字=` 形式的绑定（非形参）都必须是两个字母。
+        for decl in declared_names(src) {
+            assert_eq!(decl.len(), 2, "non-param local {:?} in {:?}", decl, out);
+        }
+        // 形参仍为单字母。
+        let open = out.find("function").expect("function in output");
+        let pl = out[open..].find('(').unwrap() + open + 1;
+        let pr = out[pl..].find(')').unwrap() + pl;
+        for p in out[pl..pr].split(',') {
+            let p = p.trim();
+            if !p.is_empty() {
+                assert_eq!(p.chars().count(), 1, "param {:?} in {:?}", p, out);
+            }
+        }
     }
 
     #[test]

@@ -281,6 +281,26 @@ pub struct CodegenContext {
     pub reserved_local_names: HashSet<String>,
 }
 
+/// 计数兜底名：单字母名只留给 `function` 形参，这里从双字母起编。
+/// `0..base²` → 两个字母，`base²..base²+base³` → 三个字母，依此类推。
+/// 与压缩器主改名循环共用同一编号语义，保证跳过禁名时水位线一致。
+pub fn nth_short_name(chars: &[char], mut index: usize) -> String {
+    let base = chars.len();
+    let mut len = 2usize;
+    let mut capacity = base * base;
+    while index >= capacity {
+        index -= capacity;
+        capacity *= base;
+        len += 1;
+    }
+    let mut out = vec![chars[0]; len];
+    for slot in out.iter_mut().rev() {
+        *slot = chars[index % base];
+        index /= base;
+    }
+    out.iter().collect()
+}
+
 impl CodegenContext {
     pub fn map_string(&self, name: &str) -> String {
         if name.is_empty() {
@@ -306,7 +326,6 @@ impl CodegenContext {
             } else {
                 valid_chars
             };
-            let base = chars.len();
 
             // 起始下标取「基址 + 已分配数」与水位线的较大者：跳过禁名时水位线
             // 记录真正用掉的下标，防止两个源名跳过同一批禁名后撞车（单射性）。
@@ -315,16 +334,9 @@ impl CodegenContext {
             let mut index = (map.len() + self.map_string_start_idx)
                 .max(MAP_WATERMARK.with(|w| w.get()));
             let final_name = loop {
-                let mut n = index;
-                let mut mapped_name = String::new();
-                loop {
-                    mapped_name.push(chars[n % base]);
-                    n /= base;
-                    if n == 0 {
-                        break;
-                    }
-                }
-                let cand: String = mapped_name.chars().rev().collect();
+                // 与压缩器改名计数同编号：0..base² → 双字母，之后三字母……
+                // 单字母名只留给 function 形参，这里一律从双字母起编。
+                let cand = nth_short_name(&chars, index);
                 if !is_reserved_name(&cand)
                     && !is_lua_keyword(&cand)
                     && !self.reserved_local_names.contains(&cand)
