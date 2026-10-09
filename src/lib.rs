@@ -16,4 +16,6 @@ pub mod BytecodeCompiler;
 pub mod VM;
 
 pub mod compressor;
+pub mod minifier;
+pub mod strcrypt;
 pub mod packer;

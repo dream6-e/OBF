@@ -44,6 +44,9 @@ pub enum Stmt {
         exprs: Vec<Expr>,
         block: Box<Block>,
     },
+    /// 注意：解析器已把 `function a.b:c()` 脱糖成 `a.b.c = function(self, …)`（见 parser.rs），
+    /// 本变体不再由解析器产生，保留仅为兼容/防御。若将来有前端直接构造它，
+    /// path[0] 必须按**变量**语义处理（旧实现只做字符串映射，导致局部名改名后对不上）。
     Function {
         path: Vec<String>,
         method: Option<String>,

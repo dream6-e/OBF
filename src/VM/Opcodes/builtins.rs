@@ -53,12 +53,14 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng, perm: 
     out
 }
 
-/// 融合指令分五族：builtin-load + LOADK + CALL 三合一、builtin-load + GETTABLE 二合一，
-/// 以及目标二新增的「取字段 + 调用」两族：SELF(A,B,C)+CALL(A,2,1)（零参方法调用）与
-/// GETTABLE(A,B,C)+CALL(A,1,1)（零参点调用），以及目标三新增的族六「计算式跳转」
-/// （JMP 落点由运行期值现算 + 诱饵后继）。后三族与 builtin 槽位无关，各占一个额外索引。
+/// 融合指令先保留两组 builtin 槽位与四个既有通用族，随后追加性能型超级指令。
 pub const FUSED_OP_BASE: usize = TOTAL_OPCODES;
-pub const FUSED_OP_COUNT: usize = BUILTIN_NAMES.len() * 2 + 4;
+pub const FUSED_SUPER_BASE: usize = BUILTIN_NAMES.len() * 2 + 4;
+pub const FUSED_ARITH_BASE: usize = FUSED_SUPER_BASE;
+pub const FUSED_ARITH_COUNT: usize = 6;
+pub const FUSED_TABLE_GET: usize = FUSED_ARITH_BASE + FUSED_ARITH_COUNT;
+pub const FUSED_TABLE_SET: usize = FUSED_TABLE_GET + 1;
+pub const FUSED_OP_COUNT: usize = FUSED_TABLE_SET + 1;
 
 /// 仅为本产物中实际触发融合的槽位生成 handler，避免扩张 BST 分发树。
 pub fn generate_fused(
@@ -183,6 +185,56 @@ pub fn generate_fused(
             "local {k1}={bx}({bx}({{PC}},{ld}),{sa}); \
              if {bx}({k1},{k1})==0X0 then {{PC}}={bx}({e1},{k1}) else {{PC}}={bx}({e2},{k1}) end",
             k1 = k1, e1 = e1, e2 = e2, sa = sa, ld = ld, bx = bx)));
+    }
+
+    // 性能型超级指令：custom ISA 的 PushRk, PushRk, arithmetic, PopReg
+    // 序列合为一次 STK 写入，GetTable/SetTable 的 Push* + Index + Pop 序列同理。
+    // rewrite 阶段仍保留被吞记录为死槽并原样推进 PC，控制流和记录偏移不变。
+    const ARITHMETIC: [&str; FUSED_ARITH_COUNT] = ["+", "-", "*", "/", "%", "^"];
+    for (offset, operator) in ARITHMETIC.iter().enumerate() {
+        let family = FUSED_ARITH_BASE + offset;
+        if !used.contains(&family) || m[family].is_empty() {
+            continue;
+        }
+        let mut h = OpcodeBuilder::new(m[family].clone(), cfg, rng);
+        let a = h.raw_inst(2);
+        let left = h.rk(3);
+        let right = h.rk(4);
+        let skip = super::ident(h.rng, 3);
+        out.push_str(&h.build(&format!(
+            "{{STK}}[{a}] = {left} {operator} {right}; {{PC}} = {{PC}} + {skip}",
+            a = a, left = left, operator = operator, right = right, skip = skip
+        )));
+    }
+
+    if used.contains(&FUSED_TABLE_GET) && !m[FUSED_TABLE_GET].is_empty() {
+        let mut h = OpcodeBuilder::new(m[FUSED_TABLE_GET].clone(), cfg, rng);
+        let a = h.raw_inst(2);
+        let table_reg = h.raw_inst(3);
+        let table = h.rng.name();
+        // 与原序列相同，先读取表寄存器，再解析 RK 键。
+        h.pre_statements.push_str(&format!("local {table}={{STK}}[{table_reg}]; "));
+        let key = h.rk(4);
+        let skip = super::ident(h.rng, 3);
+        out.push_str(&h.build(&format!(
+            "{{STK}}[{a}] = {table}[{key}]; {{PC}} = {{PC}} + {skip}",
+            a = a, table = table, key = key, skip = skip
+        )));
+    }
+
+    if used.contains(&FUSED_TABLE_SET) && !m[FUSED_TABLE_SET].is_empty() {
+        let mut h = OpcodeBuilder::new(m[FUSED_TABLE_SET].clone(), cfg, rng);
+        let table_reg = h.raw_inst(2);
+        let table = h.rng.name();
+        // 保持原 SetTable 的求值次序：表、键、值，然后执行赋值。
+        h.pre_statements.push_str(&format!("local {table}={{STK}}[{table_reg}]; "));
+        let key = h.rk(3);
+        let value = h.rk(4);
+        let skip = super::ident(h.rng, 3);
+        out.push_str(&h.build(&format!(
+            "{table}[{key}] = {value}; {{PC}} = {{PC}} + {skip}",
+            table = table, key = key, value = value, skip = skip
+        )));
     }
     out
 }

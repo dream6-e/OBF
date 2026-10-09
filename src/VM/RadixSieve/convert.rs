@@ -161,6 +161,12 @@ pub fn apply_radix_sieve(code: &str, _version: Option<super::detect::LuaVersion>
                 return false;
             }
 
+            // 值为 0/1 的字面量保持十进制最短形式（与压缩器的规范化一致），
+            // 转换只会把它们膨胀成 `0X0` / `0X0001`。
+            if matches!(mat.as_str(), "0" | "1") {
+                return false;
+            }
+
             let bytes = code.as_bytes();
             let prev_ok = if start == 0 {
                 true

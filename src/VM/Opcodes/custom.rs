@@ -253,9 +253,14 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let init = for_init.rng.name();
     let limit = for_init.rng.name();
     let step = for_init.rng.name();
+    let errors = &for_init.cfg.numeric_for_errors;
+    let init_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[0].0, errors[0].1);
+    let limit_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[1].0, errors[1].1);
+    let step_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[2].0, errors[2].1);
     out.push_str(&for_init.build(&format!(
-        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {{NATIVE_ERROR}}(\"'for' initial value must be a number\",0) end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {{NATIVE_ERROR}}(\"'for' limit must be a number\",0) end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {{NATIVE_ERROR}}(\"'for' step must be a number\",0) end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}; {pc}={pc}+{b}",
-        stk = stk, a = a, step = step, init = init, limit = limit, q = q, pc = pc, b = b
+        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {init_error} end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {limit_error} end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {step_error} end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}; {pc}={pc}+{b}",
+        stk = stk, a = a, step = step, init = init, limit = limit, q = q, pc = pc, b = b,
+        init_error = init_error, limit_error = limit_error, step_error = step_error
     )));
 
     let mut for_next = handler(m, VmOp::ForNext, cfg, rng);

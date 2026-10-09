@@ -16,8 +16,7 @@ pub(crate) static DBG_ARITH: bool = true;
 // GenRng 继续从这里 re-export，保持 crate 内既有的引用路径不变。
 pub use super::Generator_util::{CipherKeys, GenRng};
 use super::Generator_util::{
-    build_opcode_tree, rename_ident, rewrite_chunk,
-    scan_used_opcodes, uses_ident, write_string, PayloadReader,
+    rename_ident, rewrite_chunk, scan_used_opcodes, uses_ident, write_string, PayloadReader,
 };
 
 
@@ -175,9 +174,14 @@ impl Generator {
                     }
                 }
             }
-            // 融合指令（SuperOperator）也各分一组别名，和 builtin-load 一样按 slot 索引
+            // 融合指令按 slot 分配别名。性能型超级指令只用一个别名，避免为了少量
+            // 新 handler 显著扩张每条指令都要走的 opcode 派发树。
             for i in 0..Opcodes::builtins::FUSED_OP_COUNT {
-                let count = map_rng.random_range(3..=6);
+                let count = if i >= Opcodes::builtins::FUSED_SUPER_BASE {
+                    1
+                } else {
+                    map_rng.random_range(3..=6)
+                };
                 for _ in 0..count {
                     loop {
                         let val = map_rng.random_range(80000..99999);
@@ -461,6 +465,7 @@ impl Generator {
         // 目标三②：计算式跳转的密钥源——n_kon 是 execute 入口从 KREG 取出的本原型
         // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
         let (n_kon, n_ka) = (rng.name(), rng.name());
+        let numeric_for_errors = uni.register_numeric_for_errors(&mut rng);
         let cfg = OpcodeConfig {
             pc: var_pc.clone(),
             stk: var_stk.clone(),
@@ -487,6 +492,7 @@ impl Generator {
             native_type: native_type.clone(),
             native_pairs: native_pairs.clone(),
             native_error: native_error.clone(),
+            numeric_for_errors,
             native_getfenv: native_getfenv.clone(),
             native_setfenv: native_setfenv.clone(),
             builtin_reg: format!("self[{}]", k_breg),
@@ -598,29 +604,8 @@ impl Generator {
             raw_handlers = raw_handlers.replace(&comp_old, &comp_new);
         }
 
-        if raw_handlers.trim_start().starts_with("if op") { raw_handlers = raw_handlers.replacen("if op", "elseif op", 1); }
-
         // handlers 成块：多个 op 共用一个方法（省体积）
-        let mut parsed: Vec<(Vec<u32>, String)> = Vec::new();
-        let mut remaining = raw_handlers.as_str();
-        let mut current_ops: Vec<u32> = Vec::new(); let mut current_code = String::new();
-        while let Some(idx) = remaining.find("elseif op") {
-            let before = &remaining[..idx];
-            if !current_ops.is_empty() {
-                current_code.push_str(before); let code_str = current_code.trim().to_string();
-                parsed.push((current_ops.clone(), code_str));
-                current_code.clear();
-            }
-            remaining = &remaining[idx + 9..];
-            if let Some(then_idx) = remaining.find("then") {
-                let ops: Vec<u32> = remaining[..then_idx].split(|c: char| !c.is_numeric()).filter_map(|s| s.parse::<u32>().ok()).collect();
-                if !ops.is_empty() { current_ops = ops; remaining = &remaining[then_idx + 4..]; } else { current_code.push_str("elseif op"); current_code.push_str(&remaining[..then_idx]); current_code.push_str("then"); remaining = &remaining[then_idx + 4..]; }
-            }
-        }
-        if !current_ops.is_empty() {
-            current_code.push_str(remaining); let code_str = current_code.trim().to_string();
-            parsed.push((current_ops.clone(), code_str));
-        }
+        let parsed = crate::VM::VM_Backend::Generator_util::split_dispatch_handlers(&raw_handlers);
 
         // 去重 + 分配随机方法名 / 随机状态号
         let mut blocks: Vec<(Vec<u32>, String, String, u32, usize)> = Vec::new();
@@ -1067,45 +1052,48 @@ impl Generator {
         }
         let dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng, &psn_n, &poison_delay_expr);
         if tree_entries.is_empty() {
-            // 理论上不会发生（没有任何 handler）
-            block_execute_def.push_str("while true do break end end ");
+            // 理论上不会发生（没有任何 handler）；保留原先的一次空转后退出语义。
+            let split = crate::VM::VM_Backend::Generator_flow_split::wrap_for_build(
+                "", "", false, "chunk", fn_execute, self.ctx.seed, tree_entries.len(),
+            );
+            block_execute_def.push_str(&split);
+            block_execute_def.push_str(" end ");
         } else {
-            block_execute_def.push_str(&dispatch_state.setup);
-            block_execute_def.push_str("while true do ");
-            block_execute_def.push_str(&format!("{}={};", var_state_flag, "true"));
-            block_execute_def.push_str(&dispatch_state.guard);
-            block_execute_def.push_str(&format!(
+            let mut dispatch_body = String::new();
+            dispatch_body.push_str(&format!("{}={};", var_state_flag, "true"));
+            dispatch_body.push_str(&dispatch_state.guard);
+            dispatch_body.push_str(&format!(
                 "local {prev}={pc};",
                 prev = const_path_prev_pc, pc = var_pc));
 
             // ㉚ 目标①：取指改走 DC 缓存（元表前向填充=结构解码；单条公式全解作废）。
             // 条目={mag+Δ, a, B, C}（链偏移撤销+奇偶交换都在填充内完成）；
             // 四字段赋值对洗牌发射（名字↔下标配对恒定，只换书写序——纯外观差异）。
-            block_execute_def.push_str(&format!("local inst_t={}[{}];", n_dc, var_pc));
+            dispatch_body.push_str(&format!("local inst_t={}[{}];", n_dc, var_pc));
             {
                 let mut prs: Vec<(&str, u32)> = vec![("op", 1), ("inst_A", 2), ("inst_B", 3), ("inst_C", 4)];
                 rng.shuffle(&mut prs);
                 let lhs: Vec<String> = prs.iter().map(|(n, _)| n.to_string()).collect();
                 let rhs: Vec<String> = prs.iter().map(|(_, i)| format!("inst_t[{}]", i)).collect();
-                block_execute_def.push_str(&format!("local {}={}; ", lhs.join(","), rhs.join(",")));
+                dispatch_body.push_str(&format!("local {}={}; ", lhs.join(","), rhs.join(",")));
             }
             // 热路径：pc 就是普通局部变量，推进也用普通字面量
-            block_execute_def.push_str(&format!("{}={}+1;", var_pc, var_pc));
+            dispatch_body.push_str(&format!("{}={}+1;", var_pc, var_pc));
             // 同一 PC 上的操作码与三个实际操作数混入本次常量态；分支汇合处因指令
             // 记录固定而自动收敛，路径间不同的执行前缀则通过 PC 势函数统一归一。
-            block_execute_def.push_str(&format!(
+            dispatch_body.push_str(&format!(
                 "{vm}[{ck}][{key}]=({state}+op*0X{om:X}+inst_A*0X{am:X}+inst_B*0X{bm:X}+inst_C*0X{cm:X})%0X100000000;",
                 vm = var_vm, ck = k_consts, key = const_path_key, state = const_path_state,
                 om = const_path_op_mix, am = const_path_a_mix, bm = const_path_b_mix, cm = const_path_c_mix));
-            block_execute_def.push_str(&format!("local {}=op+{};", dispatch_state.route_op, dispatch_state.bias));
+            dispatch_body.push_str(&format!("local {}=op+{};", dispatch_state.route_op, dispatch_state.bias));
 
-            block_execute_def.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
-            block_execute_def.push_str(&build_opcode_tree(&tree_entries, 0, tree_entries.len() - 1, &dispatch_state.route_op, &dispatch_state.bias, &keys, &mut rng));
-            block_execute_def.push_str(&format!(
+            dispatch_body.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
+            dispatch_body.push_str(&crate::VM::VM_Backend::Generator_flow_split::build_relay_dispatch(&tree_entries, &var_pc, &var_top, &var_r1, &var_r2, &var_r3, &dispatch_state.route_op, &dispatch_state.bias, fn_execute, self.ctx.seed));
+            dispatch_body.push_str(&format!(
                 "{state}=({state}+({pc}-{prev})*0X{mul:X})%0X100000000;",
                 state = const_path_state, pc = var_pc, prev = const_path_prev_pc, mul = const_path_mul));
-            block_execute_def.push_str(&dispatch_state.update);
-            block_execute_def.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
+            dispatch_body.push_str(&dispatch_state.update);
+            dispatch_body.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
             // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
             // 活跃闭包持有明文引用不受影响；未来 CLOSURE 经 type(p)=='function' 重解
             // 换钥高频路径零新增调用：嵌套双 bx 拆平（5 次→3 次）+ 声明序/实参对/存储乱序
@@ -1170,7 +1158,7 @@ impl Generator {
                 let unit = |iv: &str| format!("{aa}[{iv}]={bx}({aa}[{iv}],{d1}); {bb}[{iv}]={bx}({bb}[{iv}],{d2}); {cc}[{iv}]={bx}({cc}[{iv}],{d3}); ", aa = aa2, bb = bb2, cc = cc2, bx = bx2, d1 = d12, d2 = d22, d3 = d32, iv = iv);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &nexp, 3, 3, &unit)
             };
-            block_execute_def.push_str(&format!(
+            dispatch_body.push_str(&format!(
                 "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; {mdw} \
                  {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
                    local {kmt}=getmetatable({kreg}); local {kold}={kreg}; {kreg}=setmetatable({{}},{{}}); setmetatable({kreg},{kmt}); for {kc1},{kv1} in {pairs_fn}({kold}) do {kreg}[{kc1}]={kv1} end; \
@@ -1189,8 +1177,15 @@ impl Generator {
                 nn = nn_seg, dline = dline_seg, rk_tail = rk_tail_seg,
                 kreg = kreg_n, c = "chunk", rotw = rot_walk, pairs_fn = native_pairs,
                 kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
-            block_execute_def.push_str(&format!("{}={};", var_state_flag, "false"));
-            block_execute_def.push_str("end end ");
+            dispatch_body.push_str(&format!("{}={};", var_state_flag, "false"));
+            let split = crate::VM::VM_Backend::Generator_flow_split::wrap_for_build(
+                &dispatch_state.setup, &dispatch_body, true, "chunk",
+                fn_execute, self.ctx.seed, tree_entries.len(),
+            );
+            block_execute_def.push_str(&split);
+            block_execute_def.push_str(" end ");
+            // ① 热区常量折叠（派发环里参数全为字面量的键表调用；语义逐位等价）
+            block_execute_def = crate::VM::VM_Backend::Generator_util::fold_const_keycalls(&block_execute_def, &keys);
         }
 
         let block_decoder_script = decoder_script.replace("\n", " ");

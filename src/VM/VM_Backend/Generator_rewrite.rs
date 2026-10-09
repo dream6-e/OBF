@@ -336,6 +336,144 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     while i < n_insts {
         let (op, a, b, c) = raw_insts[i];
 
+        // ---- 性能型 SuperOperator：custom ISA 的栈式四指令序列 → 单条寄存器快路径 ----
+        // 固定记录数不变：融合 handler 前移 PC 3 格，其余三条仍写成不可达死槽；
+        // 因而已有分支位移、共享指令空间与滚动编码链都保持原样。
+        if i >= freeze_until
+            && i + 3 < n_insts
+            && !fused_dead.contains(&i)
+            && (i + 1..=i + 3).all(|target| !jump_targets.contains(&target))
+        {
+            let opcode_at = |offset: usize| {
+                let (candidate, _, _, _) = raw_insts[i + offset];
+                VmOp::from_global(inverse_opcode_map[candidate as usize])
+            };
+            let candidate = match opcode_at(0) {
+                Some(VmOp::PushRk) => {
+                    let (_, first_a, first_b, first_c) = raw_insts[i];
+                    let (_, second_a, second_b, second_c) = raw_insts[i + 1];
+                    let (_, op_a, op_b, op_c) = raw_insts[i + 2];
+                    let (_, dest, pop_b, pop_c) = raw_insts[i + 3];
+                    let offset = match opcode_at(2) {
+                        Some(VmOp::Add) => Some(0),
+                        Some(VmOp::Sub) => Some(1),
+                        Some(VmOp::Mul) => Some(2),
+                        Some(VmOp::Div) => Some(3),
+                        Some(VmOp::Mod) => Some(4),
+                        Some(VmOp::Pow) => Some(5),
+                        _ => None,
+                    };
+                    if first_a == 0
+                        && first_c == 0
+                        && opcode_at(1) == Some(VmOp::PushRk)
+                        && second_a == 0
+                        && second_c == 0
+                        && offset.is_some()
+                        && op_a == 0
+                        && op_b == 0
+                        && op_c == 0
+                        && opcode_at(3) == Some(VmOp::PopReg)
+                        && pop_b == 0
+                        && pop_c == 0
+                    {
+                        offset.map(|n| (
+                            crate::VM::Opcodes::builtins::FUSED_ARITH_BASE + n,
+                            dest as u32,
+                            remap_rk(first_b),
+                            remap_rk(second_b),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                Some(VmOp::PushReg) => {
+                    let (_, table_reg, table_b, table_c) = raw_insts[i];
+                    let (_, first_a, first_value, first_rk_c) = raw_insts[i + 1];
+                    let (_, second_a, second_b, second_c) = raw_insts[i + 2];
+                    let (_, dest, last_b, last_c) = raw_insts[i + 3];
+                    if table_b == 0 && table_c == 0
+                        && opcode_at(1) == Some(VmOp::PushRk)
+                        && first_a == 0 && first_rk_c == 0
+                        && opcode_at(2) == Some(VmOp::GetIndex)
+                        && second_a == 0 && second_b == 0 && second_c == 0
+                        && opcode_at(3) == Some(VmOp::PopReg)
+                        && last_b == 0 && last_c == 0
+                    {
+                        Some((
+                            crate::VM::Opcodes::builtins::FUSED_TABLE_GET,
+                            dest as u32,
+                            table_reg as u32,
+                            remap_rk(first_value),
+                        ))
+                    } else if table_b == 0 && table_c == 0
+                        && opcode_at(1) == Some(VmOp::PushRk)
+                        && first_a == 0 && first_rk_c == 0
+                        && opcode_at(2) == Some(VmOp::PushRk)
+                        && second_a == 0 && second_c == 0
+                        && opcode_at(3) == Some(VmOp::SetIndex)
+                        && dest == 0 && last_b == 0 && last_c == 0
+                    {
+                        Some((
+                            crate::VM::Opcodes::builtins::FUSED_TABLE_SET,
+                            table_reg as u32,
+                            remap_rk(first_value),
+                            remap_rk(second_b),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some((family, fused_a, fused_b, fused_c)) = candidate {
+                if let Some(fused_vals) = fused_map.get(family) {
+                    if !fused_vals.is_empty() {
+                        let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
+                        let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
+                        let a_enc = fused_a.wrapping_add(mag);
+                        let (fb0, fc0) = if mag % 2 == 1 {
+                            (fused_c, fused_b)
+                        } else {
+                            (fused_b, fused_c)
+                        };
+                        let (eo18, ca18, cb18, cc18) = ch_split(chain18);
+                        let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+                        let (fb, fc) = (
+                            (fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb,
+                            (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc,
+                        );
+                        let mag_file = g18 ^ kp18;
+                        w.extend_from_slice(&mag_file.to_le_bytes());
+                        w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
+                        w.extend_from_slice(&fb.to_le_bytes());
+                        w.extend_from_slice(&fc.to_le_bytes());
+                        inst_junk(w, mag_file, rng);
+                        fused_used.insert(family);
+                        fused_count += 1;
+                        pc18 += 1;
+                        let r718 = roll18.rotate_left(7);
+                        roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+                        chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
+                        if fb0 > 127 && fc_pb(mag) {
+                            let slot = fb0 - 128;
+                            let e = fold_map.entry(slot).or_insert(0u32);
+                            *e = e.wrapping_add(fc_f(pc18));
+                            roll_map.insert(slot, roll18);
+                        }
+                        if fc0 > 127 && fc_pc(mag) {
+                            let slot = fc0 - 128;
+                            let e = fold_map.entry(slot).or_insert(0u32);
+                            *e = e.wrapping_add(fc_f(pc18));
+                            roll_map.insert(slot, roll18);
+                        }
+                        fused_dead.extend(i + 1..=i + 3);
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
         // ---- SuperOperator 族三/四：取字段 + 调用（目标二第 2 条）----
         // 族三：SELF(A,B,C) + CALL(A,2,1) —— 零参方法调用（`o:m()` 形态）
         // 族四：GETTABLE(A,B,C) + CALL(A,1,1) —— 零参点调用（`t.f()` 形态）

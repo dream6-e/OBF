@@ -80,19 +80,56 @@ fn main() {
         source_code = loop_source;
     }
 
+    // 第 ⓪ 步：源码最小化（去注释 + 最少空白 + 单行化，纯词法级，非 LZ）。
+    // 只删注释与可忽略空白，令牌序列逐字节不变 ⇒ 语义不变；自带重新分词自检，
+    // 拿不准的输入原样放行。放在 --rob 拼接之前，Check.lua 不参与最小化。
+    let raw_source = source_code.clone();
+    let minified_source = kryvex_ob::minifier::minify_source(&source_code);
+
     // --rob：编译成字节码前，把 Roblox 执行器环境检测（samples/Check.lua）原样
     // 插到源码顶部——include_str! 逐字嵌入不改动一个字节，检测随源码一起进
     // 字节码被混淆；非执行器环境（无 getgenv 等）会在检测段 error(0,0) 死循环。
-    let source_code = if args.contains(&"--rob".to_string()) {
-        format!("{}\n{}", include_str!("../samples/Check.lua"), source_code)
-    } else {
-        source_code
+    let with_check = |body: &str| -> String {
+        if args.contains(&"--rob".to_string()) {
+            format!("{}\n{}", include_str!("../samples/Check.lua"), body)
+        } else {
+            body.to_string()
+        }
     };
+    // 第 ⓪′ 步：源码字符串加密——编译成字节码之前，把每个字符串字面量换成
+    // `解密函数("密文")`，并在源码顶部注入纯算术解密壳，运行期再解回原值。
+    // 自带结构自检：与「仅把字面量替换成调用」不符时原样放行，宁少压不压坏。
+    let encrypted_source = kryvex_ob::strcrypt::encrypt_strings(&minified_source);
+
+    // --rob 的 Check.lua 是混淆器自带的检测脚手架：按既有约定不最小化、不加密。
+    let source_code = with_check(&encrypted_source);
 
     // 指令布局逐产物随机化（种子会写进容器头部，反序列化端据此恢复）
     instructions::randomize_global_seed();
 
-    match codegen::compile(source_code.as_bytes(), &format!("@{}", current_file)) {
+    // 编译：先编「最小化 + 字符串加密」的源码；编不过依次回退到最小化源码、
+    // 原始源码（用户真正写错语法时，报错仍取原始源码，行号才有意义）。
+    let chunk_name = format!("@{}", current_file);
+    let compiled = match codegen::compile(source_code.as_bytes(), &chunk_name) {
+        Ok(proto) => Ok(proto),
+        Err(_) => match codegen::compile(with_check(&minified_source).as_bytes(), &chunk_name) {
+            Ok(proto) => {
+                eprintln!("\x1b[1;33mKRYVEX: \x1b[0m 源码字符串加密后编译失败，已回退到仅最小化");
+                Ok(proto)
+            }
+            Err(_) => match codegen::compile(with_check(&raw_source).as_bytes(), &chunk_name) {
+                // 最小化版本编不过、原文能编：静默回退（并提示一句），用户无感。
+                Ok(proto) => {
+                    eprintln!("\x1b[1;33mKRYVEX: \x1b[0m 最小化源码编译失败，已回退到原始源码");
+                    Ok(proto)
+                }
+                // 都编不过：报原始源码的错误——行号是用户真正能对上的那个。
+                Err(original_err) => Err(original_err),
+            },
+        },
+    };
+
+    match compiled {
         Ok(proto) => {
             let bytes = dump::dump(&proto, true);
 
