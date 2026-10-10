@@ -6,6 +6,7 @@ pub mod Generator_flow;
 pub mod Generator_flow_split;
 pub mod Generator_unistream;
 pub mod Generator_util;
+pub mod Generator_integrity;
 pub mod Generator_rewrite;
 pub mod Generator_kdf;
 pub mod Generator_native;

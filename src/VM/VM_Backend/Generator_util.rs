@@ -631,11 +631,13 @@ pub(super) struct DispatchState {
     pub update: String,
 }
 
-/// 每次 opcode 分发都有状态偏移；两份独立滚动值相互校验。失配只污染共享旗标
-/// 并扰动路由偏移，不在 dispatcher 中早退或暴露固定失败点。
+/// 每次 opcode 分发都有状态偏移。原先两份滚动值由同一组操作数算出，加法
+/// 交换律使其恒等——互检可证为空，白送分析者“此层无效”的信号。现只留单一
+/// 滚动值驱动路由偏移；真实的状态校验移到冷块入口的 `state_digest` 单向摘要
+/// 比对。失配只污染共享旗标并扰动路由偏移，不早退、不暴露固定失败点。
 pub(super) fn build_dispatch_state(rng: &mut GenRng, poison: &str, poison_delay: &str) -> DispatchState {
-    let (acc, check, bias, mask, mul, ca, cb, cc, modulus, route_op) = (
-        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+    let (acc, bias, mask, mul, ca, cb, cc, modulus, route_op) = (
+        rng.name(), rng.name(), rng.name(), rng.name(),
         rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
     );
     let seed = rng.range64(0x1000, 0xFFFF_FFFF);
@@ -647,23 +649,23 @@ pub(super) fn build_dispatch_state(rng: &mut GenRng, poison: &str, poison_delay:
         rng.range64(3, 0x40), rng.range64(3, 0x40), rng.range64(3, 0x40),
     );
     let setup = format!(
-        "local {acc},{check},{bias},{mul},{ca},{cb},{cc},{modulus},{mask}={seed},{seed},0,{mul_v},{ca_v},{cb_v},{cc_v},0X100000000,{mask_v};",
-        acc=acc, check=check, bias=bias, mul=mul, ca=ca, cb=cb, cc=cc,
+        "local {acc},{bias},{mul},{ca},{cb},{cc},{modulus},{mask}={seed},0,{mul_v},{ca_v},{cb_v},{cc_v},0X100000000,{mask_v};",
+        acc=acc, bias=bias, mul=mul, ca=ca, cb=cb, cc=cc,
         modulus=modulus, mask=mask, seed=seed_lit, mul_v=mul_v, ca_v=ca_v,
         cb_v=cb_v, cc_v=cc_v, mask_v=mask_v,
     );
-    // ②a 循环内不变式局部化：延迟计数器原本每条指令要读两次、写一次；
-    // 现在每指令只读一次到局部，命中才写回，表里的值与语义保持逐位一致。
+    // ②a 延迟计数器每指令只读一次到局部、命中才写回。宽限期沿用原偏移，
+    // 耗尽后乘损因子真正扰动路由（旧扰动项恒为 0，毒化分支从未生效）。
     let pd = rng.name();
     let guard = format!(
-        "{poison}={poison} or ({acc}~={check});local {pd}={poison_delay};if {poison} and {pd}>0 then {pd}={pd}-1;{poison_delay}={pd} end;if {poison} and {pd}>0 then {bias}={check} else {bias}=({acc}+({acc}-{check})*{damage})%{mask} end;",
-        poison = poison, poison_delay = poison_delay, acc = acc, check = check,
+        "{poison}={poison};local {pd}={poison_delay};if {poison} and {pd}>0 then {pd}={pd}-1;{poison_delay}={pd} end;if {poison} and {pd}>0 then {bias}={acc}%{mask} else {bias}=({acc}*{damage})%{mask} end;",
+        poison = poison, poison_delay = poison_delay, acc = acc,
         bias = bias, damage = damage_v, mask = mask, pd = pd
     );
     let route = route_op.clone();
     let update = format!(
-        "{check}=({acc}*{mul}+op+inst_A*{ca}+inst_B*{cb}+inst_C*{cc})%{modulus};{acc}=({acc}*{mul}+inst_C*{cc}+inst_B*{cb}+inst_A*{ca}+op)%{modulus};",
-        check=check, acc=acc, mul=mul, ca=ca, cb=cb, cc=cc, modulus=modulus,
+        "{acc}=({acc}*{mul}+op+inst_A*{ca}+inst_B*{cb}+inst_C*{cc})%{modulus};",
+        acc=acc, mul=mul, ca=ca, cb=cb, cc=cc, modulus=modulus,
     );
     DispatchState { setup, guard, bias, route_op: route, update }
 }
@@ -1536,4 +1538,5 @@ mod custom_string_stream_tests {
             assert!(String::from_utf8_lossy(&r.stdout).contains("FOLD_OK"));
         }
     }
+
 }

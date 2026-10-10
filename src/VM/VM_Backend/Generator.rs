@@ -18,6 +18,7 @@ pub use super::Generator_util::{CipherKeys, GenRng};
 use super::Generator_util::{
     rename_ident, rewrite_chunk, scan_used_opcodes, uses_ident, write_string, PayloadReader,
 };
+use super::Generator_integrity::{cold_state_check, emit_state_digest};
 
 
 pub struct Generator { ctx: VmContext }
@@ -335,6 +336,14 @@ impl Generator {
         header_block.push_str(&format!("local {} = false; ", var_state_flag));
         header_block.push_str(&format!("local {} = function(q, s, M, C) s[{}] = select; end; ", fn_N_, hex_select_idx));
         header_block.push_str(&format!("{}(nil, {}, nil, nil); ", fn_N_, var_s));
+        // 冷块状态校验的单向摘要（每产物一次）：产物只留摘要+每块独立 salt。
+        let fn_state_digest = rng.name();
+        let sbox_state = rng.name();
+        let mut sbox_vals: [u32; 256] = [0; 256];
+        for v in sbox_vals.iter_mut() {
+            *v = rng.range64(0, 0xFFFF_FFFF) as u32;
+        }
+        header_block.push_str(&emit_state_digest(&sbox_state, &fn_state_digest, &sbox_vals));
         
         // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng
         let idx = rng.distinct(8, 0x10, 0x7F);
@@ -651,7 +660,6 @@ impl Generator {
         // 热块内联时要用的状态名 → 槽位号（驱动里声明成局部变量）
         let mut hot_locals: Vec<(String, String)> = Vec::new();
         for (ops, code, name, st, method_shard) in blocks.iter() {
-            let st_lua = rng.format_num(*st as i64);
             // 预算：热路径（算术/比较/跳转/栈与表存取）保留**内联**，冷路径
             // （调用/返回/闭包/全局/上值/内建）才提升成方法。全量方法化会把每条
             // 指令都变成一次 Lua 函数调用 —— 实测慢 5.6 倍，超出预算
@@ -718,11 +726,10 @@ impl Generator {
                 let mut pre: Vec<String> = Vec::new();
                 pre.push("local rk1,rk2;".to_string());
                 // 状态号不符时置共享投毒旗；主体仍按原控制流继续，避免固定早退信号。
-                // 状态值固定 depth=1，使用运行时查表表示，校验值仍保持完整 32 位。
-                let st_obf = rng.obfuscate_num(*st as i64, 1, &keys);
-                pre.push(format!(
-                    "{psn}={psn} or ({s}[{key}]~={state});",
-                    psn = psn_n, s = p_self, key = k_state, state = st_obf
+                // 校验改单向摘要（改进 1）：产物只留摘要+每块独立 salt，不再发射
+                // 可静态读回的期望状态，切断同源代数抵消路径。
+                pre.push(cold_state_check(
+                    &mut rng, &keys, *st, &sbox_vals, &fn_state_digest, &psn_n, &p_self, &k_state,
                 ));
                 let mut ai = 0usize;
                 while ai < alias_pairs.len() {
@@ -743,8 +750,9 @@ impl Generator {
                     p_self, p_names[0], p_names[1], p_names[2], p_names[3], text));
                 // 冷路径才付同步代价：进出方法前后各存/取一次 pc 与 top
                 // 并把本块状态号写进槽位（方法入口自校验）。
-                // 同步语句：三连存乱序/分组 + 状态号常数去指纹（原两形态合流）
-                let st_o = if rng.range(0, 4) == 0 { st_lua.clone() } else { rng.obfuscate_num(*st as i64, 1, &keys) };
+                // 同步语句：三连存乱序/分组 + 状态号常数去指纹（原两形态合流）。
+                // 初始状态值不留裸明文——它和冷块摘要校验共享同一状态语义。
+                let st_o = rng.obfuscate_num(*st as i64, 1, &keys);
                 let mut sync: Vec<(String, String)> = vec![
                     (format!("{}[{}]", var_vm, k_pc), var_pc.clone()),
                     (format!("{}[{}]", var_vm, k_top), var_top.clone()),
