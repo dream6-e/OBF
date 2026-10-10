@@ -226,11 +226,14 @@ pub(super) fn build_chain(x: ChainIn) -> String {
     #[allow(dead_code)]
     const CG: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
         let mut block_chacha_setup = String::new();
-        // ② 运行期指纹：ChaCha 密钥装配的「等价选路开关」——装配循环与状态构造
-        // 各在两条逐位等价的形态间按指纹选路。换宿主只换路径、不换密钥；静态读者
-        // 连「哪些数配成一对、按什么顺序装配」都读不出（要读得先仿真宿主语义）。
+        // ② 运行期指纹两股：动态指纹（地址/GC，非确定）只做等价形态选路；
+        // 确定性指纹 hfix（改进 2）的值被折进根 K0 token 扭曲量——跳过指纹层
+        // 即失去全部密钥材料，层不再可整层略过。静态读者要读装配细节，仍须
+        // 先仿真宿主语义。
         let (fp_src, h_var) = crate::VM::VM_Backend::Generator_native::emit_fingerprint(&mut rng);
         block_chacha_setup.push_str(&fp_src);
+        let (fix_src, fix_var, fix_val) = crate::VM::VM_Backend::Generator_kdf::emit_fix_fingerprint(&mut rng);
+        block_chacha_setup.push_str(&fix_src);
         // 第 2 项：形态选路的**运行期绑定**——同一逻辑功能发射两型逐位等价的实现，
         // 由宿主指纹 h 在运行期择一（三种择一写法随机轮抽，产物里看不到固定
         // if/表形态；静态读者也必须先仿真宿主语义才知道走哪支）。
@@ -310,7 +313,8 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         // KDF 是纯算术（32 位异或实现 + 算术旋转 + 16 位拆乘），与 Rust 侧逐位同式。
         // 位置：在 xor32/rotl32 定义之后（KDF 体引用这两个局部），且在各簇之前。
         let (root_tok, root_fetch) = {
-            let rt = crate::VM::VM_Backend::Generator_kdf::root_tokens(&mut rng, &keys, &enc.root, &h_var);
+            let rt = crate::VM::VM_Backend::Generator_kdf::root_tokens(&mut rng, &keys, &enc.root, &h_var,
+                &fix_var, fix_val, fn_xor32.as_str());
             block_chacha_setup.push_str(&rt.decl);
             let f: Vec<String> = (0..8).map(|i| rt.fetch[i].clone()).collect();
             (rt, f)

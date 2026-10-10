@@ -180,7 +180,8 @@ pub fn dispose_stmt(rng: &mut GenRng, names: &[String]) -> String {
 /// 一组 8 个密钥字的 token 化运输。运输线随机挑选：op 是该线的异或闭包
 /// （带线扰动 tx），X 半边逐字补偿 ^tx——(X, 掩码) 对不再满足裸异或抵消，
 /// 且不同簇可选到不同线，密钥运输不再共用单一选择器。
-pub fn key_tokens(rng: &mut GenRng, keys: &CipherKeys, words: &[u32; 8], h: &str) -> KeyTokens {
+pub fn key_tokens(rng: &mut GenRng, keys: &CipherKeys, words: &[u32; 8], h: &str,
+                  hfix: &str, hfix_val: u32, x32: &str) -> KeyTokens {
     let kw = rng.name();   // 真值表（运行期现算）
     let xt = rng.name();   // X 值表
     let mt = rng.name();   // 掩码表
@@ -190,7 +191,16 @@ pub fn key_tokens(rng: &mut GenRng, keys: &CipherKeys, words: &[u32; 8], h: &str
     let (tg, tk, tx) = pick_xor_transport(rng, keys);
     let mut masks: Vec<u32> = Vec::with_capacity(8);
     for _ in 0..8 { masks.push(rng.next()); }
-    let xs: Vec<String> = (0..8).map(|k| rng.obfuscate_num((words[k] ^ masks[k] ^ tx) as i64, 1, keys)).collect();
+    // 改进 2：每个根字再叠一层「指纹扭曲」(hfix*A+B) mod 2^32——A/B 逐字随机，
+    // 只有跑完确定性指纹块拿到 hfix 真值，fetch 侧才解得回原字。
+    let m32 = rng.format_num(0x1_0000_0000i64);
+    let twists: Vec<(u32, u64, u64)> = (0..8).map(|_| {
+        let a = (rng.range64(1, 0xFFFF) | 1) as u64;
+        let b = rng.next() as u32 as u64;
+        let tw = ((hfix_val as u64) * a + b) % 0x1_0000_0000;
+        (tw as u32, a, b)
+    }).collect();
+    let xs: Vec<String> = (0..8).map(|k| rng.obfuscate_num((words[k] ^ masks[k] ^ tx ^ twists[k].0) as i64, 1, keys)).collect();
     let ms: Vec<String> = (0..8).map(|k| rng.obfuscate_num(masks[k] as i64, 1, keys)).collect();
     // 槽位洗牌：真值落位与 key 序号解耦（引用侧同步用洗牌后的槽号）
     let mut slots: Vec<usize> = (1..=8).collect();
@@ -206,7 +216,12 @@ pub fn key_tokens(rng: &mut GenRng, keys: &CipherKeys, words: &[u32; 8], h: &str
         p = keys.tbl_p, tg = rng.format_num(tg as i64), tk = rng.format_num(tk as i64),
         i = i, j = j
     );
-    let fetch = slot_lits.iter().map(|s| format!("{}[{}]", kw, s)).collect();
+    let fetch = slot_lits.iter().enumerate()
+        .map(|(k, s)| format!("{x32}({kw}[{s}],({hf}*{a}+{b})%{m})",
+            x32 = x32, kw = kw, s = s, hf = hfix,
+            a = rng.format_num(twists[k].1 as i64),
+            b = rng.format_num(twists[k].2 as i64), m = m32))
+        .collect();
     KeyTokens {
         decl, fetch, kw: kw.clone(),
         aux: vec![xt.clone(), mt.clone(), pt.clone(), op.clone()],
@@ -237,8 +252,88 @@ pub fn kdf_fn_decl(rng: &mut GenRng, keys: &CipherKeys, kdf: &str, xor32: &str, 
 
 /// 第 3 项 D：单根 K0 的 token 化运输（与 `key_tokens` 同机制，但只发射一次）。
 /// `fetch[i]` 即 K0 第 i 个字（1-based）的取用表达式。
-pub fn root_tokens(rng: &mut GenRng, keys: &CipherKeys, root: &[u32; 8], h: &str) -> KeyTokens {
-    key_tokens(rng, keys, root, h)
+/// 改进 2：确定性宿主指纹（hfix）。探针只依赖 lua5.1 与 Luau 语义一致的
+/// 纯运算/字符串事实（无地址、无 GC 计数、无报错文本），值在构建期由
+/// Rust 镜像算出。它被折进根 K0 token 的扭曲量——跳过指纹层，全部密钥
+/// 材料（四组密钥字/盐/白化种子）立刻失真。与动态指纹（地址/GC，仅做
+/// 等价形态选路）互补：一个管选路，一个管钥匙。
+pub fn emit_fix_fingerprint(mut rng: &mut GenRng) -> (String, String, u32) {
+    fn fp_adv(rng: &mut GenRng, hfix: &str, m32: &str, lua_val: String, rust_val: u64, h: u64, stmts: &mut Vec<String>) -> u64 {
+        let p = rng.range64(3, 0xFFFF) | 1;
+        let nh = ((h as f64) * (p as f64) + (rust_val as f64)) % 4294967296.0;
+        stmts.push(format!("{hfix}=({hfix}*{p}+{v})%{m}; ",
+            hfix = hfix, p = rng.format_num(p as i64), v = lua_val, m = m32));
+        nh as u64
+    }
+    let hfix = rng.name();
+    let m32 = rng.format_num(0x1_0000_0000i64);
+    let seed = rng.next() as u32;
+    let mut h = seed as u64;
+    let mut stmts: Vec<String> = Vec::new();
+    // 探针 1：tostring(整数) 的某一位字节（< 1e13 的整数两运行时同形）
+    let n1 = rng.range64(1_000_000, 9_999_999_999_999);
+    let d1 = format!("{}", n1);
+    let pos1 = rng.range(1, d1.len());
+    let lv1 = format!("@B@(@T@(@F@({})),{})", rng.format_num(n1 as i64), rng.format_num(pos1 as i64));
+    h = fp_adv(&mut rng, &hfix, &m32, lv1, d1.as_bytes()[pos1 - 1] as u64, h, &mut stmts);
+    // 探针 2：纯算术取模
+    let n2 = rng.range64(0x100000, 0x7FFF_FFFF);
+    let m2 = rng.range64(97, 65521);
+    let lv2 = format!("({}%{})", rng.format_num(n2 as i64), rng.format_num(m2 as i64));
+    h = fp_adv(&mut rng, &hfix, &m32, lv2, (n2 % m2) as u64, h, &mut stmts);
+    // 探针 3：tostring(整数) 的长度
+    let n3 = rng.range64(1_000_000, 9_999_999_999_999);
+    let d3 = format!("{}", n3);
+    let lv3 = format!("#@T@(@F@({}))", rng.format_num(n3 as i64));
+    h = fp_adv(&mut rng, &hfix, &m32, lv3, d3.len() as u64, h, &mut stmts);
+    // 探针 4：整数平方根（IEEE 双精度，两运行时同值）低 8 位
+    let n4 = rng.range64(100_000_000, 999_999_999_999);
+    let sq = (n4 as f64).sqrt().floor() as u64;
+    let lv4 = format!("@F@(@S@({}))%0X100", rng.format_num(n4 as i64));
+    h = fp_adv(&mut rng, &hfix, &m32, lv4, sq % 256, h, &mut stmts);
+    // 探针 5：类型臂——number 恒真，双臂常量都在产物里，取值必须跑起来才知道
+    let c5a = rng.range64(0x100, 0xFFFF);
+    let c5b = rng.range64(0x100, 0xFFFF);
+    let n5 = rng.range64(2, 0xFFFF);
+    let lv5 = format!("(@Y@({}*0X1)==\"number\" and {} or {})",
+        rng.format_num(n5 as i64), rng.format_num(c5a as i64), rng.format_num(c5b as i64));
+    h = fp_adv(&mut rng, &hfix, &m32, lv5, c5a as u64, h, &mut stmts);
+    // 探针 6：随机字面量串的字节（文本多样性；避开反斜杠）
+    let lit: String = (0..rng.range(4, 8)).map(|_| {
+        let mut c = rng.range(0x30, 0x7A) as u8;
+        if c == 0x5C { c = 0x30; }
+        c as char
+    }).collect();
+    let pos6 = rng.range(1, lit.len());
+    let lv6 = format!("@B@(\"{}\",{})", lit, rng.format_num(pos6 as i64));
+    h = fp_adv(&mut rng, &hfix, &m32, lv6, lit.as_bytes()[pos6 - 1] as u64, h, &mut stmts);
+    // 探针 7：整除后取模
+    let n7 = rng.range64(1_000_000, 9_999_999_999_999);
+    let m7 = rng.range64(97, 65521);
+    let dv = ((n7 as f64) / 7.0).floor() as u64;
+    let lv7 = format!("@F@({}/0X7)%{}", rng.format_num(n7 as i64), rng.format_num(m7 as i64));
+    h = fp_adv(&mut rng, &hfix, &m32, lv7, dv % (m7 as u64), h, &mut stmts);
+    // 库成员局部化（声明顺序洗牌）：ts/sb/fl/sq/ty
+    let (a_ts, a_sb, a_fl, a_sq, a_ty) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let mut aliases = vec![
+        format!("local {}=tostring; ", a_ts),
+        format!("local {}=string.byte; ", a_sb),
+        format!("local {}=math.floor; ", a_fl),
+        format!("local {}=math.sqrt; ", a_sq),
+        format!("local {}=type; ", a_ty),
+    ];
+    rng.shuffle(&mut aliases);
+    let body = stmts.join("")
+        .replace("@T@", &a_ts).replace("@B@", &a_sb).replace("@F@", &a_fl)
+        .replace("@S@", &a_sq).replace("@Y@", &a_ty);
+    let src = format!("local {hfix}={seed}; do {al}{body}end; ",
+        hfix = hfix, seed = rng.format_num(seed as i64), al = aliases.concat(), body = body);
+    (src, hfix, h as u32)
+}
+
+pub fn root_tokens(rng: &mut GenRng, keys: &CipherKeys, root: &[u32; 8], h: &str,
+                   hfix: &str, hfix_val: u32, x32: &str) -> KeyTokens {
+    key_tokens(rng, keys, root, h, hfix, hfix_val, x32)
 }
 
 /// 第 3 项 D：一簇的派生块——由根 K0 现算本组 8 个密钥字 + 盐 + 两个 kind。
@@ -336,5 +431,66 @@ mod tests {
         let out = Command::new(lua).arg("-e").arg(&script).output().expect("run bundled Lua 5.1");
         assert!(out.status.success(), "transport Lua failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("TRANSPORT_OK"));
+    }
+
+    #[test]
+    fn fix_fingerprint_matches_both_lua_runtimes() {
+        // 改进 2：Rust 镜像值必须与 lua5.1、Luau 实跑值一致（两运行时同值才可入钥匙）
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let exes = [root.join("toolchains/bin/lua5.1"), root.join("toolchains/bin/luau")];
+        for round in 0..2 {
+            let mut rng = GenRng::new(round);
+            let (src, var, val) = super::emit_fix_fingerprint(&mut rng);
+            let script = format!("{} print({})", src, var);
+            for exe in &exes {
+                if !exe.exists() { continue; }
+                // luau 不吃 -e：落临时文件跑；lua5.1 走 -e
+                let out = if exe.file_name().unwrap() == "luau" {
+                    let tmp = std::env::temp_dir().join(format!("fixfp_{}.lua", round));
+                    std::fs::write(&tmp, &script).expect("write tmp");
+                    let r = Command::new(exe).arg(&tmp).output().expect("run luau");
+                    std::fs::remove_file(&tmp).ok();
+                    r
+                } else {
+                    Command::new(exe).arg("-e").arg(&script).output().expect("run lua")
+                };
+                assert!(out.status.success(), "{} failed: {}", exe.display(), String::from_utf8_lossy(&out.stderr));
+                let got: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().expect("numeric fingerprint");
+                assert_eq!(got, val, "runtime {} diverges from Rust mirror", exe.display());
+            }
+        }
+    }
+
+    #[test]
+    fn root_tokens_twist_requires_hfix_value() {
+        // 改进 2：hfix 真值解回根字；hfix 偏移 1 则 8 个字全错（A 为奇数必错）
+        let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() { return; }
+        let mut rng = GenRng::new(1234);
+        let transports = super::build_transports(&mut rng, 6, &[0x46, 0x11]);
+        let keys = CipherKeys {
+            grp1: 0x46, grp2: 0x11, key_ba: 0x63,
+            key_bs: 0x53, key_ba2: 0x71, key_bs2: 0x22,
+            tbl_p: "P".to_string(), transports,
+        };
+        let words: [u32; 8] = [0x0F1E2D3C, 0x11223344, 0xDEADBEEF, 0x01020304,
+                               0xCAFEBABE, 0x55667788, 0x99AABBCC, 0x13572468];
+        let hval: u32 = 0x0BADF00D;
+        let rt = super::key_tokens(&mut rng, &keys, &words, "HDYN", "HFIX", hval, "bx");
+        let slots = super::emit_transport_slots(&mut rng, &keys, "bx");
+        let bx = "local function bx(a,b) local r,p=0,1;while a>0 or b>0 do local ra,rb=a%2,b%2;if ra~=rb then r=r+p end;a=(a-ra)/2;b=(b-rb)/2;p=p*2 end;return r end;";
+        let mut good = String::new();
+        let mut bad = String::new();
+        for i in 0..8 {
+            good.push_str(&format!("assert({}==0X{:X}) ", rt.fetch[i], words[i]));
+            bad.push_str(&format!("assert({}~=0X{:X}) ", rt.fetch[i], words[i]));
+        }
+        let script = format!(
+            "local P={{}} {bx} {slots} do local HDYN=0X0 local HFIX=0X{hval:X} {decl} {good} end; do local HDYN=0X1 local HFIX=0X{hbad:X} {decl} {bad} end; print('TWIST_OK')",
+            bx = bx, slots = slots, decl = rt.decl, good = good, bad = bad,
+            hval = hval, hbad = hval.wrapping_add(1));
+        let out = Command::new(lua).arg("-e").arg(&script).output().expect("run bundled Lua 5.1");
+        assert!(out.status.success(), "twist Lua failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("TWIST_OK"));
     }
 }

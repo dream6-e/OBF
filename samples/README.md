@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，193,531 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），109,600 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，310,962 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，200,822 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），109,147 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，305,082 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -284,3 +284,23 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
   roblox、hash）双运行时与源一致。产物结构扫描确认：10 条运输线各自独立扰动常数、
   三种闭包形态齐备、VM 接线表内旧裸选择器清零、改进 1 的 digest 混入仍完好
   （控制流扁平化阶段自有密钥表的裸选择器属蹦床域，未在本轮授权范围，留待后续）。
+
+### 改进 2：环境检测改造——确定性宿主指纹入钥匙（2026-10-10）
+
+- **背景**：第三方批评指出运行期指纹层“双分支完全相同（可证）、所有指纹只用来选恒等
+  分支”，分析成本 0，还白送分析者“这层可整层跳过”的信心。根因是指纹（地址/GC 计数，
+  非确定）从未参与密钥，只做等价形态选路。
+- **改造**：新增确定性宿主指纹 `hfix`（`Generator_kdf.rs::emit_fix_fingerprint`）——
+  7 个探针只依赖 lua5.1 与 Luau 语义一致的纯事实（tostring 整数形态、平方根、整除、
+  类型臂、字面量字节），无地址、无 GC、无报错文本；值在构建期由 Rust 镜像算出
+  （`fix_fingerprint_matches_both_lua_runtimes` 单测在 lua5.1 与 Luau 双实跑核对）。
+- **入钥匙**：根 K0 的 8 个根字每个叠一层指纹扭曲 `(hfix*A+B) mod 2^32`（A 逐字随机
+  奇数、B 逐字随机）——token 落盘值已含扭曲，fetch 侧用运行期算出的扭曲解回；
+  跳过/篡改指纹块即失去全部密钥材料（四组密钥字、盐、白化种子全从根 K0 派生）。
+  单测 `root_tokens_twist_requires_hfix_value` 验证：真值解回 8 字，偏移 1 则 8 字全错。
+- **未变**：动态指纹（地址/GC）保留做等价形态选路；控制流扁平化阶段不受影响。
+- **验证**：`cargo test --release` **155/155**；三件套双语法门 + 双运行时逐字节一致；
+  语义三件套 + 语料 6 项全过；产物扫描见指纹块 7 探针与扭曲解回式。
+- **体积**：三件套 200,822 / 109,147 / 305,082 B（相对 4+5 版 +7.3 / −0.5 / −5.9 KB，
+  含逐构建随机波动；净增远小于 25 KB 预算）。
+- **速度**：arith 微基准 1071–1098 ms，与改造前同量级，无退化。
