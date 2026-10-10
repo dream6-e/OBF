@@ -187,7 +187,6 @@ pub(super) fn build_relay_dispatch(
     // ---- fronts: empty tables whose __index resolves from flat wire data -----
     // (schemes 4/11/14: metatable indirection, data-pool disguise, burn-after-use)
     let front_count = 1 + rng.range(2) as usize;
-    let wipe_every = 256 + rng.range(768);
     let mut front_pairs: Vec<Vec<(u32, usize)>> = vec![Vec::new(); front_count];
     for (e_i, (opcode, _body)) in entries.iter().enumerate() {
         let slot = slot_of[handler_of[e_i]];
@@ -208,9 +207,9 @@ pub(super) fn build_relay_dispatch(
     for f in 0..front_count {
         let wname = rng.name(&tag);
         let fname = rng.name(&tag);
-        let seen_t = rng.name(&tag);
-        let seen_c = rng.name(&tag);
-        let hit_c = rng.name(&tag);
+        let burn_fn = rng.name(&tag);
+        let look_c = rng.name(&tag);
+        let burn_at = 2048 + rng.range(6144);
         let mut pairs = front_pairs[f].clone();
         rng.shuffle(&mut pairs);
         let total = pairs.len();
@@ -226,28 +225,34 @@ pub(super) fn build_relay_dispatch(
         }
         let scan_end = total * 2;
         setup.push_str(&format!(
-            "local {w}={{{nums}}};local {st}={{}};local {sc},{hc}=0,0;",
+            "local {w}={{{nums}}};local {lc}=0;",
             w = wname,
             nums = nums.join(","),
-            st = seen_t,
-            sc = seen_c,
-            hc = hit_c,
+            lc = look_c,
         ));
-        // Resolver: scan wire pairs; cache hits; burn (full refill + nil the wires +
-        // drop the metatable) once every pair has been resolved once; periodic
-        // cache wipes until then so a dump finds an empty or near-empty table.
+        // Resolver: scan wire pairs and cache hits. Burn-after-use: once resolver
+        // traffic reaches a per-build threshold, refill the whole cache from the
+        // wires, nil the wire blob and drop the metatable. The refill makes burning
+        // safe at any moment (every real opcode is cached before the wires vanish),
+        // so late first-uses of an opcode never fall through to the fallback.
         setup.push_str(&format!(
-            "local {f}=setmetatable({{}},{{__index=function(t,k) local i=1;while i<={end_i} do if {w}[i]==k then local h={h}[{w}[i+1]-{mask}];rawset(t,k,h);if not {st}[k] then {st}[k]=true;{sc}={sc}+1 end;if {sc}>={total} then local j=1;while j<={end_i} do rawset(t,{w}[j],{h}[{w}[j+1]-{mask}]);j=j+2 end;{w}=nil;setmetatable(t,nil);return h end;{hc}={hc}+1;if {hc}>={wipe} then {hc}=0;for pk in pairs(t) do rawset(t,pk,nil) end;rawset(t,k,h) end;return h end;i=i+2 end;return nil end}});",
+            "local function {bf}(t) local j=1;while j<={end_i} do rawset(t,{w}[j],{h}[{w}[j+1]-{mask}]);j=j+2 end;{w}=nil;setmetatable(t,nil) end;",
+            bf = burn_fn,
+            w = wname,
+            h = handlers_name,
+            mask = format!("0X{:X}", mask),
+            end_i = scan_end,
+        ));
+        setup.push_str(&format!(
+            "local {f}=setmetatable({{}},{{__index=function(t,k) local i=1;while i<={end_i} do if {w}[i]==k then local h={h}[{w}[i+1]-{mask}];rawset(t,k,h);{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return h end;i=i+2 end;{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return nil end}});",
             f = fname,
             w = wname,
             h = handlers_name,
             mask = format!("0X{:X}", mask),
-            st = seen_t,
-            sc = seen_c,
-            hc = hit_c,
-            total = total,
+            lc = look_c,
+            burn = burn_at,
+            bf = burn_fn,
             end_i = scan_end,
-            wipe = wipe_every,
         ));
         front_names.push(fname);
     }
