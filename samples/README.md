@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，197,080 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），108,404 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，309,671 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，193,531 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），109,600 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，310,962 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -258,3 +258,29 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
      与**运行期偶发失败**（如 `'for' limit must be a number`）。已用分层判据确认与本次改名无关：
      失败样本的 `process/process1.lua`（压缩器**之前**的 VM Lua）就已失败，且新旧二进制同量级
      （fibonacci MB 旧 28/30、新 29/30；matrix MB 旧 29/30、新 28/30；string_encryption 普通旧 37/40、新 39/40）。
+
+### 密钥隔离 + 反抵消（2026-10-10，批评清单第 4/5 条）
+
+- **第 4 条 密钥隔离**：接线表每组原有的两个自由选择器（`P[g][bx]`=裸 `function(a,b)return a^b end`、
+  `P[g][add]`=裸 `a+b`，可被一把钥匙解开全表）已删除。改为每组一条独立的“运输线”
+  （`Generator_kdf.rs` 的 `build_transports` 生成 N 条 `Transport{tx,ta}`，
+  `emit_transport_slots` 发射 `P[g][kx]=fn(fbx)(f,v)→f(v^tx)` 与 `P[g][kadd]=fn a+b-ta` 两类闭包，
+  均带线独有的扰动常数）；常量解码簇、key_tokens 逐簇绑定各自运输线并补偿（`val^mask^tx`、
+  `val-mask+ta`），biased 谓词族 0 的 RHS 改为 `k-ta`。
+- **第 5 条 反抵消**：旧 `P[g1][bx](v^m,m)` / `P[g1][add](v-m,m)` 式可代数抵消的装饰调用已全部消除——
+  新形态的 xor/add 调用自带不可抵消的线扰动（`^tx`、`-ta`），且折叠器
+  （`Generator_util.rs::fold_const_keycalls`）按新形态精确折叠为字面量，热区无残留运行时调用
+  （实测热区 65 处全部折叠、残留 0）。
+- 体积：三件套相对 `91b8c7c` 基线 193,531（−3.5 KB）/109,600（+1.2 KB）/310,962（+1.3 KB），
+  均在 ≤25 KB 预算内。
+- 速度：quick bench（arith 30k / table 20k / calls 40k / string 3k / closure 3k）A/B——
+  全新构建下同输入双版本逐节重叠（arith 基线 378–497 ms、新版 364–530 ms；TOTAL 7.3–9.9 s vs 8.8–10.3 s），
+  无系统性退化；早期单轮测量中看到的 +40% 来自基线侧一个偶然偏快的构建。
+- 验证：`cargo test --release` **153/153**（新增 `transport_slots_roundtrip_in_lua` 用 lua5.1
+  实跑验证运输线闭包往返 + 补偿恒等式，并曾据此抓到 `0X…end` 粘连 bug）；
+  三件套过 `luac5.1 -p` + `luau-compile` 双语法门；print 普通/MB 在 Lua 5.1 与 Luau 下
+  与源 stdout 逐字节一致；语义三件套（lua51-semantics、vm-isa-semantics、numeric_for_errors）
+  双运行时全匹配；语料 6 件（nested_protos、DynamicGlobalEnv、string_encryption、Comptesting、
+  roblox、hash）双运行时与源一致。产物结构扫描确认：10 条运输线各自独立扰动常数、
+  三种闭包形态齐备、VM 接线表内旧裸选择器清零、改进 1 的 digest 混入仍完好
+  （控制流扁平化阶段自有密钥表的裸选择器属蹦床域，未在本轮授权范围，留待后续）。

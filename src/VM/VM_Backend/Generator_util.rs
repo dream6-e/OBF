@@ -7,16 +7,28 @@ use rand::rngs::StdRng;
 pub use super::Generator_rewrite::{loader_lookup, loadstring_probe_lua};
 pub(super) use super::Generator_rewrite::*;
 
+/// 一条常量运输线：独立组号 + 两个键槽 + 每线独立的代数扰动（tx/ta）。
+/// 运行时 P 表里 `P[grp][kx](a,b) = bxor(bxor(a,b), tx)`、
+/// `P[grp][kadd](a,b) = a + b - ta`——不再是裸 xor/加法，发射端按扰动补偿，
+/// 「(值^掩码, 掩码) 直接抵消」的恒等式不再成立；且线与线之间密钥互不相通。
+#[derive(Clone, Copy)]
+pub struct Transport {
+    pub grp: u64,
+    pub kx: u64,
+    pub kadd: u64,
+    pub tx: u32,
+    pub ta: u32,
+}
+
 pub struct CipherKeys {
     pub grp1: u64,
     pub grp2: u64,
-    pub key_bx: u64,
     pub key_ba: u64,
-    pub key_add: u64,
     pub key_bs: u64,
     pub key_ba2: u64,
     pub key_bs2: u64,
     pub tbl_p: String,
+    pub transports: Vec<Transport>,
 }
 
 pub struct ControlFlowBuilder;
@@ -40,146 +52,27 @@ impl ControlFlowBuilder {
             return Self::format_num(val, rng);
         }
 
-        // 只使用运行时表查找；不再发射可由纯数字常量折叠的加减式。
+        let t = &keys.transports[rng.range(0, keys.transports.len())];
         if rng.range(0, 2) == 0 {
-            let mask = rng.range(0x10, 0x2FFF) as i64;
-            let xor_val = val ^ mask;
-            format!("{}[{}][{}]({},{})", 
-                keys.tbl_p,
-                Self::format_num(keys.grp1 as i64, rng),
-                Self::format_num(keys.key_bx as i64, rng),
-                Self::obfuscate_num_depth(xor_val, depth - 1, keys, rng), 
-                Self::obfuscate_num_depth(mask, depth - 1, keys, rng)
-            )
+        let mask = rng.range(0x10, 0x2FFF) as i64;
+        let xor_val = val ^ mask ^ (t.tx as i64);
+        format!("{}[{}][{}]({},{})",
+        keys.tbl_p,
+        Self::format_num(t.grp as i64, rng),
+        Self::format_num(t.kx as i64, rng),
+        Self::obfuscate_num_depth(xor_val, depth - 1, keys, rng),
+        Self::obfuscate_num_depth(mask, depth - 1, keys, rng)
+        )
         } else {
-            let mask = rng.range(0x10, 0x2FFF) as i64;
-            let add_val = val.wrapping_sub(mask);
-            format!("{}[{}][{}]({},{})", 
-                keys.tbl_p,
-                Self::format_num(keys.grp1 as i64, rng),
-                Self::format_num(keys.key_add as i64, rng),
-                Self::obfuscate_num_depth(add_val, depth - 1, keys, rng),
-                Self::obfuscate_num_depth(mask, depth - 1, keys, rng)
-            )
-        }
-    }
-
-    pub fn generate_opaque_predicate(val: i64, var_name: &str, comp_op: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
-        // 改进项二：彻底消除「R<=R and R or J」单一正则锚点与固定 c[g1][add](X,K)<=M 模板。
-        // 1) 变量恒等包装池（8 形态随机，R<=R 恒真式徹底退役）：
-        //    0=裸变量  1=(R and R or J)  2=(K1~=K2 and R or J)  3=(K1==K2 and J or R)
-        //    4=(R>=0X0 and R or J)  5=(R~=R and J or R)  6=(not(not R) and R or J)  7=(K1<K2 and R or J)
-        let jn = Self::format_num(rng.range(0x10, 0xFFFF) as i64, rng);
-        let ka = rng.range(0x10, 0x7FFF) as i64;
-        let kb = ka + rng.range(0x1, 0x7FF) as i64;
-        let ka_s = Self::format_num(ka, rng);
-        let kb_s = Self::format_num(kb, rng);
-        let x_expr = match rng.range(0, 8) {
-            0 => var_name.to_string(),
-            1 => format!("({v} and {v} or {j})", v = var_name, j = jn),
-            2 => format!("({a}~={b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
-            3 => format!("({a}=={b} and {j} or {v})", a = ka_s, b = kb_s, j = jn, v = var_name),
-            4 => format!("({v}>=0X0 and {v} or {j})", v = var_name, j = jn),
-            5 => format!("({v}~={v} and {j} or {v})", v = var_name, j = jn),
-            6 => format!("(not(not {v}) and {v} or {j})", v = var_name, j = jn),
-            _ => format!("({a}<{b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
-        };
-
-        // 2) 严格/非严格边界随机转换（整数域 X<=V ⇔ X<V+1；X>V ⇔ X>=V+1）
-        let is_le = comp_op == "<=";
-        let use_strict = rng.range(0, 2) == 0;
-        let swap_sides = rng.range(0, 2) == 0;
-        let t_val = if use_strict { val.wrapping_add(1) } else { val };
-
-        let g1 = Self::format_num(keys.grp1 as i64, rng);
-        let kadd = Self::format_num(keys.key_add as i64, rng);
-        let add_call = format!("{}[{}][{}](", keys.tbl_p, g1, kadd);
-
-        // 3) 六族异构代数变换（含正系数平移/双偏移/反号镜像/仿射缩放/阈值左折）：
-        //    反号镜像族（K - X）使变量系数为负，不等号方向与阈值同步翻转，打破静态方向判定。
-        let (lhs_x, rhs_t, eff_le, eff_strict) = match rng.range(0, 6) {
-            0 => {
-                let k = rng.range(0x10, 0xFFF) as i64;
-                let ks = Self::format_num(k, rng);
-                let lx = if rng.range(0, 2) == 0 {
-                    format!("{add}{x},{k})", add = add_call, x = x_expr, k = ks)
-                } else {
-                    format!("{add}{k},{x})", add = add_call, x = x_expr, k = ks)
-                };
-                (lx, Self::format_num(t_val.wrapping_add(k), rng), is_le, use_strict)
-            }
-            1 => {
-                let k1 = rng.range(0x20, 0xFFF) as i64;
-                let k2 = rng.range(0x10, 0x7FF) as i64;
-                let (k1s, k2s) = (Self::format_num(k1, rng), Self::format_num(k2, rng));
-                let lx = if rng.range(0, 2) == 0 {
-                    format!("({add}{x},{k1})-{k2})", add = add_call, x = x_expr, k1 = k1s, k2 = k2s)
-                } else {
-                    format!("(({x}-{k2})+{k1})", x = x_expr, k1 = k1s, k2 = k2s)
-                };
-                (lx, Self::format_num(t_val.wrapping_add(k1).wrapping_sub(k2), rng), is_le, use_strict)
-            }
-            2 => {
-                let r = rng.range(0x100, 0xFFFF) as i64;
-                let k = t_val.wrapping_add(r);
-                let ks = Self::format_num(k, rng);
-                let lx = if rng.range(0, 2) == 0 {
-                    format!("({k}-{x})", k = ks, x = x_expr)
-                } else {
-                    format!("{add}{k},-{x})", add = add_call, k = ks, x = x_expr)
-                };
-                (lx, Self::format_num(r, rng), !is_le, !use_strict)
-            }
-            3 => {
-                let s = [2i64, 3, 5, 7][rng.range(0, 4)];
-                let k = rng.range(0x10, 0xFFF) as i64;
-                let (ss, ks) = (Self::format_num(s, rng), Self::format_num(k, rng));
-                let lx = if rng.range(0, 2) == 0 {
-                    format!("{add}{x}*{s},{k})", add = add_call, x = x_expr, s = ss, k = ks)
-                } else {
-                    format!("({x}*{s}+{k})", x = x_expr, s = ss, k = ks)
-                };
-                (lx, Self::format_num(t_val.wrapping_mul(s).wrapping_add(k), rng), is_le, use_strict)
-            }
-            4 => {
-                let k = rng.range(0x100, 0x7FFF) as i64;
-                let ks = Self::format_num(k, rng);
-                let lx = if t_val >= k {
-                    let d = Self::format_num(t_val - k, rng);
-                    format!("({x}-{d})", x = x_expr, d = d)
-                } else {
-                    let d = Self::format_num(k - t_val, rng);
-                    format!("{add}{x},{d})", add = add_call, x = x_expr, d = d)
-                };
-                (lx, ks, is_le, use_strict)
-            }
-            _ => {
-                let s = [2i64, 3, 4, 5][rng.range(0, 4)];
-                let r = rng.range(0x100, 0xFFFF) as i64;
-                let k = t_val.wrapping_mul(s).wrapping_add(r);
-                let (ks, ss) = (Self::format_num(k, rng), Self::format_num(s, rng));
-                let lx = format!("({k}-{x}*{s})", k = ks, x = x_expr, s = ss);
-                (lx, Self::format_num(r, rng), !is_le, !use_strict)
-            }
-        };
-
-        // 4) 左右操作数随机换位（LHS <op> RHS vs RHS <rev_op> LHS）
-        if !swap_sides {
-            let op_str = match (eff_le, eff_strict) {
-                (true, false) => "<=",
-                (true, true) => "<",
-                (false, false) => ">",
-                (false, true) => ">=",
-            };
-            format!("{}{}{}", lhs_x, op_str, rhs_t)
-        } else {
-            let op_str = match (eff_le, eff_strict) {
-                (true, false) => ">=",
-                (true, true) => ">",
-                (false, false) => "<",
-                (false, true) => "<=",
-            };
-            format!("{}{}{}", rhs_t, op_str, lhs_x)
+        let mask = rng.range(0x10, 0x2FFF) as i64;
+        let add_val = val.wrapping_sub(mask).wrapping_add(t.ta as i64);
+        format!("{}[{}][{}]({},{})",
+        keys.tbl_p,
+        Self::format_num(t.grp as i64, rng),
+        Self::format_num(t.kadd as i64, rng),
+        Self::obfuscate_num_depth(add_val, depth - 1, keys, rng),
+        Self::obfuscate_num_depth(mask, depth - 1, keys, rng)
+        )
         }
     }
 
@@ -217,11 +110,13 @@ impl ControlFlowBuilder {
         let (lhs, rhs, mut op) = match rng.range(0, 6) {
             0 => {
                 let k = rng.range(0x10, 0xFFF) as i64;
-                let ks = Self::format_num(k, rng);
-                let add = format!("{}[{}][{}]", keys.tbl_p,
-                    Self::format_num(keys.grp1 as i64, rng),
-                    Self::format_num(keys.key_add as i64, rng));
-                (format!("{}({}, {})", add, x, ks), format!("({}+{})", target_expr, ks),
+                // 运输线加法闭包带 -ta：左右两边同减，谓词等价。
+                let t = &keys.transports[rng.range(0, keys.transports.len())];
+                let (add, ta) = (format!("{}[{}][{}]", keys.tbl_p,
+                    Self::format_num(t.grp as i64, rng),
+                    Self::format_num(t.kadd as i64, rng)), t.ta as i64);
+                let ks = Self::format_num(k.wrapping_sub(ta), rng);
+                (format!("{}({}, {})", add, x, Self::format_num(k, rng)), format!("({}+{})", target_expr, ks),
                     if is_le { if strict { "<" } else { "<=" } } else if strict { ">" } else { ">=" })
             }
             1 => {
@@ -270,240 +165,6 @@ impl ControlFlowBuilder {
         }
     }
 
-    pub fn build_fast_router(
-        var_pc: &str,
-        var_insts: &str,
-        var_inst: &str,
-        var_handlers: &str,
-        var_r_flg: &str,
-        var_r_vals: &str,
-        var_r_len: &str,
-        var_tamper: &str,
-        var_tail_flg: &str,
-        rng: &mut GenRng,
-    ) -> String {
-        // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng::distinct
-        let idx = rng.distinct(8, 0x10, 0x7F);
-        let keys = CipherKeys {
-            grp1: idx[0],
-            grp2: idx[1],
-            key_bx: idx[2],
-            key_ba: idx[3],
-            key_add: idx[4],
-            key_bs: idx[5],
-            key_ba2: idx[6],
-            key_bs2: idx[7],
-            tbl_p: rng.name(),
-        };
-
-        let s_state = rng.name();
-        let t_shadow = rng.name();
-        let q_route = rng.name();
-        let d_junk = rng.name();
-        let f_tmp = rng.name();
-        let var_t = rng.name();
-
-        let fn_bx = "_BX";
-        let fn_ba = "_BA";
-        let fn_bs = "_BS";
-
-        let num_routes = rng.range(16, 28) as i64;
-        let mut junk_limit = rng.range(5, 12);
-
-        let mut out = String::new();
-
-        out.push_str(&format!("local qT4b={{}};for i=0,15 do qT4b[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4b[i][j]=r end end;local qT8b={{}};for i=0,255 do qT8b[i]={{}};end;for i=0,255 do local qIb=qT8b[i];local qHb=(i-i%16)/16;for j=0,255 do qIb[j]=qT4b[i%16][j%16]+qT4b[qHb][(j-j%16)/16]*16 end end; local {}={};", fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8b[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"));
-        out.push_str(&format!("local {}={};", fn_ba, "bit32 and bit32.band or bit and bit.band or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end"));
-        out.push_str(&format!("local {}={};", fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end"));
-        
-        let tbl_def = format!(
-            "local {p}={{}};{p}[{g1}]={{}};{p}[{g1}][{bx}]={fbx};{p}[{g1}][{add}]=function(a,b)return a+b end;{p}[{g1}][{ba}]={fba};{p}[{g2}]={{}};{p}[{g2}][{ba2}]=function(a)return {fba}(a,{max_u32})end;{p}[{g2}][{bs2}]=function(a)return {fbs}(a,{one})end;",
-            p = keys.tbl_p,
-            g1 = Self::format_num(keys.grp1 as i64, rng),
-            g2 = Self::format_num(keys.grp2 as i64, rng),
-            bx = Self::format_num(keys.key_bx as i64, rng),
-            add = Self::format_num(keys.key_add as i64, rng),
-            ba = Self::format_num(keys.key_ba as i64, rng),
-            ba2 = Self::format_num(keys.key_ba2 as i64, rng),
-            bs2 = Self::format_num(keys.key_bs2 as i64, rng),
-            fbx = fn_bx,
-            fba = fn_ba,
-            fbs = fn_bs,
-            max_u32 = Self::format_num(4294967295i64, rng),
-            one = Self::format_num(1i64, rng)
-        );
-        out.push_str(&tbl_def);
-
-        out.push_str(&format!("local {},{},{},{},{},{};", s_state, t_shadow, d_junk, q_route, f_tmp, var_t));
-        
-        let fetch_state = rng.range(0x1000, 0x2FFF) as i64;
-        let init_val1 = rng.range(10, 1000) as i64;
-        let init_val2 = rng.range(1, 1000) as i64;
-        
-        out.push_str(&format!("{},{},{},{}={},{},{},{};", 
-            s_state, t_shadow, d_junk, var_t, 
-            Self::format_num(init_val1, rng), 
-            Self::format_num(0, rng), 
-            Self::format_num(init_val2, rng), 
-            Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)
-        ));
-
-        out.push_str("while true do ");
-        
-        out.push_str(&format!("if {}=={} then ", var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)));
-        out.push_str(&format!("if {}>#{} then return end;", var_pc, var_insts));
-        out.push_str(&format!("{},{}={}[{}],{}+{};", var_inst, var_pc, var_insts, var_pc, var_pc, Self::obfuscate_num_depth(1, 1, &keys, rng)));
-        
-        let q_route_expr = format!("{}[{}][{}]({}[{}][{}]({}[{}],{}),{})", 
-            keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_ba as i64, rng),
-            keys.tbl_p, Self::format_num(keys.grp1 as i64, rng), Self::format_num(keys.key_add as i64, rng),
-            var_inst, Self::format_num(1, rng), s_state,
-            Self::format_num(num_routes, rng)
-        );
-        out.push_str(&format!("{}={};", q_route, q_route_expr));
-        
-        let dispatch_state = rng.range(0x1000, 0x2FFF) as i64;
-        out.push_str(&format!("{}={};", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
-        
-        out.push_str("elseif ");
-        out.push_str(&format!("{}=={} then ", var_t, Self::obfuscate_num_depth(dispatch_state, 1, &keys, rng)));
-        out.push_str(&Self::generate_recursive_tree(
-            0,
-            num_routes as usize - 1,
-            &q_route,
-            var_inst,
-            var_handlers,
-            var_tamper,
-            &s_state,
-            &d_junk,
-            &f_tmp,
-            &var_t,
-            fetch_state,
-            &mut junk_limit,
-            &keys,
-            rng
-        ));
-        
-        out.push_str("else ");
-        out.push_str(&format!("if {} then if {} then {},{}=false,false;{}={};else return(unpack or table.unpack)({},{},{})end else {}={};end ", 
-            var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng), var_r_vals, Self::format_num(1, rng), var_r_len, var_t, Self::obfuscate_num_depth(fetch_state, 1, &keys, rng)
-        ));
-
-        out.push_str("end end ");
-        out
-    }
-
-    pub fn generate_leaf_node(
-        var_inst: &str,
-        var_handlers: &str,
-        var_tamper: &str,
-        s_state: &str,
-        d_junk: &str,
-        f_tmp: &str,
-        var_t: &str,
-        _fetch_state: i64,
-        keys: &CipherKeys,
-        rng: &mut GenRng,
-    ) -> String {
-        let next_s = rng.range(0, 512) as i64;
-        let next_s_obf = Self::obfuscate_num_depth(next_s, 1, keys, rng);
-        let else_state = 0i64;
-        let state_transition = format!("{}={};", var_t, Self::obfuscate_num_depth(else_state, 1, keys, rng));
-        let leaf_type = rng.range(0, 5);
-        let mut node = String::new();
-        let idx_1 = Self::format_num(1, rng);
-
-        match leaf_type {
-            0 => {
-                node.push_str(&format!("{}={}+{};{}={}[{}[{}]+{}];{}({});{}={};{}", 
-                    d_junk, d_junk, Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
-            }
-            1 => {
-                node.push_str(&format!("repeat {}={}[{}[{}]+{}];{}({});{}={};{}break until false;", 
-                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
-            }
-            2 => {
-                node.push_str(&format!("for _={},{} do {}={}[{}[{}]+{}];{}({});end {}={};{}", 
-                    Self::format_num(1, rng), Self::format_num(1, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
-            }
-            3 => {
-                node.push_str(&format!("if {}~={} then {}={}[{}[{}]+{}];{}({});{}={};{}end ", 
-                    d_junk, Self::format_num(4294967295i64, rng), f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
-            }
-            _ => {
-                node.push_str(&format!("{}={}[{}[{}]+{}];{}({});{}={};{}", 
-                    f_tmp, var_handlers, var_inst, idx_1, var_tamper, f_tmp, var_inst, s_state, next_s_obf, state_transition));
-            }
-        }
-        node
-    }
-
-    pub fn generate_recursive_tree(
-        min: usize,
-        max: usize,
-        q_route: &str,
-        var_inst: &str,
-        var_handlers: &str,
-        var_tamper: &str,
-        s_state: &str,
-        d_junk: &str,
-        f_tmp: &str,
-        var_t: &str,
-        fetch_state: i64,
-        junk_limit: &mut usize,
-        keys: &CipherKeys,
-        rng: &mut GenRng,
-    ) -> String {
-        if min == max {
-            let real_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
-            if *junk_limit > 0 && rng.range(0, 5) == 0 {
-                *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
-                let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
-                return format!("if {}=={} then {} else {} end ", d_junk, fake_cond, junk_leaf, real_leaf);
-            }
-            return real_leaf;
-        }
-
-        let mid = (min + max) / 2;
-        let mut branch = String::new();
-        let direction = rng.range(0, 2) == 0;
-
-        let comp_expr = Self::generate_opaque_predicate(mid as i64, q_route, "<=", keys, rng);
-
-        if direction {
-            branch.push_str(&format!("if {} then ", comp_expr));
-            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
-            
-            if *junk_limit > 0 && rng.range(0, 4) == 0 {
-                *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
-                let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
-                branch.push_str(&format!("elseif {}=={} then {} ", d_junk, fake_cond, junk_leaf));
-            }
-
-            branch.push_str("else ");
-            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
-            branch.push_str("end ");
-        } else {
-            let rev_comp = Self::generate_opaque_predicate(mid as i64, q_route, ">", keys, rng);
-
-            branch.push_str(&format!("if {} then ", rev_comp));
-            branch.push_str(&Self::generate_recursive_tree(mid + 1, max, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
-            
-            if *junk_limit > 0 && rng.range(0, 4) == 0 {
-                *junk_limit -= 1;
-                let junk_leaf = Self::generate_leaf_node(var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, keys, rng);
-                let fake_cond = Self::format_num(rng.range(0x1000, 0x2FFF) as i64, rng);
-                branch.push_str(&format!("elseif {}=={} then {} ", d_junk, fake_cond, junk_leaf));
-            }
-
-            branch.push_str("else ");
-            branch.push_str(&Self::generate_recursive_tree(min, mid, q_route, var_inst, var_handlers, var_tamper, s_state, d_junk, f_tmp, var_t, fetch_state, junk_limit, keys, rng));
-            branch.push_str("end ");
-        }
-        branch
-    }
 }
 
 pub struct GenRng { used: HashSet<String>, slots: Vec<i64> }
@@ -612,13 +273,17 @@ impl GenRng {
     }
     pub fn obfuscate_num(&mut self, val: i64, depth: usize, keys: &CipherKeys) -> String {
         if depth == 0 { return self.format_num(val); }
-        // 深度大于零时仅使用运行时表查找，移除纯数字加减恒等式。
+        // 每次调用随机挑一条运输线：全产物不再共用同一对 (组, 键) 选择器，
+        // 且线上带独立扰动（tx/ta），值与掩码不再能直接抵消。
+        let t = &keys.transports[self.range(0, keys.transports.len())];
         if self.range(0, 2) == 0 {
             let mask = self.range64(0x10000000, 0x3FFFFFFF);
-            format!("{}[{}][{}]({},{})", keys.tbl_p, self.format_num(keys.grp1 as i64), self.format_num(keys.key_bx as i64), self.obfuscate_num(val ^ mask, depth - 1, keys), self.obfuscate_num(mask, depth - 1, keys))
+            let a = val ^ mask ^ (t.tx as i64);
+            format!("{}[{}][{}]({},{})", keys.tbl_p, self.format_num(t.grp as i64), self.format_num(t.kx as i64), self.obfuscate_num(a, depth - 1, keys), self.obfuscate_num(mask, depth - 1, keys))
         } else {
             let mask = self.range64(0x10000000, 0x3FFFFFFF);
-            format!("{}[{}][{}]({},{})", keys.tbl_p, self.format_num(keys.grp1 as i64), self.format_num(keys.key_add as i64), self.obfuscate_num(val.wrapping_sub(mask), depth - 1, keys), self.obfuscate_num(mask, depth - 1, keys))
+            let a = val.wrapping_sub(mask).wrapping_add(t.ta as i64);
+            format!("{}[{}][{}]({},{})", keys.tbl_p, self.format_num(t.grp as i64), self.format_num(t.kadd as i64), self.obfuscate_num(a, depth - 1, keys), self.obfuscate_num(mask, depth - 1, keys))
         }
     }
 }
@@ -937,10 +602,10 @@ pub(super) fn build_inst_decoder_lua(
 /// 折叠只是把「生成期就能算出的值」算好：语义逐位等价，产物变短也变快。
 ///
 /// 折叠规则（与产物内辅助函数的运行时语义一致）：
-///   - `key_bx`  → `A ^ B`（A、B 均为非负且 < 2^31 时才折；与 bit32.bxor 的 32 位语义一致）
-///   - `key_add` → `A + B`（A、B、和都 < 2^52 时才折，避开双精度整数精度边界）
-///   - `key_ba`  → `A & B`（A、B 均为非负且 < 2^52 时；grp1 下是二元 band）
-/// 组号不等于 `grp1`、键不在上述三种、参数含变量或为负、解析失败——一律原样保留。
+///   - 运输线 `kx`   → `(A ^ B) ^ tx`（A、B 非负且 < 2^31；与运行时 32 位双异或一致）
+///   - 运输线 `kadd` → `A + B - ta`（各量与结果都在 [0, 2^52) 才折）
+///   - `key_ba`      → `A & B`（A、B 均为非负且 < 2^52 时；grp1 下是二元 band）
+/// 组/键不属于上述组合、参数含变量或为负、解析失败——一律原样保留。
 pub(super) fn fold_const_keycalls(region: &str, keys: &CipherKeys) -> String {
     const SAFE: i64 = 1 << 52;
     let b = region.as_bytes();
@@ -1003,22 +668,28 @@ pub(super) fn fold_const_keycalls(region: &str, keys: &CipherKeys) -> String {
                                         if let Some((c, p4)) = parse_num(b, skip_sp(b, p3 + 1)) {
                                             let p4 = skip_sp(b, p4);
                                             if p4 < b.len() && b[p4] == b')' {
-                                                if g == keys.grp1 as i64 {
-                                                    let folded = if k == keys.key_bx as i64
+                                                if g == keys.grp1 as i64 && k == keys.key_ba as i64
+                                                    && a < SAFE && c < SAFE
+                                                {
+                                                    // grp1 的 key_ba 是二元 band（见 Generator 的键表构造：
+                                                    // `tbl[g1][ba]=fn_ba`），按位与逐位等价。
+                                                    out.push_str(&format!("(0X{:X})", (a & c) as u64));
+                                                    i = p4 + 1;
+                                                    ok = true;
+                                                } else if let Some(t) = keys.transports.iter()
+                                                    .find(|t| g == t.grp as i64 && (k == t.kx as i64 || k == t.kadd as i64))
+                                                {
+                                                    // 运输线带扰动：xor 线 = (a^c)^tx（32 位），
+                                                    // add 线 = a + c - ta；与运行时闭包同式才可折。
+                                                    let folded = if k == t.kx as i64
                                                         && a < (1 << 31) && c < (1 << 31)
                                                     {
-                                                        Some((a ^ c) as u64)
-                                                    } else if k == keys.key_add as i64
-                                                        && a < SAFE && c < SAFE
-                                                        && a.saturating_add(c) < SAFE
-                                                    {
-                                                        Some((a + c) as u64)
-                                                    } else if k == keys.key_ba as i64
+                                                        Some(((a ^ c) as u32 ^ t.tx) as u64)
+                                                    } else if k == t.kadd as i64
                                                         && a < SAFE && c < SAFE
                                                     {
-                                                        // grp1 的 key_ba 是二元 band（见 Generator 的键表构造：
-                                                        // `tbl[g1][ba]=fn_ba`），按位与逐位等价。
-                                                        Some((a & c) as u64)
+                                                        let r = a + c - t.ta as i64;
+                                                        if r >= 0 && r < SAFE { Some(r as u64) } else { None }
                                                     } else {
                                                         None
                                                     };
@@ -1480,7 +1151,7 @@ pub use crate::VM::VM_Backend::Generator_unistream::UniStream;
 
 #[cfg(test)]
 mod custom_string_stream_tests {
-    use super::{mix_decrypt, mix_encrypt, stream_dec_body, CipherKeys};
+    use super::{mix_decrypt, mix_encrypt, stream_dec_body, CipherKeys, GenRng, Transport};
     use std::path::Path;
     use std::process::Command;
 
@@ -1508,31 +1179,32 @@ mod custom_string_stream_tests {
 
     #[test]
     fn fold_const_keycalls_matches_runtime_semantics() {
-        // 三个辅助键（异或/与/加）各造一条常量调用；参数全为字面量。
+        // 运输线（带扰动）+ band 辅助键各造常量调用；参数全为字面量。
         let keys = CipherKeys {
-            grp1: 0x46, grp2: 0x11, key_bx: 0x51, key_ba: 0x63, key_add: 0x1B,
+            grp1: 0x46, grp2: 0x11, key_ba: 0x63,
             key_bs: 0x53, key_ba2: 0x71, key_bs2: 0x22, tbl_p: "K".to_string(),
+            transports: vec![Transport { grp: 0x30, kx: 0x21, kadd: 0x22, tx: 0xA5, ta: 0x37 }],
         };
-        let src = "if K[0X46][0X51](0X5C07F492,607577790)<=x then y=K[70][27](1000,2000)+K[0X46][0X63](0XFFFFFFFF,1) end;                    K[0X46][0X51](v,1); local z=K[0X46][0X51](0X10,0X20)";
+        let src = "if K[0X30][0X21](0X5C07F492,607577790)<=x then y=K[0X30][0X22](1000,2000)+K[0X46][0X63](0XFFFFFFFF,1) end;                    K[0X30][0X21](v,1); local z=K[0X30][0X21](0X10,0X20)";
         let out = super::fold_const_keycalls(src, &keys);
-        // 常量调用被折成字面量（用括号包住，避免和左邻右舍粘连）
-        assert!(out.contains(&format!("(0X{:X})", 0x5C07F492u64 ^ 607577790)), "{}", out);
-        assert!(out.contains(&format!("(0X{:X})", 1000u64 + 2000)), "{}", out);
+        // xor 线：(A^B)^tx；add 线：A+B-ta；都折成字面量（括号包住防粘连）
+        assert!(out.contains(&format!("(0X{:X})", ((0x5C07F492u32 ^ 607577790u32) ^ 0xA5) as u64)), "{}", out);
+        assert!(out.contains(&format!("(0X{:X})", 1000u64 + 2000 - 0x37)), "{}", out);
         // 二元 band：0XFFFFFFFF & 1 == 1（曾误按「掩码」折成 0XFFFFFFFF，测试就是为此加的）
         assert!(out.contains(&format!("(0X{:X})", 0xFFFF_FFFFu64 & 1)), "{}", out);
-        assert!(out.contains(&format!("(0X{:X})", 0x10u64 ^ 0x20)), "{}", out);
-        // 含变量的调用、非三类键、组号不符：一律原样保留
-        assert!(out.contains("K[0X46][0X51](v,1)"));
+        assert!(out.contains(&format!("(0X{:X})", ((0x10u32 ^ 0x20) ^ 0xA5) as u64)), "{}", out);
+        // 含变量的调用、未知键、组号不符：一律原样保留
+        assert!(out.contains("K[0X30][0X21](v,1)"));
         let noop = super::fold_const_keycalls("K[0X11][0X51](1,2)", &keys);
         assert_eq!(noop, "K[0X11][0X51](1,2)");
-        let noop2 = super::fold_const_keycalls("K[0X46][0X53](1,2)", &keys);
-        assert_eq!(noop2, "K[0X46][0X53](1,2)");
+        let noop2 = super::fold_const_keycalls("K[0X30][0X53](1,2)", &keys);
+        assert_eq!(noop2, "K[0X30][0X53](1,2)");
         // 折叠后必须是合法 Lua 表达式片段（与一个占位符拼接后交给 lua5.1 校验）
         let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
         if lua.exists() {
             // K 用桩表顶上：片段里的调用在探针里只需能解析/可调用
             let probe = format!(
-                "local K={{[0X46]={{[0X51]=function(a,b) return 0 end,[27]=function(a,b) return 0 end,[0X63]=function(a,b) return 0 end}}}} local x=7 local v=3 local y=0 {out} print('FOLD_OK')");
+                "local K={{[0X30]={{[0X21]=function(a,b) return 0 end,[0X22]=function(a,b) return 0 end}},[0X46]={{[0X63]=function(a,b) return 0 end}}}} local x=7 local v=3 local y=0 {out} print('FOLD_OK')");
             let r = Command::new(lua).arg("-e").arg(&probe).output().expect("run lua");
             assert!(r.status.success(), "folded Lua failed: {}", String::from_utf8_lossy(&r.stderr));
             assert!(String::from_utf8_lossy(&r.stdout).contains("FOLD_OK"));

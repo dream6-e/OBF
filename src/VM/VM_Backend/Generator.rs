@@ -347,28 +347,27 @@ impl Generator {
         
         // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng
         let idx = rng.distinct(8, 0x10, 0x7F);
+        // 常量运输线（改进 4/5）：逐线独立组号 + 扰动，替代全局裸选择器。
+        let transports = crate::VM::VM_Backend::Generator_kdf::build_transports(
+            &mut rng, 10, &[idx[0], idx[1]]);
         let keys = CipherKeys {
             grp1: idx[0],
             grp2: idx[1],
-            key_bx: idx[2],
             key_ba: idx[3],
-            key_add: idx[4],
             key_bs: idx[5],
             key_ba2: idx[6],
             key_bs2: idx[7],
             tbl_p: rng.name(),
+            transports,
         };
 
         let fn_bx = rng.name();
         let fn_ba = rng.name();
         let fn_bs = rng.name();
-        // ⑱.4 execute 前置 bxor 别名（与 fn_bxor 同实现）：execute 定义在解码器
-        // 函数之前，直接引用 fn_bxor 会捕获成全局 nil——取指/掩码派生专用此别名
+        // execute 前置 bxor 别名：execute 定义在解码器之前，直引 fn_bxor 会捕成全局 nil
         let fn_bxor2 = rng.name();
         let mut block_p_def = String::new();
-        // ㉘D2 形式改写：qT4c/qT8c 的两段平铺建表折进一个函数边界（双表以返回值
-        // 出界，外层同名局部接住——后续 fn_bx/fn_bxor2 fallback 对 qT8c 的 upvalue
-        // 捕获不变）；四个位库局部互无依赖，洗牌后发射
+        // qT4c/qT8c 两段建表折进一个函数边界（双表以返回值出界）；位库局部洗牌后发射
         block_p_def.push_str("local qT4c,qT8c=(function() local qT4c={};for i=0,15 do qT4c[i]={};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4c[i][j]=r end end;local qT8c={};for i=0,255 do qT8c[i]={};end;for i=0,255 do local qIc=qT8c[i];local qHc=(i-i%16)/16;for j=0,255 do qIc[j]=qT4c[i%16][j%16]+qT4c[qHc][(j-j%16)/16]*16 end end; return qT4c,qT8c end)(); ");
         let mut bit_locals: Vec<String> = vec![
             format!("local {}={}; ", fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"),
@@ -378,23 +377,23 @@ impl Generator {
         ];
         rng.shuffle(&mut bit_locals);
         for bl in &bit_locals { block_p_def.push_str(bl); }
+        // 裸 xor/加法选择器已退役（改进 4/5）：常量运输一律走带扰动的
+        // 运输线（emit_transport_slots）；此表只留 band/移位辅助槽。
         let tbl_def = format!(
-            "local {p}={{}};{p}[{g1}]={{}};{p}[{g1}][{bx}]={fbx};{p}[{g1}][{add}]=function(a,b)return a+b end;{p}[{g1}][{ba}]={fba};{p}[{g2}]={{}};{p}[{g2}][{ba2}]=function(a)return {fba}(a,{max_u32})end;{p}[{g2}][{bs2}]=function(a)return {fbs}(a,{one})end;",
+            "local {p}={{}};{p}[{g1}]={{}};{p}[{g1}][{ba}]={fba};{p}[{g2}]={{}};{p}[{g2}][{ba2}]=function(a)return {fba}(a,{max_u32})end;{p}[{g2}][{bs2}]=function(a)return {fbs}(a,{one})end;",
             p = keys.tbl_p,
             g1 = rng.format_num(keys.grp1 as i64),
             g2 = rng.format_num(keys.grp2 as i64),
-            bx = rng.format_num(keys.key_bx as i64),
-            add = rng.format_num(keys.key_add as i64),
             ba = rng.format_num(keys.key_ba as i64),
             ba2 = rng.format_num(keys.key_ba2 as i64),
             bs2 = rng.format_num(keys.key_bs2 as i64),
-            fbx = fn_bx,
             fba = fn_ba,
             fbs = fn_bs,
             max_u32 = rng.format_num(4294967295i64),
             one = rng.format_num(1i64)
         );
         block_p_def.push_str(&tbl_def);
+        block_p_def.push_str(&crate::VM::VM_Backend::Generator_kdf::emit_transport_slots(&mut rng, &keys, &fn_bx));
 
         let block_vm_core = Lua_core::build_vm_core().replace("\n", " ");
         
