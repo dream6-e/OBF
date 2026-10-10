@@ -1,20 +1,21 @@
 //! Semantics-preserving relay dispatch for VM instruction cases.
 //!
 //! The frame setup remains in `execute`; opcode cases are independent functions and
-//! each returns its next PC to the iterative driver. To keep the payload from being a
-//! single scriptable shape ("one routes table + one cases table + one call site"),
-//! every structural choice below is re-randomized per build:
+//! each returns its next PC to the iterative driver. The opcode→handler wiring is
+//! hidden rather than merely shuffled:
 //!
-//! * case handlers are sharded into 2–3 bucket tables, each bucket using one of
-//!   several storage shapes (plain closure, aliased parameter permutation, named
-//!   function reference, single-element array box);
-//! * route tables are sharded per bucket and built from shuffled constructor
-//!   literals plus scattered assignment statements;
+//! * handlers live in a shuffled registry array; bodies keep randomized keyword
+//!   wraps (`do`/single-iteration `while`/`repeat`), aliased parameter
+//!   permutations, and fallthrough returns trimmed to the flags actually used;
+//! * the route/case mapping never appears as keyed assignments. Wires are a flat,
+//!   shuffled numeric blob (opcode, masked slot index pairs + trailing garbage)
+//!   that reads like ordinary data, and one or two empty "front" tables resolve
+//!   lookups through an `__index` metamethod that scans the wires and caches hits;
+//! * burn-after-use: once every wire pair has been resolved once, the resolver
+//!   refills the cache, nils the wire blob and drops the metatable, so a later
+//!   dump finds no wiring; until then the cache is periodically wiped;
 //! * the dispatch expression is picked among several equivalent templates;
-//! * case bodies get randomized keyword wraps (`do`/single-iteration `while`/
-//!   `repeat`) and the fallthrough return arity is trimmed to the flags the body
-//!   actually touches;
-//! * decoy tables live inside `if false` / zero-trip `for` blocks;
+//! * decoy maps live inside `if false` / zero-trip `for` blocks;
 //! * the entry/exit protocol relay is split across two state tables.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,8 +80,9 @@ enum CaseShape {
     Boxed,
 }
 
-/// Build the sharded protocol lookup and one independent function per distinct case.
-/// The setup block is hoisted by `wrap_dispatcher` before the iterative driver is emitted.
+/// Build the hidden opcode→handler wiring (flat wire blobs resolved through
+/// `__index` fronts) and one independent function per distinct case. The setup
+/// block is hoisted by `wrap_dispatcher` before the iterative driver is emitted.
 pub(super) fn build_relay_dispatch(
     entries: &[(u32, String)],
     pc: &str,
@@ -101,70 +103,39 @@ pub(super) fn build_relay_dispatch(
     );
     let tag = rng.name(&format!("{}_dx", execute_name));
 
-    // Deduplicate identical handler bodies behind shared protocol codes.
-    let mut unique: Vec<(u32, String)> = Vec::new();
-    let mut used_codes = Vec::new();
-    let mut route_entries: Vec<(u32, u32)> = Vec::with_capacity(entries.len());
-    for (index, (opcode, body)) in entries.iter().enumerate() {
-        let protocol = if let Some((protocol, _)) = unique.iter().find(|(_, old)| old == body) {
-            *protocol
+    // Deduplicate identical handler bodies; each opcode points at a handler index.
+    let mut unique: Vec<String> = Vec::new();
+    let mut handler_of: Vec<usize> = Vec::with_capacity(entries.len());
+    for (_opcode, body) in entries.iter() {
+        let idx = if let Some(pos) = unique.iter().position(|old| old == body) {
+            pos
         } else {
-            let mut code = protocol_code(vm_seed, *opcode, index);
-            while used_codes.contains(&code) {
-                code = code.wrapping_add(0x9E37_79B9);
-            }
-            used_codes.push(code);
-            unique.push((code, body.clone()));
-            code
+            unique.push(body.clone());
+            unique.len() - 1
         };
-        route_entries.push((*opcode, protocol));
+        handler_of.push(idx);
     }
 
-    // Shard protocols across 2–3 bucket tables (one bucket for a single protocol).
-    let bucket_count = if unique.len() <= 1 {
-        1
-    } else {
-        let want = 2 + rng.range(2) as usize;
-        want.min(unique.len())
-    };
-    let mut proto_order: Vec<usize> = (0..unique.len()).collect();
-    rng.shuffle(&mut proto_order);
-    let mut proto_bucket = vec![0usize; unique.len()];
-    for (slot, proto_idx) in proto_order.iter().enumerate() {
-        proto_bucket[*proto_idx] = slot % bucket_count;
+    // Handler registry order is shuffled; slot_of maps original index -> slot.
+    let mut order: Vec<usize> = (0..unique.len()).collect();
+    rng.shuffle(&mut order);
+    let mut slot_of = vec![0usize; unique.len()];
+    for (slot, orig) in order.iter().enumerate() {
+        slot_of[*orig] = slot;
     }
 
-    // Distinct storage shapes, shuffled across buckets. The Named shape declares one
-    // local function per case in the enclosing scope, so keep it away from the
-    // 200-locals-per-function limit when the handler set is large.
-    let mut shapes: Vec<CaseShape> = vec![CaseShape::Plain, CaseShape::Aliased, CaseShape::Named, CaseShape::Boxed];
-    if unique.len() > 140 {
-        shapes.retain(|s| *s != CaseShape::Named);
-    }
-    rng.shuffle(&mut shapes);
-    let bucket_shapes: Vec<CaseShape> = (0..bucket_count).map(|i| shapes[i % shapes.len()]).collect();
-    // Parameter style per bucket: canonical names or a permuted signature that is
-    // aliased back inside the handler (bodies keep referring to the canonical names).
-    let bucket_aliased: Vec<bool> = (0..bucket_count)
-        .map(|i| bucket_shapes[i] == CaseShape::Aliased || (bucket_shapes[i] != CaseShape::Plain && rng.coin()))
-        .collect();
-    let bucket_names: Vec<(String, String)> = (0..bucket_count)
-        .map(|_| (rng.name(&tag), rng.name(&tag)))
-        .collect();
+    let handlers_name = rng.name(&tag);
     let fallback = rng.name(&tag);
-    let junk: Vec<(String, String)> = (0..bucket_count).map(|_| (rng.name(&tag), rng.name(&tag))).collect();
+    let mask = 1 + rng.range(0x00FF_FFFF) as u32;
 
-    // ---- emit case handlers -------------------------------------------------
-    let mut named_defs: Vec<String> = Vec::new();
-    let mut inline_entries: Vec<Vec<String>> = vec![Vec::new(); bucket_count];
-    let mut scattered: Vec<String> = Vec::new();
-    let mut route_stmts: Vec<(usize, String)> = Vec::new();
-
-    for (proto_idx, (protocol, body)) in unique.iter().enumerate() {
-        let b = proto_bucket[proto_idx];
-        let (cases_b, _routes_b) = &bucket_names[b];
-        let (j1, j2) = &junk[b];
-        let (params, alias_stmt) = handler_params(&mut rng, bucket_aliased[b]);
+    // ---- emit handlers (mix of named defs and inline closures) --------------
+    let mut setup = String::new();
+    let mut h_entries: Vec<String> = vec![String::new(); unique.len()];
+    for (slot, orig) in order.iter().enumerate() {
+        let body = &unique[*orig];
+        let aliased = rng.coin();
+        let (params, alias_stmt) = handler_params(&mut rng, aliased);
+        let (j1, j2) = (rng.name(&tag), rng.name(&tag));
         let trimmed = trimmed_flags(body, &[r1, r2, r3]);
         let wrapped = wrap_case_body(&mut rng, body);
         let fallthrough = if ends_with_return_statement(body) {
@@ -191,117 +162,109 @@ pub(super) fn build_relay_dispatch(
             wrapped = wrapped,
             fallthrough = fallthrough,
         );
-        let fn_expr = format!("function({params}) {inner} end", params = params, inner = inner);
-        match bucket_shapes[b] {
-            CaseShape::Named => {
-                let hname = rng.name(&tag);
-                named_defs.push(format!("local function {hname}({params}) {inner} end;", hname = hname, params = params, inner = inner));
-                if rng.coin() {
-                    inline_entries[b].push(format!("[0X{protocol:08X}]={hname}", protocol = protocol, hname = hname));
-                } else {
-                    scattered.push(format!("{cases_b}[0X{protocol:08X}]={hname};", cases_b = cases_b, protocol = protocol, hname = hname));
-                }
-            }
-            CaseShape::Boxed => {
-                let stmt = format!("{cases_b}[0X{protocol:08X}]={{{fne}}};", cases_b = cases_b, protocol = protocol, fne = fn_expr);
-                if inline_entries[b].is_empty() && rng.coin() {
-                    inline_entries[b].push(format!("[0X{protocol:08X}]={{{fne}}}", protocol = protocol, fne = fn_expr));
-                } else {
-                    scattered.push(stmt);
-                }
-            }
-            _ => {
-                if inline_entries[b].len() < 3 && rng.coin() {
-                    inline_entries[b].push(format!("[0X{protocol:08X}]={fne}", protocol = protocol, fne = fn_expr));
-                } else {
-                    scattered.push(format!("{cases_b}[0X{protocol:08X}]={fne};", cases_b = cases_b, protocol = protocol, fne = fn_expr));
-                }
-            }
-        }
-    }
-
-    // ---- route statements (per bucket) --------------------------------------
-    for (opcode, protocol) in &route_entries {
-        let b = proto_bucket[unique.iter().position(|(p, _)| p == protocol).unwrap()];
-        let stmt = format!(
-            "{routes}[0X{opcode:X}]=0X{protocol:08X};",
-            routes = bucket_names[b].1,
-            opcode = opcode,
-            protocol = protocol,
-        );
-        route_stmts.push((b, stmt));
-    }
-    rng.shuffle(&mut route_stmts);
-    rng.shuffle(&mut scattered);
-
-    // ---- assemble the setup block -------------------------------------------
-    let mut setup = String::new();
-    for def in &named_defs {
-        setup.push_str(def);
-    }
-    for b in 0..bucket_count {
-        let (cases_b, routes_b) = &bucket_names[b];
-        if inline_entries[b].is_empty() {
-            setup.push_str(&format!("local {cases_b},{routes_b}={{}},{{}};", cases_b = cases_b, routes_b = routes_b));
-        } else {
+        if rng.coin() {
+            let hname = rng.name(&tag);
             setup.push_str(&format!(
-                "local {cases_b},{routes_b}={{{entries}}},{{}};",
-                cases_b = cases_b,
-                routes_b = routes_b,
-                entries = inline_entries[b].join(","),
+                "local function {hname}({params}) {inner} end;",
+                hname = hname,
+                params = params,
+                inner = inner,
             ));
+            h_entries[slot] = hname;
+        } else {
+            h_entries[slot] = format!("function({params}) {inner} end", params = params, inner = inner);
         }
     }
-    // Interleave scattered case assignments and route assignments.
-    let mut si = 0usize;
-    let mut ri = 0usize;
-    while si < scattered.len() || ri < route_stmts.len() {
-        let take_route = if si >= scattered.len() {
-            true
-        } else if ri >= route_stmts.len() {
-            false
-        } else {
-            rng.coin()
-        };
-        if take_route {
-            setup.push_str(&route_stmts[ri].1);
-            ri += 1;
-        } else {
-            setup.push_str(&scattered[si]);
-            si += 1;
-        }
-    }
+    setup.push_str(&format!("local {handlers_name}={{{entries}}};", handlers_name = handlers_name, entries = h_entries.join(",")));
+
     // Fallback in one of several equivalent shapes.
     setup.push_str(&match rng.range(3) {
         0 => format!("local {fallback}=function() return {pc},nil,nil,nil end;", fallback = fallback, pc = pc),
         1 => format!("local function {fallback}() do return {pc},nil,nil,nil end end;", fallback = fallback, pc = pc),
         _ => format!("local {fallback}=function() local {j}; return {pc},nil,nil,nil end;", fallback = fallback, pc = pc, j = rng.name(&tag)),
     });
-    // Decoy tables inside dead code: plausible number→function maps that no lookup
-    // ever reaches, to poison generic table-dumping scripts.
+
+    // ---- fronts: empty tables whose __index resolves from flat wire data -----
+    // (schemes 4/11/14: metatable indirection, data-pool disguise, burn-after-use)
+    let front_count = 1 + rng.range(2) as usize;
+    let wipe_every = 256 + rng.range(768);
+    let mut front_pairs: Vec<Vec<(u32, usize)>> = vec![Vec::new(); front_count];
+    for (e_i, (opcode, _body)) in entries.iter().enumerate() {
+        let slot = slot_of[handler_of[e_i]];
+        let f = rng.range(front_count as u64) as usize;
+        front_pairs[f].push((*opcode, slot));
+    }
+    // Keep fronts balanced-ish: move pairs out of the busiest front if one is empty.
+    if front_count > 1 && front_pairs.iter().any(|p| p.is_empty()) {
+        let (donor, _) = front_pairs.iter().enumerate().max_by_key(|(_, p)| p.len()).unwrap();
+        for f in 0..front_count {
+            if front_pairs[f].is_empty() {
+                let moved = front_pairs[donor].pop().unwrap();
+                front_pairs[f].push(moved);
+            }
+        }
+    }
+    let mut front_names: Vec<String> = Vec::new();
+    for f in 0..front_count {
+        let wname = rng.name(&tag);
+        let fname = rng.name(&tag);
+        let seen_t = rng.name(&tag);
+        let seen_c = rng.name(&tag);
+        let hit_c = rng.name(&tag);
+        let mut pairs = front_pairs[f].clone();
+        rng.shuffle(&mut pairs);
+        let total = pairs.len();
+        // Flat numeric wire blob: shuffled (opcode, masked slot) pairs plus
+        // a few trailing garbage numbers so it reads like ordinary data.
+        let mut nums: Vec<String> = Vec::with_capacity(total * 2 + 4);
+        for (op, slot) in &pairs {
+            nums.push(format!("0X{:X}", op));
+            nums.push(format!("0X{:X}", (*slot as u32) + 1 + mask));
+        }
+        for _ in 0..rng.range(5) {
+            nums.push(format!("0X{:X}", rng.next() as u32));
+        }
+        let scan_end = total * 2;
+        setup.push_str(&format!(
+            "local {w}={{{nums}}};local {st}={{}};local {sc},{hc}=0,0;",
+            w = wname,
+            nums = nums.join(","),
+            st = seen_t,
+            sc = seen_c,
+            hc = hit_c,
+        ));
+        // Resolver: scan wire pairs; cache hits; burn (full refill + nil the wires +
+        // drop the metatable) once every pair has been resolved once; periodic
+        // cache wipes until then so a dump finds an empty or near-empty table.
+        setup.push_str(&format!(
+            "local {f}=setmetatable({{}},{{__index=function(t,k) local i=1;while i<={end_i} do if {w}[i]==k then local h={h}[{w}[i+1]-{mask}];rawset(t,k,h);if not {st}[k] then {st}[k]=true;{sc}={sc}+1 end;if {sc}>={total} then local j=1;while j<={end_i} do rawset(t,{w}[j],{h}[{w}[j+1]-{mask}]);j=j+2 end;{w}=nil;setmetatable(t,nil);return h end;{hc}={hc}+1;if {hc}>={wipe} then {hc}=0;for pk in pairs(t) do rawset(t,pk,nil) end;rawset(t,k,h) end;return h end;i=i+2 end;return nil end}});",
+            f = fname,
+            w = wname,
+            h = handlers_name,
+            mask = format!("0X{:X}", mask),
+            st = seen_t,
+            sc = seen_c,
+            hc = hit_c,
+            total = total,
+            end_i = scan_end,
+            wipe = wipe_every,
+        ));
+        front_names.push(fname);
+    }
+    // Dead-code decoys stay: plausible fake maps to poison naive dumpers.
     setup.push_str(&decoy_block(&mut rng, &tag, &format!("{}_d", tag)));
 
     // ---- dispatch expression (several equivalent templates) ------------------
-    let mut order: Vec<usize> = (0..bucket_count).collect();
-    rng.shuffle(&mut order);
+    let mut order_f: Vec<usize> = (0..front_count).collect();
+    rng.shuffle(&mut order_f);
     let ov = format!("{}-{}", route_op, bias);
-    let rtchain = order
-        .iter()
-        .map(|b| format!("{}[{}]", bucket_names[*b].1, ov))
-        .collect::<Vec<_>>()
-        .join(" or ");
-    let k = rng.name(&tag);
     let f = rng.name(&tag);
     let g = rng.name(&tag);
     let np = rng.name(&tag);
     let (ra, rb, rc) = (rng.name(&tag), rng.name(&tag), rng.name(&tag));
-    let unwrap = |b: usize, key: &str| match bucket_shapes[b] {
-        CaseShape::Boxed => format!("({t}[{key}] and {t}[{key}][1])", t = bucket_names[b].0, key = key),
-        _ => format!("{}[{}]", bucket_names[b].0, key),
-    };
-    let hchain = order
+    let chain = order_f
         .iter()
-        .map(|b| unwrap(*b, &k))
+        .map(|i| format!("{}[{}]", front_names[*i], ov))
         .collect::<Vec<_>>()
         .join(" or ");
     let call = format!("{np},{ra},{rb},{rc}={f}(op,inst_A,inst_B,inst_C);", np = np, ra = ra, rb = rb, rc = rc, f = f);
@@ -310,25 +273,23 @@ pub(super) fn build_relay_dispatch(
         np = np, pc = pc, r1 = r1, r2 = r2, r3 = r3, ra = ra, rb = rb, rc = rc,
     );
     let dispatch = match rng.range(3) {
-        0 => format!("local {k}={rtchain};local {f}={hchain} or {fallback};{call}{tail}", k = k, rtchain = rtchain, f = f, hchain = hchain, fallback = fallback, call = call, tail = tail),
+        0 => format!("local {f}={chain} or {fallback};{call}{tail}", f = f, chain = chain, fallback = fallback, call = call, tail = tail),
         1 => format!(
-            "local {k}={rtchain};local {f}={fallback};do local {g}={hchain};if {g} then {f}={g} end end;{call}{tail}",
-            k = k, rtchain = rtchain, f = f, fallback = fallback, g = g, hchain = hchain, call = call, tail = tail,
+            "local {f}={fallback};do local {g}={chain};if {g} then {f}={g} end end;{call}{tail}",
+            f = f, fallback = fallback, g = g, chain = chain, call = call, tail = tail,
         ),
         _ => {
-            // Per-bucket temporaries, then an or-chain over the temporaries.
-            let ks: Vec<String> = (0..order.len()).map(|i| format!("{}_{}", k, i)).collect();
-            let hs: Vec<String> = (0..order.len()).map(|i| format!("{}_{}", g, i)).collect();
-            let kvs: Vec<String> = order.iter().map(|b| format!("{}[{}]", bucket_names[*b].1, ov)).collect();
-            let hvs: Vec<String> = order.iter().zip(ks.iter()).map(|(b, kn)| unwrap(*b, kn)).collect();
+            let ts: Vec<String> = (0..front_count).map(|i| format!("{}_{}", g, i)).collect();
+            let vs: Vec<String> = order_f
+                .iter()
+                .map(|i| format!("{}[{}]", front_names[*i], ov))
+                .collect();
             format!(
-                "local {ks}={kvs};local {hs}={hvs};local {f}={chain} or {fallback};{call}{tail}",
-                ks = ks.join(","),
-                kvs = kvs.join(","),
-                hs = hs.join(","),
-                hvs = hvs.join(","),
+                "local {ts}={vs};local {f}={chain_t} or {fallback};{call}{tail}",
+                ts = ts.join(","),
+                vs = vs.join(","),
                 f = f,
-                chain = hs.join(" or "),
+                chain_t = ts.join(" or "),
                 fallback = fallback,
                 call = call,
                 tail = tail,
@@ -424,18 +385,6 @@ fn decoy_block(rng: &mut TinyRng, tag: &str, dtag: &str) -> String {
     } else {
         format!("for {}=1,0 do {} end;", rng.name(tag), inner)
     }
-}
-
-fn protocol_code(seed: u64, opcode: u32, index: usize) -> u32 {
-    let mut value = (seed as u32)
-        ^ opcode.rotate_left((index as u32) & 31)
-        ^ (index as u32 + 1).wrapping_mul(0x9E37_79B9);
-    value ^= value >> 16;
-    value = value.wrapping_mul(0x7FEB_352D);
-    value ^= value >> 15;
-    value = value.wrapping_mul(0x846C_A68B);
-    value ^= value >> 16;
-    value
 }
 
 fn ends_with_return_statement(body: &str) -> bool {
@@ -752,6 +701,8 @@ mod tests {
             for fixed in ["_relay_cases", "_relay_routes", "_relay_fallback"] {
                 assert!(!wrapped.contains(fixed), "fixed relay suffix leaked: {fixed}");
             }
+            assert!(wrapped.contains("setmetatable"), "front tables must hide behind __index");
+            assert!(wrapped.contains("__index"), "resolver must live in the metatable");
             assert!(
                 wrapped.matches("local function").count() + wrapped.matches("=function(").count() >= 5,
                 "cases must remain independent functions"
