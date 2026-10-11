@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，200,822 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），109,147 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，305,082 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，196,896 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），109,685 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，315,891 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -304,3 +304,26 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 - **体积**：三件套 200,822 / 109,147 / 305,082 B（相对 4+5 版 +7.3 / −0.5 / −5.9 KB，
   含逐构建随机波动；净增远小于 25 KB 预算）。
 - **速度**：arith 微基准 1071–1098 ms，与改造前同量级，无退化。
+
+### 改进 3：篡改旗三旗池化（2026-10-11）
+
+- **背景**：批评指出篡改旗（原单旗 `psn`）"41 处置位、3 处 `s=true`、全文件无人读取"，
+  且置位写法单一（`V=V or (D(...)~=C)` 同形），一个 grep 就能枚举全部置位点、钉死单旗
+  即令全部毒化哑火。改进 1/2 后该旗已被毒化路径读取（`if psn and delay<=0 ...`），
+  但"单旗 + 同形写入"的指纹仍在。
+- **改造**：
+  1. **三旗池**：声明三个独立布尔旗，所有置位点（冷块摘要校验、方法桩、派发态、
+     AntiTamper 绊线、flow 守卫、pcall 完整性）各自随机挑一旗写入；
+  2. **毒化读取乱序析取**：毒化守卫改读 `(a or b or c)`（三旗乱序、两种包裹形态），
+     钉死任一单旗都无法令全部毒化哑火；
+  3. **写入形态多样化**：冷块校验置旗在 4 种等价语义写法间轮抽
+     （`V=V or (chk)` / `if not V then V=(chk) end` / `V=((chk) or V)` / `if (chk) then V=true end`），
+     打散同形文本指纹。
+- **验证**：`cargo test --release` **155/155**；三件套双语法门 + 双运行时逐字节一致；
+  语义三件套（lua51、vm-isa、numeric_for_errors）全过；产物结构扫描确认三旗声明、
+  多形态置位、乱序析取读取齐备。语料 5/6 直接通过，`roblox`/`hash` 各一次偶发
+  为既有"生成器偶发坏构建"（交接总结已记录，新旧二进制同量级、非本次引入），
+  各自重生成后双运行时逐字节一致。
+- **体积**：三件套 196,896 / 109,685 / 315,891 B，相对改进 2 版 −3.9 / +0.5 / +10.8 KB
+  （含逐构建随机波动），净增远小于 25 KB 预算。
+- **速度**：arith 微基准与改进 2 版同量级（多产物对比分布重叠，旗读取为冷路径），无系统性退化。

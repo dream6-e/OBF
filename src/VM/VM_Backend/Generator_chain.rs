@@ -41,6 +41,7 @@ pub(super) struct ChainIn {
     pub pf_opcodes: String,
     pub pf_protos: String,
     pub psn_n: String,
+    pub psn_pool: Vec<String>,
     pub poison_delay_key: u32,
     pub var_a2: String,
     pub var_whiten: String,
@@ -154,6 +155,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         pf_opcodes,
         pf_protos,
         psn_n,
+        psn_pool,
         poison_delay_key,
         var_a2,
         var_whiten,
@@ -240,7 +242,18 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         // 第 2 项：**延迟静默投毒**——守卫失败只立共享旗 psn；随机指令窗口结束后，
         // 再渐进污染密钥/常量与路由。探针不早退、不抛专属错误；后续只呈现自然劣化。
         // 四种 Keystream 扰动均为模 256 运算，并按短命对象地址作运行期抽样；不消耗全局随机数。
+        // 改进 3：毒化读取不再盯单旗——三旗乱序析取（两种包裹形态），钉一旗不哑火
+        let psn_read = |rng: &mut GenRng| -> String {
+            let mut idx: Vec<usize> = (0..psn_pool.len()).collect();
+            rng.shuffle(&mut idx);
+            let names: Vec<&str> = idx.iter().map(|&i| psn_pool[i].as_str()).collect();
+            match rng.range(0, 2) {
+                0 => format!("({})", names.join(" or ")),
+                _ => format!("(({}))", names.iter().map(|n| format!("({})", n)).collect::<Vec<_>>().join(" or ")),
+            }
+        };
         let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
+            let pe = psn_read(rng);
             let k1 = rng.range(0x100, 0xFFFF) as u32;
             let k2 = rng.range(0x100, 0xFFFF) as u32;
             let (sample_s, sample_h, sample_i) = (rng.name(), rng.name(), rng.name());
@@ -249,10 +262,10 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 s = sample_s, h = sample_h, i = sample_i
             );
             match rng.range(0, 4) {
-                0 => format!("if {psn} and {delay}<=0 and {sample} then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1),
-                1 => format!("if {psn} and {delay}<=0 and {sample} then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, z = rng.name()),
-                2 => format!("if {psn} and {delay}<=0 and {sample} then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, k2 = k2),
-                _ => format!("if {psn} and {delay}<=0 and {sample} then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = psn_n, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, k2 = k2, z = rng.name()),
+                0 => format!("if {psn} and {delay}<=0 and {sample} then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = pe, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1),
+                1 => format!("if {psn} and {delay}<=0 and {sample} then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = pe, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, z = rng.name()),
+                2 => format!("if {psn} and {delay}<=0 and {sample} then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = pe, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, k2 = k2),
+                _ => format!("if {psn} and {delay}<=0 and {sample} then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = pe, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1, k2 = k2, z = rng.name()),
             }
         };
         let bind2 = |rng: &mut GenRng, dst: &str, n0: &str, n1: &str| -> String {
@@ -667,11 +680,12 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let (fun_stmt, sc_fn_hdr) = uni.fetch(&mut rng, hid_fun);
         let (mode_stmt, sc_mode) = uni.fetch(&mut rng, hid_mode);
         let (k_stmt, sc_k) = uni.fetch(&mut rng, hid_k);
-        let block_dec_header = crate::VM::VM_Backend::Generator_flow::build_header(
+        let psn_pick = psn_pool[rng.range(0, psn_pool.len())].clone();
+                let block_dec_header = crate::VM::VM_Backend::Generator_flow::build_header(
             &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
             var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
             sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str(), var_whiten.as_str(), var_whiten_pos.as_str(),
-            native_type.as_str(), psn_n.as_str());
+            native_type.as_str(), psn_pick.as_str());
         let block_dec_header = format!("{fun_stmt}{mode_stmt}{k_stmt}") + &block_dec_header;
         // ㉛ 白化参数（逐构建随机）的产物侧拼写——read_dec 内每字节现算掩码用
         let rng_whiten_mul_s = rng.obfuscate_num(whiten_mul as i64, 1, &keys);
@@ -761,6 +775,7 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             pf_opcodes,
             pf_protos,
             psn_n,
+            psn_pool: psn_pool.clone(),
             poison_delay_key,
             var_a2,
             var_whiten,

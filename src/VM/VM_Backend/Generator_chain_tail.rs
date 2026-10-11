@@ -46,6 +46,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         pf_opcodes,
         pf_protos,
         psn_n,
+        psn_pool,
         poison_delay_key,
         var_a2,
         var_whiten,
@@ -112,14 +113,24 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         ..
     } = x;
     let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
-    let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
+    let psn_read = |rng: &mut GenRng| -> String {
+            let mut idx: Vec<usize> = (0..psn_pool.len()).collect();
+            rng.shuffle(&mut idx);
+            let names: Vec<&str> = idx.iter().map(|&i| psn_pool[i].as_str()).collect();
+            match rng.range(0, 2) {
+                0 => format!("({})", names.join(" or ")),
+                _ => format!("(({}))", names.iter().map(|n| format!("({})", n)).collect::<Vec<_>>().join(" or ")),
+            }
+        };
+        let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
+            let pe = psn_read(rng);
         let k1 = rng.range(0x100, 0xFFFF) as u32;
         let k2 = rng.range(0x100, 0xFFFF) as u32;
         match rng.range(0, 4) {
-            0 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1),
-            1 => format!("if {psn} and {delay}<=0 then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1, z = rng.name()),
-            2 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2),
-            _ => format!("if {psn} and {delay}<=0 then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = psn_n, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2, z = rng.name()),
+            0 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1),
+            1 => format!("if {psn} and {delay}<=0 then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1, z = rng.name()),
+            2 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2),
+            _ => format!("if {psn} and {delay}<=0 then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2, z = rng.name()),
         }
     };
     let bind2 = |rng: &mut GenRng, dst: &str, n0: &str, n1: &str| -> String {
@@ -255,7 +266,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let cid_gk = uni.register("KryvexObf_");
         let (ci_stmt, sc_index2) = uni.fetch(&mut rng, cid_index);
         let (gk_stmt, sc_kobf) = uni.fetch(&mut rng, cid_gk);
-        let (bc_scatter, agg_field) = crate::VM::VM_Backend::Generator_flow::build_consts(
+        let psn_pick = psn_pool[rng.range(0, psn_pool.len())].as_str().to_string();
+        let psn_pick = psn_pick.as_str();
+                let (bc_scatter, agg_field) = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
@@ -265,7 +278,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
                 &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
-                chain_delta, chain_m, chain_k0, psn_n.as_str(),
+                chain_delta, chain_m, chain_k0, {psn_pick},
                 poison_delay_expr.as_str());
         let body_consts = format!("{st}={nxt}; {ci_stmt}{gk_stmt} {bc_scatter} ",
             st = var_state, nxt = obf_s_protos);
@@ -303,7 +316,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}=pcall(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or {nt}({b1})~='number' or {nt}({b2})~='number' or {nt}({b3})~='number' or {nt}({b4})~='number' or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
             go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
             co = co, cm = cm, b1 = b1, b2 = b2, b3 = b3, b4 = b4,
-            sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, nt = native_type, psn = psn_n
+            sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, nt = native_type,
+            psn = psn_pool[rng.range(0, psn_pool.len())].as_str()
         );
         let dbg_locals: Vec<String> = (0..9).map(|_| rng.name()).collect();
         let body_debug = format!(
@@ -489,7 +503,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         // 物理行数不变（仍是 3 行），行完整性探针的目标行号不受影响。
         out.push_str(&format!("local {} = ...;\n", var_l));
         out.push_str(&header_block);
-        out.push_str(&format!("local {}=false; ", psn_n));
+        for pf_ in &psn_pool { out.push_str(&format!("local {}=false; ", pf_)); }
         out.push_str(&format!("local {}=type; local {}=pairs; ", native_type, native_pairs));
         // ㉓ 统一流前导（表+惰性解码器）：直接落在主 return({}) 壳内——header_block
         // 打开的 wai 函数体开头（用户指示，不另起壳）；壳内所有取用点（守卫/散点/

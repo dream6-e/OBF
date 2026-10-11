@@ -57,11 +57,17 @@ pub(super) fn cold_state_check(
     let salt_obf = rng.obfuscate_num(salt as i64, 1, keys);
     let expect = state_digest(st, salt, sbox);
     let expect_obf = rng.obfuscate_num(expect as i64, 1, keys);
-    format!(
-        "{psn}={psn} or ({dg}({self_var}[{state_key}],{salt})~={expect});",
-        psn = psn, dg = dg_fn, self_var = self_var, state_key = state_key,
-        salt = salt_obf, expect = expect_obf
-    )
+    // 改进 3：置旗写法四种等价形态轮抽——同形文本指纹（一 grep 全出）被打散，
+    // 语义一致：chk 为真则旗置真，否则旗保持原值。
+    let chk = format!("{dg}({self_var}[{state_key}],{salt})~={expect}",
+        dg = dg_fn, self_var = self_var, state_key = state_key,
+        salt = salt_obf, expect = expect_obf);
+    match rng.range(0, 3) {
+        0 => format!("{psn}={psn} or ({chk});", psn = psn, chk = chk),
+        1 => format!("if not {psn} then {psn}=({chk}) end; ", psn = psn, chk = chk),
+        2 => format!("{psn}=(({chk}) or {psn});", psn = psn, chk = chk),
+        _ => format!("if ({chk}) then {psn}=true end; ", psn = psn, chk = chk),
+    }
 }
 
 #[cfg(test)]

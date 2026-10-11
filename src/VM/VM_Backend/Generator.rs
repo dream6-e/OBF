@@ -303,8 +303,7 @@ impl Generator {
         let sc_mul_k2: u8 = rng.range(2, 8) as u8;
         let sc_rot_k2: u32 = rng.range(1, 8) as u32;
         let sc_rot_k4: u32 = rng.range(1, 8) as u32;
-        // ㉛ 白化种子：kdf(根字, 专用组号, 字序号)——与 Lua 侧同一式（Generator_chain
-        // 发射同一取值的 kdf 调用），产物里不落任何白化参数，只有运行期装出的根能重算。
+        // ㉛ 白化种子：kdf(根字, 组号, 字序)，与 Lua 侧同式；产物不落白化参数。
         let whiten_seed: u64 = {
             let w = crate::VM::VM_Backend::Generator_chacha::derive_word(
                 enc.root[3], WHITEN_GROUP as u32, WHITEN_WORD) as u64;
@@ -412,8 +411,10 @@ impl Generator {
         let fn_execute = "execute";
         // 诱饵投毒旗（外围 upvalue）：守卫失败/诱饵 handler 置位后先经过随机指令窗口，
         // 再渐进污染常量、密钥或路由；探针本身不早退，也不提供固定错误位置。
-        let psn_n = rng.name();
-        let mut at = AntiTamper::generate_split(true, &key_seed_var, &psn_n);
+        // 改进 3：篡改旗三旗池随机分派写入点，毒化读取乱序析取，钉单旗不哑火。
+        let psn_pool: Vec<String> = (0..3).map(|_| rng.name()).collect();
+        let psn_n = psn_pool[0].clone();
+        let mut at = AntiTamper::generate_split(true, &key_seed_var, &psn_pool[rng.range(0, psn_pool.len())]);
         let var_pc = rng.name();
         let var_stk = rng.name();
         let var_vstack = rng.name();
@@ -727,8 +728,10 @@ impl Generator {
                 // 状态号不符时置共享投毒旗；主体仍按原控制流继续，避免固定早退信号。
                 // 校验改单向摘要（改进 1）：产物只留摘要+每块独立 salt，不再发射
                 // 可静态读回的期望状态，切断同源代数抵消路径。
+                let psn_pick = psn_pool[rng.range(0, psn_pool.len())].clone();
                 pre.push(cold_state_check(
-                    &mut rng, &keys, *st, &sbox_vals, &fn_state_digest, &psn_n, &p_self, &k_state,
+                    &mut rng, &keys, *st, &sbox_vals, &fn_state_digest,
+                    &psn_pick, &p_self, &k_state,
                 ));
                 let mut ai = 0usize;
                 while ai < alias_pairs.len() {
@@ -845,15 +848,14 @@ impl Generator {
                 ds = d_self, dp0 = d_p0, dp1 = d_p1, dp2 = d_p2, dp3 = d_p3,
                 mv = method_shards[d_shard], nm = rng.name(), dg = dg, bx2 = fn_bxor2.as_str(),
                 dop = dop, m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng),
-                skv = skv, ks = k_stk, kt = k_top, psn = psn_n, taut = htaut));
+                skv = skv, ks = k_stk, kt = k_top,
+                psn = psn_pool[rng.range(0, psn_pool.len())].as_str(), taut = htaut));
         }
         // ③ 随机代码块分配：注册顺序打乱，分发树按**状态号**（随机大整数）路由
         rng.shuffle(&mut defs);
         tree_entries.sort_by_key(|e| e.0);
 
-        // 这几个哨兵常量在**每次 VM 调用**和**每次 return** 时都要重新求值（下面的
-        // execute 前导 + 三个返回钩子 + 返回分派）。按用户要求，一律走 obfuscate_num
-        // 的位运算风格（`V[a][b](x,y)`），不为了热路径换成简单表达式。
+        // 哨兵常量：每次 VM 调用/return 重求值，一律走 obfuscate_num 位运算风格。
         let obf0 = rng.obfuscate_num(0i64, 1, &keys);
         let obf1 = rng.obfuscate_num(1i64, 1, &keys);
         let obf2 = rng.obfuscate_num(2i64, 1, &keys);
@@ -1028,8 +1030,7 @@ impl Generator {
         block_execute_def.push_str(&format!(
             "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; end; {deriv} ",
             kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18, deriv = deriv));
-        // 改进项一：指令惰性解码器改为原生 Lua 闭包内联（彻底消除 loadstring/StreamTable 源码级暴露），
-        // 状态表 5 个字段名（原 .n/.ch/.m1/.m2/.m3）全量随机化，内层 3 态+1 诱饵态平坦化分发。
+        // 改进项一：解码器闭包内联，状态表字段名随机化，3 态+1 诱饵态平坦化分发。
         let (ds_n, ds_ch, ds_m1, ds_m2, ds_m3) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         {
             let (factory_prefix, init_dc_stmt) = crate::VM::VM_Backend::Generator_util::build_inst_decoder_lua(
@@ -1057,7 +1058,9 @@ impl Generator {
             block_execute_def.insert_str(0, &factory_prefix);
             block_execute_def.push_str(&init_dc_stmt);
         }
-        let dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng, &psn_n, &poison_delay_expr);
+        let psn_pick = psn_pool[rng.range(0, psn_pool.len())].clone();
+        let dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng,
+            &psn_pick, &poison_delay_expr);
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）；保留原先的一次空转后退出语义。
             let split = crate::VM::VM_Backend::Generator_flow_split::wrap_for_build(
@@ -1139,8 +1142,7 @@ impl Generator {
                     format!("{}[{}]={};", var_vm, k_mk3, nc_n),
                 ];
                 rng.shuffle(&mut stmts);
-                // ㉚：DC 填充从状态表读掩码——换钥后把新钥同步进 ds（使用随机化字段名），
-                // 否则后续填充用旧钥解新掩码数组→垃圾条目。
+                // ㉚：换钥后把新钥同步进 ds，否则后续填充用旧钥解新掩码→垃圾。
                 format!("{}[{}][1]={}; {}{}{} {},{},{}={},{},{}; {}.{}={}; {}.{}={}; {}.{}={}; ",
                     kreg_n, "chunk", nk1_n, stmts[0], stmts[1], stmts[2],
                     n_mk1, n_mk2, n_mk3, na_n, nb_n, nc_n,
@@ -1217,7 +1219,7 @@ impl Generator {
             whiten_mul,
             whiten_add,
             fn_a3, fn_bxor, fn_c, fn_decode_chunk, fn_s_byte, fn_s_sub, pf_a_arr, pf_b_arr, pf_c_arr, pf_is_vararg,
-            pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, poison_delay_key, var_a2,
+            pf_ld, pf_lld, pf_maxstack, pf_n, pf_numparams, pf_nups, pf_opcodes, pf_protos, psn_n, psn_pool, poison_delay_key, var_a2,
             var_builtin_reg, var_p, var_raw_p, var_vc, native_type, native_pairs, np21,
             md21, th21, tw21, rk21, kreg_n,
             fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, const_path_key, sk_setup, t, x, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
