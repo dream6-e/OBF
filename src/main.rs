@@ -152,9 +152,12 @@ fn main() {
             });
 
             let mut deserializer = Deserializer::new(bytes);
-            let decoded_chunk = deserializer.decode_file();
-            let vm_ctx = VmContext::new();
-            
+            let mut decoded_chunk = deserializer.decode_file();
+            let mut vm_ctx = VmContext::new();
+            // 外部 API 名 handle 映射：全局名改指数字 handle 常量，名字离池入独立保险库
+            vm_ctx.global_names =
+                kryvex_ob::VM::VM_Backend::GlobalHandles::apply_global_handles(&mut decoded_chunk);
+
             let private_payload = Serializer::serialize(&decoded_chunk, &vm_ctx);
             
             let vm_generator = Generator::new(vm_ctx);

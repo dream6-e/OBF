@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，196,896 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），109,685 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，315,891 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，196,911 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），111,112 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，320,312 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -14,6 +14,8 @@
 | `lua51-semantics.lua` / `lua51-semantics.expected.txt` | Lua 5.1 差分回归源与预期输出，覆盖多返回值、循环、元方法、upvalue、环境及禁用部分全局函数 |
 | `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，273,906 B；Lua 5.1 输出与预期一致 |
 | `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，254,829 B；Lua 5.1 输出与预期一致 |
+
+2026-10-11 外部 API 名 handle 映射（取代“目标四”里“全局名作为普通字符串常量加密”的旧形态）：构建期 `GlobalHandles` pass 给每个被 GETGLOBAL/SETGLOBAL 引用的环境名分配随机 32 位 handle，指令改指新增的数字常量槽；只被全局指令引用的孤儿名字槽替换为诱饵数字，名字彻底离开主常量池（仍被其它指令当字面量引用的按普通字符串保留）。产物侧在 chacha 簇之后发射独立名字保险库（handle→密文字节表），解码器复用既有单根 KDF（独立组号、独立字序），每次取用现解、不落任何明文缓存；GETGLOBAL/SETGLOBAL handler 经 kreg 注册表槽调用解码器。内建名表（BUILTINREG）与表键字符串（GETTABLESTR/NAMECALL 族）不在本次范围。`cargo test` 158/158（含 3 个新 pass 单测）；三件套重生成 **196,911 / 111,112 / 320,312 B**（+15 B / +1.4 KB / +4.4 KB），双语法门、双运行时字节一致、`DynamicGlobalEnv` 环境重绑定夹具全过；GETGLOBAL 热环微基准（20 万次）约 19 µs/次，无系统性退化；`print`/`numeric_for_errors` 等零全局名输入的产物不发射保险库。200 局部上限贴线偶发坏构建（`numeric_for_errors` 等）为既有现象，重生成即过。
 
 新增回归夹具 `test/numeric_for_errors.lua` / `.expected.txt` 覆盖数值 `for` 初值、上限、步长三条错误路径。普通与 MB 产物在 Lua 5.1、Luau 下均匹配预期；三条消息由 UniStream 惰性解密，保持 `error(message, 0)`，且生成产物及 `process/*.lua` 中间文件均无错误消息明文。目标分支生成的直接 `return({})` 壳结构保留；固定样本已按合并后的代码重生成。
 

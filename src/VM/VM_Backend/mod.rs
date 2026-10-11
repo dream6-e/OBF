@@ -14,5 +14,6 @@ pub mod Generator_chacha;
 pub mod CustomIsa;
 pub mod Lua_core;
 pub mod Serializer;
+pub mod GlobalHandles;
 pub mod AntiTamper;
 pub mod Sandbox;

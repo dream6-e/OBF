@@ -475,11 +475,15 @@ impl Generator {
         // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
         let (n_kon, n_ka) = (rng.name(), rng.name());
         let numeric_for_errors = uni.register_numeric_for_errors(&mut rng);
+        // 外部 API 名解码器：kreg 注册表槽（取用点早于解码器声明，走运行期查表）
+        let kreg_n = rng.name();
+        let gn_key = rng.range(0x0100_0000, 0x6FFF_FFFF) as u32;
         let cfg = OpcodeConfig {
             pc: var_pc.clone(),
             stk: var_stk.clone(),
             vstack: var_vstack.clone(),
             consts: var_consts.clone(),
+            gn: format!("{}[0X{:X}]", kreg_n, gn_key),
             top: var_top.clone(),
             insts: var_insts.clone(),
             inst: var_inst.clone(),
@@ -969,7 +973,6 @@ impl Generator {
         //（旧钥即弃，跨时刻两份 dump 无法互推；rn 放大换钥摊销成本）
         let rk21 = rng.name();
         let rkey_every = rng.range(4, 16);
-        let kreg_n = rng.name();
         let poison_delay_key = rng.range(0x7000_0000, 0x7FFF_FFFF) as u32;
         let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
         // 冷块调用前后由调用点负责与 VM 对象的槽位同步。
@@ -1206,14 +1209,13 @@ impl Generator {
         let fn_rotl32 = rng.name();
         let xor_tbl_var = rng.name();
 
-        // ChaCha 的 4 个 sigma 常量（"expand 32-byte k"）不以字面量出现在产物里；
-        // ⑯ 每组独立派生：sigma_i=(d_i+K_g[idx_i])%2^32，idx 是每组自己的 [1..8] 洗牌排列
+        // ChaCha sigma 不落字面量（每组独立派生）
         let sigma: [u32; 4] = crate::VM::VM_Backend::Generator_chacha::SIGMA;
 
 
-        // phase 2 已原样搬至 Generator_chain.rs（README 单文件 ≤ 80 KB 规则）。
         Generator_chain::build_chain(Generator_chain::ChainIn {
             rng, at, keys, enc, sigma,
+            global_names: self.ctx.global_names.clone(), gn_key,
             var_whiten,
             var_whiten_pos,
             whiten_mul,

@@ -10,6 +10,9 @@ pub struct VmContext {
     pub opcode_map: [u8; VM_OPCODE_COUNT],
     pub state_sequence: Vec<usize>,
     pub xor_keys: [u8; 4],
+    /// 外部 API 名 handle 注册表 (handle, 名字)，由 `GlobalHandles` pass 填充，
+    /// Generator 据此发射独立名字保险库 + 惰性解码器。
+    pub global_names: Vec<(u32, Vec<u8>)>,
 }
 
 impl VmContext {
@@ -43,6 +46,7 @@ impl VmContext {
             opcode_map,
             state_sequence,
             xor_keys,
+            global_names: Vec::new(),
         }
     }
 }

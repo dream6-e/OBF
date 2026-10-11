@@ -116,6 +116,9 @@ pub struct OpcodeConfig {
     /// 自定义 ISA 的装箱表达式栈；与寄存器窗口分离，nil 也能安全入栈。
     pub vstack: String,
     pub consts: String,
+    /// 外部 API 名解码器：GETGLOBAL/SETGLOBAL 的键常量是数字 handle，
+    /// 经它现解为环境名（独立保险库，见 GlobalHandles/Generator_chain_tail）。
+    pub gn: String,
     pub top: String,
     pub insts: String,
     pub inst: String,
@@ -330,6 +333,7 @@ impl<'a> OpcodeBuilder<'a> {
         code = code.replace("{STK}", &self.cfg.stk);
         code = code.replace("{VSTACK}", &self.cfg.vstack);
         code = code.replace("{CONSTS}", &self.cfg.consts);
+        code = code.replace("{GN}", &self.cfg.gn);
         code = code.replace("{TOP}", &self.cfg.top);
         code = code.replace("{INSTS}", &self.cfg.insts);
         code = code.replace("{INST}", &self.local_inst);

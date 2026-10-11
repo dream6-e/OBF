@@ -3,9 +3,10 @@ use super::{OpcodeBuilder, OpcodeConfig, OpcodesRng};
 // Shared by GETGLOBAL, GETGLOBALSTR and GETIMPORT: resolve only through the active Lua
 // environment. getfenv/setfenv are intercepted at the VM call boundary so the caller's
 // virtual frame is known even when the function value was saved and invoked later.
+// 外部 API 名 handle 映射：常量槽里只有数字 handle，环境名经 {GN} 解码器现解。
 pub(super) fn global_lookup_body(const_slot: &str, dst: &str) -> String {
     format!(
-        "local k = {{CONSTS}}[{const_slot}+1]; local e = {{ENV}}; {{STK}}[{dst}] = e[k]",
+        "local k = {{GN}}({{CONSTS}}[{const_slot}+1]); local e = {{ENV}}; {{STK}}[{dst}] = e[k]",
         const_slot = const_slot,
         dst = dst,
     )
@@ -40,7 +41,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let sg_b = setglobal.raw_inst(3);
     let sg_a = setglobal.raw_inst(2);
     out.push_str(&setglobal.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]",
+        "local k = {{GN}}({{CONSTS}}[{}+1]); local e = {{ENV}}; e[k] = {{STK}}[{}]",
         sg_b, sg_a
     )));
 
@@ -142,7 +143,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let sgs_b = setglobalstr.raw_inst(3);
     let sgs_a = setglobalstr.raw_inst(2);
     out.push_str(&setglobalstr.build(&format!(
-        "local k = {{CONSTS}}[{}+1]; local e = {{ENV}}; e[k] = {{STK}}[{}]",
+        "local k = {{GN}}({{CONSTS}}[{}+1]); local e = {{ENV}}; e[k] = {{STK}}[{}]",
         sgs_b, sgs_a
     )));
 

@@ -18,6 +18,10 @@ use rand::rngs::StdRng;
 /// 第一阶段（Generator::build 前半）交给第二阶段的全部状态。
 pub(super) struct ChainIn {
     pub rng: GenRng,
+    /// 外部 API 名 handle 注册表 (handle, 名字)；chain_tail 发射保险库+解码器。
+    pub global_names: Vec<(u32, Vec<u8>)>,
+    /// 解码器在 kreg 注册表里的槽键（与 OpcodeConfig.gn 的取用表达式同源）。
+    pub gn_key: u32,
     pub at: AntiTamperResult,
     pub keys: CipherKeys,
     pub enc: EncCtx,
@@ -134,7 +138,7 @@ pub(super) struct ChainMid {
 /// 第二阶段：chacha 簇 + 解码链 + 装配，返回最终目标源码。
 pub(super) fn build_chain(x: ChainIn) -> String {
     let ChainIn {
-        rng: mut rng, at: mut at, keys, enc,
+        rng: mut rng, global_names, gn_key, at: mut at, keys, enc,
         sigma,
         fn_a3,
         fn_bxor,
@@ -752,6 +756,8 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
 
         let x_repacked = ChainIn {
             rng,
+            global_names,
+            gn_key,
             at,
             keys,
             enc,

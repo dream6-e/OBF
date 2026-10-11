@@ -134,7 +134,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let consts = set_global.cfg.consts.clone();
     let env = set_global.cfg.env.clone();
     out.push_str(&set_global.build(&format!(
-        "local k={consts}[{b}+1]; local e={env}; e[k]={stk}[{a}]",
+        "local k={{GN}}({consts}[{b}+1]); local e={env}; e[k]={stk}[{a}]",
         consts = consts, b = b, env = env, stk = stk, a = a
     )));
 

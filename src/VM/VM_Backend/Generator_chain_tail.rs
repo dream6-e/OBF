@@ -25,7 +25,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         block_dec_readers,
     } = mid;
     let ChainIn {
-        rng: mut rng, at: mut at, keys, enc,
+        rng: mut rng, global_names, gn_key, at: mut at, keys, enc,
         sigma,
         fn_a3,
         fn_bxor,
@@ -476,12 +476,54 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             block_dec_header,
             block_dec_helpers,
             block_dec_readers,
-            block_chacha_setup,
+            block_chacha_setup.clone(),
             cluster_parts[0].clone(),
             cluster_parts[1].clone(),
             cluster_parts[2].clone(),
             block_dec_chunk,
         ];
+
+        // 外部 API 名 handle 映射（GlobalHandles pass 的产物侧）：字节码里只剩数字
+        // handle，名字进独立保险库——复用单根 KDF（独立组号），每次取用现解、
+        // 不落任何明文缓存（与主池惰性解码同律）。
+        // 位置：必须紧跟 block_chacha_setup 之后——解码器体引用其中声明的
+        // xor32/kdf/根 token 取用表达式（词序在后即未声明）。取用侧（GETGLOBAL/
+        // SETGLOBAL handler）经 kreg 注册表运行期查表，与声明位置解耦。
+        if !global_names.is_empty() {
+            let gr_gn = rng.range(0x0300, 0xFFFF) as u32;
+            let rk = rng.range(0, 8);
+            let w0 = rng.range(0x40, 0x100) as u32;
+            let mut idx_map: Vec<String> = Vec::new();
+            let mut ents: Vec<String> = Vec::new();
+            for (idx, (h, name)) in global_names.iter().enumerate() {
+                let i = (idx + 1) as u32;
+                idx_map.push(format!("[0X{:X}]=0X{:X}", h, i));
+                let mut bs: Vec<String> = Vec::new();
+                for (j, byte) in name.iter().enumerate() {
+                    let w = w0 + i * 0x100 + j as u32 + 1;
+                    let kw = crate::VM::VM_Backend::Generator_chacha::derive_word(enc.root[rk], gr_gn, w);
+                    bs.push(format!("0X{:X}", (*byte as u32) ^ (kw & 0xFF)));
+                }
+                ents.push(format!("{{{}}}", bs.join(",")));
+            }
+            let (v_i, v_e, v_h, v_o, v_j, v_ii, v_ee) =
+                (rng.name(), rng.name(), rng.name(),
+                 rng.name(), rng.name(), rng.name(), rng.name());
+            let gn_part = format!(
+                "{kreg}[0X{key:X}]=(function() local {vi}={{{im}}}; local {ve}={{{en}}}; \
+                 return function({h}) \
+                 local {ii}={vi}[{h}]; local {ee}={ve}[{ii}]; local {o}={{}}; \
+                 for {j}=0X1,#{ee} do {o}[{j}]=string_char({bx}({ee}[{j}],{kdf}({root},0X{g:X},0X{w0:X}+{ii}*0X100+{j})%0X100)) end; \
+                 return table_concat({o}) end end)(); ",
+                vi = v_i, im = idx_map.join(","), ve = v_e, en = ents.join(","),
+                h = v_h, ii = v_ii, ee = v_ee, o = v_o, j = v_j,
+                bx = fn_bxor, kdf = kdf_name, root = root_fetch[rk], g = gr_gn, w0 = w0,
+                kreg = kreg_n, key = gn_key
+            );
+            // block_chacha_setup 在 vec 里按内容定位（其声明带 xor32/kdf/根 token）
+            let chacha_pos = parts.iter().position(|p| *p == block_chacha_setup);
+            parts.insert(chacha_pos.map(|p| p + 1).unwrap_or(parts.len()), gn_part);
+        }
 
         {
             let lg20 = line_guard(&mut rng, &mut uni, false);
