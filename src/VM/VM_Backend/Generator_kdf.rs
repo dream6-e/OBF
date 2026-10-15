@@ -298,7 +298,7 @@ pub fn emit_fix_fingerprint(
     let c5a = rng.range64(0x100, 0xFFFF);
     let c5b = rng.range64(0x100, 0xFFFF);
     let n5 = rng.range64(2, 0xFFFF);
-    let lv5 = format!("(@Y@({}*0X1)==\"number\" and {} or {})",
+    let lv5 = format!("(@Y@({}*0X1)==@N@ and {} or {})",
         rng.format_num(n5 as i64), rng.format_num(c5a as i64), rng.format_num(c5b as i64));
     h = fp_adv(&mut rng, &hfix, &m32, lv5, c5a as u64, h, &mut stmts);
     // 探针 6：随机字面量串的字节（文本多样性；避开反斜杠）
@@ -319,13 +319,14 @@ pub fn emit_fix_fingerprint(
     // 库成员局部化（声明顺序洗牌）：ts/sb/fl/sq/ty
     let (a_ts, a_sb, a_fl, a_sq, a_ty) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
     // ㉜ 产物路径经 NB 槽绑定（None 分支保留给单测独立跑）
-    let (r_ts, r_sb, r_fl, r_sq, r_ty) = match vault {
+    let (r_ts, r_sb, r_fl, r_sq, r_ty, r_tnum) = match vault {
         Some(v) => (
             v.global("tostring"),
             v.member("string", "byte"),
             v.member("math", "floor"),
             v.member("math", "sqrt"),
             v.global("type"),
+            v.lit("number"),
         ),
         None => (
             "tostring".to_string(),
@@ -333,6 +334,7 @@ pub fn emit_fix_fingerprint(
             "math.floor".to_string(),
             "math.sqrt".to_string(),
             "type".to_string(),
+            "\"number\"".to_string(),
         ),
     };
     let mut aliases = vec![
@@ -345,7 +347,7 @@ pub fn emit_fix_fingerprint(
     rng.shuffle(&mut aliases);
     let body = stmts.join("")
         .replace("@T@", &a_ts).replace("@B@", &a_sb).replace("@F@", &a_fl)
-        .replace("@S@", &a_sq).replace("@Y@", &a_ty);
+        .replace("@S@", &a_sq).replace("@Y@", &a_ty).replace("@N@", &r_tnum);
     let src = format!("local {hfix}={seed}; do {al}{body}end; ",
         hfix = hfix, seed = rng.format_num(seed as i64), al = aliases.concat(), body = body);
     (src, hfix, h as u32)

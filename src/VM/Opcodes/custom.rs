@@ -277,6 +277,12 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
         q = q, stk = stk, a = a, limit = limit, step = step, index = index, pc = pc, b = b
     )));
 
+    let (cf_base, cf_want, cf_n, cf_fn, cf_args, cf_res) = (
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+    );
+    let (cm_proto, cm_upv, cm_fenv) = (rng.name(), rng.name(), rng.name());
+    let (t_fn, t_num, t_tbl) = (cfg.type_fn.clone(), cfg.type_num.clone(), cfg.type_tbl.clone());
+
     let mut iterator = handler(m, VmOp::IteratorNext, cfg, rng);
     let a = iterator.raw_inst(2);
     let b = iterator.raw_inst(3);
@@ -292,10 +298,11 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let meta = iterator.rng.name();
     let j = iterator.rng.name();
     out.push_str(&iterator.build(&format!(
-        "local {iter_fn}={stk}[{a}]; local {meta}; if {native_type}({iter_fn})=='function' then {meta}={registry}[{iter_fn}] end; local {res}; if {meta} then {res}=zm({execute}({meta}.proto,{meta}.fenvironment,{meta}.upvalues,{iter_fn},{frame},{stk}[{a}+1],{stk}[{a}+2])) else {res}=zm({iter_fn}({stk}[{a}+1],{stk}[{a}+2])) end; for {j}=1,{b} do {stk}[{a}+2+{j}]={res}[{j}] end; if {stk}[{a}+3]~=nil then {stk}[{a}+2]={stk}[{a}+3]; {pc}={pc}+{c} end",
+        "local {iter_fn}={stk}[{a}]; local {meta}; if {native_type}({iter_fn})=={tfn} then {meta}={registry}[{iter_fn}] end; local {res}; if {meta} then {res}=zm({execute}({meta}.{cm_proto},{meta}.{cm_fenv},{meta}.{cm_upv},{iter_fn},{frame},{stk}[{a}+1],{stk}[{a}+2])) else {res}=zm({iter_fn}({stk}[{a}+1],{stk}[{a}+2])) end; for {j}=1,{b} do {stk}[{a}+2+{j}]={res}[{j}] end; if {stk}[{a}+3]~=nil then {stk}[{a}+2]={stk}[{a}+3]; {pc}={pc}+{c} end",
         res = res, stk = stk, a = a, j = j, b = b, pc = pc, c = c,
         iter_fn = iter_fn, registry = registry, meta = meta, execute = execute,
-        native_type = native_type, frame = frame
+        native_type = native_type, frame = frame, tfn = t_fn,
+        cm_proto = cm_proto, cm_fenv = cm_fenv, cm_upv = cm_upv
     )));
 
     let mut call_pack = handler(m, VmOp::CallPack, cfg, rng);
@@ -309,8 +316,9 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let q = call_pack.rng.name();
     let j = call_pack.rng.name();
     out.push_str(&call_pack.build(&format!(
-        "local {n}={b}>0 and {b}-1 or {top}-{a}; if {n}<0 then {n}=0 end; local {q}={{base={a},want={c},n={n},fn={stk}[{a}],args={{}}}}; for {j}=1,{n} do {q}.args[{j}]={stk}[{a}+{j}] end; if {b}==0 then {top}={a} end; {vs}[#{vs}+1]={{{q}}}",
-        n = n, b = b, top = top, a = a, q = q, c = c, j = j, stk = stk, vs = vs
+        "local {n}={b}>0 and {b}-1 or {top}-{a}; if {n}<0 then {n}=0 end; local {q}={{{cf_base}={a},{cf_want}={c},{cf_n}={n},{cf_fn}={stk}[{a}],{cf_args}={{}}}}; for {j}=1,{n} do {q}.{cf_args}[{j}]={stk}[{a}+{j}] end; if {b}==0 then {top}={a} end; {vs}[#{vs}+1]={{{q}}}",
+        n = n, b = b, top = top, a = a, q = q, c = c, j = j, stk = stk, vs = vs,
+        cf_base = cf_base, cf_want = cf_want, cf_n = cf_n, cf_fn = cf_fn, cf_args = cf_args
     )));
 
     let mut call_execute = handler(m, VmOp::CallExecute, cfg, rng);
@@ -334,12 +342,15 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let active_frame = call_execute.rng.name();
     let current_fn = call_execute.rng.name();
     out.push_str(&call_execute.build(&format!(
-        "local {n}=#{vs}; local {q}={vs}[{n}][1]; local {meta}; if {native_type}({q}.fn)=='function' then {meta}={registry}[{q}.fn] end; if {meta} then {q}.result=zm({execute}({meta}.proto,{meta}.fenvironment,{meta}.upvalues,{q}.fn,{frame},unpack({q}.args,1,{q}.n))) elseif {native_getfenv} and {q}.fn=={native_getfenv} then local {level}={q}.args[1]; if {level}==nil then {level}=1 end; if {native_type}({level})=='number' then if {level}==0 then {q}.result=zm({native_getfenv}(0)) elseif {level}>=1 and {level}%1==0 then local {active_frame}={frame}; local {depth}={level}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {q}.result=zm({active_frame}[{env_key}]) else {q}.result=zm({native_getfenv}({level})) end else {q}.result=zm({native_getfenv}({level})) end else if {native_type}({level})=='function' and {registry}[{level}] then {q}.result=zm({registry}[{level}].fenvironment) else {q}.result=zm({native_getfenv}({level})) end end elseif {native_setfenv} and {q}.fn=={native_setfenv} then local {target}={q}.args[1]; local {new_env}={q}.args[2]; if {native_type}({target})=='number' then if {target}==0 then {q}.result=zm({native_setfenv}(0,{new_env})) elseif {native_type}({new_env})~='table' then {q}.result=zm({native_setfenv}({target},{new_env})) elseif {target}>=1 and {target}%1==0 then local {active_frame}={frame}; local {depth}={target}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {active_frame}[{env_key}]={new_env}; local {current_fn}={active_frame}[{function_key}]; if {current_fn} then local {meta}={registry}[{current_fn}]; if {meta} then {meta}.fenvironment={new_env} end end; {q}.result=zm({current_fn} or {execute}) else {q}.result=zm({native_setfenv}({target},{new_env})) end else {q}.result=zm({native_setfenv}({target},{new_env})) end elseif {native_type}({target})=='function' and {registry}[{target}] then if {native_type}({new_env})~='table' then {q}.result=zm({native_setfenv}({target},{new_env})) else {meta}={registry}[{target}]; {meta}.fenvironment={new_env}; local {active_frame}={frame}; while {active_frame} do if {active_frame}[{function_key}]=={target} then {active_frame}[{env_key}]={new_env} end; {active_frame}={active_frame}[{parent_key}] end; {q}.result=zm({target}) end else {q}.result=zm({native_setfenv}({target},{new_env})) end else {q}.result=zm({q}.fn(unpack({q}.args,1,{q}.n))) end",
+        "local {n}=#{vs}; local {q}={vs}[{n}][1]; local {meta}; if {native_type}({q}.{cf_fn})=={tfn} then {meta}={registry}[{q}.{cf_fn}] end; if {meta} then {q}.{cf_res}=zm({execute}({meta}.{cm_proto},{meta}.{cm_fenv},{meta}.{cm_upv},{q}.{cf_fn},{frame},unpack({q}.{cf_args},1,{q}.{cf_n}))) elseif {native_getfenv} and {q}.{cf_fn}=={native_getfenv} then local {level}={q}.{cf_args}[1]; if {level}==nil then {level}=1 end; if {native_type}({level})=={tnum} then if {level}==0 then {q}.{cf_res}=zm({native_getfenv}(0)) elseif {level}>=1 and {level}%1==0 then local {active_frame}={frame}; local {depth}={level}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {q}.{cf_res}=zm({active_frame}[{env_key}]) else {q}.{cf_res}=zm({native_getfenv}({level})) end else {q}.{cf_res}=zm({native_getfenv}({level})) end else if {native_type}({level})=={tfn} and {registry}[{level}] then {q}.{cf_res}=zm({registry}[{level}].{cm_fenv}) else {q}.{cf_res}=zm({native_getfenv}({level})) end end elseif {native_setfenv} and {q}.{cf_fn}=={native_setfenv} then local {target}={q}.{cf_args}[1]; local {new_env}={q}.{cf_args}[2]; if {native_type}({target})=={tnum} then if {target}==0 then {q}.{cf_res}=zm({native_setfenv}(0,{new_env})) elseif {native_type}({new_env})~={ttbl} then {q}.{cf_res}=zm({native_setfenv}({target},{new_env})) elseif {target}>=1 and {target}%1==0 then local {active_frame}={frame}; local {depth}={target}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {active_frame}[{env_key}]={new_env}; local {current_fn}={active_frame}[{function_key}]; if {current_fn} then local {meta}={registry}[{current_fn}]; if {meta} then {meta}.{cm_fenv}={new_env} end end; {q}.{cf_res}=zm({current_fn} or {execute}) else {q}.{cf_res}=zm({native_setfenv}({target},{new_env})) end else {q}.{cf_res}=zm({native_setfenv}({target},{new_env})) end elseif {native_type}({target})=={tfn} and {registry}[{target}] then if {native_type}({new_env})~={ttbl} then {q}.{cf_res}=zm({native_setfenv}({target},{new_env})) else {meta}={registry}[{target}]; {meta}.{cm_fenv}={new_env}; local {active_frame}={frame}; while {active_frame} do if {active_frame}[{function_key}]=={target} then {active_frame}[{env_key}]={new_env} end; {active_frame}={active_frame}[{parent_key}] end; {q}.{cf_res}=zm({target}) end else {q}.{cf_res}=zm({native_setfenv}({target},{new_env})) end else {q}.{cf_res}=zm({q}.{cf_fn}(unpack({q}.{cf_args},1,{q}.{cf_n}))) end",
         n = n, vs = vs, q = q, registry = registry, execute = execute, frame = frame,
         env_key = env_key, parent_key = parent_key, function_key = function_key,
         native_type = native_type, native_getfenv = native_getfenv, native_setfenv = native_setfenv,
         meta = meta, target = target, new_env = new_env, level = level, depth = depth,
-        active_frame = active_frame, current_fn = current_fn
+        active_frame = active_frame, current_fn = current_fn,
+        cf_fn = cf_fn, cf_args = cf_args, cf_n = cf_n, cf_res = cf_res,
+        cm_proto = cm_proto, cm_fenv = cm_fenv, cm_upv = cm_upv,
+        tfn = t_fn, tnum = t_num, ttbl = t_tbl
     )));
 
     let mut call_collect = handler(m, VmOp::CallCollect, cfg, rng);
@@ -355,9 +366,10 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let want = call_collect.rng.name();
     let count = call_collect.rng.name();
     out.push_str(&call_collect.build(&format!(
-        "local {n}=#{vs}; local {q}={vs}[{n}][1]; local {res}={q}.result; local {base}={q}.base; local {want}={q}.want; if {want}>0 then for {j}=1,{want}-1 do {stk}[{base}+{j}-1]={res}[{j}] end else local {count}={res}.{count_field}; {top}={base}-1; for {j}=1,{count} do {stk}[{base}+{j}-1]={res}[{j}]; {top}={top}+1 end end; {vs}[{n}]=nil",
+        "local {n}=#{vs}; local {q}={vs}[{n}][1]; local {res}={q}.{cf_res}; local {base}={q}.{cf_base}; local {want}={q}.{cf_want}; if {want}>0 then for {j}=1,{want}-1 do {stk}[{base}+{j}-1]={res}[{j}] end else local {count}={res}.{count_field}; {top}={base}-1; for {j}=1,{count} do {stk}[{base}+{j}-1]={res}[{j}]; {top}={top}+1 end end; {vs}[{n}]=nil",
         n = n, vs = vs, q = q, res = res, base = base, want = want, j = j, stk = stk,
-        count = count, count_field = count_field, top = top
+        count = count, count_field = count_field, top = top,
+        cf_res = cf_res, cf_base = cf_base, cf_want = cf_want
     )));
 
     let close_ups = "if {STK}.{OPEN_UPS} then for reg, uv_obj in {NATIVE_PAIRS}({STK}.{OPEN_UPS}) do uv_obj[1] = {uv_obj[1][uv_obj[2]]}; uv_obj[2] = 1; end; {STK}.{OPEN_UPS} = nil; end; ";
@@ -384,13 +396,16 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let current_fn = tail.rng.name();
     let count_field = tail.cfg.vararg_count.clone();
     let body = format!(
-        "{close}local {n}=#{vs}; local {q}={vs}[{n}][1]; local {meta}; if {native_type}({q}.fn)=='function' then {meta}={registry}[{q}.fn] end; local {res}; if {meta} then {res}=zm({execute}({meta}.proto,{meta}.fenvironment,{meta}.upvalues,{q}.fn,{frame}[{parent_key}],unpack({q}.args,1,{q}.n))) elseif {native_getfenv} and {q}.fn=={native_getfenv} then local {level}={q}.args[1]; if {level}==nil then {level}=1 end; if {native_type}({level})=='number' then if {level}==0 then {res}=zm({native_getfenv}(0)) elseif {level}>=1 and {level}%1==0 then local {active_frame}={frame}; local {depth}={level}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {res}=zm({active_frame}[{env_key}]) else {res}=zm({native_getfenv}({level})) end else {res}=zm({native_getfenv}({level})) end else if {native_type}({level})=='function' and {registry}[{level}] then {res}=zm({registry}[{level}].fenvironment) else {res}=zm({native_getfenv}({level})) end end elseif {native_setfenv} and {q}.fn=={native_setfenv} then local {target}={q}.args[1]; local {new_env}={q}.args[2]; if {native_type}({target})=='number' then if {target}==0 then {res}=zm({native_setfenv}(0,{new_env})) elseif {native_type}({new_env})~='table' then {res}=zm({native_setfenv}({target},{new_env})) elseif {target}>=1 and {target}%1==0 then local {active_frame}={frame}; local {depth}={target}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {active_frame}[{env_key}]={new_env}; local {current_fn}={active_frame}[{function_key}]; if {current_fn} then local {meta}={registry}[{current_fn}]; if {meta} then {meta}.fenvironment={new_env} end end; {res}=zm({current_fn} or {execute}) else {res}=zm({native_setfenv}({target},{new_env})) end else {res}=zm({native_setfenv}({target},{new_env})) end elseif {native_type}({target})=='function' and {registry}[{target}] then if {native_type}({new_env})~='table' then {res}=zm({native_setfenv}({target},{new_env})) else {meta}={registry}[{target}]; {meta}.fenvironment={new_env}; local {active_frame}={frame}; while {active_frame} do if {active_frame}[{function_key}]=={target} then {active_frame}[{env_key}]={new_env} end; {active_frame}={active_frame}[{parent_key}] end; {res}=zm({target}) end else {res}=zm({native_setfenv}({target},{new_env})) end else {res}=zm({q}.fn(unpack({q}.args,1,{q}.n))) end; {vs}[{n}]=nil; {{STOREBACK}} return {{RET2}}({res},1,{res}.{count_field})",
+        "{close}local {n}=#{vs}; local {q}={vs}[{n}][1]; local {meta}; if {native_type}({q}.{cf_fn})=={tfn} then {meta}={registry}[{q}.{cf_fn}] end; local {res}; if {meta} then {res}=zm({execute}({meta}.{cm_proto},{meta}.{cm_fenv},{meta}.{cm_upv},{q}.{cf_fn},{frame}[{parent_key}],unpack({q}.{cf_args},1,{q}.{cf_n}))) elseif {native_getfenv} and {q}.{cf_fn}=={native_getfenv} then local {level}={q}.{cf_args}[1]; if {level}==nil then {level}=1 end; if {native_type}({level})=={tnum} then if {level}==0 then {res}=zm({native_getfenv}(0)) elseif {level}>=1 and {level}%1==0 then local {active_frame}={frame}; local {depth}={level}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {res}=zm({active_frame}[{env_key}]) else {res}=zm({native_getfenv}({level})) end else {res}=zm({native_getfenv}({level})) end else if {native_type}({level})=={tfn} and {registry}[{level}] then {res}=zm({registry}[{level}].{cm_fenv}) else {res}=zm({native_getfenv}({level})) end end elseif {native_setfenv} and {q}.{cf_fn}=={native_setfenv} then local {target}={q}.{cf_args}[1]; local {new_env}={q}.{cf_args}[2]; if {native_type}({target})=={tnum} then if {target}==0 then {res}=zm({native_setfenv}(0,{new_env})) elseif {native_type}({new_env})~={ttbl} then {res}=zm({native_setfenv}({target},{new_env})) elseif {target}>=1 and {target}%1==0 then local {active_frame}={frame}; local {depth}={target}; while {depth}>1 and {active_frame} do {active_frame}={active_frame}[{parent_key}]; {depth}={depth}-1 end; if {active_frame} then {active_frame}[{env_key}]={new_env}; local {current_fn}={active_frame}[{function_key}]; if {current_fn} then local {meta}={registry}[{current_fn}]; if {meta} then {meta}.{cm_fenv}={new_env} end end; {res}=zm({current_fn} or {execute}) else {res}=zm({native_setfenv}({target},{new_env})) end else {res}=zm({native_setfenv}({target},{new_env})) end elseif {native_type}({target})=={tfn} and {registry}[{target}] then if {native_type}({new_env})~={ttbl} then {res}=zm({native_setfenv}({target},{new_env})) else {meta}={registry}[{target}]; {meta}.{cm_fenv}={new_env}; local {active_frame}={frame}; while {active_frame} do if {active_frame}[{function_key}]=={target} then {active_frame}[{env_key}]={new_env} end; {active_frame}={active_frame}[{parent_key}] end; {res}=zm({target}) end else {res}=zm({native_setfenv}({target},{new_env})) end else {res}=zm({q}.{cf_fn}(unpack({q}.{cf_args},1,{q}.{cf_n}))) end; {vs}[{n}]=nil; {{STOREBACK}} return {{RET2}}({res},1,{res}.{count_field})",
         close = close_ups, n = n, vs = vs, q = q, res = res, count_field = count_field,
         registry = registry, execute = execute, native_type = native_type, frame = frame,
         parent_key = parent_key, env_key = env_key, function_key = function_key,
         native_getfenv = native_getfenv, native_setfenv = native_setfenv,
         meta = meta, target = target, new_env = new_env, level = level, depth = depth,
-        active_frame = active_frame, current_fn = current_fn
+        active_frame = active_frame, current_fn = current_fn,
+        cf_fn = cf_fn, cf_args = cf_args, cf_n = cf_n,
+        cm_proto = cm_proto, cm_fenv = cm_fenv, cm_upv = cm_upv,
+        tfn = t_fn, tnum = t_num, ttbl = t_tbl
     );
     out.push_str(&tail.build(&body));
 
@@ -463,11 +478,12 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let closure_fn = make_closure.rng.name();
     let closure_meta = make_closure.rng.name();
     let closure_body = format!(
-        "local {p}={protos}[{b}+1]; if {native_type}({p})=='function' then {p}={p}(); {protos}[{b}+1]={p} end; local {uv}={{}}; {stk}.{{OPEN_UPS}}={stk}.{{OPEN_UPS}} or {{}}; for {j}=1,{c} do local {uv_inst} = {insts}[{pc}]; {pc}={pc}+1; if {check_local} then local {reg}={uv_inst}[3]; if not {stk}.{{OPEN_UPS}}[{reg}] then {stk}.{{OPEN_UPS}}[{reg}]={{{stk},{reg}}} end; {uv}[{j}]={stk}.{{OPEN_UPS}}[{reg}] else {uv}[{j}]={up}[{uv_inst}[3]+1] end end; local {closure_fn}; {closure_fn}=function(...) return {execute}({p},{registry}[{closure_fn}].fenvironment,{uv},{closure_fn},nil,...) end; local {closure_meta}={{proto={p},upvalues={uv},fenvironment={env}}}; {registry}[{closure_fn}]={closure_meta}; {stk}[{a}]={closure_fn}",
+        "local {p}={protos}[{b}+1]; if {native_type}({p})=={tfn} then {p}={p}(); {protos}[{b}+1]={p} end; local {uv}={{}}; {stk}.{{OPEN_UPS}}={stk}.{{OPEN_UPS}} or {{}}; for {j}=1,{c} do local {uv_inst} = {insts}[{pc}]; {pc}={pc}+1; if {check_local} then local {reg}={uv_inst}[3]; if not {stk}.{{OPEN_UPS}}[{reg}] then {stk}.{{OPEN_UPS}}[{reg}]={{{stk},{reg}}} end; {uv}[{j}]={stk}.{{OPEN_UPS}}[{reg}] else {uv}[{j}]={up}[{uv_inst}[3]+1] end end; local {closure_fn}; {closure_fn}=function(...) return {execute}({p},{registry}[{closure_fn}].{cm_fenv},{uv},{closure_fn},nil,...) end; local {closure_meta}={{{cm_proto}={p},{cm_upv}={uv},{cm_fenv}={env}}}; {registry}[{closure_fn}]={closure_meta}; {stk}[{a}]={closure_fn}",
         p = p, protos = protos, b = b, uv = uv, stk = stk, j = j, c = c, uv_inst = uv_inst,
         insts = insts, pc = pc, check_local = check_local, reg = reg, up = up, a = a,
         execute = execute, env = env, registry = registry, native_type = native_type,
-        closure_fn = closure_fn, closure_meta = closure_meta
+        closure_fn = closure_fn, closure_meta = closure_meta,
+        tfn = t_fn, cm_proto = cm_proto, cm_upv = cm_upv, cm_fenv = cm_fenv
     );
     out.push_str(&make_closure.build(&closure_body));
 

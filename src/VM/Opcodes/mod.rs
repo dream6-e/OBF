@@ -166,6 +166,10 @@ pub struct OpcodeConfig {
     pub ret0: String,
     pub ret1: String,
     pub ret2: String,
+    /// 经 NameVault(UniStream) 加密隐藏的三个类型名槽表达式（"function"/"number"/"table"）。
+    pub type_fn: String,
+    pub type_num: String,
+    pub type_tbl: String,
 }
 
 pub struct OpcodeBuilder<'a> {

@@ -37,6 +37,8 @@ enum Slot {
     Root,
     /// kreg 的 `__mode='k'` 弱键元表本体（建表时构造，kreg 轮换重建时复用）
     KregMt,
+    /// 纯字符串常量值（如 "function"/"string"/"number"/"table"/"boolean"/"__index" 等）
+    Lit(String),
 }
 
 #[derive(Clone)]
@@ -126,6 +128,14 @@ impl NameVault {
     pub fn kreg_mt(&mut self) -> String {
         self.request("@kreg_mt", Slot::KregMt)
     }
+    /// 纯字符串常量槽（如类型名 "function"/"string"/"number"/"table"/"boolean"、
+    /// 元方法键 "__index"/"__newindex"、字段名 "what" 等）：复用 UniStream 数字密文
+    /// 在 NB 建表时一次性解码入槽，运行期直接读槽，零明文残留且零热路径解码开销。
+    pub fn lit(&mut self, s: &str) -> String {
+        let key = format!("@lit:{}", s);
+        let slot = Slot::Lit(s.to_string());
+        self.request(&key, slot)
+    }
 
     /// 发射 NB 建表 IIFE（一次 boot 开销；热路径零改动）。
     /// `kreg` 给定时顺带补 `__mode='k'` 弱键元表（kreg 声明侧已改普通 `{}`）。
@@ -214,6 +224,11 @@ impl NameVault {
                     body.push_str(&format!("{}[{}]={}; ", v_t, kl, v_e));
                 }
                 Slot::KregMt => {} // 在下方弱表分支统一装配
+                Slot::Lit(s) => {
+                    let id = uni.register(s);
+                    let (st, ex) = uni.fetch(rng, id);
+                    body.push_str(&format!("{}{}[{}]={}; ", st, v_t, kl, ex));
+                }
             }
         }
 
@@ -475,17 +490,21 @@ mod tests {
         let bx = v.bitop("bxor");
         let up = v.unpack();
         let rt = v.root();
+        let l1 = v.lit("function");
+        let l2 = v.lit("function");
+        assert_eq!(l1, l2, "同字面量请求必须命中同一槽");
+        assert_ne!(l1, a);
         let src = v.build(&mut rng, &mut uni, Some("KrEg"));
         // 引导三态式 + 弱表补齐 + 各槽装配都在
         assert!(src.contains("_ENV or _G"));
         assert!(src.contains("__mode") || src.contains("KrEg"));
         assert!(src.contains("KrEg"));
-        for e in [&a, &m, &bx, &up, &rt] {
+        for e in [&a, &m, &bx, &up, &rt, &l1] {
             let kl = e.split('[').nth(1).unwrap().trim_end_matches(']');
             assert!(src.contains(kl), "槽 {} 必须被装配", kl);
         }
-        // 产物侧不得出现任何明文 API 名
-        for bad in ["pcall", "string", "byte", "bxor", "unpack", "bit32", "getfenv", "setmetatable", "__mode", "\"k\"", "'k'"] {
+        // 产物侧不得出现任何明文 API 名或类型串字面量
+        for bad in ["pcall", "string", "byte", "bxor", "unpack", "bit32", "getfenv", "setmetatable", "__mode", "\"k\"", "'k'", "\"function\"", "'function'"] {
             assert!(!src.contains(bad), "NB 建表泄漏明文: {}", bad);
         }
     }
@@ -507,12 +526,15 @@ mod tests {
         let s_bx = v.bitop("bxor");
         let s_up = v.unpack();
         let s_mt = v.kreg_mt();
+        let s_lfn = v.lit("function");
+        let s_lnum = v.lit("number");
+        let s_idx = v.lit("__index");
         let nb_src = v.build(&mut rng, &mut uni, Some("Kr"));
         assert!(nb_src.starts_with("do (function()"), "必须 do..end 包裹防括号首语句歧义");
         assert!(!nb_src.contains("local Kr="), "bind_local 模式不得另起 local");
         let prelude = uni.emit_prelude(&mut rng);
         let script = format!(
-            "{prelude} local Kr={{}}; {nb_src}              assert({s_pc}==pcall); assert({s_ts}==tostring);              assert({s_sb}('AB',2)==66); assert({s_mf}(3.9)==3);              assert({s_up}({{7,8,9}},2,3)==8);              assert(getmetatable(Kr)=={s_mt} and {s_mt}.__mode=='k');              local _ = {s_bx}; print('VAULT_LUA_OK')"
+            "{prelude} local Kr={{}}; {nb_src}              assert({s_pc}==pcall); assert({s_ts}==tostring);              assert({s_sb}('AB',2)==66); assert({s_mf}(3.9)==3);              assert({s_up}({{7,8,9}},2,3)==8);              assert(getmetatable(Kr)=={s_mt} and {s_mt}.__mode=='k');              assert({s_lfn}=='function' and {s_lnum}=='number' and {s_idx}=='__index');              local _ = {s_bx}; print('VAULT_LUA_OK')"
         );
         let out = std::process::Command::new(lua)
             .arg("-e").arg(&script).output().expect("run lua5.1");

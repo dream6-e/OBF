@@ -99,8 +99,8 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let check_str = all_checks.join(" or ");
 
     out.push_str(&closure.build(&format!(
-        "local p = {{PROTOS}}[{}+1]; if {{NATIVE_TYPE}}(p) == 'function' then p = p(); {{PROTOS}}[{}+1] = p end; local uv = {{}}; {{STK}}.{{OPEN_UPS}} = {{STK}}.{{OPEN_UPS}} or {{}}; for j = 1, p.{{PROTO_NUPS}} do local uv_inst = {{INSTS}}[{{PC}}]; {{PC}} = {{PC}} + 1; if {} then local reg = uv_inst[3]; if not {{STK}}.{{OPEN_UPS}}[reg] then {{STK}}.{{OPEN_UPS}}[reg] = {{{{STK}}, reg}} end; uv[j] = {{STK}}.{{OPEN_UPS}}[reg] else uv[j] = {{UPVALS}}[uv_inst[3]+1] end end; {{STK}}[{}] = function(...) return execute(p, env, uv, nil, nil, ...) end",
-        cl_b, cl_b, check_str, cl_a
+        "local p = {{PROTOS}}[{}+1]; if {{NATIVE_TYPE}}(p) == {} then p = p(); {{PROTOS}}[{}+1] = p end; local uv = {{}}; {{STK}}.{{OPEN_UPS}} = {{STK}}.{{OPEN_UPS}} or {{}}; for j = 1, p.{{PROTO_NUPS}} do local uv_inst = {{INSTS}}[{{PC}}]; {{PC}} = {{PC}} + 1; if {} then local reg = uv_inst[3]; if not {{STK}}.{{OPEN_UPS}}[reg] then {{STK}}.{{OPEN_UPS}}[reg] = {{{{STK}}, reg}} end; uv[j] = {{STK}}.{{OPEN_UPS}}[reg] else uv[j] = {{UPVALS}}[uv_inst[3]+1] end end; {{STK}}[{}] = function(...) return execute(p, env, uv, nil, nil, ...) end",
+        cl_b, cfg.type_fn, cl_b, check_str, cl_a
     )));
 
     let mut vararg = OpcodeBuilder::new(m[37].clone(), cfg, rng);

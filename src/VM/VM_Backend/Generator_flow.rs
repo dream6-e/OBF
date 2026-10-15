@@ -433,6 +433,11 @@ pub fn build_consts(
     let v_getmeta = vault.global("getmetatable");
     let v_tostring = vault.global("tostring");
     let v_sbyte = vault.member("string", "byte");
+    let v_t_num = vault.lit("number");
+    let v_t_str = vault.lit("string");
+    let v_t_bool = vault.lit("boolean");
+    let v_t_tbl = vault.lit("table");
+    let v_mm_newidx = vault.lit("__newindex");
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
     let (eh_ret, eh_nil, eh_next, eh_val) =
         (k.eh_ret.as_str(), k.eh_nil.as_str(), k.eh_next.as_str(), k.eh_val.as_str());                // ── ⑥ 常量池查表打散
@@ -580,8 +585,8 @@ pub fn build_consts(
                         // V1 元方法惰载：底表键 = bxor(tag, kk)，__index 反解
                         let (ld_r, dsp_r, lkk, dkk) = (rng.name(), rng.name(),
                             format!("0X{:X}", rng.range(0x100, 0xFFFFF)), format!("0X{:X}", rng.range(0x100, 0xFFFFF)));
-                        ct_init = format!("local {ldr},{dspr}={{}},{{}}; local {ld}={sm}({{}},{{__index=function(_,k) return {ldr}[({bx})(k,{lkk})] end}}); local {dsp}={sm}({{}},{{__index=function(_,k) return {dspr}[({bx})(k,{dkk})] end}}); ",
-                            ldr = ld_r, dspr = dsp_r, ld = ld_name, dsp = dsp_name, bx = fn_bxor, lkk = lkk, dkk = dkk, sm = v_setmeta);
+                        ct_init = format!("local {ldr},{dspr}={{}},{{}}; local {ld}={sm}({{}},{{[{idx}]=function(_,k) return {ldr}[({bx})(k,{lkk})] end}}); local {dsp}={sm}({{}},{{[{idx}]=function(_,k) return {dspr}[({bx})(k,{dkk})] end}}); ",
+                            ldr = ld_r, dspr = dsp_r, ld = ld_name, dsp = dsp_name, bx = fn_bxor, lkk = lkk, dkk = dkk, sm = v_setmeta, idx = sc_index2);
                         for (tag, body) in &ld_tags {
                             ld_defs.push(format!("{ldr}[({bx})({tag},{kk})]=function({ddl},pos) {body} end; ",
                                 ldr = ld_r, bx = fn_bxor, tag = tag, kk = lkk, ddl = ddl, body = body));
@@ -653,14 +658,16 @@ pub fn build_consts(
                     // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
                     // pairs 遍历直接报错；后备退化为普通表（fail-open）
                     "local {m32}={m32v}; local {agg}=0X0; local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}={np} and {np}(true) or {ecb}; local {ca}={np} and {np}(true) or {cab}; local {wctr}=0X0; \
-                     do local {m1}={gm}({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}={gm}({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
+                     do local {m1}={gm}({ec}) if {m1} then {m1}[{idx}]={ecb} {m1}[{nidx}]={ecb} end; local {m2}={gm}({ca}) if {m2} then {m2}[{idx}]={cab} {m2}[{nidx}]={cab} end end; \
                      local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
-                     local {pfn}=function(q) local tq={nt}(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then local {ps}={ts}({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+{sb}({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=='boolean' then return not q end return q end; ",
+                     local {pfn}=function(q) local tq={nt}(q) if tq=={tnum} then return (q*{kmul}+{kadd})%{m32} elseif tq=={tstr} then local {ps}={ts}({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+{sb}({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=={tbool} then return not q end return q end; ",
                     m32 = m32, m32v = m32v, agg = agg_name,
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
                     wctr = wctr, pfn = pfn_n, nt = native_type, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
                     np = v_newproxy, gm = v_getmeta, ts = v_tostring, sb = v_sbyte,
+                    idx = sc_index2, nidx = v_mm_newidx,
+                    tnum = v_t_num, tstr = v_t_str, tbool = v_t_bool,
                     ps = poison_s, ph = poison_h, pi = poison_i,
                     m1 = rng.name(), m2 = rng.name(),
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
@@ -672,9 +679,10 @@ pub fn build_consts(
                 // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
                 // ——乘数域均 <2^40，Lua double 全精确；串/表两种 blob 分支取字节
                 lua.push_str(&format!(
-                    "local {vm}=function({vb},{vl},{vf},{vr}) if {vl}==nil then {vl}=0X0 end; if {vf}==nil then {vf}=0X0 end; if {vr}==nil then {vr}=0X0 end; if {nt}({vb})~='string' and {nt}({vb})~='table' then {vb}={kobf}..({vb} or 0X0) end; local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if {nt}({vb})=='string' then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
+                    "local {vm}=function({vb},{vl},{vf},{vr}) if {vl}==nil then {vl}=0X0 end; if {vf}==nil then {vf}=0X0 end; if {vr}==nil then {vr}=0X0 end; if {nt}({vb})~={tstr} and {nt}({vb})~={ttbl} then {vb}={kobf}..({vb} or 0X0) end; local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if {nt}({vb})=={tstr} then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
                     vm = vm, nt = native_type, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
                     mc1 = mc1, mc2 = mc2, mc3 = mc3, mc4 = mc4, mc5 = mc5,
+                    tstr = v_t_str, ttbl = v_t_tbl,
                     kobf = sc_kobf, bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte, m32 = m32));
                 // ③-4 变体化的常量表基建——必须在 vmac 之后（V2/V3 的分派闭包
                 // 体内引用 vmac，词序先于其定义会把 vm 解析成全局）
@@ -682,9 +690,9 @@ pub fn build_consts(
                 for x in &dsp_defs { lua.push_str(x); }
                 // 缓存前哨：非字符串常量命中后短路；字符串必须在每次取用时重解密。
                 lua.push_str(&format!(
-                    "local {memo}=function({ddm},{ix}) local ev={ec}[({ix})]; if {nt}(ev)=='table' and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
+                    "local {memo}=function({ddm},{ix}) local ev={ec}[({ix})]; if {nt}(ev)=={ttbl} and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
                     memo = memo_name, nt = native_type, ix = var_idx_chunk, ca = var_cache, ddm = ddm,
-                    ec = var_enc_c, strtag = three));
+                    ec = var_enc_c, strtag = three, ttbl = v_t_tbl));
                 lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
                                 // ③-4：记录解码调用点随调用制变体（表制走闭包表，函数制直调）
                 let kbh = if table_regime {
@@ -700,9 +708,9 @@ lua.push_str(&format!(
                     "local {hh}={{}}; \
                      {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in {np}({cab}) do {cab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else if {psn} and {delay}<=0 then return {x_ret1},{pfn}(g) end; return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
-                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[({ix})] if {nt}({ev})~='table' then {fake} return {x_nil1} end; \
+                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[({ix})] if {nt}({ev})~={ttbl} then {fake} return {x_nil1} end; \
                        {ev}[(0X4)]={tba}[{pathkey}] or 0X0; {ev}[(0X5)]=(({ev}[(0X5)] or 0X0)+0X1)%{m32}; {kbh}\
-                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~='string' then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
+                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~={tstr} then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
                     wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, np = native_pairs, nt = native_type, pv = rng.name(),
                     pfn = pfn_n, psn = psn, delay = poison_delay,
@@ -711,6 +719,7 @@ lua.push_str(&format!(
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
                     ev = var_e, kbh = kbh, tba = hh_tb_arg, pathkey = const_path_key, m32 = m32,
                     ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v,
+                    ttbl = v_t_tbl, tstr = v_t_str,
                     fake = fake_stmt.as_str()));
                 // ㉔ 解码链状态转移四形态化：基形已是键表引用表达式（②），
                 // 追加 ③ 惰性槽 / ④ 委托返回值；函数体开头落转移基建。

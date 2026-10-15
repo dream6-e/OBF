@@ -527,6 +527,9 @@ impl Generator {
             ret0: format!("{}:{}", var_vm, fn_ret0),
             ret1: format!("{}:{}", var_vm, fn_ret1),
             ret2: format!("{}:{}", var_vm, fn_ret2),
+            type_fn: vault.lit("function"),
+            type_num: vault.lit("number"),
+            type_tbl: vault.lit("table"),
         };
         let mut raw_handlers = Opcodes::generate_handlers(&mapped_opcodes, &fused_opcodes, &fused_used, &cfg, self.ctx.seed).replace("execute(", &format!("{}(", fn_execute));
 
@@ -1145,9 +1148,10 @@ impl Generator {
             let w2_mv = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let w2_stmt = format!("local {};", w2_dst) + &weld.weld(&mut rng, &w2_dst, &w2_mv);
             let md_walk = {
-                let (md2, th2) = (md21.clone(), th21.clone());
+                let (md2, th2) = (md21.clone(), md21.clone());
+                let (md2, th2, tt2) = (md2, th21.clone(), cfg.type_tbl.clone());
                 let off = rng.range(0, 100);
-                let unit = |iv: &str| format!("if {nt}({md}[{iv}])=='table' then {md}[{iv}]={th}[{iv}] end; ", nt = native_type, md = md2, th = th2, iv = iv);
+                let unit = |iv: &str| format!("if {nt}({md}[{iv}])=={tt} then {md}[{iv}]={th}[{iv}] end; ", nt = native_type, md = md2, th = th2, iv = iv, tt = tt2);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &format!("#{}", md21), 2, 3, &unit)
             };
             let rot_walk = {

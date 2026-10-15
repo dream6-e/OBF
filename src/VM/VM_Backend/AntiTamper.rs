@@ -222,19 +222,20 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
     };
     let (dq0,dq1,dq2,dq3,dx,dy,dcipher,dmask,dna,dnb,dprev) =
         (rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var());
+    let (df_i, df_o, df_n) = (rand_var(), rand_var(), rand_var());
     setup.push_str(&format!(
         concat!(
             "local function {dec}(h) ",
-            "local {t}={{i=0X0,o=''}}; local {e}={pool}[h]; if not {e} then return {e} end; ",
-            "{t}.n=#{e}; local {q0}={mf}({K}/0X1000000)%0X100; local {q1}={mf}({K}/0X10000)%0X100; ",
+            "local {t}={{{fi}=0X0,{fo}={sc}()}}; local {e}={pool}[h]; if not {e} then return {e} end; ",
+            "{t}.{fn_}=#{e}; local {q0}={mf}({K}/0X1000000)%0X100; local {q1}={mf}({K}/0X10000)%0X100; ",
             "local {q2}={mf}({K}/0X100)%0X100; local {q3}={K}%0X100; ",
             "local {a}=({q0}*0X101+{q1}*0X107+{q2}*0X10D+{q3}*0X10F+0X13579B)%0X7FFFFF01; ",
             "local {b}=({q3}*0X115+{q2}*0X119+{q1}*0X11B+{q0}*0X125+0X2468AC)%0X7FFFFF01; ",
             "local {prev}=0X0; local {c}={sc}; local {x},{y},{cipher},{mask},{na},{nb},{r}=0X0,0X0,0X0,0X0,0X0,0X0,0X0; ",
             "local {j}={j0}; local {st}={init}; while true do ",
-            "if {st}=={S1} then if {t}.i<{t}.n then {st}={tr12} else {st}={tdone} end ",
-            "elseif {st}=={S2} then {t}.i={t}.i+0X1; {st}={tr23} ",
-            "elseif {st}=={S3} then local pos={t}.i; {cipher}={e}[{t}.i]; ",
+            "if {st}=={S1} then if {t}.{fi}<{t}.{fn_} then {st}={tr12} else {st}={tdone} end ",
+            "elseif {st}=={S2} then {t}.{fi}={t}.{fi}+0X1; {st}={tr23} ",
+            "elseif {st}=={S3} then local pos={t}.{fi}; {cipher}={e}[{t}.{fi}]; ",
             "{x}=({a}*(({b}%0X10000)+0X25D)+{b}*0X3A7+pos*0X139+{prev}*0X2D5+{q0}*0X101+{q2}*0X107)%0X7FFFFF01; ",
             "{y}=({b}*(({x}%0X10000)+0X317)+{x}*0X2B9+pos*0X1B3+{prev}*0X3D1+{q1}*0X10D+{q3}*0X113)%0X7FFFFF01; ",
             "{mask}=({x}%0X100+({y}%0X100)*0X3+(pos%0X100)*0X5+(({x}-{x}%0X100)/0X100)%0X100+(({y}-{y}%0X100)/0X100)%0X100)%0X100; ",
@@ -242,11 +243,12 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
             "{na}=({x}*(({y}%0X10000)+0X21D)+{y}*0X331+pos*0X12B+{r}*0X17+{prev}*0X2B+{cipher}*0X35+{q2})%0X7FFFFF01; ",
             "{nb}=({y}*(({na}%0X10000)+0X2A7)+{na}*0X2F5+pos*0X1D3+{cipher}*0X3B+{r}*0X43+{q3})%0X7FFFFF01; ",
             "{a}={na}; {b}={nb}; {prev}={cipher}; {st}={tr34} ",
-            "elseif {st}=={S4} then {j}={j}+0X1; if {opq} then {t}.o={t}.o..{c}({r}) end; {st}={tr41b} ",
-            "else break end end; return {t}.o end;"
+            "elseif {st}=={S4} then {j}={j}+0X1; if {opq} then {t}.{fo}={t}.{fo}..{c}({r}) end; {st}={tr41b} ",
+            "else break end end; return {t}.{fo} end;"
         ),
         mf=v_mfloor,sc=v_schar,
         dec=v_dec,t=d_t,pool=v_pool,e=d_e,j=d_j,
+        fi=df_i,fo=df_o,fn_=df_n,
         q0=dq0,q1=dq1,q2=dq2,q3=dq3,a=d_a,b=d_b,prev=dprev,c=d_c,
         x=dx,y=dy,cipher=dcipher,mask=dmask,na=dna,nb=dnb,r=d_r,
         st=d_st,init=st_init,S1=s1,S2=s2,S3=s3,S4=s4,
@@ -415,6 +417,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
                     let hash_C = poly_hash("C");
                     let key = sc_key("table");
                     let sc_tab = st.call("table", key);
+                    let sc_what = vault.lit("what");
                     check_code = format!(
                         "local d={}({}); local p={}({}); \
                          if not (d and p) then {} else \
@@ -424,7 +427,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
                          else \
                              local ok, inf = p(gi, p); \
                              if not ok or {ty}(inf)~={tab_lit} then {} else \
-                             local w=inf.what; local h={hp_seed}; \
+                             local w=inf[{what_lit}]; local h={hp_seed}; \
                              for idx=1,#w do h=(h*{hp_mult}+{sb}(w,idx)+{hp_add})%{hm32} end; \
                              if h~={} then {} else {} end end end end\n",
                         v_res, hash_debug, v_res, hash_pcall,
@@ -434,7 +437,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
                         next_bad,
                         hash_C, next_bad, next_good,
                         ty = v_type, sb = v_sbyte,
-                        tab_lit = sc_tab,
+                        tab_lit = sc_tab, what_lit = sc_what,
                         hm32 = "4294967296",
                         hp_seed = format!("0X{:X}", hash_params().seed),
                         hp_mult = format!("0X{:X}", hash_params().mult),

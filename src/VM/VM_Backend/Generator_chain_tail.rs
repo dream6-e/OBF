@@ -317,14 +317,15 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
              rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
-        let (v_va_pc, v_va_ts, v_va_sb) = (
-            vault.global("pcall"), vault.global("tostring"), vault.member("string", "byte"));
+        let (v_va_pc, v_va_ts, v_va_sb, v_va_tnum) = (
+            vault.global("pcall"), vault.global("tostring"),
+            vault.member("string", "byte"), vault.lit("number"));
         let verify_agg = format!(
-            "local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sby}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}={pc}(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or {nt}({b1})~='number' or {nt}({b2})~='number' or {nt}({b3})~='number' or {nt}({b4})~='number' or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
+            "local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sby}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}={pc}(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or {nt}({b1})~={tnum} or {nt}({b2})~={tnum} or {nt}({b3})~={tnum} or {nt}({b4})~={tnum} or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
             go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
             co = co, cm = cm, b1 = b1, b2 = b2, b3 = b3, b4 = b4,
             sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, nt = native_type,
-            pc = v_va_pc, ts = v_va_ts, sby = v_va_sb,
+            pc = v_va_pc, ts = v_va_ts, sby = v_va_sb, tnum = v_va_tnum,
             psn = psn_pool[rng.range(0, psn_pool.len())].as_str()
         );
         let dbg_locals: Vec<String> = (0..9).map(|_| rng.name()).collect();
@@ -342,10 +343,12 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         // ⑳ 行信息探针仅作兼容性检查：宿主错误栈格式/行号不同或不可用时必须 fail-open，
         // 不得把正常 Lua 运行环境判成篡改。采样位来自对象地址，不消费 math.random。
         // 定义式/内联两形态仍保留随机化探针与错误消息针式，但不制造固定报错。
-        let (v_lg_pc, v_lg_ts, v_lg_sb, v_lg_sc) = (
+        let (v_lg_pc, v_lg_ts, v_lg_sb, v_lg_sc, v_lg_sf, v_lg_sfun, v_lg_sstr) = (
             vault.global("pcall"), vault.global("tostring"),
-            vault.member("string", "byte"), vault.member("string", "char"));
-        let line_guard = |rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream, inline: bool| -> String {
+            vault.member("string", "byte"), vault.member("string", "char"),
+            vault.member("string", "find"),
+            vault.lit("function"), vault.lit("string"));
+        let line_guard = |rng: &mut GenRng, _uni: &mut crate::VM::VM_Backend::Generator_util::UniStream, inline: bool| -> String {
             let tbl = rng.name();
             let probe_body = |rng: &mut GenRng| -> String {
                 let v = rng.name();
@@ -377,38 +380,41 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let (f1, f2) = (rng.name(), rng.name());
             let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}={nt}({u}); ",
                 u = p_u, h = p_hit, tol = tolerant, f1 = f1, nt = native_type);
-            // ㉓ 填充语型别串：壳内守卫走统一流惰性解密；fu 内守卫（inline）
-            // 用 string.char 数字拼装自足表达，二者都零字面量。
-            let (jf_stmt, jf_expr) = if inline {
+            // ㉓ 填充语型别串与 string.find：壳内守卫走 NameVault(UniStream) 预解槽；
+            // fu 内守卫（inline）用 string.char 数字拼装自足表达，二者都零明文字面量、零 :find 冒号调用。
+            let (xh_pre, jf_expr, js_expr, sf_expr) = if inline {
                 // ㉓.4 fu 守卫型别串：字节先与随机掩码异或落为密文数字，运行期用
                 // 自带算术 XOR（不依赖 bit32/bit，Lua 5.1 与 Luau 通吃）还原——
                 // ASCII 明文数字消失，string.char 只做字节→字符拼装。
                 let mask = rng.range(1, 256) as u8;
-                let plain: [u8; 8] = [102, 117, 110, 99, 116, 105, 111, 110]; // "function"
                 let (xh, mv) = (rng.name(), rng.name());
                 let (pa, pb, pr, pw, pv, pda, pdb) = (rng.name(), rng.name(), rng.name(),
                     rng.name(), rng.name(), rng.name(), rng.name());
                 let nlit = |rng: &mut GenRng, v: u8| -> String {
                     if rng.range(0, 2) == 0 { format!("{}", v) } else { format!("0X{:X}", v) }
                 };
-                let stmt = format!(
+                let pre = format!(
                     "local {xh}=function({a},{b}) local {r},{w}=0X0,0X1 for {v}=0X1,0X8 do local {da},{db}={a}%0X2,{b}%0X2 if {da}~={db} then {r}={r}+{w} end; {a}=({a}-{da})/0X2 {b}=({b}-{db})/0X2 {w}={w}+{w} end; return {r} end; local {mv}={mk}; ",
                     xh = xh, a = pa, b = pb, r = pr, w = pw, v = pv, da = pda, db = pdb,
                     mv = mv, mk = nlit(&mut *rng, mask));
-                let args = plain.iter()
-                    .map(|b| format!("{xh}({c},{m})", xh = xh, c = nlit(&mut *rng, b ^ mask), m = mv))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sc_fn = if inline { "string.char" } else { v_lg_sc.as_str() };
-                (stmt, format!("{}({})", sc_fn, args))
+                let mut xstr = |plain: &[u8]| -> String {
+                    let args = plain.iter()
+                        .map(|b| format!("{xh}({c},{m})", xh = xh, c = nlit(&mut *rng, b ^ mask), m = mv))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("string.char({})", args)
+                };
+                let jf = xstr(&[102, 117, 110, 99, 116, 105, 111, 110]); // "function"
+                let js = xstr(&[115, 116, 114, 105, 110, 103]); // "string"
+                let sfind = format!("string[{}]", xstr(&[102, 105, 110, 100])); // string["find"]
+                (pre, jf, js, sfind)
             } else {
-                let jf_id = uni.register("function");
-                uni.fetch(&mut *rng, jf_id)
+                (String::new(), v_lg_sfun.clone(), v_lg_sstr.clone(), v_lg_sf.clone())
             };
             let mut hopts = vec![
                 format!("if {u}~={u} then {u}={u} end; ", u = p_u),
-                format!("{jf_stmt}if {f1}=={jf_expr}then {u}={u} end; ", jf_stmt = jf_stmt, f1 = f1, jf_expr = jf_expr, u = p_u),
-                format!("if {f1}==\"string\"and #{u}>0X0 then {u}={u} end; ", f1 = f1, u = p_u),
+                format!("if {f1}=={jf_expr} then {u}={u} end; ", f1 = f1, jf_expr = jf_expr, u = p_u),
+                format!("if {f1}=={js_expr} and #{u}>0X0 then {u}={u} end; ", f1 = f1, js_expr = js_expr, u = p_u),
                 format!("for {f2}=0X1,0X{} do if {u} then break end end; ", rng.range(2, 6), f2 = f2, u = p_u),
                 format!("local {f2}=({u})and 0X1 or 0X0; ", f2 = f2, u = p_u),
             ];
@@ -429,8 +435,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                     pcf = if inline { "pcall" } else { v_lg_pc.as_str() }),
                 format!("{t}.{pb}=function({s}){body} end; ",
                     t = tbl, pb = m_probe, s = p_self, body = pb),
-                format!("{t}.{ck}=function({s},{e})local {sc}={scf};return {nt}({e})==\"string\"and {e}:find({ndl})end; ",
+                format!("{t}.{ck}=function({s},{e})local {sc}={scf};return {nt}({e})=={js} and {sf}({e},{ndl})end; ",
                     t = tbl, ck = m_chk, s = p_self, e = p_err, sc = sc, ndl = needle, nt = native_type,
+                    js = js_expr, sf = sf_expr,
                     scf = if inline { "string.char" } else { v_lg_sc.as_str() }),
                 format!("{t}.{ht}=function({s},{h}){hb} end; ",
                     t = tbl, ht = m_hit, s = p_self, h = p_hit, hb = ht_body),
@@ -442,8 +449,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                     t = tbl, d2 = rng.name(), s = p_self, q = rng.name()));
             }
             rng.shuffle(&mut ms);
-            let body = format!("local {t}={{}} {ms} {t}:{drv}() ",
-                t = tbl, ms = ms.concat(), drv = m_drv);
+            let body = format!("{xh_pre}local {t}={{}} {ms} {t}:{drv}() ",
+                xh_pre = xh_pre, t = tbl, ms = ms.concat(), drv = m_drv);
             let (go, gb, ga, gx, gs, gh, gi) =
                 (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
             let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
@@ -512,6 +519,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let m_vmcore = shell.add(&mut rng, &[&kreg_n], block_vm_core);
         let block_vm_core = format!("{}; ", shell.call(&m_vmcore, &[&kreg_n]));
 
+        let v_mm_idx = vault.lit("__index");
+        let block_execute_def = block_execute_def.replace("{__index=", &format!("{{[{}]=", v_mm_idx));
         let exec_marker = format!("{} = function(", fn_execute);
         let block_execute_def = if let Some(pos) = block_execute_def.find(&exec_marker) {
             let prefix = &block_execute_def[..pos];
