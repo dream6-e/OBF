@@ -48,7 +48,7 @@ enum Step {
 pub struct Packer;
 
 impl Packer {
-    pub fn pack(input: &[u8], vm_rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream) -> (String, String, String) {
+    pub fn pack(input: &[u8], vm_rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream, vault: &mut crate::VM::VM_Backend::Generator_names::NameVault) -> (String, String, String) {
         let seed = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u32)
@@ -105,7 +105,7 @@ impl Packer {
 
         let (decoder_script, entry_func) = Self::build_decoder(
             &keys, &nat, &alpha_str, &alpha_perm, split_pos,
-            symbol_marker, &symbol_map, main_is_raw, vm_rng, uni,
+            symbol_marker, &symbol_map, main_is_raw, vm_rng, uni, vault,
         );
         (lua_payload, decoder_script, entry_func)
     }
@@ -389,10 +389,11 @@ impl Packer {
         main_is_raw: bool,
         rng: &mut GenRng,
         uni: &mut crate::VM::VM_Backend::Generator_util::UniStream,
+        vault: &mut crate::VM::VM_Backend::Generator_names::NameVault,
     ) -> (String, String) {
         // 原生流（Native Stream）解密内核：运行期指纹 + 现场构造 S-box + 每字节步进，
         // 闭包按 upvalue 捕获状态——密钥材料不以数据形态出现在产物里。
-        let kern = crate::VM::VM_Backend::Generator_native::emit_decrypt_kernel(rng, nat, "pack");
+        let kern = crate::VM::VM_Backend::Generator_native::emit_decrypt_kernel(rng, nat, "pack", Some(vault));
         let kern_decl = kern.decl.clone();
         let kern_init_fn = kern.init_fn.clone();
         let kern_step = kern.step.clone();
@@ -608,7 +609,7 @@ impl Packer {
 
         let router_code = ControlFlowBuilder::build_fast_router(
             "s.pc", "s.insts", "inst", "s.handlers", "s.r_flg", "s.r_vals", "s.r_len", "s.tamper", "s.tail_flg",
-            &kseed, "s.hk", "s.hs", rng
+            &kseed, "s.hk", "s.hs", rng, Some(vault)
         );
 
         let num_key_parts = rng.range(3, 7);
@@ -701,7 +702,7 @@ impl Packer {
         let id_chunk = uni.register("kryvex");
         let (ret_stmt, ret_expr) = uni.fetch(rng, id_ret);
         let (chunk_stmt, chunk_expr) = uni.fetch(rng, id_chunk);
-        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, uni, rng);
+        let probe = crate::VM::VM_Backend::Generator_util::loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, uni, rng, Some(vault));
         // ── 第 2 项：这层解码器也不再是「初始化 → 拆分 → 解码 → 执行」的清晰骨架 ──
         // 状态表构造里 32 个键值对彼此独立，顺序打乱；stage2 里 16 条初始化赋值同样打乱
         // （data/len 那一对有先后依赖，单独保持原序）；gmatch 的 for-in 拆成显式迭代器 + 影子守卫。
@@ -806,6 +807,17 @@ impl Packer {
         let (pk_fet, pk_code, pk_env, pk_maker) = (rng.name(), rng.name(), rng.name(), rng.name());
         // 判据①修复：载荷切分点（sb 段字符数）以混淆数字拼写下发，'~' 不再出现
         let split_lit = rng.format_num(split_pos as i64);
+        // ㉜ m_main 实参组：原 `unpack or table.unpack, string.char, …` 教科书
+        // 开场退役——库/成员访问全走 NB 槽（解码方法体内只用形参名，语义不变）
+        let a_unpack = vault.unpack();
+        let a_char = vault.member("string", "char");
+        let a_byte = vault.member("string", "byte");
+        let a_floor = vault.member("math", "floor");
+        let a_insert = vault.member("table", "insert");
+        let a_concat = vault.member("table", "concat");
+        let a_remove = vault.member("table", "remove");
+        let a_reverse = vault.member("string", "reverse");
+        let a_sub = vault.member("string", "sub");
         // ㉙② 句柄键基/步长运行时推导：取密钥前 3 字节混合（init_map 之后 s.k
         // 已就位），值域 <0XFFFFF；步长恒奇。注册/查表两侧共用 → 键集合不落文本
         let hk_derive = format!(
@@ -907,7 +919,7 @@ end,
                 local sb_expr = q:{m_run}(s);
                 
                 {ret_stmt}local {pk_fet} = load_func({ret_expr} .. sb_expr);
-                local {pk_code} = {pk_fet} and {pk_fet}() or string.char();
+                local {pk_code} = {pk_fet} and {pk_fet}() or {a_char}();
                 {chunk_stmt}local {pk_env} = load_func({pk_code}, {chunk_expr});
                 
                 local stage2 = function()
@@ -923,7 +935,7 @@ end,
                 {pk_init_table}
             }});
         end
-    }}):{m_main}({v_data}, {split_lit}, unpack or table.unpack, string.char, string.byte, math.floor, table.insert, table.concat, table.remove, string.reverse, string.sub, {v_pload});
+    }}):{m_main}({v_data}, {split_lit}, {a_unpack}, {a_char}, {a_byte}, {a_floor}, {a_insert}, {a_concat}, {a_remove}, {a_reverse}, {a_sub}, {v_pload});
 end
 ");
         // 脚本里所有 s.<字段> 的访问统一换成随机名（router / init_insts_loop /

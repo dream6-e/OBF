@@ -135,6 +135,11 @@ impl Generator {
         let mut weld = crate::VM::VM_Backend::Generator_kdf::WeldCache::new(&mut rng);
         // ㉓ 统一流：packer 脚本串/探测九件套/守卫散点串共用的一条密钥流（惰性解密）。
         let mut uni = crate::VM::VM_Backend::Generator_util::UniStream::new(&mut rng);
+        // ㉜ API 名保险库（NB）：VM 自身的全局 API 名一律只以 `NB[槽]` 出现；
+        // 最终 move 进 ChainIn，建表 IIFE 由 chain_tail 在预声明后发射。
+        let mut vault = crate::VM::VM_Backend::Generator_names::NameVault::new(&mut rng);
+        let kreg_n = rng.name();
+        vault.bind_local(&kreg_n);
         
         let mut used_ops = HashSet::new();
         { let mut scan_reader = PayloadReader { data: payload, pos: 0 }; scan_used_opcodes(&mut scan_reader, &mut used_ops); }
@@ -324,17 +329,19 @@ impl Generator {
         }
         
         let key_kryvex = String::from("x1"); let p_out: Vec<String> = (0..6).map(|_| rng.name()).collect();
-        let var_s = rng.name(); let fn_N_ = rng.name(); let var_fU = rng.name(); let var_L = rng.name(); let var_get_count = rng.name();
+        let var_s = rng.name(); let fn_N_ = rng.name(); let var_L = rng.name(); let var_get_count = rng.name();
         let hex_select_idx = format!("0X{:X}", rng.range(10, 255));
         let var_state_flag = rng.name();
         let wai = rng.name();
         let mut header_block = String::new();
         header_block.push_str(&format!("return ({{ {} = function(agv,aggv,agv,agv,agv,aggv,agv,agv,aggv,aggv,aggv,agggv,agggv,agggv,agggv,aggv,{},{},{},{}, ...)\n", wai, p_out[0], p_out[1], p_out[2], p_out[3]));
         // ㉘D1 头部两行声明换位（互无依赖）：位库 fallback 先、状态旗后
-        header_block.push_str(&format!("local {} = {{}}; local {} = bit32 and bit32.rshift or bit and bit.rshift; ", var_s, var_fU));
+        // ㉜ select 捕获推迟到 NB 之后（header_captures）；var_fU 位库捕获无消费点，退役。
+        header_block.push_str(&format!("local {} = {{}}; ", var_s));
         header_block.push_str(&format!("local {} = false; ", var_state_flag));
-        header_block.push_str(&format!("local {} = function(q, s, M, C) s[{}] = select; end; ", fn_N_, hex_select_idx));
-        header_block.push_str(&format!("{}(nil, {}, nil, nil); ", fn_N_, var_s));
+        let header_captures = format!(
+            "local {} = function(q, s, M, C) s[{}] = {}; end; {}(nil, {}, nil, nil); ",
+            fn_N_, hex_select_idx, vault.global("select"), fn_N_, var_s);
         // 冷块状态校验的单向摘要（每产物一次）：产物只留摘要+每块独立 salt。
         let fn_state_digest = rng.name();
         let sbox_state = rng.name();
@@ -368,12 +375,9 @@ impl Generator {
         let mut block_p_def = String::new();
         // qT4c/qT8c 两段建表折进一个函数边界（双表以返回值出界）；位库局部洗牌后发射
         block_p_def.push_str("local qT4c,qT8c=(function() local qT4c={};for i=0,15 do qT4c[i]={};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4c[i][j]=r end end;local qT8c={};for i=0,255 do qT8c[i]={};end;for i=0,255 do local qIc=qT8c[i];local qHc=(i-i%16)/16;for j=0,255 do qIc[j]=qT4c[i%16][j%16]+qT4c[qHc][(j-j%16)/16]*16 end end; return qT4c,qT8c end)(); ");
-        let mut bit_locals: Vec<String> = vec![
-            format!("local {}={}; ", fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"),
-            format!("local {}={}; ", fn_ba, "bit32 and bit32.band or bit and bit.band or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end"),
-            format!("local {}={}; ", fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end"),
-            format!("local {}={}; ", fn_bxor2, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8c[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"),
-        ];
+        // ㉜ 位库双回退链收进 NB（发射体在 Generator_names.rs）
+        let mut bit_locals = crate::VM::VM_Backend::Generator_names::emit_bit_locals(
+            &mut vault, &fn_bx, &fn_ba, &fn_bs, &fn_bxor2);
         rng.shuffle(&mut bit_locals);
         for bl in &bit_locals { block_p_def.push_str(bl); }
         // 裸 xor/加法选择器已退役（改进 4/5）：常量运输一律走带扰动的
@@ -394,9 +398,11 @@ impl Generator {
         block_p_def.push_str(&tbl_def);
         block_p_def.push_str(&crate::VM::VM_Backend::Generator_kdf::emit_transport_slots(&mut rng, &keys, &fn_bx));
 
-        let block_vm_core = Lua_core::build_vm_core().replace("\n", " ");
+        // ㉜ vm_core 模板的库访问点收进 NB 槽（替换体在 Generator_names.rs）
+        let block_vm_core = crate::VM::VM_Backend::Generator_names::vaultify_vm_core(
+            &mut vault, Lua_core::build_vm_core().replace("\n", " "));
         
-        let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng, &mut uni);
+        let (payload_str, decoder_script, entry_func) = Packer::pack(&combined_payload, &mut rng, &mut uni, &mut vault);
         let var_vc = rng.name(); let var_builtin_reg = rng.name();
         let var_builtin_view = rng.name(); let var_builtin_mask = rng.name(); let var_builtin_i = rng.name(); let var_builtin_xor = rng.name();
         let closure_env_registry = rng.name();
@@ -406,15 +412,17 @@ impl Generator {
         let native_error = rng.name();
         let native_getfenv = rng.name();
         let native_setfenv = rng.name();
+        // ㉜ setmetatable/rawset/rawget/kreg 弱元表走 NB 槽表达式（零新增壳层 local）
+        let (native_smeta, native_smt, native_rset, native_rget) = (
+            vault.global("setmetatable"), vault.kreg_mt(),
+            vault.global("rawset"), vault.global("rawget"));
         let block_packer_vars = format!("local {}, {}; ", var_vc, var_builtin_reg);
 
         let fn_execute = "execute";
-        // 诱饵投毒旗（外围 upvalue）：守卫失败/诱饵 handler 置位后先经过随机指令窗口，
-        // 再渐进污染常量、密钥或路由；探针本身不早退，也不提供固定错误位置。
         // 改进 3：篡改旗三旗池随机分派写入点，毒化读取乱序析取，钉单旗不哑火。
         let psn_pool: Vec<String> = (0..3).map(|_| rng.name()).collect();
         let psn_n = psn_pool[0].clone();
-        let mut at = AntiTamper::generate_split(true, &key_seed_var, &psn_pool[rng.range(0, psn_pool.len())]);
+        let mut at = AntiTamper::generate_split(true, &key_seed_var, &psn_pool[rng.range(0, psn_pool.len())], &mut vault);
         let var_pc = rng.name();
         let var_stk = rng.name();
         let var_vstack = rng.name();
@@ -476,7 +484,6 @@ impl Generator {
         let (n_kon, n_ka) = (rng.name(), rng.name());
         let numeric_for_errors = uni.register_numeric_for_errors(&mut rng);
         // 外部 API 名解码器：kreg 注册表槽（取用点早于解码器声明，走运行期查表）
-        let kreg_n = rng.name();
         let gn_key = rng.range(0x0100_0000, 0x6FFF_FFFF) as u32;
         let cfg = OpcodeConfig {
             pc: var_pc.clone(),
@@ -869,14 +876,10 @@ impl Generator {
         // 状态对象每个调用一个，方法通过 __index 原型共享，调用仍是 `V
         let mut block_methods = String::new();
         block_methods.push_str(&format!("local {}; ", fn_execute));
-        block_methods.push_str(&format!(
-            "local {to_num}=tonumber;local {err_fn}=error;local {getenv}=getfenv;local {setenv}=setfenv;local {closure_env}=setmetatable({{}},{{__mode='k'}}); ",
-            to_num = native_tonumber,
-            err_fn = native_error,
-            getenv = native_getfenv,
-            setenv = native_setfenv,
-            closure_env = closure_env_registry,
-        ));
+        // ㉜ 原生捕获改从 NB 取槽（发射体在 Generator_names.rs）
+        block_methods.push_str(&crate::VM::VM_Backend::Generator_names::emit_natives_capture(
+            &mut rng, &mut uni, &mut vault, &native_tonumber, &native_error,
+            &native_getfenv, &native_setfenv, &closure_env_registry));
         // ㉓ 统一流取用：惰性解密语句+纯数字密文，替换原池调用
         let (hash_stmt, hash_expr) = {
             let id = uni.register("#");
@@ -884,11 +887,12 @@ impl Generator {
         };
         block_methods.push_str(&hash_stmt);
         block_methods.push_str(&format!("local {} = function(...) return {}[{}]({}, ...) end; ", var_get_count, var_s, hex_select_idx, hash_expr));
-        block_methods.push_str(&format!("local unpack, zm = unpack or table and table.unpack or function() end, function(...) return {{{}={}(...),...}} end; ", pf_vn, var_get_count));
+        let var_unpack = rng.name();
+        block_methods.push_str(&format!("local {}, zm = {} or function() end, function(...) return {{{}={}(...),...}} end; ", var_unpack, vault.unpack(), pf_vn, var_get_count));
         let shard_names = method_shards.join(",");
         let shard_tables = vec!["{}"; method_shard_count].join(",");
         block_methods.push_str(&format!("local {}={};local {}={{}};", shard_names, shard_tables, var_proto));
-        for d in defs.iter() { block_methods.push_str(d); block_methods.push(' '); }
+        for d in defs.iter() { block_methods.push_str(&rename_ident(d, "unpack", &var_unpack)); block_methods.push(' '); }
         let (idx_stmt, idx_expr) = {
             let id = uni.register("__index");
             uni.fetch(&mut rng, id)
@@ -897,7 +901,7 @@ impl Generator {
         let mut method_order: Vec<usize> = (0..method_shard_count).collect();
         rng.shuffle(&mut method_order);
         for pair in method_order.windows(2) {
-            block_methods.push_str(&format!("setmetatable({},{{[{}]={}}});", method_shards[pair[0]], idx_expr, method_shards[pair[1]]));
+            block_methods.push_str(&format!("{}({},{{[{}]={}}});", native_smeta, method_shards[pair[0]], idx_expr, method_shards[pair[1]]));
         }
         block_methods.push_str(&format!("{}[{}]={};", var_proto, idx_expr, method_shards[method_order[0]]));
 
@@ -906,7 +910,7 @@ impl Generator {
             fn_execute, var_current_fn, var_parent_frame
         ));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
-        block_execute_def.push_str(&format!("local {} = setmetatable({{}}, {}); ", var_vm, var_proto));
+        block_execute_def.push_str(&format!("local {} = {}({{}}, {}); ", var_vm, native_smeta, var_proto));
         let builtin_count = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len();
         block_execute_def.push_str(&format!("local {bxv}={bx};local {bm}=chunk.{cbm};local {bv}=chunk.{cbv};if not {bv} then {bm}={bxv}({bxv}(chunk.{lld},chunk.{nups}),chunk.{ms})%0X40;{bv}={{}};for {bi}=0,{last} do {bv}[{bxv}({bi},{bm})+1]={src}[{bi}+1] end;chunk.{cbm}={bm};chunk.{cbv}={bv};end;", bxv=var_builtin_xor, bm=var_builtin_mask, bv=var_builtin_view, cbm=pf_builtin_mask, cbv=pf_builtin_view, bx=fn_bxor2, lld=pf_lld, nups=pf_nups, ms=pf_maxstack, bi=var_builtin_i, last=builtin_count-1, src=var_builtin_reg));
         block_execute_def.push_str(&format!("{}[{}]={}.{}+{};{}[{}]={{}};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, "chunk", pf_lld, obf1, var_vm, k_stk, var_vm, k_vstack, var_vm, k_top, obf0));
@@ -1057,6 +1061,7 @@ impl Generator {
                 k_dc.as_str(),
                 pf_cnt18.as_str(),
                 (ds_n.as_str(), ds_ch.as_str(), ds_m1.as_str(), ds_m2.as_str(), ds_m3.as_str()),
+                &native_smeta, &native_rset, &native_rget,
             );
             block_execute_def.insert_str(0, &factory_prefix);
             block_execute_def.push_str(&init_dc_stmt);
@@ -1101,12 +1106,12 @@ impl Generator {
             dispatch_body.push_str(&format!("local {}=op+{};", dispatch_state.route_op, dispatch_state.bias));
 
             dispatch_body.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
-            dispatch_body.push_str(&crate::VM::VM_Backend::Generator_flow_split::build_relay_dispatch(&tree_entries, &var_pc, &var_top, &var_r1, &var_r2, &var_r3, &dispatch_state.route_op, &dispatch_state.bias, fn_execute, self.ctx.seed));
+            dispatch_body.push_str(&crate::VM::VM_Backend::Generator_flow_split::build_relay_dispatch(&tree_entries, &var_pc, &var_top, &var_r1, &var_r2, &var_r3, &dispatch_state.route_op, &dispatch_state.bias, fn_execute, self.ctx.seed, &native_smeta, &native_rset));
             dispatch_body.push_str(&format!(
                 "{state}=({state}+({pc}-{prev})*0X{mul:X})%0X100000000;",
                 state = const_path_state, pc = var_pc, prev = const_path_prev_pc, mul = const_path_mul));
             dispatch_body.push_str(&dispatch_state.update);
-            dispatch_body.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return unpack({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
+            dispatch_body.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return {}({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_unpack, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
             // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
             // 活跃闭包持有明文引用不受影响；未来 CLOSURE 经 type(p)=='function' 重解
             // 换钥高频路径零新增调用：嵌套双 bx 拆平（5 次→3 次）+ 声明序/实参对/存储乱序
@@ -1173,7 +1178,7 @@ impl Generator {
             dispatch_body.push_str(&format!(
                 "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; {mdw} \
                  {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
-                   local {kmt}=getmetatable({kreg}); local {kold}={kreg}; {kreg}=setmetatable({{}},{{}}); setmetatable({kreg},{kmt}); for {kc1},{kv1} in {pairs_fn}({kold}) do {kreg}[{kc1}]={kv1} end; \
+                   local {kold}={kreg}; {kreg}={smeta}({{}},{kmt}); for {kc1},{kv1} in {pairs_fn}({kold}) do {kreg}[{kc1}]={kv1} end; \
                    local {lv}={c}.{lld}; {w2} local {nk1}={bx}({kon},{pc}%{m32})%{m32}; {nn} \
                    {dline} \
                    {rotw} \
@@ -1188,7 +1193,7 @@ impl Generator {
                 nk1 = nk1_n, lv = lv_n,
                 nn = nn_seg, dline = dline_seg, rk_tail = rk_tail_seg,
                 kreg = kreg_n, c = "chunk", rotw = rot_walk, pairs_fn = native_pairs,
-                kmt = rng.name(), kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
+                smeta = native_smeta, kmt = native_smt, kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
             dispatch_body.push_str(&format!("{}={};", var_state_flag, "false"));
             let split = crate::VM::VM_Backend::Generator_flow_split::wrap_for_build(
                 &dispatch_state.setup, &dispatch_body, true, "chunk",
@@ -1227,6 +1232,8 @@ impl Generator {
             fn_execute, bc_kb, bc_kc, bc_ki1, bc_ki2, chain_delta, chain_m, chain_k0, sc_add, sc_add_k1, sc_mul_k2, sc_rot_in, sc_rot_k2, sc_rot_k4, tag_map18, fc18, block_decoder_script, block_execute_def, block_methods, block_p_def, block_packer_vars, block_vm_core, entry_func, fn_a10, fn_a5, fn_b_rotr, fn_qr, fn_read_dec, fn_read_string, fn_rotl32, fn_u32_dec, fn_xor32, header_block, key_seed_var, payload_str, pf_cnt18, pf_consts, const_path_key, sk_setup, t, x, var_boot_env, var_l, var_state_flag, wai, xor_tbl_var,
             weld,
             uni,
+            vault,
+            header_captures,
         })
     }
 }

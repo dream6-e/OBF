@@ -257,7 +257,10 @@ pub fn kdf_fn_decl(rng: &mut GenRng, keys: &CipherKeys, kdf: &str, xor32: &str, 
 /// Rust 镜像算出。它被折进根 K0 token 的扭曲量——跳过指纹层，全部密钥
 /// 材料（四组密钥字/盐/白化种子）立刻失真。与动态指纹（地址/GC，仅做
 /// 等价形态选路）互补：一个管选路，一个管钥匙。
-pub fn emit_fix_fingerprint(mut rng: &mut GenRng) -> (String, String, u32) {
+pub fn emit_fix_fingerprint(
+    mut rng: &mut GenRng,
+    vault: Option<&mut crate::VM::VM_Backend::Generator_names::NameVault>,
+) -> (String, String, u32) {
     fn fp_adv(rng: &mut GenRng, hfix: &str, m32: &str, lua_val: String, rust_val: u64, h: u64, stmts: &mut Vec<String>) -> u64 {
         let p = rng.range64(3, 0xFFFF) | 1;
         let nh = ((h as f64) * (p as f64) + (rust_val as f64)) % 4294967296.0;
@@ -315,12 +318,29 @@ pub fn emit_fix_fingerprint(mut rng: &mut GenRng) -> (String, String, u32) {
     h = fp_adv(&mut rng, &hfix, &m32, lv7, dv % (m7 as u64), h, &mut stmts);
     // 库成员局部化（声明顺序洗牌）：ts/sb/fl/sq/ty
     let (a_ts, a_sb, a_fl, a_sq, a_ty) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    // ㉜ 产物路径经 NB 槽绑定（None 分支保留给单测独立跑）
+    let (r_ts, r_sb, r_fl, r_sq, r_ty) = match vault {
+        Some(v) => (
+            v.global("tostring"),
+            v.member("string", "byte"),
+            v.member("math", "floor"),
+            v.member("math", "sqrt"),
+            v.global("type"),
+        ),
+        None => (
+            "tostring".to_string(),
+            "string.byte".to_string(),
+            "math.floor".to_string(),
+            "math.sqrt".to_string(),
+            "type".to_string(),
+        ),
+    };
     let mut aliases = vec![
-        format!("local {}=tostring; ", a_ts),
-        format!("local {}=string.byte; ", a_sb),
-        format!("local {}=math.floor; ", a_fl),
-        format!("local {}=math.sqrt; ", a_sq),
-        format!("local {}=type; ", a_ty),
+        format!("local {}={}; ", a_ts, r_ts),
+        format!("local {}={}; ", a_sb, r_sb),
+        format!("local {}={}; ", a_fl, r_fl),
+        format!("local {}={}; ", a_sq, r_sq),
+        format!("local {}={}; ", a_ty, r_ty),
     ];
     rng.shuffle(&mut aliases);
     let body = stmts.join("")
@@ -440,7 +460,7 @@ mod tests {
         let exes = [root.join("toolchains/bin/lua5.1"), root.join("toolchains/bin/luau")];
         for round in 0..2 {
             let mut rng = GenRng::new(round);
-            let (src, var, val) = super::emit_fix_fingerprint(&mut rng);
+            let (src, var, val) = super::emit_fix_fingerprint(&mut rng, None);
             let script = format!("{} print({})", src, var);
             for exe in &exes {
                 if !exe.exists() { continue; }

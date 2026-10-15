@@ -422,6 +422,9 @@ pub(super) fn build_inst_decoder_lua(
     k_dc: &str,
     pf_cnt: &str,
     ds_fields: (&str, &str, &str, &str, &str),
+    smeta: &str,
+    rset: &str,
+    rget: &str,
 ) -> (String, String) {
     let (ds_n, ds_ch, ds_m1, ds_m2, ds_m3) = ds_fields;
     let dc_fn = rng.name();
@@ -531,8 +534,8 @@ pub(super) fn build_inst_decoder_lua(
         1 => vec![upd, swap_stmt, wj_stmt],
         _ => vec![wj_stmt, upd, swap_stmt],
     };
-    st2_stmts.push(format!("rawset({pi},{ph}.{fn_},{{{wf},{wj},{wh},{wi}}});",
-        pi = p_i, ph = p_h, fn_ = ds_n, wf = w_f, wj = w_j, wh = w_h, wi = w_i));
+    st2_stmts.push(format!("{rs}({pi},{ph}.{fn_},{{{wf},{wj},{wh},{wi}}});",
+        rs = rset, pi = p_i, ph = p_h, fn_ = ds_n, wf = w_f, wj = w_j, wh = w_h, wi = w_i));
 
     // 3 态 + 1 诱饵态的平坦化状态机
     let st_var = rng.name();
@@ -584,7 +587,8 @@ pub(super) fn build_inst_decoder_lua(
     let end_v = rng.name();
     let init_dc_stmt = format!(
         "local {ndc}={{}}; local {ds}={{{inits}}}; local {fill}={fn_}({bind}); local {ende}={c}.{lld}+{c}.{cnt}; \
-         setmetatable({ndc},{{__index=function({tt},{kk}) while {ds}.{dsn}<{kk} and {ds}.{dsn}<{ende} do {fill}() end return rawget({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
+         {sm}({ndc},{{__index=function({tt},{kk}) while {ds}.{dsn}<{kk} and {ds}.{dsn}<{ende} do {fill}() end return {rg}({tt},{kk}) end}}); {vm}[{kdc}]={ndc}; ",
+        sm = smeta, rg = rget,
         ndc = n_dc, ds = dc_ds, inits = ds_inits.join(","),
         fill = dc_fill, fn_ = dc_fn, bind = bind_args,
         tt = rng.name(), kk = rng.name(), dsn = ds_n, vm = var_vm, kdc = k_dc,
@@ -932,7 +936,13 @@ pub fn mix_key(plain: &str, rng: &mut GenRng) -> u32 {
 /// 密钥由 4 个字节组成；字节递推同时吸收位置、前一密文、当前密文与明文。
 /// 本算法是项目自创的可逆变换，不等同于经审计的标准密码算法。
 pub fn stream_dec_body() -> String {
-    r#"function(s,k) local M=0X7FFFFF01; local q0=math.floor(k/0X1000000)%0X100; local q1=math.floor(k/0X10000)%0X100; local q2=math.floor(k/0X100)%0X100; local q3=k%0X100; local a=(q0*0X101+q1*0X107+q2*0X10D+q3*0X10F+0X13579B)%M; local b=(q3*0X115+q2*0X119+q1*0X11B+q0*0X125+0X2468AC)%M; local o,i,prev='',0,0; local n=#s; while i<n do i=i+1; local pos=i%M; local c=string.byte(s,i); local x=(a*((b%0X10000)+0X25D)+b*0X3A7+pos*0X139+prev*0X2D5+q0*0X101+q2*0X107)%M; local y=(b*((x%0X10000)+0X317)+x*0X2B9+pos*0X1B3+prev*0X3D1+q1*0X10D+q3*0X113)%M; local mask=(x%0X100+(y%0X100)*0X3+(pos%0X100)*0X5+((x-x%0X100)/0X100)%0X100+((y-y%0X100)/0X100)%0X100)%0X100; local p=(c+0X100-mask)%0X100; local na=(x*((y%0X10000)+0X21D)+y*0X331+pos*0X12B+p*0X17+prev*0X2B+c*0X35+q2)%M; local nb=(y*((na%0X10000)+0X2A7)+na*0X2F5+pos*0X1D3+c*0X3B+p*0X43+q3)%M; a=na; b=nb; prev=c; o=o..string.char(p) end; return o end"#.to_string()
+    stream_dec_body_with("math.floor", "string.byte", "string.char")
+}
+
+/// ㉜ 参数化形态：三个库成员取用表达式由调用侧注入（产物路径传 NB 槽表达式；
+/// 无参版仅测试使用）。
+pub fn stream_dec_body_with(mfloor: &str, sbyte: &str, schar: &str) -> String {
+    format!(r#"function(s,k) local M=0X7FFFFF01; local q0={mf}(k/0X1000000)%0X100; local q1={mf}(k/0X10000)%0X100; local q2={mf}(k/0X100)%0X100; local q3=k%0X100; local a=(q0*0X101+q1*0X107+q2*0X10D+q3*0X10F+0X13579B)%M; local b=(q3*0X115+q2*0X119+q1*0X11B+q0*0X125+0X2468AC)%M; local o,i,prev='',0,0; local n=#s; while i<n do i=i+1; local pos=i%M; local c={sb}(s,i); local x=(a*((b%0X10000)+0X25D)+b*0X3A7+pos*0X139+prev*0X2D5+q0*0X101+q2*0X107)%M; local y=(b*((x%0X10000)+0X317)+x*0X2B9+pos*0X1B3+prev*0X3D1+q1*0X10D+q3*0X113)%M; local mask=(x%0X100+(y%0X100)*0X3+(pos%0X100)*0X5+((x-x%0X100)/0X100)%0X100+((y-y%0X100)/0X100)%0X100)%0X100; local p=(c+0X100-mask)%0X100; local na=(x*((y%0X10000)+0X21D)+y*0X331+pos*0X12B+p*0X17+prev*0X2B+c*0X35+q2)%M; local nb=(y*((na%0X10000)+0X2A7)+na*0X2F5+pos*0X1D3+c*0X3B+p*0X43+q3)%M; a=na; b=nb; prev=c; o=o..{sc}(p) end; return o end"#, mf=mfloor, sb=sbyte, sc=schar)
 }
 
 /// ── ⑤ 池键哈希的参数：逐产物随机 ──
@@ -985,13 +995,20 @@ pub struct StreamTable {
     entries: Vec<(u32, String)>,
     used: std::collections::HashSet<u32>,
     dec_key: u32,
+    /// ㉜ 产物路径注入 NB 槽化的解码器源（None 时用明文版，仅测试路径）
+    decoder: Option<String>,
 }
 
 impl StreamTable {
     pub fn new(name: String) -> Self {
         let mut used = std::collections::HashSet::new();
         let dec_key = Self::fresh_key(&mut used);
-        StreamTable { name, entries: Vec::new(), used, dec_key }
+        StreamTable { name, entries: Vec::new(), used, dec_key, decoder: None }
+    }
+
+    /// 注入解码器源（NB 槽化形态）。
+    pub fn set_decoder(&mut self, src: String) {
+        self.decoder = Some(src);
     }
 
     fn fresh_key(used: &mut std::collections::HashSet<u32>) -> u32 {
@@ -1025,7 +1042,8 @@ impl StreamTable {
     pub fn emit(&self) -> String {
         let mut r = rand::thread_rng();
         let mut items: Vec<String> = Vec::new();
-        items.push(format!("[{}]={}", self.dec_key, stream_dec_body()));
+        items.push(format!("[{}]={}", self.dec_key,
+            self.decoder.clone().unwrap_or_else(stream_dec_body)));
         for (k, v) in &self.entries {
             items.push(format!("[{}]={}", k, v));
         }

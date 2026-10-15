@@ -11,8 +11,10 @@ thread_local! {
 }
 
 fn is_reserved_member(name: &str) -> bool {
+    // ㉖.4 补完：元方法协议键（__index/__newindex/__mode/…）在 `x.__index` 点访问、
+    // `{__index=…}` 表字段各形态下都是 Lua 内部协议名——映射会让 userdata proxy 等元表失灵
     let lower = name.to_ascii_lowercase();
-    matches!(
+    lower.starts_with("__") || matches!(
         lower.as_str(),
         "byte"
             | "char"

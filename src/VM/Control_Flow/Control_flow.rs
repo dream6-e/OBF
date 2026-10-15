@@ -305,6 +305,7 @@ impl ControlFlowBuilder {
         h_base: &str,
         h_stride: &str,
         rng: &mut GenRng,
+        vault: Option<&mut crate::VM::VM_Backend::Generator_names::NameVault>,
     ) -> String {
         // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng::distinct
         let idx = rng.distinct(8, 0x10, 0x7F);
@@ -341,9 +342,24 @@ impl ControlFlowBuilder {
 
         let mut out = String::new();
 
-        out.push_str(&format!("local qT4a={{}};for i=0,15 do qT4a[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4a[i][j]=r end end;local qT8a={{}};for i=0,255 do qT8a[i]={{}};end;for i=0,255 do local qIa=qT8a[i];local qHa=(i-i%16)/16;for j=0,255 do qIa[j]=qT4a[i%16][j%16]+qT4a[qHa][(j-j%16)/16]*16 end end; local {}={};", fn_bx, "bit32 and bit32.bxor or bit and bit.bxor or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8a[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end"));
-        out.push_str(&format!("local {}={};", fn_ba, "bit32 and bit32.band or bit and bit.band or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end"));
-        out.push_str(&format!("local {}={};", fn_bs, "bit32 and bit32.rshift or bit and bit.rshift or function(a,n)local d=2^n return (a-a%d)/d end"));
+        // ㉜ 位库回退链与 unpack 改走 NB 槽（None 分支保留给无 NB 的独立调用者）
+        let (r_bx, r_ba, r_bs, r_unpack) = match vault {
+            Some(v) => (
+                v.bitop("bxor"),
+                v.bitop("band"),
+                v.bitop("rshift"),
+                format!("({})", v.unpack()),
+            ),
+            None => (
+                "(bit32 and bit32.bxor or bit and bit.bxor)".to_string(),
+                "(bit32 and bit32.band or bit and bit.band)".to_string(),
+                "(bit32 and bit32.rshift or bit and bit.rshift)".to_string(),
+                "(unpack or table.unpack)".to_string(),
+            ),
+        };
+        out.push_str(&format!("local qT4a={{}};for i=0,15 do qT4a[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4a[i][j]=r end end;local qT8a={{}};for i=0,255 do qT8a[i]={{}};end;for i=0,255 do local qIa=qT8a[i];local qHa=(i-i%16)/16;for j=0,255 do qIa[j]=qT4a[i%16][j%16]+qT4a[qHa][(j-j%16)/16]*16 end end; local {}={} or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8a[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end;", fn_bx, r_bx));
+        out.push_str(&format!("local {}={} or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end;", fn_ba, r_ba));
+        out.push_str(&format!("local {}={} or function(a,n)local d=2^n return (a-a%d)/d end;", fn_bs, r_bs));
         
         let tbl_def = format!(
             "local {p}={{}};{p}[{g1}]={{}};{p}[{g1}][{bx}]={fbx};{p}[{g1}][{add}]=function(a,b)return a+b end;{p}[{g1}][{ba}]={fba};{p}[{g2}]={{}};{p}[{g2}][{ba2}]=function(a)return {fba}(a,{max_u32})end;{p}[{g2}][{bs2}]=function(a)return {fbs}(a,{one})end;",
@@ -515,8 +531,8 @@ impl ControlFlowBuilder {
         out.push_str("else ");
         let tf_a = Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng);
         let tf_b = Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng);
-        out.push_str(&format!("if {} then if {} then {},{}=false,false;{}else return(unpack or table.unpack)({},{},{})end else {}end ", 
-            var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, tf_a, var_r_vals, Self::obfuscate_num_depth(1, 1, &keys, rng), var_r_len, tf_b
+        out.push_str(&format!("if {} then if {} then {},{}=false,false;{}else return{}({},{},{})end else {}end ", 
+            var_r_flg, var_tail_flg, var_tail_flg, var_r_flg, tf_a, r_unpack, var_r_vals, Self::obfuscate_num_depth(1, 1, &keys, rng), var_r_len, tf_b
         ));
 
         out.push_str("end "); // 闭合骨架态图 if

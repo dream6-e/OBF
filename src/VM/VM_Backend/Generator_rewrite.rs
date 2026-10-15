@@ -869,7 +869,10 @@ pub fn loader_lookup(
 /// （不依赖 bit32 / bit，标准 Lua 5.1 与 Roblox 都能跑）。
 /// 每个串一个独立随机密钥，密钥避开该串里出现过的字节，
 /// 保证密文里不会写出 `\000`。只在启动时解 9 个短串，代价可忽略。
-pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream, rng: &mut GenRng) -> String {
+pub fn loadstring_probe_lua(
+    nat: &str, getf: &str, pl: &str, uni: &mut UniStream, rng: &mut GenRng,
+    vault: Option<&mut crate::VM::VM_Backend::Generator_names::NameVault>,
+) -> String {
     // ── 要隐藏的字符串（九件套 + 三个类型名）全并入统一流（㉓）──
     const PLAIN: [&str; 9] = [
         "getinfo",    // info 表的键
@@ -899,6 +902,21 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream
     let (st_table, ex_table) = uni.fetch(rng, id_table);
     let (st_fn, ex_fn) = uni.fetch(rng, id_function);
 
+    // ㉜ vault 给定时 debug/type/pcall/环境根全部走 NB 槽（None 给 stub_generator）
+    let (r_dbg, r_ty, r_pc, r_root) = match vault {
+        Some(v) => (
+            v.global("debug"),
+            v.global("type"),
+            v.global("pcall"),
+            v.root(),
+        ),
+        None => (
+            "debug".to_string(),
+            "type".to_string(),
+            "pcall".to_string(),
+            "((getfenv and getfenv()) or _G)".to_string(),
+        ),
+    };
     let v_d = rng.name(); let v_gi = rng.name();
     let v_ok = rng.name(); let v_inf = rng.name();
     // nat：用到 getinfo/what/C/source/=[C]/S/table/function
@@ -906,15 +924,16 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream
         stmts[0], stmts[1], stmts[2], stmts[3], stmts[4], st_s, st_table, st_fn);
     let nat_body = format!(
         "local function {nat}({f}) \
-            local {d} = debug; {stms} \
-            if type({d}) ~= {sc_t} then return true end; \
+            local {d} = {dbg}; {stms} \
+            if {ty}({d}) ~= {sc_t} then return true end; \
             local {gi} = {d}[{k1}]; \
-            if type({gi}) ~= {sc_f} then return true end; \
-            local {ok}, {inf} = pcall({gi}, {f}, {sc_s}); \
-            if not {ok} or type({inf}) ~= {sc_t} then return true end; \
+            if {ty}({gi}) ~= {sc_f} then return true end; \
+            local {ok}, {inf} = {pc}({gi}, {f}, {sc_s}); \
+            if not {ok} or {ty}({inf}) ~= {sc_t} then return true end; \
             return {inf}[{k2}] == {k3} and {inf}[{k4}] == {k5}; \
         end; ",
         nat = nat, f = rng.name(), d = v_d, stms = nat_stmts,
+        dbg = r_dbg, ty = r_ty, pc = r_pc,
         sc_t = ex_table, sc_f = ex_fn, sc_s = ex_s,
         gi = v_gi, k1 = exprs[0], ok = v_ok, inf = v_inf,
         k2 = exprs[1], k3 = exprs[2], k4 = exprs[3], k5 = exprs[4]);
@@ -926,19 +945,19 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream
         stmts[5], stmts[6], stmts[7], stmts[8], st_fn, st_table, st_s);
     let getf_body = format!(
         "local function {getf}() \
-            local {g} = (getfenv and getfenv()) or _G; {stms} \
+            local {g} = {rt}; {stms} \
             local {gg} = {g}[{k6}]; \
-            if type({gg}) == {sc_f} then {g} = {gg}() or {g}; end; \
+            if {ty}({gg}) == {sc_f} then {g} = {gg}() or {g}; end; \
             local {ge} = {g}[{k7}]; \
             local {env} = {g}; \
-            if type({ge}) == {sc_f} then {env} = {ge}() or {g}; end; \
+            if {ty}({ge}) == {sc_f} then {env} = {ge}() or {g}; end; \
             local {list} = {{ {g}[{k8}], {env}[{k8}], {env}[{k9}], {g}[{k9}] }}; \
             local {alt}, {i} = nil, 0; \
             local {n} = #{list}; \
             while {i} < {n} do \
                 {i} = {i} + 1; \
                 local {f} = {list}[{i}]; \
-                local {t} = type({f}); \
+                local {t} = {ty}({f}); \
                 if {t} == {sc_f} then \
                     if {nat}({f}) and {alt} == nil then {alt} = {f}; {i} = {n}; end; \
                     if {alt} == nil then {alt} = {f}; end; \
@@ -947,7 +966,7 @@ pub fn loadstring_probe_lua(nat: &str, getf: &str, pl: &str, uni: &mut UniStream
             return {alt}; \
         end; \
         local {pl} = {getf}();\n",
-        getf = getf, g = v_g, stms = getf_stmts,
+        getf = getf, g = v_g, rt = r_root, ty = r_ty, stms = getf_stmts,
         gg = v_gg, k6 = exprs[5], sc_f = ex_fn, ge = v_ge, k7 = exprs[6],
         env = v_env2, list = v_list, k8 = exprs[7], k9 = exprs[8],
         alt = v_alt, i = v_i2, n = v_n2, f = v_f2, t = v_t2,

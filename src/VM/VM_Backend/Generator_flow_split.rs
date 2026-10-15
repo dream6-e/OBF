@@ -94,6 +94,8 @@ pub(super) fn build_relay_dispatch(
     bias: &str,
     execute_name: &str,
     vm_seed: u64,
+    setmetatable: &str,
+    rawset: &str,
 ) -> String {
     let _ = top;
     let mut rng = TinyRng::new(
@@ -236,15 +238,17 @@ pub(super) fn build_relay_dispatch(
         // safe at any moment (every real opcode is cached before the wires vanish),
         // so late first-uses of an opcode never fall through to the fallback.
         setup.push_str(&format!(
-            "local function {bf}(t) local j=1;while j<={end_i} do rawset(t,{w}[j],{h}[{w}[j+1]-{mask}]);j=j+2 end;{w}=nil;setmetatable(t,nil) end;",
+            "local function {bf}(t) local j=1;while j<={end_i} do {rs}(t,{w}[j],{h}[{w}[j+1]-{mask}]);j=j+2 end;{w}=nil;{sm}(t,nil) end;",
             bf = burn_fn,
             w = wname,
             h = handlers_name,
             mask = format!("0X{:X}", mask),
             end_i = scan_end,
+            sm = setmetatable,
+            rs = rawset,
         ));
         setup.push_str(&format!(
-            "local {f}=setmetatable({{}},{{__index=function(t,k) local i=1;while i<={end_i} do if {w}[i]==k then local h={h}[{w}[i+1]-{mask}];rawset(t,k,h);{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return h end;i=i+2 end;{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return nil end}});",
+            "local {f}={sm}({{}},{{__index=function(t,k) local i=1;while i<={end_i} do if {w}[i]==k then local h={h}[{w}[i+1]-{mask}];{rs}(t,k,h);{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return h end;i=i+2 end;{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return nil end}});",
             f = fname,
             w = wname,
             h = handlers_name,
@@ -253,6 +257,8 @@ pub(super) fn build_relay_dispatch(
             burn = burn_at,
             bf = burn_fn,
             end_i = scan_end,
+            sm = setmetatable,
+            rs = rawset,
         ));
         front_names.push(fname);
     }
@@ -693,6 +699,7 @@ mod tests {
         for seed in [0x1234u64, 0xBEEF, 0x0F0F_0F0F, 0xDEAD_BEEF] {
             let dispatch = build_relay_dispatch(
                 &entries, "pc", "top", "r1", "r2", "r3", "route_op", "bias", "relay_test", seed,
+                "setmetatable", "rawset",
             );
             let body = format!(
                 "pc=pc+1;local route_op=op+bias;local rk1,rk2;local r1,r2,r3;{dispatch}return pc,top,value,r1,r2,r3;"

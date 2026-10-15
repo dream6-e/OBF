@@ -110,6 +110,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         xor_tbl_var,
         weld: mut weld,
         uni: mut uni,
+        vault: mut vault,
+        header_captures,
         ..
     } = x;
     let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
@@ -269,7 +271,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let psn_pick = psn_pool[rng.range(0, psn_pool.len())].as_str().to_string();
         let psn_pick = psn_pick.as_str();
                 let (bc_scatter, agg_field) = crate::VM::VM_Backend::Generator_flow::build_consts(
-                &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
+                &mut vault, &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
                 fn_a5.as_str(), fn_read_dec.as_str(), native_type.as_str(), native_pairs.as_str(),
@@ -312,11 +314,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
              rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
+        let (v_va_pc, v_va_ts, v_va_sb) = (
+            vault.global("pcall"), vault.global("tostring"), vault.member("string", "byte"));
         let verify_agg = format!(
-            "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}=pcall(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or {nt}({b1})~='number' or {nt}({b2})~='number' or {nt}({b3})~='number' or {nt}({b4})~='number' or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
+            "local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sby}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}={pc}(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or {nt}({b1})~='number' or {nt}({b2})~='number' or {nt}({b3})~='number' or {nt}({b4})~='number' or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
             go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
             co = co, cm = cm, b1 = b1, b2 = b2, b3 = b3, b4 = b4,
             sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, nt = native_type,
+            pc = v_va_pc, ts = v_va_ts, sby = v_va_sb,
             psn = psn_pool[rng.range(0, psn_pool.len())].as_str()
         );
         let dbg_locals: Vec<String> = (0..9).map(|_| rng.name()).collect();
@@ -334,6 +339,9 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         // ⑳ 行信息探针仅作兼容性检查：宿主错误栈格式/行号不同或不可用时必须 fail-open，
         // 不得把正常 Lua 运行环境判成篡改。采样位来自对象地址，不消费 math.random。
         // 定义式/内联两形态仍保留随机化探针与错误消息针式，但不制造固定报错。
+        let (v_lg_pc, v_lg_ts, v_lg_sb, v_lg_sc) = (
+            vault.global("pcall"), vault.global("tostring"),
+            vault.member("string", "byte"), vault.member("string", "char"));
         let line_guard = |rng: &mut GenRng, uni: &mut crate::VM::VM_Backend::Generator_util::UniStream, inline: bool| -> String {
             let tbl = rng.name();
             let probe_body = |rng: &mut GenRng| -> String {
@@ -388,7 +396,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                     .map(|b| format!("{xh}({c},{m})", xh = xh, c = nlit(&mut *rng, b ^ mask), m = mv))
                     .collect::<Vec<_>>()
                     .join(",");
-                (stmt, format!("string.char({})", args))
+                let sc_fn = if inline { "string.char" } else { v_lg_sc.as_str() };
+                (stmt, format!("{}({})", sc_fn, args))
             } else {
                 let jf_id = uni.register("function");
                 uni.fetch(&mut *rng, jf_id)
@@ -412,12 +421,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",
                     t = tbl, drv = m_drv, s = p_self, o = rng.name(), e = p_err,
                     pc = m_pcall, ht = m_hit, ck = m_chk),
-                format!("{t}.{pc}=function({s})return pcall({s}.{pb},{s})end; ",
-                    t = tbl, pc = m_pcall, s = p_self, pb = m_probe),
+                format!("{t}.{pc}=function({s})return {pcf}({s}.{pb},{s})end; ",
+                    t = tbl, pc = m_pcall, s = p_self, pb = m_probe,
+                    pcf = if inline { "pcall" } else { v_lg_pc.as_str() }),
                 format!("{t}.{pb}=function({s}){body} end; ",
                     t = tbl, pb = m_probe, s = p_self, body = pb),
-                format!("{t}.{ck}=function({s},{e})local {sc}=string.char;return {nt}({e})==\"string\"and {e}:find({ndl})end; ",
-                    t = tbl, ck = m_chk, s = p_self, e = p_err, sc = sc, ndl = needle, nt = native_type),
+                format!("{t}.{ck}=function({s},{e})local {sc}={scf};return {nt}({e})==\"string\"and {e}:find({ndl})end; ",
+                    t = tbl, ck = m_chk, s = p_self, e = p_err, sc = sc, ndl = needle, nt = native_type,
+                    scf = if inline { "string.char" } else { v_lg_sc.as_str() }),
                 format!("{t}.{ht}=function({s},{h}){hb} end; ",
                     t = tbl, ht = m_hit, s = p_self, h = p_hit, hb = ht_body),
                 format!("{t}.{d1}=function({s},{q})return {q} end; ",
@@ -433,11 +444,19 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let (go, gb, ga, gx, gs, gh, gi) =
                 (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
             let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
-            format!(
-                "local {go},{gb}=pcall(function() local {ga},{gx}={{}},{{}};local {gs}=tostring({ga})..tostring({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+string.byte({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then {body} end;",
-                go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi,
-                seed = gate_seed, body = body
-            )
+            // inline=true 落在兄弟方法 fu 体内：fu 在 wai 之前执行，不在 wai 词法作用域内，
+            // NB 尚未建表——该处直接走 {body}（内部 pcall/string.char 已用环境或自足拼装）；
+            // wai 壳内（inline=false）照旧走 NB 槽采样门。
+            if inline {
+                format!("do {} end;", body)
+            } else {
+                format!(
+                    "local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sb}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then {body} end;",
+                    go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi,
+                    pc = v_lg_pc, ts = v_lg_ts, sb = v_lg_sb,
+                    seed = gate_seed, body = body
+                )
+            }
         };
         let mut ch_pairs: Vec<(String, String)> = vec![
             (obf_s_init.clone(), body_init),
@@ -546,7 +565,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         out.push_str(&format!("local {} = ...;\n", var_l));
         out.push_str(&header_block);
         for pf_ in &psn_pool { out.push_str(&format!("local {}=false; ", pf_)); }
-        out.push_str(&format!("local {}=type; local {}=pairs; ", native_type, native_pairs));
+        // ㉜ type/pairs 捕获推迟到 NB 建表之后（原 `local X=type; local Y=pairs;`）
         // ㉓ 统一流前导（表+惰性解码器）：直接落在主 return({}) 壳内——header_block
         // 打开的 wai 函数体开头（用户指示，不另起壳）；壳内所有取用点（守卫/散点/
         // 打乱 parts/解码脚本）都在其后，解码脚本以 upvalue 捕获。fu 是兄弟字段且在
@@ -567,18 +586,38 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 (th21.clone(), "{}".to_string()),
                 (tw21.clone(), "0X0".to_string()),
                 (rk21.clone(), z_rk),
-                (kreg_n.clone(), "setmetatable({},{__mode='k'})".to_string()),
+                (kreg_n.clone(), "{}".to_string()), // ㉜ 弱键元表由 NB 建表时补（setmetatable 不落明文）
             ];
             rng.shuffle(&mut decls);
             let names: Vec<String> = decls.iter().map(|(n, _)| n.clone()).collect();
             let vals: Vec<String> = decls.iter().map(|(_, v)| v.clone()).collect();
             out.push_str(&format!("local {}={}; ", names.join(","), vals.join(",")));
+        }
+        // ㉜ chain_tail 所需 NB 槽表达式必须**先于 build 登记**（建表只装配此前
+        // 登记过的条目；建表后再请求的槽在产物里恒为 nil）。
+        let v_type = vault.global("type");
+        let v_pairs = vault.global("pairs");
+        let v_tostring = vault.global("tostring");
+        let v_sbyte = vault.member("string", "byte");
+        let v_boot_gf = vault.global("getfenv");
+        let v_mfloor = vault.member("math", "floor");
+        let v_schar = vault.member("string", "char");
+        let v_ssub = vault.member("string", "sub");
+        let v_tconcat = vault.member("table", "concat");
+        {
+            // ㉜ NB 建表 IIFE：uni prelude 与 kreg 声明之后、一切消费点之前；
+            // 顺带给 kreg 补 __mode='k' 弱键元表（原预声明处的 setmetatable 明文退役）。
+            out.push_str(&vault.build(&mut rng, &mut uni, Some(&kreg_n)));
+            // 头部 select 捕获与 type/pairs 捕获在 NB 之后落地（消费点全在 parts 里，词法安全）
+            out.push_str(&header_captures);
+            out.push_str(&format!("local {}={}; local {}={}; ", native_type, v_type, native_pairs, v_pairs));
             // 复用 kreg 的私有槽，避免新增 Lua upvalue；地址哈希提供每次启动的小幅抖动，
             // 不读取或消费 math.random。失败后先让 VM 继续一段随机指令数，再启用扰动。
             let poison_delay_seed = rng.range(32, 80);
             out.push_str(&format!(
-                "{tab}[0X{key:X}]={seed}+(function()local s=tostring({tab});local h=0;for i=1,#s do h=(h*33+string.byte(s,i))%17 end;return h end)(); ",
-                tab = kreg_n, key = poison_delay_key, seed = poison_delay_seed
+                "{tab}[0X{key:X}]={seed}+(function()local s={ts}({tab});local h=0;for i=1,#s do h=(h*33+{sb}(s,i))%17 end;return h end)(); ",
+                tab = kreg_n, key = poison_delay_key, seed = poison_delay_seed,
+                ts = v_tostring, sb = v_sbyte
             ));
         }
         // ㉒② 焊接缓存表声明：长时状态只剩槽号；此后各站点以「一个 if 三件事」
@@ -599,27 +638,22 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             out.push_str(&format!(" local {} = (0X{:X}%0X{:X}); ", key_seed_var, zk2, zk2));
         }
         out.push_str(" ");
-        // A 解码器前奏打散：五件套不再「库-函数」对齐并列（math.floor,string.char,... 教科书
-        // 解码器开场）。先落随机键库表，五个 local 按洗牌序逐个经表取用，.m/["m"] 访问混用；
-        // 后续模板仍引用同名局部（math_floor/string_char/...），语义不变
+        // A 解码器前奏打散：五件套改从 NB 槽直取（㉜）——原「随机键库表 + .m/["m"]
+        // 混用访问」退役（[km]=math 与 .floor 都是明文面）；五个 local 名字-初值
+        // 配对后洗牌，单条多赋值发射；后续模板仍引用同名局部，语义不变
         {
-            let pt = rng.name();
-            let kf = |v: usize| -> String { format!("0X{:X}", v) };
-            let (km, ks, kt) = (rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF), rng.range(0x1000, 0xFFFFF));
             let mut members = vec![
-                (km, "math_floor", "floor"),
-                (ks, "string_char", "char"),
-                (ks, "string_sub", "sub"),
-                (ks, "string_byte", "byte"),
-                (kt, "table_concat", "concat"),
+                ("math_floor".to_string(), v_mfloor.clone()),
+                ("string_char".to_string(), v_schar.clone()),
+                ("string_sub".to_string(), v_ssub.clone()),
+                ("string_byte".to_string(), v_sbyte.clone()),
+                ("table_concat".to_string(), v_tconcat.clone()),
             ];
             rng.shuffle(&mut members);
-            let mut frag = format!("local {}={{[{}]=math,[{}]=string,[{}]=table}}; ", pt, kf(km), kf(ks), kf(kt));
-            for (k, loc, m) in &members {
-                let acc = if rng.range(0, 2) == 0 { format!(".{}", m) } else { format!("[\"{}\"]", m) };
-                frag.push_str(&format!("local {}={}[{}]{}; ", loc, pt, kf(*k), acc));
-            }
-            out.push_str(&frag);
+            // local 声明语法＝先名列后统一 `=`（逐名初始化不是合法 Lua）
+            let mnames: Vec<&str> = members.iter().map(|(n, _)| n.as_str()).collect();
+            let mexprs: Vec<String> = members.iter().map(|(_, e)| e.clone()).collect();
+            out.push_str(&format!("local {}={}; ", mnames.join(","), mexprs.join(",")));
         }
 
         for part in parts {
@@ -630,7 +664,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         out.push_str(&line_guard(&mut rng, &mut uni, false));
         // ㉘D7 尾部形式改写：空的兼容 registry 与当前环境捕获前移到解码之前；
         // 解码调用包一层函数边界，打破「解码→触发→取环境」的平铺调用链形态。全局名已走普通常量。
-        out.push_str(&format!("{}={{}}; local {}=(getfenv and getfenv() or _ENV or _G); ", var_builtin_reg, var_boot_env));
+        // ㉜ boot_env 尾部现求值：getfenv 走 NB 槽（执行环境可能被守卫改过，不吃 NB boot 快照）
+        let var_boot_gf = rng.name();
+        out.push_str(&format!("{}={{}}; local {}=(function() local {}={} return ({} and {}()) or _ENV or _G end)(); ",
+            var_builtin_reg, var_boot_env, var_boot_gf, v_boot_gf, var_boot_gf, var_boot_gf));
         out.push_str(&format!("local main_chunk=(function() return {}() end)(); ", fn_decode_chunk));
         out.push_str(&at.trigger);
         // ㉑ thunk 快照：密文 thunk 常驻，明文可随时写回回收

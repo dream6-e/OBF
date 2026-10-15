@@ -4,9 +4,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，196,911 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），111,112 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，320,312 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，210,425 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），118,556 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，331,393 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
 | `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
@@ -14,6 +14,8 @@
 | `lua51-semantics.lua` / `lua51-semantics.expected.txt` | Lua 5.1 差分回归源与预期输出，覆盖多返回值、循环、元方法、upvalue、环境及禁用部分全局函数 |
 | `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，273,906 B；Lua 5.1 输出与预期一致 |
 | `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，254,829 B；Lua 5.1 输出与预期一致 |
+
+2026-10-15 API 名战线残留面清理（`Generator_names.rs`，与 handle 映射互补）：handle 映射只覆盖用户代码的 GETGLOBAL/SETGLOBAL，产物里 VM 自身仍留有 ~322 处明文全局 API 标识符（pcall/tostring/setmetatable/getmetatable/rawset/rawget/newproxy/select/unpack/tonumber/error/getfenv/setfenv/typeof/raknet/debug/math/string/table/bit32/bit 等）。新增 `NameVault`（零新增壳层局部，借 `kreg` 表槽存放）：各发射点按名去重登记槽号，名字本身复用 `UniStream` 以数字密文落盘，boot 时一次性解码并按三态环境根（`getfenv() or _ENV or _G`）取值装槽；顺带连带修复 `compressor/codegen.rs` 的 `is_reserved_member`（`__index`/`__newindex` 点访问此前会被成员改名器改坏 userdata proxy 元表）。产物中 19 个 API 家族彻底清零，总命中从 322 压至 18（仅剩引导层固有根：`_ENV`/`_G`、uni prelude 自身的解码原语与 `fu` 壳早于 wai 的自足守卫）。`cargo test --lib` 160/160；三件套重生成 **210,425 / 118,556 / 331,393 B**（+13.5 / +7.4 / +11.1 KB，在 25 KB 预算内），双语法门与双运行时全部通过。
 
 2026-10-11 外部 API 名 handle 映射（取代“目标四”里“全局名作为普通字符串常量加密”的旧形态）：构建期 `GlobalHandles` pass 给每个被 GETGLOBAL/SETGLOBAL 引用的环境名分配随机 32 位 handle，指令改指新增的数字常量槽；只被全局指令引用的孤儿名字槽替换为诱饵数字，名字彻底离开主常量池（仍被其它指令当字面量引用的按普通字符串保留）。产物侧在 chacha 簇之后发射独立名字保险库（handle→密文字节表），解码器复用既有单根 KDF（独立组号、独立字序），每次取用现解、不落任何明文缓存；GETGLOBAL/SETGLOBAL handler 经 kreg 注册表槽调用解码器。内建名表（BUILTINREG）与表键字符串（GETTABLESTR/NAMECALL 族）不在本次范围。`cargo test` 158/158（含 3 个新 pass 单测）；三件套重生成 **196,911 / 111,112 / 320,312 B**（+15 B / +1.4 KB / +4.4 KB），双语法门、双运行时字节一致、`DynamicGlobalEnv` 环境重绑定夹具全过；GETGLOBAL 热环微基准（20 万次）约 19 µs/次，无系统性退化；`print`/`numeric_for_errors` 等零全局名输入的产物不发射保险库。200 局部上限贴线偶发坏构建（`numeric_for_errors` 等）为既有现象，重生成即过。
 

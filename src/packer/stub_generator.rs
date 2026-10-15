@@ -289,7 +289,7 @@ impl StubGenerator {
         // ㉓ 统一流：壳脚本自带一只（惰性解密+数字密文），与主产物同一机制。
         let mut uni_rng = GenRng::new(seed as u64);
         let mut uni = UniStream::new(&mut uni_rng);
-        let probe = loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut uni, &mut uni_rng);
+        let probe = loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut uni, &mut uni_rng, None);
         // ④E：加载器不以标识符落盘——探测结果优先，取不到再从环境表按
         // 运行期还原的名字取；产物里没有 `loadstring` / `load` 两个词。
         let (ld_setup, ld_var) = crate::VM::VM_Backend::Generator_util::loader_lookup(

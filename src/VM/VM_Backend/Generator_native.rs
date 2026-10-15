@@ -239,7 +239,10 @@ impl LegacyRootNative {
 /// 三路都 fail-open：某一路在宿主上取不到就跳过，汇编出的 h 只影响等价选路，
 /// 两种选路逐位同结果，所以跳过不影响可解性；想让 Python 侧算 h，仍必须把
 /// tostring/collectgarbage/pcall 与错误消息格式逐位复刻出来。
-pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
+pub fn emit_fingerprint(
+    rng: &mut GenRng,
+    vault: Option<&mut crate::VM::VM_Backend::Generator_names::NameVault>,
+) -> (String, String) {
     let h = rng.name();
     let ok = rng.name();
     let v = rng.name();
@@ -298,7 +301,7 @@ pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
     let mut src = format!(
         "local {h}=0X0; do @ALIAS@local {ok},{v}=@PCALL@(function() return @TSTR@(function() end) end); \
            if {ok} and @TYPE@({v})=={t1} then for {i}=0X1,#{v} do {h}=({h}*{p1}+@BYTE@({v},{i}))%{hm} end; \
-              local {okc},{c}=@PCALL@(collectgarbage,{opt}); \
+              local {okc},{c}=@PCALL@(@CG@,{opt}); \
               if {okc} and @TYPE@({c})==@TYPE@(0X0) then {h}=({h}*{p2}+@FLOOR@({c}))%{hm} end; end; \
            local {mok},{m}=@PCALL@(function() {eb} end); \
            if @TYPE@({m})=={t3} then {l3} end; \
@@ -308,21 +311,44 @@ pub fn emit_fingerprint(rng: &mut GenRng) -> (String, String) {
         okc = okc, c = c, opt = opt, p2 = p2,
         mok = mok, m = m, eb = err_body, t3 = t3, l3 = loop3
     );
-    let mut aliases: Vec<(String, &str)> = Vec::new();
+    // ㉜ vault 给定时六个成员+collectgarbage 全部从 NB 槽取；None 分支给
+    // uni prelude（早于 NB 建表）与单测。
+    let (r_sub, r_type, r_pcall, r_byte, r_floor, r_tstr, r_cg) = match vault {
+        Some(v) => (
+            v.member("string", "sub"),
+            v.global("type"),
+            v.global("pcall"),
+            v.member("string", "byte"),
+            v.member("math", "floor"),
+            v.global("tostring"),
+            v.global("collectgarbage"),
+        ),
+        None => (
+            "string.sub".to_string(),
+            "type".to_string(),
+            "pcall".to_string(),
+            "string.byte".to_string(),
+            "math.floor".to_string(),
+            "tostring".to_string(),
+            "collectgarbage".to_string(),
+        ),
+    };
+    src = src.replace("@CG@", &r_cg);
+    let mut aliases: Vec<(String, String)> = Vec::new();
     for (marker, lib) in [
-        ("@SUB@", "string.sub"),
-        ("@TYPE@", "type"),
-        ("@PCALL@", "pcall"),
-        ("@BYTE@", "string.byte"),
-        ("@FLOOR@", "math.floor"),
-        ("@TSTR@", "tostring"),
+        ("@SUB@", r_sub),
+        ("@TYPE@", r_type),
+        ("@PCALL@", r_pcall),
+        ("@BYTE@", r_byte),
+        ("@FLOOR@", r_floor),
+        ("@TSTR@", r_tstr),
     ] {
         if src.matches(marker).count() > 2 {
             let a = rng.name();
             aliases.push((a.clone(), lib));
             src = src.replace(marker, &a);
         } else {
-            src = src.replace(marker, lib);
+            src = src.replace(marker, &lib);
         }
     }
     rng.shuffle(&mut aliases);
@@ -348,17 +374,28 @@ pub struct Kernel {
 }
 
 /// 生成解密内核。种子表由 `init_fn` 的形参传入（调用方给 `s.k` 之类的已就位表）。
-pub fn emit_decrypt_kernel(rng: &mut GenRng, nat: &Native, tag: &str) -> Kernel {
-    emit_kernel_ex(rng, nat, tag, true)
+pub fn emit_decrypt_kernel(
+    rng: &mut GenRng,
+    nat: &Native,
+    tag: &str,
+    vault: Option<&mut crate::VM::VM_Backend::Generator_names::NameVault>,
+) -> Kernel {
+    emit_kernel_ex(rng, nat, tag, true, vault)
 }
 
 /// 只建 S-box（不发射全局步进函数）：给「每串各自起流」的场合用。
 pub fn emit_sbox_builder(rng: &mut GenRng, nat: &Native, tag: &str) -> Kernel {
-    emit_kernel_ex(rng, nat, tag, false)
+    emit_kernel_ex(rng, nat, tag, false, None)
 }
 
-fn emit_kernel_ex(rng: &mut GenRng, nat: &Native, tag: &str, with_step: bool) -> Kernel {
-    let (fp_src, h) = emit_fingerprint(rng);
+fn emit_kernel_ex(
+    rng: &mut GenRng,
+    nat: &Native,
+    tag: &str,
+    with_step: bool,
+    vault: Option<&mut crate::VM::VM_Backend::Generator_names::NameVault>,
+) -> Kernel {
+    let (fp_src, h) = emit_fingerprint(rng, vault);
     let sb = rng.name();
     let st1 = rng.name();
     let st2 = rng.name();
@@ -499,7 +536,7 @@ mod custom_stream_tests {
         let plain: Vec<u8> = (0..=255).collect();
         let (cipher, _) = nat.encrypt(&seeds, &sb, &plain);
         let mut rng = GenRng::new(0xC0FF_EE12);
-        let kernel = emit_decrypt_kernel(&mut rng, &nat, "test");
+        let kernel = emit_decrypt_kernel(&mut rng, &nat, "test", None);
         let table = |bytes: &[u8]| bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
         let script = format!(
             "local seed={{{}}}; {} {}(seed); local c={{{}}}; local p={{{}}}; for i=1,#c do assert({}(c[i])==p[i],i) end; print('NATIVE_OK')",

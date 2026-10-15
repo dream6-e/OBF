@@ -79,8 +79,24 @@ fn shuffle_vec(vec: &mut Vec<usize>) {
     }
 }
 
-pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiTamperResult {
+pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &mut crate::VM::VM_Backend::Generator_names::NameVault) -> AntiTamperResult {
     let mut rng = thread_rng();
+    // ㉜ 明文 API 名全部改走 NB 槽（守卫/setup/trigger 都在 NB 建表之后运行）
+    let v_getgenv = vault.global("getgenv");
+    let v_root = vault.root();
+    let v_type = vault.global("type");
+    let v_pcall = vault.global("pcall");
+    let v_tostring = vault.global("tostring");
+    let v_setmeta = vault.global("setmetatable");
+    let v_sbyte = vault.member("string", "byte");
+    let v_schar = vault.member("string", "char");
+    let v_sfind = vault.member("string", "find");
+    let v_ssub = vault.member("string", "sub");
+    let v_mfloor = vault.member("math", "floor");
+    let v_typeof = vault.global("typeof");
+    let v_raknet = vault.global("raknet");
+    let v_error = vault.global("error");
+    let v_print = vault.global("print");
     
     let v_env = rand_var();
     let v_net = rand_var();
@@ -153,11 +169,12 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
 
     let mut setup = String::new();
     // 使用 getgenv() 完美适配 Roblox 执行器全局环境
-    setup.push_str(&format!("local {} = getgenv and getgenv() or getfenv and getfenv() or _ENV or _G or {{}};\n", v_env));
+    setup.push_str(&format!("local {} = ({} and {}()) or {} or {{}};\n", v_env, v_getgenv, v_getgenv, v_root));
 
     // 自定义流加密键表（独立于池）：解码器匿名挂在表里（finish_setup 时渲染）。
     // 守卫体与 Generator 的解头/方法原型/body_consts 复用同一张表。
     let mut st = StreamTable::new(rand_var());
+    st.set_decoder(crate::VM::VM_Backend::Generator_util::stream_dec_body_with(&v_mfloor, &v_sbyte, &v_schar));
 
     // 隐藏 tripwire 只置共享 poison 并返回；探针失败不直接卡死或抛固定错误。
     setup.push_str(&format!("local function {}(...) {}=true end;\n", v_tripwire, poison_var));
@@ -204,11 +221,11 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
         concat!(
             "local function {dec}(h) ",
             "local {t}={{i=0X0,o=''}}; local {e}={pool}[h]; if not {e} then return {e} end; ",
-            "{t}.n=#{e}; local {q0}=math.floor({K}/0X1000000)%0X100; local {q1}=math.floor({K}/0X10000)%0X100; ",
-            "local {q2}=math.floor({K}/0X100)%0X100; local {q3}={K}%0X100; ",
+            "{t}.n=#{e}; local {q0}={mf}({K}/0X1000000)%0X100; local {q1}={mf}({K}/0X10000)%0X100; ",
+            "local {q2}={mf}({K}/0X100)%0X100; local {q3}={K}%0X100; ",
             "local {a}=({q0}*0X101+{q1}*0X107+{q2}*0X10D+{q3}*0X10F+0X13579B)%0X7FFFFF01; ",
             "local {b}=({q3}*0X115+{q2}*0X119+{q1}*0X11B+{q0}*0X125+0X2468AC)%0X7FFFFF01; ",
-            "local {prev}=0X0; local {c}=string.char; local {x},{y},{cipher},{mask},{na},{nb},{r}=0X0,0X0,0X0,0X0,0X0,0X0,0X0; ",
+            "local {prev}=0X0; local {c}={sc}; local {x},{y},{cipher},{mask},{na},{nb},{r}=0X0,0X0,0X0,0X0,0X0,0X0,0X0; ",
             "local {j}={j0}; local {st}={init}; while true do ",
             "if {st}=={S1} then if {t}.i<{t}.n then {st}={tr12} else {st}={tdone} end ",
             "elseif {st}=={S2} then {t}.i={t}.i+0X1; {st}={tr23} ",
@@ -223,6 +240,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
             "elseif {st}=={S4} then {j}={j}+0X1; if {opq} then {t}.o={t}.o..{c}({r}) end; {st}={tr41b} ",
             "else break end end; return {t}.o end;"
         ),
+        mf=v_mfloor,sc=v_schar,
         dec=v_dec,t=d_t,pool=v_pool,e=d_e,j=d_j,
         q0=dq0,q1=dq1,q2=dq2,q3=dq3,a=d_a,b=d_b,prev=dprev,c=d_c,
         x=dx,y=dy,cipher=dcipher,mask=dmask,na=dna,nb=dnb,r=d_r,
@@ -235,7 +253,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
         v_res, v_dec, v_env
     ));
     setup.push_str(&format!(
-    "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if te~=nil then if z(te)~=v then c(b,n) else g(1) end end;break;end;end;rt(typeof,raknet,error,print,_VERSION);\n"
+    "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if te~=nil then if z(te)~=v then c(b,n) else g(1) end end;break;end;end;rt({tof},{rk},{er},{pr},_VERSION);\n", tof = v_typeof, rk = v_raknet, er = v_error, pr = v_print
 ));
     setup.push_str(&format!("local {}={{}};\n", v_net));
     // 网表缺项时不早退、不爆栈：静默置共享投毒旗并返回恒等闭包，让链继续走。
@@ -319,10 +337,10 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                     "local sc_val = 0; \
                      local chk = {{{}, {}, {}}}; \
                      for idx = 1, 3 do \
-                         if type({}(chk[idx])) ~= {nil_lit} then sc_val = sc_val + 1 end \
+                         if {ty}({}(chk[idx])) ~= {nil_lit} then sc_val = sc_val + 1 end \
                      end; \
                      if sc_val ~= 3 then {} else {} end\n",
-                    fnv_pcall, fnv_string, fnv_math, v_res, next_bad, next_good, nil_lit = sc_nil
+                    fnv_pcall, fnv_string, fnv_math, v_res, next_bad, next_good, nil_lit = sc_nil, ty = v_type
                 );
             }
             1 => {
@@ -334,7 +352,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                     mm_calls.push(st.call(mm, key));
                 }
                 check_code = format!(
-                    "local z = setmetatable({{}}, {{ \
+                    "local z = {sm}({{}}, {{ \
                         [{m0}]=function(a)return a end, \
                         [{m1}]=function(a)return a end, \
                         [{m2}]=function(a)return a end, \
@@ -344,6 +362,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                      local st,r=p(function() local x=z+z-z*z; local y=z(z); return x==z and y==z end); \
                      if not st or not r then {} else {} end end\n",
                     v_res, hash_pcall, next_bad, next_bad, next_good,
+                    sm = v_setmeta,
                     m0 = mm_calls[0], m1 = mm_calls[1], m2 = mm_calls[2], m3 = mm_calls[3]
                 );
             }
@@ -399,9 +418,9 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                              if d[{}({})] then {} else {} end \
                          else \
                              local ok, inf = p(gi, p); \
-                             if not ok or type(inf)~={tab_lit} then {} else \
+                             if not ok or {ty}(inf)~={tab_lit} then {} else \
                              local w=inf.what; local h={hp_seed}; \
-                             for idx=1,#w do h=(h*{hp_mult}+string.byte(w,idx)+{hp_add})%{hm32} end; \
+                             for idx=1,#w do h=(h*{hp_mult}+{sb}(w,idx)+{hp_add})%{hm32} end; \
                              if h~={} then {} else {} end end end end\n",
                         v_res, hash_debug, v_res, hash_pcall,
                         next_bad,
@@ -409,6 +428,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                         v_dec, hash_info, next_good, next_bad,
                         next_bad,
                         hash_C, next_bad, next_good,
+                        ty = v_type, sb = v_sbyte,
                         tab_lit = sc_tab,
                         hm32 = "4294967296",
                         hp_seed = format!("0X{:X}", hash_params().seed),
@@ -509,21 +529,22 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                 }
                 check_code = format!(
                     "local {e} = {env}; \
-                     local {t} = type({e}); \
+                     local {t} = {ty}({e}); \
                      local {flag} = ({t} == {tab_lit}); \
                      local {mt} = {{}}; \
                      {meta} \
-                     local {pk} = setmetatable({{}}, {mt}); \
+                     local {pk} = {sm}({{}}, {mt}); \
                      local {j} = 0; \
                      if not {flag} and {t} ~= {tab_lit} then {bad} else \
                      {j} = {j} + 1; \
-                     local {ok} = pcall(function() {e}[{dec}({h})] = {pk} end); \
+                     local {ok} = {pc}(function() {e}[{dec}({h})] = {pk} end); \
                      {j} = {j} - 1; \
                      if {j} ~= 0 or {ok} == {j} then {bad} else {good} end \
                      end\n",
                     e = g_e, env = v_env, t = g_t, flag = g_flag, mt = g_mt,
                     meta = meta_lines.join(" "), pk = g_pk, j = g_j, ok = g_ok,
                     bad = next_bad, good = next_good, dec = v_dec, h = rand_hash,
+                    ty = v_type, sm = v_setmeta, pc = v_pcall,
                     tab_lit = sc_tab
                 );
             }
@@ -575,13 +596,16 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
                 let h_pat = poly_hash(":(%d+)[:\r\n ]");
                 // ① 能力采样：解出 string/type/debug/pcall/tonumber 与类型名；逐项 fail-open。
                 let phase_a = format!(
-                    "{st}={res}({h_st}); {pc}={res}({h_pc}); {sb},{sc},{sf},{ss}={st}.byte,{st}.char,{st}.find,{st}.sub; {tp}={res}({h_tp}); {d}={res}({h_dbg}); {tb},{nm},{fn},{sg}={dec}({h_tb}),{dec}({h_nm}),{dec}({h_fn}),{dec}({h_sg}); if {tp}({d})~={tb} then {good} end; {gi}={d}[{dec}({h_gi})]; if {tp}({gi})~={fn} then {good} end; {tn}={res}({h_tn}); if {tp}({tn})~={fn} then {good} end; ",
+                    "{st}={res}({h_st}); {pc}={res}({h_pc}); {members}; {tp}={res}({h_tp}); {d}={res}({h_dbg}); {tb},{nm},{fn},{sg}={dec}({h_tb}),{dec}({h_nm}),{dec}({h_fn}),{dec}({h_sg}); if {tp}({d})~={tb} then {good} end; {gi}={d}[{dec}({h_gi})]; if {tp}({gi})~={fn} then {good} end; {tn}={res}({h_tn}); if {tp}({tn})~={fn} then {good} end; ",
                     st = g_st, res = v_res, h_st = h_string, pc = g_pc, h_pc = h_pcall,
-                    sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, tp = g_tp, h_tp = h_type,
+                    tp = g_tp, h_tp = h_type,
                     d = g_d, h_dbg = h_debug, dec = v_dec,
                     tb = g_ts_tab, nm = g_ts_num, fn = g_ts_fun, sg = g_ts_str,
                     h_tb = h_table, h_nm = h_number, h_fn = h_function, h_sg = h_string,
-                    good = next_good, gi = g_gi, h_gi = h_getinfo, tn = g_tn, h_tn = h_tonumber
+                    good = next_good, gi = g_gi, h_gi = h_getinfo, tn = g_tn, h_tn = h_tonumber,
+                    members = format!("{sb},{sc},{sf},{ss}={vb},{vc},{vf},{vs}",
+                        sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss,
+                        vb = v_sbyte, vc = v_schar, vf = v_sfind, vs = v_ssub)
                 );
                 // ② 测量：f2/f3 的 linedefined、f1 的报错行号（两种读法）、当前执行行。
                 let phase_b = format!(
@@ -636,9 +660,10 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
             (rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var(), rand_var());
         let gate_seed = rng.gen_range(0x1000u64..0x7FFF_FF00u64);
         let sampled_check = format!(
-            "local {ok},{bit}=pcall(function() local {a},{b}={{}},{{}};local {s}=tostring({a})..tostring({b});local {h}=0X{seed:X};for {i}=1,#{s} do {h}=({h}*0X21+string.byte({s},{i}))%0X7FFFFF01 end;return {h}%0X2 end);if {ok} and {bit}==0X0 then {check} else {good} end;",
+            "local {ok},{bit}={pc}(function() local {a},{b}={{}},{{}};local {s}={ts}({a})..{ts}({b});local {h}=0X{seed:X};for {i}=1,#{s} do {h}=({h}*0X21+{sb}({s},{i}))%0X7FFFFF01 end;return {h}%0X2 end);if {ok} and {bit}==0X0 then {check} else {good} end;",
             ok = gate_ok, bit = gate_bit, a = gate_a, b = gate_b, s = gate_s, h = gate_h, i = gate_i,
-            seed = gate_seed, check = check_code, good = next_good
+            seed = gate_seed, check = check_code, good = next_good,
+            pc = v_pcall, ts = v_tostring, sb = v_sbyte
         );
         current_expected += delta;
         // 状态推进始终执行；只有探测体随机选中时才检查环境，并将坏令牌继续沿链传播。
@@ -667,8 +692,9 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str) -> AntiT
         key_var, v_net, derived_num(keys[0], &mut rng), initial_token
     ));
     trigger.push_str(&format!(
-        "local {} = setmetatable({{}}, {{ [{}] = function(...) {}=true; return function() end end }});\n",
+        "local {} = {}({{}}, {{ [{}] = function(...) {}=true; return function() end end }});\n",
         v_jump,
+        v_setmeta,
         {
             let key = sc_key("__index");
             st.call("__index", key)

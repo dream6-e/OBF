@@ -113,6 +113,10 @@ pub(super) struct ChainIn {
     pub fc18: crate::VM::VM_Backend::Generator_util::FoldCtx,
     pub weld: crate::VM::VM_Backend::Generator_kdf::WeldCache,
     pub uni: crate::VM::VM_Backend::Generator_util::UniStream,
+    /// ㉜ API 名保险库：发射点登记 NB 槽，chain_tail 建表 IIFE 一次发射。
+    pub vault: crate::VM::VM_Backend::Generator_names::NameVault,
+    /// 头部 select 捕获（推迟到 NB 建表之后发射）。
+    pub header_captures: String,
 }
 
 pub(super) const CG_GROUPS: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
@@ -226,6 +230,8 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         xor_tbl_var,
         weld: mut weld,
         uni: mut uni,
+        vault: mut vault,
+        header_captures,
     } = x;
     let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
     // CG 原为第一阶段块内 const，随代码原样搬迁重声明（同值同路径）。
@@ -236,9 +242,9 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         // 确定性指纹 hfix（改进 2）的值被折进根 K0 token 扭曲量——跳过指纹层
         // 即失去全部密钥材料，层不再可整层略过。静态读者要读装配细节，仍须
         // 先仿真宿主语义。
-        let (fp_src, h_var) = crate::VM::VM_Backend::Generator_native::emit_fingerprint(&mut rng);
+        let (fp_src, h_var) = crate::VM::VM_Backend::Generator_native::emit_fingerprint(&mut rng, Some(&mut vault));
         block_chacha_setup.push_str(&fp_src);
-        let (fix_src, fix_var, fix_val) = crate::VM::VM_Backend::Generator_kdf::emit_fix_fingerprint(&mut rng);
+        let (fix_src, fix_var, fix_val) = crate::VM::VM_Backend::Generator_kdf::emit_fix_fingerprint(&mut rng, Some(&mut vault));
         block_chacha_setup.push_str(&fix_src);
         // 第 2 项：形态选路的**运行期绑定**——同一逻辑功能发射两型逐位等价的实现，
         // 由宿主指纹 h 在运行期择一（三种择一写法随机轮抽，产物里看不到固定
@@ -256,14 +262,16 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 _ => format!("(({}))", names.iter().map(|n| format!("({})", n)).collect::<Vec<_>>().join(" or ")),
             }
         };
+        let v_pks_ts = vault.global("tostring");
+        let v_pks_sb = vault.member("string", "byte");
         let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
             let pe = psn_read(rng);
             let k1 = rng.range(0x100, 0xFFFF) as u32;
             let k2 = rng.range(0x100, 0xFFFF) as u32;
             let (sample_s, sample_h, sample_i) = (rng.name(), rng.name(), rng.name());
             let poison_sample = format!(
-                "(function()local {s}=tostring({{}});local {h}=0;for {i}=1,#{s} do {h}=({h}*0X21+string.byte({s},{i}))%0X7FFFFF01 end;return {h}%0X80==0X0 end)()",
-                s = sample_s, h = sample_h, i = sample_i
+                "(function()local {s}={ts}({{}});local {h}=0;for {i}=1,#{s} do {h}=({h}*0X21+{sb}({s},{i}))%0X7FFFFF01 end;return {h}%0X80==0X0 end)()",
+                s = sample_s, h = sample_h, i = sample_i, ts = v_pks_ts, sb = v_pks_sb
             );
             match rng.range(0, 4) {
                 0 => format!("if {psn} and {delay}<=0 and {sample} then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = pe, delay = poison_delay_expr, sample = poison_sample, ks = ks, k = k1),
@@ -686,7 +694,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let (k_stmt, sc_k) = uni.fetch(&mut rng, hid_k);
         let psn_pick = psn_pool[rng.range(0, psn_pool.len())].clone();
                 let block_dec_header = crate::VM::VM_Backend::Generator_flow::build_header(
-            &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
+            &mut vault, &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
             var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
             sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str(), var_whiten.as_str(), var_whiten_pos.as_str(),
             native_type.as_str(), psn_pick.as_str());
@@ -848,6 +856,8 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             fc18,
             weld,
             uni,
+            vault,
+            header_captures,
         };
         let mid = ChainMid {
             x: x_repacked,

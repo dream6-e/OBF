@@ -411,6 +411,7 @@ pub fn build_readers(
 /// 常量池查表协议：HH 三 handler 返回码状态机（形态①②）+ ④⑤ 探针反转臂
 #[allow(clippy::too_many_arguments)]
 pub fn build_consts(
+    vault: &mut crate::VM::VM_Backend::Generator_names::NameVault,
     rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, pj_name: &str, fn_bxor: &str,
     sc_index2: &str, sc_kobf: &str, var_state_flag: &str, var_idx_chunk: &str,
     var_tbl: &str, var_e: &str, ds: &[String; 4], dn: &[String; 4], fn_read_string: &str, fn_s_byte: &str,
@@ -426,6 +427,12 @@ pub fn build_consts(
     chain_delta: u32, chain_m: u64, chain_k0: u64,
     psn: &str, poison_delay: &str,
 ) -> (String, String) {
+    // ㉜ 明文 API 名改走 NB 槽（build_consts 落 parts，NB 已建表）
+    let v_setmeta = vault.global("setmetatable");
+    let v_newproxy = vault.global("newproxy");
+    let v_getmeta = vault.global("getmetatable");
+    let v_tostring = vault.global("tostring");
+    let v_sbyte = vault.member("string", "byte");
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
     let (eh_ret, eh_nil, eh_next, eh_val) =
         (k.eh_ret.as_str(), k.eh_nil.as_str(), k.eh_next.as_str(), k.eh_val.as_str());                // ── ⑥ 常量池查表打散
@@ -573,8 +580,8 @@ pub fn build_consts(
                         // V1 元方法惰载：底表键 = bxor(tag, kk)，__index 反解
                         let (ld_r, dsp_r, lkk, dkk) = (rng.name(), rng.name(),
                             format!("0X{:X}", rng.range(0x100, 0xFFFFF)), format!("0X{:X}", rng.range(0x100, 0xFFFFF)));
-                        ct_init = format!("local {ldr},{dspr}={{}},{{}}; local {ld}=setmetatable({{}},{{__index=function(_,k) return {ldr}[({bx})(k,{lkk})] end}}); local {dsp}=setmetatable({{}},{{__index=function(_,k) return {dspr}[({bx})(k,{dkk})] end}}); ",
-                            ldr = ld_r, dspr = dsp_r, ld = ld_name, dsp = dsp_name, bx = fn_bxor, lkk = lkk, dkk = dkk);
+                        ct_init = format!("local {ldr},{dspr}={{}},{{}}; local {ld}={sm}({{}},{{__index=function(_,k) return {ldr}[({bx})(k,{lkk})] end}}); local {dsp}={sm}({{}},{{__index=function(_,k) return {dspr}[({bx})(k,{dkk})] end}}); ",
+                            ldr = ld_r, dspr = dsp_r, ld = ld_name, dsp = dsp_name, bx = fn_bxor, lkk = lkk, dkk = dkk, sm = v_setmeta);
                         for (tag, body) in &ld_tags {
                             ld_defs.push(format!("{ldr}[({bx})({tag},{kk})]=function({ddl},pos) {body} end; ",
                                 ldr = ld_r, bx = fn_bxor, tag = tag, kk = lkk, ddl = ddl, body = body));
@@ -645,14 +652,15 @@ pub fn build_consts(
                 let mut lua = format!(
                     // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
                     // pairs 遍历直接报错；后备退化为普通表（fail-open）
-                    "local {m32}={m32v}; local {agg}=0X0; local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}=newproxy and newproxy(true) or {ecb}; local {ca}=newproxy and newproxy(true) or {cab}; local {wctr}=0X0; \
-                     do local {m1}=getmetatable({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}=getmetatable({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
+                    "local {m32}={m32v}; local {agg}=0X0; local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}={np} and {np}(true) or {ecb}; local {ca}={np} and {np}(true) or {cab}; local {wctr}=0X0; \
+                     do local {m1}={gm}({ec}) if {m1} then {m1}.__index={ecb} {m1}.__newindex={ecb} end; local {m2}={gm}({ca}) if {m2} then {m2}.__index={cab} {m2}.__newindex={cab} end end; \
                      local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
-                     local {pfn}=function(q) local tq={nt}(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then local {ps}=tostring({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+string.byte({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=='boolean' then return not q end return q end; ",
+                     local {pfn}=function(q) local tq={nt}(q) if tq=='number' then return (q*{kmul}+{kadd})%{m32} elseif tq=='string' then local {ps}={ts}({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+{sb}({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=='boolean' then return not q end return q end; ",
                     m32 = m32, m32v = m32v, agg = agg_name,
                     ft = ftds, rt = rtds, rf = rfds,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
                     wctr = wctr, pfn = pfn_n, nt = native_type, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
+                    np = v_newproxy, gm = v_getmeta, ts = v_tostring, sb = v_sbyte,
                     ps = poison_s, ph = poison_h, pi = poison_i,
                     m1 = rng.name(), m2 = rng.name(),
                     nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
@@ -738,8 +746,8 @@ lua.push_str(&format!(
                     cur = hh_cur, aux = hh_aux, c = hh_c, a2 = hh_a2,
                     hh = hh_name, e_kc = e_kc, w4v = w4v, a2x = rng.name()));
                 lua.push_str(&format!(
-                    "{c}.{pf}=setmetatable({{}},{mt}); {mt}=({{}})[{mtn}]; ",
-                    c = fn_c, pf = pf_consts, mt = mt_name, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
+                    "{c}.{pf}={sm}({{}},{mt}); {mt}=({{}})[{mtn}]; ",
+                    c = fn_c, pf = pf_consts, mt = mt_name, sm = v_setmeta, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
                 for x in &ld_defs { lua.push_str(x); }
                 // #3 折叠 + ㉓-A（读侧）：body_insts 已把指令数组（op=文件魔数、
                 // a=文件A、b/c=dcb 解码后明文=预掩码预交换值）填进 c.pf_*。
@@ -808,11 +816,17 @@ lua.push_str(&format!(
 /// 解头（防篡改探针+入口解密装配）—— 自 Generator.rs 拆出
 #[allow(clippy::too_many_arguments)]
 pub fn build_header(
+    vault: &mut crate::VM::VM_Backend::Generator_names::NameVault,
     rng: &mut GenRng, keys: &CipherKeys, fn_s_byte: &str, fn_s_sub: &str, var_raw_p: &str,
     payload_str: &str, var_vc: &str, var_p: &str, var_a2: &str, entry_func: &str, fn_a3: &str, x: &str,
     fn_lit: &str, mode_lit: &str, k_lit: &str, var_whiten: &str, var_whiten_pos: &str,
     native_type: &str, psn: &str,
 ) -> String {
+    // ㉜ 探针/弱表 API 名改走 NB 槽
+    let v_pcall = vault.global("pcall");
+    let v_tostring = vault.global("tostring");
+    let v_sbyte = vault.member("string", "byte");
+    let v_setmeta = vault.global("setmetatable");
     // ㉓-D 去 KRYVEX 包裹标记后，载荷从第 1 字节开始读取。
     let mut lua = format!(
         "local {byte},{sub}={byte_name},{sub_name}; local {raw}=([=[{payload}]=]); ",
@@ -827,17 +841,18 @@ pub fn build_header(
     let (type_ok, type_result) = (rng.name(), rng.name());
     let gate_seed = rng.range64(0x1000, 0x7FFF_FF00);
     lua.push_str(&format!(
-        "local {ok},{bit}=pcall(function() local {a},{b}={{}},{{}}; local {s}=tostring({a})..tostring({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+string.byte({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
-         local {tok},{tr}=pcall(function() return {nt}({byte})=={fn_lit} end); {psn}={psn} or ({ok} and {bit}==0X0 and {tok} and not {tr}); ",
+        "local {ok},{bit}={pc}(function() local {a},{b}={{}},{{}}; local {s}={ts}({a})..{ts}({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+{sb}({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
+         local {tok},{tr}={pc}(function() return {nt}({byte})=={fn_lit} end); {psn}={psn} or ({ok} and {bit}==0X0 and {tok} and not {tr}); ",
         ok = gate_ok, bit = gate_bit, a = gate_a, b = gate_b, s = gate_s, h = gate_h, i = gate_i,
-        seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, nt = native_type, psn = psn
+        seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, nt = native_type, psn = psn,
+        pc = v_pcall, ts = v_tostring, sb = v_sbyte
     ));
     lua.push_str(&format!(
-        "local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {vc}=setmetatable({{}},mt_vc); \
+        "local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {vc}={sm}({{}},mt_vc); \
          local {p},{a2}={entry}({sub}({raw},{start})),{one}; \
          local function {a3}() local {x}={byte}({p},{a2},{a2}); {a2}={a2}+{one}; return {x} end; \
          local k1,k2,k3,k4={a3}(),{a3}(),{a3}(),{a3}(); local {wk}=0X0; local {wp}=0X4; ",
-        mode_lit = mode_lit, k_lit = k_lit, vc = var_vc,
+        mode_lit = mode_lit, k_lit = k_lit, vc = var_vc, sm = v_setmeta,
         p = var_p, a2 = var_a2, entry = entry_func, sub = fn_s_sub, raw = var_raw_p,
         start = rng.obfuscate_num(1i64, 1, keys), one = rng.obfuscate_num(1i64, 1, keys),
         a3 = fn_a3, x = x, byte = fn_s_byte, wk = var_whiten, wp = var_whiten_pos
