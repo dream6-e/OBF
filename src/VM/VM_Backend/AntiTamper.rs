@@ -20,9 +20,10 @@ pub struct AntiTamperResult {
 }
 
 impl AntiTamperResult {
-    /// 全部调用点注册完后调用：把键表渲染进 setup 尾部。
+    /// 全部调用点注册完后调用：把键表渲染进 setup 状态机分支内。
     pub fn finish_setup(&mut self) {
-        self.setup.push_str(&self.st.emit());
+        let st_assign = minify_lua(&self.st.emit_assign());
+        self.setup = self.setup.replace("@ST_ASSIGN@", &st_assign);
     }
 }
 
@@ -172,104 +173,17 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
     
     let pool_data = pool_entries.join(",");
 
-    let mut setup = String::new();
-    // 使用 getgenv() 完美适配 Roblox 执行器全局环境
-    setup.push_str(&format!("local {} = ({} and {}()) or {} or {{}};\n", v_env, v_getgenv, v_getgenv, v_root));
-
     // 自定义流加密键表（独立于池）：解码器匿名挂在表里（finish_setup 时渲染）。
     // 守卫体与 Generator 的解头/方法原型/body_consts 复用同一张表。
     let mut st = StreamTable::new(rand_var());
     st.set_decoder(crate::VM::VM_Backend::Generator_util::stream_dec_body_with(&v_mfloor, &v_sbyte, &v_schar));
 
-    // 隐藏 tripwire 只置共享 poison 并返回；探针失败不直接卡死或抛固定错误。
-    setup.push_str(&format!("local function {}(...) {}=true end;\n", v_tripwire, poison_var));
-    setup.push_str(&format!("local {} = {{{}}};\n", v_pool, pool_data));
-    // 池解码器把线性逻辑与数据流打散：while 循环、自增下标、五态状态机、
-    // 暂存表槽和逐产物随机局部名组合使用；密钥拆分和字节解码仍按运行期数据计算。
-    // 数值状态、异或循环常量和模数直接使用数值字面量；谓词仍使用动态变量关系。
-    // 纯冷路径（守卫/池查表时走），不吃性能。
     let v_dec = rand_var();
-    let d_t = rand_var();
-    let d_e = rand_var();
-    let d_k1 = rand_var();
-    let d_j = rand_var();
-    let d_a = rand_var();
-    let d_b = rand_var();
-    let d_r = rand_var();
-    let d_st = rand_var();
-    let d_c = rand_var();
-    let mut used_states: Vec<u32> = Vec::new();
-    let s1 = rand_state(&mut rng, &mut used_states);
-    let s2 = rand_state(&mut rng, &mut used_states);
-    let s3 = rand_state(&mut rng, &mut used_states);
-    let s4 = rand_state(&mut rng, &mut used_states);
-    let tr12 = opq_ident(&mut rng, s2);
-    let tr23 = opq_ident(&mut rng, s3);
-    let tr34 = opq_ident(&mut rng, s4);
-    let tr41 = opq_ident(&mut rng, s1);
-    let s_done = rand_state(&mut rng, &mut used_states);
-    let st_init = opq_ident(&mut rng, s1);
-    let e8 = opq_const(&mut rng, 8);
-    let e2a = opq_const(&mut rng, 2);
-    let e2b = opq_const(&mut rng, 2);
-    let e2c = opq_const(&mut rng, 2);
-    let e2d = opq_const(&mut rng, 2);
-    let e2e = opq_const(&mut rng, 2);
-    let opq = match rng.gen_range(0..3) {
-        0 => format!("({j}+{j})-{j}>0", j = d_j),
-        1 => format!("({j}-{j})+{j}>0", j = d_j),
-        _ => format!("{j}*{j}>={j}", j = d_j),
-    };
-    let (dq0,dq1,dq2,dq3,dx,dy,dcipher,dmask,dna,dnb,dprev) =
-        (rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var(),rand_var());
-    let (df_i, df_o, df_n) = (rand_var(), rand_var(), rand_var());
-    setup.push_str(&format!(
-        concat!(
-            "local function {dec}(h) ",
-            "local {t}={{{fi}=0X0,{fo}={sc}()}}; local {e}={pool}[h]; if not {e} then return {e} end; ",
-            "{t}.{fn_}=#{e}; local {q0}={mf}({K}/0X1000000)%0X100; local {q1}={mf}({K}/0X10000)%0X100; ",
-            "local {q2}={mf}({K}/0X100)%0X100; local {q3}={K}%0X100; ",
-            "local {a}=({q0}*0X101+{q1}*0X107+{q2}*0X10D+{q3}*0X10F+0X13579B)%0X7FFFFF01; ",
-            "local {b}=({q3}*0X115+{q2}*0X119+{q1}*0X11B+{q0}*0X125+0X2468AC)%0X7FFFFF01; ",
-            "local {prev}=0X0; local {c}={sc}; local {x},{y},{cipher},{mask},{na},{nb},{r}=0X0,0X0,0X0,0X0,0X0,0X0,0X0; ",
-            "local {j}={j0}; local {st}={init}; while true do ",
-            "if {st}=={S1} then if {t}.{fi}<{t}.{fn_} then {st}={tr12} else {st}={tdone} end ",
-            "elseif {st}=={S2} then {t}.{fi}={t}.{fi}+0X1; {st}={tr23} ",
-            "elseif {st}=={S3} then local pos={t}.{fi}; {cipher}={e}[{t}.{fi}]; ",
-            "{x}=({a}*(({b}%0X10000)+0X25D)+{b}*0X3A7+pos*0X139+{prev}*0X2D5+{q0}*0X101+{q2}*0X107)%0X7FFFFF01; ",
-            "{y}=({b}*(({x}%0X10000)+0X317)+{x}*0X2B9+pos*0X1B3+{prev}*0X3D1+{q1}*0X10D+{q3}*0X113)%0X7FFFFF01; ",
-            "{mask}=({x}%0X100+({y}%0X100)*0X3+(pos%0X100)*0X5+(({x}-{x}%0X100)/0X100)%0X100+(({y}-{y}%0X100)/0X100)%0X100)%0X100; ",
-            "{r}=({cipher}+0X100-{mask})%0X100; ",
-            "{na}=({x}*(({y}%0X10000)+0X21D)+{y}*0X331+pos*0X12B+{r}*0X17+{prev}*0X2B+{cipher}*0X35+{q2})%0X7FFFFF01; ",
-            "{nb}=({y}*(({na}%0X10000)+0X2A7)+{na}*0X2F5+pos*0X1D3+{cipher}*0X3B+{r}*0X43+{q3})%0X7FFFFF01; ",
-            "{a}={na}; {b}={nb}; {prev}={cipher}; {st}={tr34} ",
-            "elseif {st}=={S4} then {j}={j}+0X1; if {opq} then {t}.{fo}={t}.{fo}..{c}({r}) end; {st}={tr41b} ",
-            "else break end end; return {t}.{fo} end;"
-        ),
-        mf=v_mfloor,sc=v_schar,
-        dec=v_dec,t=d_t,pool=v_pool,e=d_e,j=d_j,
-        fi=df_i,fo=df_o,fn_=df_n,
-        q0=dq0,q1=dq1,q2=dq2,q3=dq3,a=d_a,b=d_b,prev=dprev,c=d_c,
-        x=dx,y=dy,cipher=dcipher,mask=dmask,na=dna,nb=dnb,r=d_r,
-        st=d_st,init=st_init,S1=s1,S2=s2,S3=s3,S4=s4,
-        tr12=tr12,tr23=tr23,tr34=tr34,tr41b=tr41,tdone=s_done,opq=opq,
-        j0=rng.gen_range(1..64),K=format!("0X{:08X}",pool_key)
-    ));
-    setup.push_str(&format!(
-        "local function {}(h) local xc,yu=true; local s = {}(h); if not s then return yu end; return xc and {}[s]; end;",
-        v_res, v_dec, v_env
-    ));
-    setup.push_str(&format!(
-    "local rt=function(z,x,c,g,nt) local v,b,n,y,op=\"\\116\\97\\98\\108\\101\",\"\\49\\37\\64\",0X0,\"\\76\\117\\97\\117\";if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if te~=nil then if z(te)~=v then c(b,n) else g(1) end end;break;end;end;rt({tof},{rk},{er},{pr},_VERSION);\n", tof = v_typeof, rk = v_raknet, er = v_error, pr = v_print
-));
-    setup.push_str(&format!("local {}={{}};\n", v_net));
-    // 网表缺项时不早退、不爆栈：静默置共享投毒旗并返回恒等闭包，让链继续走。
-    let trap_arg = rand_var();
-    setup.push_str(&format!(
-        "{}({},{{[{}]=function(...) {}=true;return function({}) return {} end end}});\n",
-        format!("{}({})", v_res, poly_hash("setmetatable")),
-        v_net, format!("{}({})", v_dec, poly_hash("__index")), poison_var, trap_arg, trap_arg
-    ));
+    let dec_fn = crate::VM::VM_Backend::Generator_util::emit_scrambled_mix_dec(
+        Some((&v_pool, pool_key)),
+        &v_sbyte,
+        &v_schar,
+    );
 
     let mut current_expected: i64 = rng.gen_range(1000..9999);
     let initial_token = current_expected;
@@ -303,7 +217,99 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         let prev = *state_at.last().unwrap();
         state_at.push((prev.wrapping_mul(a).wrapping_add(b)) % 0x1_0000_0000);
     }
-    setup.push_str(&format!("local {}={};\n", v_state, derived_num(state_at[0], &mut rng)));
+
+    // 顶层 setup 同样采用乱序跳表 + 二分判定树状态机，消除 m_at 首部线性序列
+    let mut used_top_states: Vec<u32> = Vec::new();
+    let mut top_ids: Vec<u32> = Vec::with_capacity(7);
+    for _ in 0..7 {
+        top_ids.push(rand_state(&mut rng, &mut used_top_states));
+    }
+    let mut top_phys: Vec<usize> = (1..=7).collect();
+    shuffle_vec(&mut top_phys);
+    let mut top_tbl_elems = vec![0u32; 7];
+    for (logic_i, &p_slot) in top_phys.iter().enumerate() {
+        top_tbl_elems[p_slot - 1] = top_ids[logic_i];
+    }
+    let top_tbl_var = rand_var();
+    let top_st_var = rand_var();
+    let trap_arg = rand_var();
+    let rt_var = rand_var();
+
+    let mut decl_names = vec![
+        v_env.clone(),
+        v_tripwire.clone(),
+        v_pool.clone(),
+        v_dec.clone(),
+        v_res.clone(),
+        v_net.clone(),
+        v_state.clone(),
+        st.name.clone(),
+    ];
+    for i in (1..decl_names.len()).rev() {
+        let j = rng.gen_range(0..=i);
+        decl_names.swap(i, j);
+    }
+
+    let tb0 = format!(
+        "{env}=({gg} and {gg}()) or {rt} or {{}};{tw}=function(...) {psn}=true end;{st}={tbl}[{nx1}];",
+        env = v_env, gg = v_getgenv, rt = v_root, tw = v_tripwire, psn = poison_var,
+        st = top_st_var, tbl = top_tbl_var, nx1 = top_phys[1]
+    );
+    let tb1 = format!(
+        "{pool}={{{pdata}}};@ST_ASSIGN@{st}={tbl}[{nx2}];",
+        pool = v_pool, pdata = pool_data, st = top_st_var, tbl = top_tbl_var, nx2 = top_phys[2]
+    );
+    let tb2 = format!(
+        "{dec}={dec_fn};{res}=function(h) local xc,yu=true;local s={dec}(h);if not s then return yu end;return xc and {env}[s] end;{st}={tbl}[{nx3}];",
+        dec = v_dec, dec_fn = dec_fn, res = v_res, env = v_env,
+        st = top_st_var, tbl = top_tbl_var, nx3 = top_phys[3]
+    );
+    let lit_rt_tab = vault.lit("table");
+    let lit_rt_err = vault.lit("1%@");
+    let lit_rt_luau = vault.lit("Luau");
+    let tb3 = format!(
+        "local {rt}=function(z,x,c,g,nt) local v,b,n,y,op={ltab},{lerr},0X0,{lluau};if n<=0.0 then op=z else op=x end;local te;local ui=nt;while ui==y do if not te then te=x else te=g end;if te~=nil then if z(te)~=v then c(b,n) else g(1) end end;break;end;end;{rt}({tof},{rk},{er},{pr},_VERSION);{vst}={s0};{st}={tbl}[{nx4}];",
+        rt = rt_var, ltab = lit_rt_tab, lerr = lit_rt_err, lluau = lit_rt_luau,
+        tof = v_typeof, rk = v_raknet, er = v_error, pr = v_print,
+        vst = v_state, s0 = derived_num(state_at[0], &mut rng),
+        st = top_st_var, tbl = top_tbl_var, nx4 = top_phys[4]
+    );
+    let tb4 = format!(
+        "{net}={{}};{res}({h_sm})({net},{{[{dec}({h_ix})]=function(...) {psn}=true;return function({ta}) return {ta} end end}});{st}={tbl}[{nxe}];",
+        net = v_net, res = v_res, h_sm = poly_hash("setmetatable"),
+        dec = v_dec, h_ix = poly_hash("__index"), psn = poison_var, ta = trap_arg,
+        st = top_st_var, tbl = top_tbl_var, nxe = top_phys[6]
+    );
+    let tb5 = format!(
+        "{vst}=(({vst} or 0X0)*0X13+0X7)%4294967296;{st}={tbl}[{nx2}];",
+        vst = v_state, st = top_st_var, tbl = top_tbl_var, nx2 = top_phys[2]
+    );
+
+    let mut top_branches: Vec<(u32, String)> = vec![
+        (top_ids[0], tb0),
+        (top_ids[1], tb1),
+        (top_ids[2], tb2),
+        (top_ids[3], tb3),
+        (top_ids[4], tb4),
+        (top_ids[5], tb5),
+    ];
+    top_branches.sort_by_key(|&(k, _)| k);
+    let top_tree = crate::VM::VM_Backend::Generator_util::build_bst_dispatch(&top_branches, &top_st_var);
+    let top_tbl_str = top_tbl_elems
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let setup = format!(
+        "local {decls};local {tbl}={{{tbl_str}}};local {st}={tbl}[{nx0}];while {st}~={tbl}[{nxe}] do {tree} end;",
+        decls = decl_names.join(","),
+        tbl = top_tbl_var,
+        tbl_str = top_tbl_str,
+        st = top_st_var,
+        nx0 = top_phys[0],
+        nxe = top_phys[6],
+        tree = top_tree
+    );
 
     let mut guards_code = Vec::new();
 

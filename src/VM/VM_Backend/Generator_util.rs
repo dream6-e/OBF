@@ -932,6 +932,249 @@ pub fn mix_key(plain: &str, rng: &mut GenRng) -> u32 {
     }
 }
 
+/// 将 `(状态码, 分支体)` 列表按状态码排序后递归编译为二分判定树 `if st<=pivot then ... else ... end`。
+pub fn build_bst_dispatch(items: &[(u32, String)], st_var: &str) -> String {
+    if items.len() == 1 {
+        return items[0].1.clone();
+    }
+    let mid = items.len() / 2;
+    let pivot = items[mid - 1].0;
+    let left = build_bst_dispatch(&items[..mid], st_var);
+    let right = build_bst_dispatch(&items[mid..], st_var);
+    format!("if {}<={} then {} else {} end;", st_var, pivot, left, right)
+}
+
+/// 生成打乱控制流与数据流的自定义流/池解密函数：
+/// - `pool_mode = Some((pool_var, pool_key))`：生成 `function(h) ... end`（按哈希键从池表取字节数组解密）；
+/// - `pool_mode = None`：生成 `function(s,k) ... end`（直接对密文串 `s` 与密钥参数 `k` 解密）。
+/// 所有工作寄存器、拆分后的模数/魔数份额、29 个递推权重与 11 个状态转移目标全部洗牌混入单张状态表 `S`，
+/// 由 10 个微状态经二分判定树与数据依赖跳表驱动，彻底消除线性头与整块算式。
+pub fn emit_scrambled_mix_dec(
+    pool_mode: Option<(&str, u32)>,
+    sbyte: &str,
+    schar: &str,
+) -> String {
+    use rand::Rng;
+    let mut r = rand::thread_rng();
+
+    // 生成 11 个互异的随机状态码（0..10 为 10 个微状态，10 为退出态）
+    let mut st_ids: Vec<u32> = Vec::with_capacity(11);
+    while st_ids.len() < 11 {
+        let cand: u32 = r.gen_range(0x10000..0x7F_FFFF);
+        if !st_ids.contains(&cand) {
+            st_ids.push(cand);
+        }
+    }
+
+    // 拆分魔数与常量份额，消除 0X7FFFFF01 / 0X10000 / 0X13579B / 0X2468AC / pool_key 明文指纹
+    let m_total: u64 = 0x7FFF_FF01;
+    let m_p1: u64 = r.gen_range(0x1000_0000..0x6FFF_FF00);
+    let m_p2: u64 = m_total - m_p1;
+
+    let u16_total: u64 = 0x10000;
+    let u16_p1: u64 = r.gen_range(0x1000..0xF000);
+    let u16_p2: u64 = u16_total - u16_p1;
+
+    let a_total: u64 = 0x13579B;
+    let a_p1: u64 = r.gen_range(0x20000..0x110000);
+    let a_p2: u64 = a_total - a_p1;
+
+    let b_total: u64 = 0x2468AC;
+    let b_p1: u64 = r.gen_range(0x30000..0x200000);
+    let b_p2: u64 = b_total - b_p1;
+
+    let (k_p1, k_p2): (u64, u64) = match pool_mode {
+        Some((_, pk)) => {
+            let p1 = r.gen_range(0x1000_0000u64..(pk as u64).max(0x2000_0000));
+            let p1 = p1.min(pk as u64);
+            (p1, (pk as u64) - p1)
+        }
+        None => (0, 0),
+    };
+
+    // 72 个槽位的初始值定义（0..22 为运行期工作槽，初值置 0；22..72 为常数/份额/权重/跳表槽）
+    let init_vals: [u64; 72] = [
+        // 0..22: 工作寄存器槽
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        // 22..32: 拆分份额槽
+        m_p1, m_p2, u16_p1, u16_p2, k_p1, k_p2, a_p1, a_p2, b_p1, b_p2,
+        // 32..36: 基础步长槽 (256, 1, 3, 5)
+        256, 1, 3, 5,
+        // 36..44: 初态 a/b 权重槽
+        0x101, 0x107, 0x10D, 0x10F, 0x115, 0x119, 0x11B, 0x125,
+        // 44..61: 字节递推权重槽
+        0x25D, 0x3A7, 0x139, 0x2D5,
+        0x317, 0x2B9, 0x1B3, 0x3D1, 0x113,
+        0x21D, 0x331, 0x12B, 0x17, 0x2B, 0x35,
+        0x2A7, 0x2F5,
+        // 61..72: 剩余递推权重槽 (3) + 状态码槽 (8) -> 扩为 75 槽以容纳全部 11 个状态码
+        0x1D3, 0x3B, 0x43,
+        st_ids[0] as u64, st_ids[1] as u64, st_ids[2] as u64, st_ids[3] as u64,
+        st_ids[4] as u64, st_ids[5] as u64, st_ids[6] as u64, st_ids[7] as u64,
+    ];
+    let extra_vals: [u64; 3] = [st_ids[8] as u64, st_ids[9] as u64, st_ids[10] as u64];
+    const TOTAL_SLOTS: usize = 75;
+    let mut all_init = Vec::with_capacity(TOTAL_SLOTS);
+    all_init.extend_from_slice(&init_vals);
+    all_init.extend_from_slice(&extra_vals);
+
+    // 生成 1..=75 的随机物理槽位排列：逻辑槽 i -> 物理槽 slot[i] (1..=75)
+    let mut phys: Vec<usize> = (1..=TOTAL_SLOTS).collect();
+    for i in (1..phys.len()).rev() {
+        let j = r.gen_range(0..=i);
+        phys.swap(i, j);
+    }
+    let mut table_elems = vec![0u64; TOTAL_SLOTS];
+    for (logic_idx, &p_slot) in phys.iter().enumerate() {
+        table_elems[p_slot - 1] = all_init[logic_idx];
+    }
+
+    // 逻辑槽位读取辅助闭包
+    let sl = |logic_idx: usize| -> usize { phys[logic_idx] };
+    // 工作寄存器物理槽位 (1..=75 十进制字面量，长度 <= 2，绝不触发 hoist_constants)
+    let (r_e, r_i, r_n, r_o, r_wk) = (sl(0), sl(1), sl(2), sl(3), sl(4));
+    let (r_q0, r_q1, r_q2, r_q3) = (sl(5), sl(6), sl(7), sl(8));
+    let (r_a, r_b, r_prev, r_c) = (sl(9), sl(10), sl(11), sl(12));
+    let (r_x, r_y, r_p, r_na, r_nb) = (sl(13), sl(14), sl(15), sl(16), sl(17));
+    let (r_t1, r_t2, r_m, r_u16) = (sl(18), sl(19), sl(20), sl(21));
+
+    // 拆分份额物理槽位
+    let (c_m1, c_m2, c_u16a, c_u16b) = (sl(22), sl(23), sl(24), sl(25));
+    let (c_k1, c_k2, c_a1, c_a2, c_b1, c_b2) = (sl(26), sl(27), sl(28), sl(29), sl(30), sl(31));
+
+    // 基础步长与权重物理槽位
+    let (c_256, c_1, c_3, c_5) = (sl(32), sl(33), sl(34), sl(35));
+    let (w_a0, w_a1, w_a2, w_a3) = (sl(36), sl(37), sl(38), sl(39));
+    let (w_b0, w_b1, w_b2, w_b3) = (sl(40), sl(41), sl(42), sl(43));
+    let (w_x_add, w_x_b, w_x_pos, w_x_prv) = (sl(44), sl(45), sl(46), sl(47));
+    let (w_y_add, w_y_x, w_y_pos, w_y_prv, w_y_q3) = (sl(48), sl(49), sl(50), sl(51), sl(52));
+    let (w_na_add, w_na_y, w_na_pos, w_na_p, w_na_prv, w_na_c) =
+        (sl(53), sl(54), sl(55), sl(56), sl(57), sl(58));
+    let (w_nb_add, w_nb_na, w_nb_pos, w_nb_c, w_nb_p) =
+        (sl(59), sl(60), sl(61), sl(62), sl(63));
+
+    // 状态转移目标物理槽位
+    let (nx_0, nx_1, nx_2, nx_3, nx_4) = (sl(64), sl(65), sl(66), sl(67), sl(68));
+    let (nx_5, nx_6, nx_7, nx_8, _nx_9, nx_exit) =
+        (sl(69), sl(70), sl(71), sl(72), sl(73), sl(74));
+
+    let init_src = match pool_mode {
+        Some((pool_var, _)) => format!(
+            "S[{re}]={pool}[h];if not S[{re}] then return S[{re}] end;S[{rn}]=#S[{re}];S[{rwk}]=S[{ck1}]+S[{ck2}];",
+            re = r_e, pool = pool_var, rn = r_n, rwk = r_wk, ck1 = c_k1, ck2 = c_k2
+        ),
+        None => format!(
+            "S[{re}]=s;S[{rn}]=#s;S[{rwk}]=k;",
+            re = r_e, rn = r_n, rwk = r_wk
+        ),
+    };
+    let fetch_byte = match pool_mode {
+        Some(_) => format!("S[{}][S[{}]]", r_e, r_i),
+        None => format!("{}(S[{}],S[{}])", sbyte, r_e, r_i),
+    };
+
+    let b0 = format!(
+        "{init}S[{ro}]={sc}();S[{rm}]=S[{cm1}]+S[{cm2}];S[{ru16}]=S[{cu1}]+S[{cu2}];st=S[{nx1}];",
+        init = init_src, ro = r_o, sc = schar, rm = r_m, cm1 = c_m1, cm2 = c_m2,
+        ru16 = r_u16, cu1 = c_u16a, cu2 = c_u16b, nx1 = nx_1
+    );
+    let b1 = format!(
+        "S[{rq3}]=S[{rwk}]%S[{c256}];S[{rwk}]=(S[{rwk}]-S[{rq3}])/S[{c256}];\
+         S[{rq2}]=S[{rwk}]%S[{c256}];S[{rwk}]=(S[{rwk}]-S[{rq2}])/S[{c256}];\
+         S[{ra}]=(S[{rq2}]*S[{wa2}]+S[{rq3}]*S[{wa3}]+S[{ca1}])%S[{rm}];\
+         S[{rb}]=(S[{rq3}]*S[{wb0}]+S[{rq2}]*S[{wb1}]+S[{cb1}])%S[{rm}];\
+         st=S[{nx2}+(S[{rq3}]-S[{rq3}])];",
+        rq3 = r_q3, rwk = r_wk, c256 = c_256, rq2 = r_q2,
+        ra = r_a, wa2 = w_a2, wa3 = w_a3, ca1 = c_a1, rm = r_m,
+        rb = r_b, wb0 = w_b0, wb1 = w_b1, cb1 = c_b1, nx2 = nx_2
+    );
+    let b2 = format!(
+        "S[{rq1}]=S[{rwk}]%S[{c256}];S[{rwk}]=(S[{rwk}]-S[{rq1}])/S[{c256}];\
+         S[{rq0}]=S[{rwk}]%S[{c256}];\
+         S[{ra}]=(S[{ra}]+S[{rq0}]*S[{wa0}]+S[{rq1}]*S[{wa1}]+S[{ca2}])%S[{rm}];\
+         S[{rb}]=(S[{rb}]+S[{rq1}]*S[{wb2}]+S[{rq0}]*S[{wb3}]+S[{cb2}])%S[{rm}];\
+         st=S[{nx3}];",
+        rq1 = r_q1, rwk = r_wk, c256 = c_256, rq0 = r_q0,
+        ra = r_a, wa0 = w_a0, wa1 = w_a1, ca2 = c_a2, rm = r_m,
+        rb = r_b, wb2 = w_b2, wb3 = w_b3, cb2 = c_b2, nx3 = nx_3
+    );
+    let b3 = format!(
+        "if S[{ri}]<S[{rn}] then S[{ri}]=S[{ri}]+S[{c1}];S[{rc}]={fb};st=S[{nx4}] else st=S[{nxe}] end;",
+        ri = r_i, rn = r_n, c1 = c_1, rc = r_c, fb = fetch_byte, nx4 = nx_4, nxe = nx_exit
+    );
+    let b4 = format!(
+        "S[{rt1}]=(S[{ra}]*((S[{rb}]%S[{ru16}])+S[{wxa}])+S[{rb}]*S[{wxb}])%S[{rm}];\
+         S[{rt2}]=((S[{ri}]%S[{rm}])*S[{wxp}]+S[{rprv}]*S[{wxv}]+S[{rq0}]*S[{wa0}]+S[{rq2}]*S[{wa1}])%S[{rm}];\
+         S[{rx}]=(S[{rt1}]+S[{rt2}])%S[{rm}];st=S[{nx5}+(S[{rc}]-S[{rc}])];",
+        rt1 = r_t1, ra = r_a, rb = r_b, ru16 = r_u16, wxa = w_x_add, wxb = w_x_b, rm = r_m,
+        rt2 = r_t2, ri = r_i, wxp = w_x_pos, rprv = r_prev, wxv = w_x_prv, rq0 = r_q0, wa0 = w_a0,
+        rq2 = r_q2, wa1 = w_a1, rx = r_x, nx5 = nx_5, rc = r_c
+    );
+    let b5 = format!(
+        "S[{rt1}]=(S[{rb}]*((S[{rx}]%S[{ru16}])+S[{wya}])+S[{rx}]*S[{wyx}])%S[{rm}];\
+         S[{rt2}]=((S[{ri}]%S[{rm}])*S[{wyp}]+S[{rprv}]*S[{wyv}]+S[{rq1}]*S[{wa2}]+S[{rq3}]*S[{wy3}])%S[{rm}];\
+         S[{ry}]=(S[{rt1}]+S[{rt2}])%S[{rm}];st=S[{nx6}+(S[{ri}]-S[{ri}])];",
+        rt1 = r_t1, rb = r_b, rx = r_x, ru16 = r_u16, wya = w_y_add, wyx = w_y_x, rm = r_m,
+        rt2 = r_t2, ri = r_i, wyp = w_y_pos, rprv = r_prev, wyv = w_y_prv, rq1 = r_q1, wa2 = w_a2,
+        rq3 = r_q3, wy3 = w_y_q3, ry = r_y, nx6 = nx_6
+    );
+    let b6 = format!(
+        "S[{rt1}]=((S[{rx}]-S[{rx}]%S[{c256}])/S[{c256}])%S[{c256}]+((S[{ry}]-S[{ry}]%S[{c256}])/S[{c256}])%S[{c256}];\
+         S[{rt2}]=(S[{rx}]%S[{c256}]+(S[{ry}]%S[{c256}])*S[{c3}]+(S[{ri}]%S[{c256}])*S[{c5}]+S[{rt1}])%S[{c256}];\
+         S[{rp}]=(S[{rc}]+S[{c256}]-S[{rt2}])%S[{c256}];S[{ro}]=S[{ro}]..{sc}(S[{rp}]);\
+         st=S[{nx7}+(S[{rp}]-S[{rp}])];",
+        rt1 = r_t1, rx = r_x, c256 = c_256, ry = r_y,
+        rt2 = r_t2, c3 = c_3, ri = r_i, c5 = c_5,
+        rp = r_p, rc = r_c, ro = r_o, sc = schar, nx7 = nx_7
+    );
+    let b7 = format!(
+        "S[{rt1}]=(S[{rx}]*((S[{ry}]%S[{ru16}])+S[{wnaa}])+S[{ry}]*S[{wnay}])%S[{rm}];\
+         S[{rt2}]=((S[{ri}]%S[{rm}])*S[{wnap}]+S[{rp}]*S[{wnar}]+S[{rprv}]*S[{wnav}]+S[{rc}]*S[{wnac}]+S[{rq2}])%S[{rm}];\
+         S[{rna}]=(S[{rt1}]+S[{rt2}])%S[{rm}];st=S[{nx8}];",
+        rt1 = r_t1, rx = r_x, ry = r_y, ru16 = r_u16, wnaa = w_na_add, wnay = w_na_y, rm = r_m,
+        rt2 = r_t2, ri = r_i, wnap = w_na_pos, rp = r_p, wnar = w_na_p, rprv = r_prev, wnav = w_na_prv,
+        rc = r_c, wnac = w_na_c, rq2 = r_q2, rna = r_na, nx8 = nx_8
+    );
+    let b8 = format!(
+        "S[{rt1}]=(S[{ry}]*((S[{rna}]%S[{ru16}])+S[{wnba}])+S[{rna}]*S[{wnbn}])%S[{rm}];\
+         S[{rt2}]=((S[{ri}]%S[{rm}])*S[{wnbp}]+S[{rc}]*S[{wnbc}]+S[{rp}]*S[{wnbr}]+S[{rq3}])%S[{rm}];\
+         S[{rnb}]=(S[{rt1}]+S[{rt2}])%S[{rm}];S[{ra}]=S[{rna}];S[{rb}]=S[{rnb}];S[{rprv}]=S[{rc}];\
+         st=S[{nx3}+(S[{rp}]-S[{rp}])];",
+        rt1 = r_t1, ry = r_y, rna = r_na, ru16 = r_u16, wnba = w_nb_add, wnbn = w_nb_na, rm = r_m,
+        rt2 = r_t2, ri = r_i, wnbp = w_nb_pos, rc = r_c, wnbc = w_nb_c, rp = r_p, wnbr = w_nb_p,
+        rq3 = r_q3, rnb = r_nb, ra = r_a, rb = r_b, rprv = r_prev, nx3 = nx_3
+    );
+    let b9 = format!(
+        "S[{rt1}]=(S[{ra}]*S[{wxb}]+S[{rb}]*S[{wyx}]+S[{rprv}])%S[{rm}];S[{ra}]=S[{rt1}];st=S[{nx4}];",
+        rt1 = r_t1, ra = r_a, wxb = w_x_b, rb = r_b, wyx = w_y_x, rprv = r_prev, rm = r_m, nx4 = nx_4
+    );
+
+    let mut branches: Vec<(u32, String)> = vec![
+        (st_ids[0], b0),
+        (st_ids[1], b1),
+        (st_ids[2], b2),
+        (st_ids[3], b3),
+        (st_ids[4], b4),
+        (st_ids[5], b5),
+        (st_ids[6], b6),
+        (st_ids[7], b7),
+        (st_ids[8], b8),
+        (st_ids[9], b9),
+    ];
+    branches.sort_by_key(|&(k, _)| k);
+    let tree = build_bst_dispatch(&branches, "st");
+    let tbl_str = table_elems
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sig = if pool_mode.is_some() { "function(h)" } else { "function(s,k)" };
+    format!(
+        "{sig} local S={{{tbl}}};local st=S[{nx0}];while st~=S[{nxe}] do {tree} end;return S[{ro}] end",
+        sig = sig, tbl = tbl_str, nx0 = nx_0, nxe = nx_exit, tree = tree, ro = r_o
+    )
+}
+
 /// ── 自定义字符串流（与探测串/AntiTamper 池逐位同规格）──
 /// 密钥由 4 个字节组成；字节递推同时吸收位置、前一密文、当前密文与明文。
 /// 本算法是项目自创的可逆变换，不等同于经审计的标准密码算法。
@@ -939,10 +1182,10 @@ pub fn stream_dec_body() -> String {
     stream_dec_body_with("math.floor", "string.byte", "string.char")
 }
 
-/// ㉜ 参数化形态：三个库成员取用表达式由调用侧注入（产物路径传 NB 槽表达式；
-/// 无参版仅测试使用）。
-pub fn stream_dec_body_with(mfloor: &str, sbyte: &str, schar: &str) -> String {
-    format!(r#"function(s,k) local M=0X7FFFFF01; local q0={mf}(k/0X1000000)%0X100; local q1={mf}(k/0X10000)%0X100; local q2={mf}(k/0X100)%0X100; local q3=k%0X100; local a=(q0*0X101+q1*0X107+q2*0X10D+q3*0X10F+0X13579B)%M; local b=(q3*0X115+q2*0X119+q1*0X11B+q0*0X125+0X2468AC)%M; local o,i,prev='',0,0; local n=#s; while i<n do i=i+1; local pos=i%M; local c={sb}(s,i); local x=(a*((b%0X10000)+0X25D)+b*0X3A7+pos*0X139+prev*0X2D5+q0*0X101+q2*0X107)%M; local y=(b*((x%0X10000)+0X317)+x*0X2B9+pos*0X1B3+prev*0X3D1+q1*0X10D+q3*0X113)%M; local mask=(x%0X100+(y%0X100)*0X3+(pos%0X100)*0X5+((x-x%0X100)/0X100)%0X100+((y-y%0X100)/0X100)%0X100)%0X100; local p=(c+0X100-mask)%0X100; local na=(x*((y%0X10000)+0X21D)+y*0X331+pos*0X12B+p*0X17+prev*0X2B+c*0X35+q2)%M; local nb=(y*((na%0X10000)+0X2A7)+na*0X2F5+pos*0X1D3+c*0X3B+p*0X43+q3)%M; a=na; b=nb; prev=c; o=o..{sc}(p) end; return o end"#, mf=mfloor, sb=sbyte, sc=schar)
+/// ㉜ 参数化形态：库成员取用表达式由调用侧注入（产物路径传 NB 槽表达式；
+/// 无参版仅测试使用）。内部采用状态表与二分判定树微状态机，消除线性控制流与数据流。
+pub fn stream_dec_body_with(_mfloor: &str, sbyte: &str, schar: &str) -> String {
+    emit_scrambled_mix_dec(None, sbyte, schar)
 }
 
 /// ── ⑤ 池键哈希的参数：逐产物随机 ──
@@ -1037,9 +1280,8 @@ impl StreamTable {
         }
     }
 
-    /// 渲染整张表：`local T={[dk]=function(s,k)…end,[k]="…",[k]=0X…,…};`
-    /// 条目顺序洗牌——构造器里密文/密钥/解码器混在一起，没有配对关系可看。
-    pub fn emit(&self) -> String {
+    /// 渲染整张表赋值：`T={[dk]=function(s,k)…end,[k]="…",[k]=0X…,…};`
+    pub fn emit_assign(&self) -> String {
         let mut r = rand::thread_rng();
         let mut items: Vec<String> = Vec::new();
         items.push(format!("[{}]={}", self.dec_key,
@@ -1051,7 +1293,13 @@ impl StreamTable {
             let j = r.gen_range(0..=i);
             items.swap(i, j);
         }
-        format!("local {}={{{}}}; ", self.name, items.join(","))
+        format!("{}={{{}}}; ", self.name, items.join(","))
+    }
+
+    /// 渲染整张表：`local T={[dk]=function(s,k)…end,[k]="…",[k]=0X…,…};`
+    /// 条目顺序洗牌——构造器里密文/密钥/解码器混在一起，没有配对关系可看。
+    pub fn emit(&self) -> String {
+        format!("local {}", self.emit_assign())
     }
 }
 
@@ -1187,9 +1435,16 @@ mod custom_string_stream_tests {
         assert_ne!(cipher, plain);
         if !lua.exists() { return; }
 
+        let dec_src = stream_dec_body();
+        assert!(!dec_src.contains("13579B") && !dec_src.contains("1267611"));
+        assert!(!dec_src.contains("2468AC") && !dec_src.contains("2386092"));
+        assert!(!dec_src.contains("7FFFFF01") && !dec_src.contains("2147483393"));
+        let pool_dec = super::emit_scrambled_mix_dec(Some(("P", key)), "string.byte", "string.char");
+        assert!(!pool_dec.contains("13579B") && !pool_dec.contains("2468AC"));
+
         let script = format!(
-            "local dec={decoder}; local c={{{cipher}}}; local t={{}}; for i=1,#c do t[i]=string.char(c[i]) end; local out=dec(table.concat(t),0X{key:08X}); local expected={{{plain}}}; assert(#out==#expected); for i=1,#expected do assert(string.byte(out,i)==expected[i],i) end; print('STRING_STREAM_OK')",
-            decoder=stream_dec_body(),cipher=table(&cipher),plain=table(&plain),key=key);
+            "local dec={decoder}; local P={{[0X77]={{{cipher}}}}}; local pdec={pdec}; local c={{{cipher}}}; local t={{}}; for i=1,#c do t[i]=string.char(c[i]) end; local out=dec(table.concat(t),0X{key:08X}); local out2=pdec(0X77); assert(pdec(0X99)==nil); assert(out==out2); local expected={{{plain}}}; assert(#out==#expected); for i=1,#expected do assert(string.byte(out,i)==expected[i],i) end; print('STRING_STREAM_OK')",
+            decoder=dec_src,pdec=pool_dec,cipher=table(&cipher),plain=table(&plain),key=key);
         let out = Command::new(lua).arg("-e").arg(script).output().expect("run bundled Lua 5.1");
         assert!(out.status.success(), "string stream Lua failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("STRING_STREAM_OK"));
