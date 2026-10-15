@@ -403,6 +403,195 @@ impl ShellMethods {
             })
             .collect()
     }
+
+    /// 将 `wai_field`（内含最大加密密文 payload `[=[...]=]`）置于外层 `return({...})` 表中央，
+    /// 并将剩余所有兄弟方法按压缩后体积均衡分配到密文上下两部分，使密文前后的功能性代码大小基本一致。
+    pub fn into_balanced_fields(
+        &self,
+        rng: &mut GenRng,
+        wai_field: String,
+        fu_field: String,
+    ) -> Vec<String> {
+        let mut other_fields = self.into_fields();
+        other_fields.push(fu_field);
+        rng.shuffle(&mut other_fields);
+
+        let (mut upper_len, mut lower_len) = if let Some(open_pos) = wai_field.find("[=[") {
+            let close_pos = wai_field[open_pos..]
+                .find("]=]")
+                .map(|p| open_pos + p + 3)
+                .unwrap_or(open_pos);
+            let u = est_compressed_len(&wai_field[..open_pos]);
+            let l = est_compressed_len(&wai_field[close_pos..]);
+            // 补偿 wai 上半段（execute 派发表）常量提升带来的额外压缩量与下半段 RadixSieve 进制转换增量
+            let adjust = (u + l) / 48;
+            (u, l + adjust)
+        } else {
+            let half = est_compressed_len(&wai_field) / 2;
+            (half, half)
+        };
+
+        let weights: Vec<usize> = other_fields.iter().map(|f| est_compressed_len(f) + 1).collect();
+        let mut order: Vec<usize> = (0..other_fields.len()).collect();
+        order.sort_by(|&a, &b| weights[b].cmp(&weights[a]).then(a.cmp(&b)));
+
+        let mut in_upper = vec![false; other_fields.len()];
+        for idx in order {
+            if upper_len <= lower_len {
+                in_upper[idx] = true;
+                upper_len += weights[idx];
+            } else {
+                lower_len += weights[idx];
+            }
+        }
+
+        // 1-flip / 1-swap 局部搜索微调，进一步收窄上下两部分体积差
+        loop {
+            let cur_diff = upper_len.abs_diff(lower_len);
+            let mut best_diff = cur_diff;
+            let mut best_flip: Option<usize> = None;
+            let mut best_swap: Option<(usize, usize)> = None;
+
+            for i in 0..weights.len() {
+                let (nu, nl) = if in_upper[i] {
+                    (upper_len - weights[i], lower_len + weights[i])
+                } else {
+                    (upper_len + weights[i], lower_len - weights[i])
+                };
+                let d = nu.abs_diff(nl);
+                if d < best_diff {
+                    best_diff = d;
+                    best_flip = Some(i);
+                    best_swap = None;
+                }
+            }
+            for i in 0..weights.len() {
+                if !in_upper[i] {
+                    continue;
+                }
+                for j in 0..weights.len() {
+                    if in_upper[j] {
+                        continue;
+                    }
+                    let nu = upper_len + weights[j] - weights[i];
+                    let nl = lower_len + weights[i] - weights[j];
+                    let d = nu.abs_diff(nl);
+                    if d < best_diff {
+                        best_diff = d;
+                        best_flip = None;
+                        best_swap = Some((i, j));
+                    }
+                }
+            }
+            if let Some(i) = best_flip {
+                if in_upper[i] {
+                    upper_len -= weights[i];
+                    lower_len += weights[i];
+                } else {
+                    upper_len += weights[i];
+                    lower_len -= weights[i];
+                }
+                in_upper[i] = !in_upper[i];
+            } else if let Some((i, j)) = best_swap {
+                upper_len = upper_len + weights[j] - weights[i];
+                lower_len = lower_len + weights[i] - weights[j];
+                in_upper[i] = false;
+                in_upper[j] = true;
+            } else {
+                break;
+            }
+        }
+
+        let mut out = Vec::with_capacity(other_fields.len() + 1);
+        let mut lower = Vec::new();
+        for (idx, field) in other_fields.into_iter().enumerate() {
+            if in_upper[idx] {
+                out.push(field);
+            } else {
+                lower.push(field);
+            }
+        }
+        out.push(wai_field);
+        out.extend(lower);
+        out
+    }
+}
+
+/// 估算一段生成期 Lua 代码经 `Compressor` 改名与去空白后的字节长度。
+fn est_compressed_len(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    let mut total = 0usize;
+    let mut prev_alnum = false;
+    let mut after_fn = false;
+    let mut in_param_list = false;
+
+    while i < n {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let cur_alnum = b.is_ascii_alphanumeric() || b == b'_';
+        if prev_alnum && cur_alnum {
+            total += 1;
+        }
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = i;
+            i += 1;
+            while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &s[start..i];
+            let is_kw = matches!(
+                word,
+                "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for"
+                    | "function" | "if" | "in" | "local" | "nil" | "not" | "or"
+                    | "repeat" | "return" | "then" | "true" | "until" | "while"
+            );
+            if is_kw {
+                total += word.len();
+                after_fn = word == "function";
+            } else if in_param_list {
+                total += 1;
+                after_fn = false;
+            } else {
+                total += 2;
+                after_fn = false;
+            }
+            prev_alnum = true;
+        } else if b.is_ascii_digit() {
+            let start = i;
+            i += 1;
+            while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.') {
+                i += 1;
+            }
+            let num = &s[start..i];
+            if (num.starts_with("0X") || num.starts_with("0x"))
+                && u64::from_str_radix(&num[2..], 16).map_or(false, |v| v <= 1)
+            {
+                total += 1;
+            } else {
+                total += num.len();
+            }
+            after_fn = false;
+            prev_alnum = true;
+        } else {
+            if b == b'(' && after_fn {
+                in_param_list = true;
+                after_fn = false;
+            } else if b == b')' && in_param_list {
+                in_param_list = false;
+            } else {
+                after_fn = false;
+            }
+            total += 1;
+            prev_alnum = false;
+            i += 1;
+        }
+    }
+    total
 }
 
 /// 生成 `block_methods` 中 `#`/`unpack`/分片元表链的装配代码（将 `hash_expr` 与 `idx_expr`
@@ -578,5 +767,39 @@ mod tests {
             .expect("run lua5.1");
         assert!(out.status.success(), "Lua failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("SHELL_OK"));
+    }
+
+    #[test]
+    fn into_balanced_fields_centers_payload_between_functional_halves() {
+        let mut rng = GenRng::new(0xC3A7_E501);
+        let mut shell = ShellMethods::new(&mut rng);
+        for k in 0..10 {
+            let body = "local a=0X10; a=a+0X20; ".repeat(20 + k * 5) + "return a";
+            shell.add(&mut rng, &["x"], body);
+        }
+        let wai = rng.name();
+        let fu = rng.name();
+        let wai_pre = "local u=0X1; ".repeat(60);
+        let payload = "P".repeat(4000);
+        let wai_post = "local v=0X2; ".repeat(60);
+        let wai_field = format!(
+            "{}=function({}) {} local raw=([=[{}]=]); {} return #raw end",
+            wai, shell.self_var, wai_pre, payload, wai_post
+        );
+        let fu_field = format!("{}=function(z) return z:{}() end", fu, wai);
+        let balanced = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
+        let joined = format!("return ({{ {} }}):{}()", balanced.join(", "), fu);
+        let open = joined.find("[=[").expect("must contain payload open");
+        let close = joined[open..].find("]=]").map(|p| open + p + 3).unwrap();
+        let upper_est = est_compressed_len(&joined[..open]);
+        let lower_est = est_compressed_len(&joined[close..]);
+        let ratio = upper_est as f64 / (upper_est + lower_est) as f64;
+        assert!(
+            (0.42..=0.58).contains(&ratio),
+            "upper/lower functional code should be balanced around payload: upper={} lower={} ratio={:.3}",
+            upper_est,
+            lower_est,
+            ratio
+        );
     }
 }

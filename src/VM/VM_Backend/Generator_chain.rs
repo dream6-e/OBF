@@ -730,7 +730,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let m_hdr = shell.add_self(
             &mut rng,
             &s_hdr,
-            &[&kreg_n, &u_tbl, &u_dec, &u_kb, &native_type, &keys.tbl_p, &fn_s_byte, &fn_s_sub],
+            &[&var_raw_p, &kreg_n, &u_tbl, &u_dec, &u_kb, &native_type, &keys.tbl_p, &fn_s_byte, &fn_s_sub],
             format!(
                 "local function {}({}) return {}:{}({},{},{},{},{}) end; {}{}{}{}",
                 entry_func, d_hdr, s_hdr, m_pack, d_hdr, kreg_n, u_tbl, u_dec, u_kb,
@@ -739,7 +739,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         );
         let hdr_call_expr = shell.call(
             &m_hdr,
-            &[&kreg_n, &u_tbl, &u_dec, &u_kb, &native_type, &keys.tbl_p, &fn_s_byte, &fn_s_sub],
+            &[&var_raw_p, &kreg_n, &u_tbl, &u_dec, &u_kb, &native_type, &keys.tbl_p, &fn_s_byte, &fn_s_sub],
         );
         let block_dec_header = hdr_wai_body.replace("@HDR_CALL@", &hdr_call_expr);
         // ㉛ 白化参数（逐构建随机）的产物侧拼写——read_dec 内每字节现算掩码用

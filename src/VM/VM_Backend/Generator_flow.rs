@@ -846,12 +846,11 @@ pub fn build_header(
     let start = rng.obfuscate_num(1i64, 1, keys);
     let one = rng.obfuscate_num(1i64, 1, keys);
     let hdr_m = format!(
-        "local {raw}=([=[{payload}]=]); \
-         local {ok},{bit}={pc}(function() local {a},{b}={{}},{{}}; local {s}={ts}({a})..{ts}({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+{sb}({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
+        "local {ok},{bit}={pc}(function() local {a},{b}={{}},{{}}; local {s}={ts}({a})..{ts}({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+{sb}({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
          local {tok},{tr}={pc}(function() return {nt}({byte})=={fn_lit} end); \
          local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; \
          return {entry}({sub}({raw},{start})), {sm}({{}},mt_vc), ({ok} and {bit}==0X0 and {tok} and not {tr})",
-        raw = var_raw_p, payload = payload_str,
+        raw = var_raw_p,
         ok = gate_ok, bit = gate_bit, a = gate_a, b = gate_b, s = gate_s, h = gate_h, i = gate_i,
         seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, nt = native_type,
         pc = v_pcall, ts = v_tostring, sb = v_sbyte,
@@ -861,11 +860,12 @@ pub fn build_header(
     let bad_v = rng.name();
     let hdr_wai = format!(
         "local {byte},{sub}={byte_name},{sub_name}; local {p},{a2}=nil,{one}; \
-         do local {bad}; {p},{vc},{bad}=@HDR_CALL@; {psn}={psn} or {bad} end; \
+         do local {bad},{raw}=nil,([=[{payload}]=]); {p},{vc},{bad}=@HDR_CALL@; {psn}={psn} or {bad} end; \
          local function {a3}() local {x}={byte}({p},{a2},{a2}); {a2}={a2}+{one}; return {x} end; \
          local k1,k2,k3,k4={a3}(),{a3}(),{a3}(),{a3}(); local {wk}=0X0; local {wp}=0X4; ",
         byte = fn_s_byte, sub = fn_s_sub, byte_name = "string_byte", sub_name = "string_sub",
-        p = var_p, a2 = var_a2, one = one, bad = bad_v, vc = var_vc, psn = psn,
+        p = var_p, a2 = var_a2, one = one, bad = bad_v, raw = var_raw_p, payload = payload_str,
+        vc = var_vc, psn = psn,
         a3 = fn_a3, x = x, wk = var_whiten, wp = var_whiten_pos
     );
     (hdr_m, hdr_wai)

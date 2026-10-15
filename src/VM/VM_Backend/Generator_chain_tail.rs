@@ -840,10 +840,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             "{}=function({},{},{}) local {}=type; {} return {}:{}() end",
             fu, fu_self, fu_p0, fu_p1, native_type, line_guard(&mut rng, &mut uni, true), fu_self, wai
         );
-        let mut shell_fields = shell.into_fields();
-        shell_fields.push(wai_field);
-        shell_fields.push(fu_field);
-        rng.shuffle(&mut shell_fields);
+        let shell_fields = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
 
         let mut out = String::new();
         out.push_str(&format!("local {} = ...;\n", var_l));
