@@ -12,6 +12,11 @@ pub struct AntiTamperResult {
     /// 流加密键表（解码器匿名挂在表里）。Generator 的解头/方法原型/body_consts
     /// 与守卫同作用域，复用同一张表；探测块的调用点也在收表前注册完毕。
     pub st: StreamTable,
+    /// 供外层 `return({...})` 壳兄弟方法导出给 `wai` 守卫闭包捕获的 6 个局部名：
+    /// `[v_env, v_dec, v_res, v_net, v_state, st.name]`。
+    pub exports: [String; 6],
+    /// 绑定的毒化旗变量名（供外层兄弟方法替换为回调闭包）。
+    pub poison_var: String,
 }
 
 impl AntiTamperResult {
@@ -704,12 +709,15 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
     trigger.push_str(&format!("{}[{}] = function() end;\n", v_jump, current_expected));
     trigger.push_str(&format!("{}[{}]();\n", v_jump, key_var));
     
+    let st_name = st.name.clone();
     AntiTamperResult {
         setup: minify_lua(&setup),
         guards: guards_code,
         trigger: minify_lua(&trigger),
         expected_final: current_expected,
         st,
+        exports: [v_env, v_dec, v_res, v_net, v_state, st_name],
+        poison_var: poison_var.to_string(),
     }
 }
 

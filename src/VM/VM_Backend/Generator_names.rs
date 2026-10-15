@@ -277,7 +277,7 @@ pub fn emit_bit_locals(
 
 /// vm_core 解码内核模板的四个库访问点收进 NB 槽（模板固定串，逐一替换）。
 pub fn vaultify_vm_core(vault: &mut NameVault, raw: String) -> String {
-    let mut vc = raw;
+    let mut vc = raw.replace("local A, B, C, D = ...;", "local A, B, C, D;");
     for (plain, slot) in [
         ("string.byte(", vault.member("string", "byte")),
         ("string.char(", vault.member("string", "char")),
@@ -326,6 +326,136 @@ pub fn emit_natives_capture(
         mk = mode_expr,
         kv = mk_expr,
     )
+}
+
+/// 最外层大 `return({...})` 表壳的兄弟方法注册器。
+///
+/// 按 `README.md` 约定：多出来的步骤以及逼近/超过 Lua 5.1 单函数 200 `local`
+/// 上限的步骤，统一拆成最外层 `return({wai=function(...) end, xx=function(a,b,c) end, ...})`
+/// 表壳里的多个兄弟方法。每个兄弟方法拥有独立的局部寄存器帧与常量池，
+/// 压缩器会自动将方法名压成 2 字母、形参压成单字母 `(a,b,c,...)`。
+pub struct ShellMethods {
+    pub self_var: String,
+    /// `(method_name, self_param, params_without_self, body)`
+    entries: Vec<(String, String, Vec<String>, String)>,
+}
+
+impl ShellMethods {
+    pub fn new(rng: &mut GenRng) -> Self {
+        Self {
+            self_var: rng.name(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// 注册一个不直接引用自身 `self` 的外层兄弟方法 `m = function(s, p1, p2, ...) body end`。
+    pub fn add(&mut self, rng: &mut GenRng, params: &[&str], body: String) -> String {
+        let s = rng.name();
+        self.add_self(rng, &s, params, body)
+    }
+
+    /// 注册一个显式指定 `self_param` 的外层兄弟方法（供方法体内继续调 `s:other(...)`）。
+    pub fn add_self(
+        &mut self,
+        rng: &mut GenRng,
+        self_param: &str,
+        params: &[&str],
+        body: String,
+    ) -> String {
+        let m = rng.name();
+        let mut ps: Vec<String> = params.iter().map(|p| (*p).to_string()).collect();
+        while ps.len() < 2 {
+            ps.push(rng.name());
+        }
+        self.entries.push((m.clone(), self_param.to_string(), ps, body));
+        m
+    }
+
+    /// 生成 `self_var:m(arg1, arg2, ...)` 调用表达式。
+    pub fn call(&self, m: &str, args: &[&str]) -> String {
+        format!("{}:{}({})", self.self_var, m, args.join(","))
+    }
+
+    /// 导出外层表壳的 `xx=function(s,a,b,...) ... end` 字段列表。
+    pub fn into_fields(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .map(|(m, s, ps, body)| {
+                let mut all = Vec::with_capacity(ps.len() + 1);
+                all.push(s.clone());
+                all.extend(ps.iter().cloned());
+                format!("{}=function({}) {} end", m, all.join(","), body)
+            })
+            .collect()
+    }
+}
+
+/// 生成 `block_methods` 中 `#`/`unpack`/分片元表链的装配代码（将 `hash_expr` 与 `idx_expr`
+/// 收敛在 `do ... end` 块内，为 `wai` 省 2 个顶层局部槽，同时为 `Generator.rs` 减重）。
+#[allow(clippy::too_many_arguments)]
+pub fn emit_methods_wire(
+    rng: &mut GenRng,
+    uni: &mut UniStream,
+    vault: &mut NameVault,
+    var_get_count: &str,
+    var_s: &str,
+    hex_select_idx: &str,
+    pf_vn: &str,
+    var_unpack: &str,
+    method_shards: &[String],
+    var_proto: &str,
+    defs: &[String],
+    native_smeta: &str,
+    rename_fn: impl Fn(&str, &str, &str) -> String,
+) -> String {
+    let mut out = String::new();
+    let (hash_stmt, hash_expr) = {
+        let id = uni.register("#");
+        uni.fetch(rng, id)
+    };
+    out.push_str(&format!(
+        "local {gc}; do {hs}{gc} = function(...) return {vs}[{hsi}]({he}, ...) end end; ",
+        gc = var_get_count,
+        hs = hash_stmt,
+        vs = var_s,
+        hsi = hex_select_idx,
+        he = hash_expr
+    ));
+    out.push_str(&format!(
+        "local {up}, zm = {vup} or function() end, function(...) return {{{vn}={gc}(...),...}} end; ",
+        up = var_unpack,
+        vup = vault.unpack(),
+        vn = pf_vn,
+        gc = var_get_count
+    ));
+    let shard_names = method_shards.join(",");
+    let shard_tables = vec!["{}"; method_shards.len()].join(",");
+    out.push_str(&format!(
+        "local {}={};local {}={{}};",
+        shard_names, shard_tables, var_proto
+    ));
+    for d in defs.iter() {
+        out.push_str(&rename_fn(d, "unpack", &var_unpack));
+        out.push(' ');
+    }
+    let (idx_stmt, idx_expr) = {
+        let id = uni.register("__index");
+        uni.fetch(rng, id)
+    };
+    let mut method_order: Vec<usize> = (0..method_shards.len()).collect();
+    rng.shuffle(&mut method_order);
+    out.push_str(&format!("do {}", idx_stmt));
+    for pair in method_order.windows(2) {
+        out.push_str(&format!(
+            "{}({},{{[{}]={}}});",
+            native_smeta, method_shards[pair[0]], idx_expr, method_shards[pair[1]]
+        ));
+    }
+    out.push_str(&format!(
+        "{}[{}]={} end;",
+        var_proto, idx_expr, method_shards[method_order[0]]
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -388,5 +518,43 @@ mod tests {
             .arg("-e").arg(&script).output().expect("run lua5.1");
         assert!(out.status.success(), "Lua failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("VAULT_LUA_OK"));
+    }
+
+    #[test]
+    fn shell_methods_shuffle_and_dispatch_in_lua51() {
+        let lua = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() {
+            return;
+        }
+        let mut rng = GenRng::new(0x5E11_B0D5);
+        let mut shell = ShellMethods::new(&mut rng);
+        let m1 = shell.add(&mut rng, &["x"], "return x + 0X20".to_string());
+        let s2 = rng.name();
+        let m2 = shell.add_self(
+            &mut rng,
+            &s2,
+            &["u", "v"],
+            format!("return {}:{}({}) + v", s2, m1, "u"),
+        );
+        let call_expr = shell.call(&m2, &["0X10", "0X5"]);
+        let wai = rng.name();
+        let fu = rng.name();
+        let mut fields = shell.into_fields();
+        assert_eq!(fields.len(), 2);
+        fields.push(format!("{}=function({}) return {} end", wai, shell.self_var, call_expr));
+        fields.push(format!("{}=function(z) return z:{}() end", fu, wai));
+        rng.shuffle(&mut fields);
+        let script = format!(
+            "local r = (function() return ({{ {} }}):{}() end)(); assert(r == 0X35); print('SHELL_OK')",
+            fields.join(", "),
+            fu
+        );
+        let out = std::process::Command::new(lua)
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("run lua5.1");
+        assert!(out.status.success(), "Lua failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("SHELL_OK"));
     }
 }

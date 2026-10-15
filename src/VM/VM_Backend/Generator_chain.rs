@@ -124,6 +124,8 @@ pub(super) const CG_GROUPS: usize = crate::VM::VM_Backend::Generator_util::CONST
 pub(super) struct ChainMid {
     pub x: ChainIn,
     pub h_var: String,
+    pub fix_var: String,
+    pub root_kw: String,
     pub block_chacha_setup: String,
     pub ds_names: [String; CG_GROUPS],
     pub dn_names: [String; CG_GROUPS],
@@ -137,6 +139,7 @@ pub(super) struct ChainMid {
     pub block_dec_header: String,
     pub block_dec_helpers: String,
     pub block_dec_readers: String,
+    pub shell: crate::VM::VM_Backend::Generator_names::ShellMethods,
 }
 
 /// 第二阶段：chacha 簇 + 解码链 + 装配，返回最终目标源码。
@@ -233,6 +236,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         vault: mut vault,
         header_captures,
     } = x;
+    let mut shell = crate::VM::VM_Backend::Generator_names::ShellMethods::new(&mut rng);
     let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
     // CG 原为第一阶段块内 const，随代码原样搬迁重声明（同值同路径）。
     #[allow(dead_code)]
@@ -240,12 +244,18 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let mut block_chacha_setup = String::new();
         // ② 运行期指纹两股：动态指纹（地址/GC，非确定）只做等价形态选路；
         // 确定性指纹 hfix（改进 2）的值被折进根 K0 token 扭曲量——跳过指纹层
-        // 即失去全部密钥材料，层不再可整层略过。静态读者要读装配细节，仍须
-        // 先仿真宿主语义。
+        // 即失去全部密钥材料，层不再可整层略过。拆入外层兄弟方法 m_fp。
         let (fp_src, h_var) = crate::VM::VM_Backend::Generator_native::emit_fingerprint(&mut rng, Some(&mut vault));
-        block_chacha_setup.push_str(&fp_src);
         let (fix_src, fix_var, fix_val) = crate::VM::VM_Backend::Generator_kdf::emit_fix_fingerprint(&mut rng, Some(&mut vault));
-        block_chacha_setup.push_str(&fix_src);
+        let m_fp = shell.add(
+            &mut rng,
+            &[&kreg_n],
+            format!("{}{} return {},{}", fp_src, fix_src, h_var, fix_var),
+        );
+        block_chacha_setup.push_str(&format!(
+            "local {},{}={}; ",
+            h_var, fix_var, shell.call(&m_fp, &[&kreg_n])
+        ));
         // 第 2 项：形态选路的**运行期绑定**——同一逻辑功能发射两型逐位等价的实现，
         // 由宿主指纹 h 在运行期择一（三种择一写法随机轮抽，产物里看不到固定
         // if/表形态；静态读者也必须先仿真宿主语义才知道走哪支）。
@@ -288,10 +298,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 _ => format!("local {t}={{{a},{b}}}; {d}={t}[({h}%0X2)+0X1]; ", d = dst, a = a, b = b, h = h_var, t = rng.name()),
             }
         };
-        // ㉒① XOR 表构建（256×256）→ 双层数值游标机：外层扫行（8 态×32 行），
-        // 内层扫列（8 态×32 列）。经典双重 for 消失，只剩 while true + if G==K
-        // 的扁平化游走（行游标名固定 av，供内层文本引用；列表格名 rw 双字母
-        // 避开单字母遮蔽池）。每格里的位运算 while 是数据驱动的游标守卫，保留。
+        // ㉒① XOR 表构建（256×256）+ xor32 + rotl32 拆入外层兄弟方法 m_xt。
         let xor_walk = {
             use crate::VM::VM_Backend::Generator_util::{cursor_walk_static};
             let xt2 = xor_tbl_var.clone();
@@ -308,61 +315,60 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 inner = inner, xt = xt2, av = av);
             cursor_walk_static(&mut rng, None, out_off, 0, 255, 8, Some("av"), &outer_unit)
         };
-        block_chacha_setup.push_str(&format!(
-            "local {xt}={{}}; {walk} ",
-            xt = xor_tbl_var, walk = xor_walk
-        ));
-        // ⑤ 字节权 2^16/2^24 直接以数值字面量发射（xor32 内局部）。
         let (x16, x24) = (rng.name(), rng.name());
         let (x16v, x24v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
-        block_chacha_setup.push_str(&format!(
-            "local function {xor32}(a,b) local {p2}={p2v}; local {p3}={p3v}; local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/{p2})%256,math_floor(a/{p3})%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/{p2})%256,math_floor(b/{p3})%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*{p2}+{xt}[a4][b4]*{p3} end; ",
-            xor32 = fn_xor32, xt = xor_tbl_var,
-            p2 = x16, p3 = x24, p2v = x16v, p3v = x24v
-        ));
-        // ㉔ 2^32 模数直接发射数值字面量，不再生成可折叠差式。
         let mk_m = |_rng: &mut GenRng| -> String { "4294967296".to_string() };
         let (m_rot1, m_rot2) = (mk_m(&mut rng), mk_m(&mut rng));
-        block_chacha_setup.push_str(&format!(
-            "local function {rotl32}(x,n) local m=2^n; return ((x*m)%{m1})+math_floor(x/({m2}/m)) end; ",
+        let xt_body = format!(
+            "local {xt}={{}}; {walk} \
+             local function {xor32}(a,b) local {p2}={p2v}; local {p3}={p3v}; local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/{p2})%256,math_floor(a/{p3})%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/{p2})%256,math_floor(b/{p3})%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*{p2}+{xt}[a4][b4]*{p3} end; \
+             local function {rotl32}(x,n) local m=2^n; return ((x*m)%{m1})+math_floor(x/({m2}/m)) end; \
+             return {xt},{xor32},{rotl32}",
+            xt = xor_tbl_var, walk = xor_walk,
+            xor32 = fn_xor32, p2 = x16, p3 = x24, p2v = x16v, p3v = x24v,
             rotl32 = fn_rotl32, m1 = m_rot1, m2 = m_rot2
+        );
+        let m_xt = shell.add(&mut rng, &["math_floor"], xt_body);
+        block_chacha_setup.push_str(&format!(
+            "local {},{},{}={}; ",
+            xor_tbl_var, fn_xor32, fn_rotl32, shell.call(&m_xt, &["math_floor"])
         ));
-        // ㉔ quarter-round 形态池（0=教科书原版保留）+ 旋转常量直接输出数值字面量，
-        // 并随机化形参（单字母 s,a,b,c,d 即参考实现指纹）。
-        // 各臂输出与标准 QR 恒等（A+=B;D^=A;D=rot(D,16);C+=D;B^=C;B=rot(B,12);×2 变体）。
         let r_lit = |rng: &mut GenRng, v: u32| -> String { rng.format_num(v as i64) };
         let (qS, qA, qB, qC, qD) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let (r1e, r2e, r3e, r4e) = (r_lit(&mut rng, 16), r_lit(&mut rng, 12), r_lit(&mut rng, 8), r_lit(&mut rng, 7));
-        // 第 3 项 D：单根 K0 与 KDF 函数——四组的全部密钥材料都从这一份
-        // 根现算。根以 token 掩码形态落盘（X/掩码分表、槽位洗牌、运行期异或还原）；
-        // KDF 是纯算术（32 位异或实现 + 算术旋转 + 16 位拆乘），与 Rust 侧逐位同式。
-        // 位置：在 xor32/rotl32 定义之后（KDF 体引用这两个局部），且在各簇之前。
+        // 第 3 项 D：单根 K0 + KDF + 白化种子派生拆入外层兄弟方法 m_kdf。
         let (root_tok, root_fetch) = {
             let rt = crate::VM::VM_Backend::Generator_kdf::root_tokens(&mut rng, &keys, &enc.root, &h_var,
                 &fix_var, fix_val, fn_xor32.as_str());
-            block_chacha_setup.push_str(&rt.decl);
             let f: Vec<String> = (0..8).map(|i| rt.fetch[i].clone()).collect();
             (rt, f)
         };
-        // 根装配辅料（X/掩码/槽位表 + 异或实现）只在装配期用：装完即销毁；
-        // 值表本身必须常驻（各常量解码簇的流闭包以 upvalue 捕获它）
-        block_chacha_setup.push_str(&crate::VM::VM_Backend::Generator_kdf::dispose_stmt(&mut rng, &root_tok.aux));
+        let root_kw = root_tok.kw.clone();
+        let dispose_s = crate::VM::VM_Backend::Generator_kdf::dispose_stmt(&mut rng, &root_tok.aux);
         let kdf_name = rng.name();
         let kdf_m32v = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
-        block_chacha_setup.push_str(&crate::VM::VM_Backend::Generator_kdf::kdf_fn_decl(
-            &mut rng, &keys, kdf_name.as_str(), fn_xor32.as_str(), fn_rotl32.as_str(), kdf_m32v.as_str()));
-        // ㉛ 载荷白化种子：kdf(根字, 专用组号, 字序号) —— 与 Rust 侧
-        // `Generator::whiten_byte` 的 seed 同式同值。读者侧 read_dec 以
-        // (seed, 位置) 现算掩码字节，故产物里落不下任何白化参数：
-        // 要还原载荷结构，必须先装出根 K0（另一层）再复刻 KDF。
-        {
+        let kdf_decl = crate::VM::VM_Backend::Generator_kdf::kdf_fn_decl(
+            &mut rng, &keys, kdf_name.as_str(), fn_xor32.as_str(), fn_rotl32.as_str(), kdf_m32v.as_str());
+        let w_seed_stmt = {
             let wg = rng.obfuscate_num(crate::VM::VM_Backend::Generator::WHITEN_GROUP as i64, 1, &keys);
             let ww = rng.obfuscate_num(crate::VM::VM_Backend::Generator::WHITEN_WORD as i64, 1, &keys);
-            // 与 Rust 侧 `w % 2147483646 + 1` 同式：模 2^31-2 后 +1（避开 0 不动点）
             let wmod = rng.obfuscate_num(2147483646i64, 1, &keys);
             let seed = format!("{kdf}({root},{g},{w})", kdf = kdf_name, root = root_fetch[3], g = wg, w = ww);
-            block_chacha_setup.push_str(&format!("{wk}=({seed}%{m})+0X1; ", wk = var_whiten, seed = seed, m = wmod));
-        }
+            format!("local {wk}=({seed}%{m})+0X1; ", wk = var_whiten, seed = seed, m = wmod)
+        };
+        let m_kdf = shell.add(
+            &mut rng,
+            &[&keys.tbl_p, &h_var, &fix_var, &fn_xor32, &fn_rotl32],
+            format!(
+                "{}{}{}{}return {},{},{}",
+                root_tok.decl, dispose_s, kdf_decl, w_seed_stmt, root_kw, kdf_name, var_whiten
+            ),
+        );
+        block_chacha_setup.push_str(&format!(
+            "local {},{}; {},{},{}={}; ",
+            root_kw, kdf_name, root_kw, kdf_name, var_whiten,
+            shell.call(&m_kdf, &[&keys.tbl_p, &h_var, &fix_var, &fn_xor32, &fn_rotl32])
+        ));
         let m_qr1 = mk_m(&mut rng); let m_qr2 = mk_m(&mut rng);
         let x32 = fn_xor32.as_str(); let rt = fn_rotl32.as_str();
         let mk_qr = |rng: &mut GenRng,
@@ -443,7 +449,21 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             _ => format!("local {tv}={{[0X1]={n0},[0X2]={n1}}}; local {qr}={tv}[({h}%0X2)+0X1]; ",
                     qr = fn_qr, n0 = qn0, n1 = qn1, h = h_var, tv = rng.name()),
         };
-        block_chacha_setup.push_str(&format!("{}{}{}", qd0, qd1, qsel));
+        let (w_t0, w_t1, w_t2) = (
+            weld.tables[0].clone(),
+            weld.tables[1].clone(),
+            weld.tables[2].clone(),
+        );
+        let m_qr = shell.add(
+            &mut rng,
+            &[&h_var, &fn_xor32, &fn_rotl32, &w_t0, &w_t1, &w_t2],
+            format!("{}{}{} return {}", qd0, qd1, qsel, fn_qr),
+        );
+        block_chacha_setup.push_str(&format!(
+            "local {}={}; ",
+            fn_qr,
+            shell.call(&m_qr, &[&h_var, &fn_xor32, &fn_rotl32, &w_t0, &w_t1, &w_t2])
+        ));
         // ㉔ 调用矩阵去指纹：列组/对角组内洗牌（4 列互不相交、4 对角互不相交，
         // 组内换序恒等；组间顺序固定保 ChaCha 语义），8 元组改数据表驱动，
         // 元组成员与循环次数均直接写成数值字面量。
@@ -693,12 +713,35 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let (mode_stmt, sc_mode) = uni.fetch(&mut rng, hid_mode);
         let (k_stmt, sc_k) = uni.fetch(&mut rng, hid_k);
         let psn_pick = psn_pool[rng.range(0, psn_pool.len())].clone();
-                let block_dec_header = crate::VM::VM_Backend::Generator_flow::build_header(
+        let (hdr_m_body, hdr_wai_body) = crate::VM::VM_Backend::Generator_flow::build_header(
             &mut vault, &mut rng, &keys, fn_s_byte.as_str(), fn_s_sub.as_str(), var_raw_p.as_str(), payload_str.as_str(),
             var_vc.as_str(), var_p.as_str(), var_a2.as_str(), entry_func.as_str(), fn_a3.as_str(), x.as_str(),
             sc_fn_hdr.as_str(), sc_mode.as_str(), sc_k.as_str(), var_whiten.as_str(), var_whiten_pos.as_str(),
             native_type.as_str(), psn_pick.as_str());
-        let block_dec_header = format!("{fun_stmt}{mode_stmt}{k_stmt}") + &block_dec_header;
+        let (u_tbl, u_dec, u_kb) = (uni.tbl.clone(), uni.dec.clone(), uni.k_b.clone());
+        let v_pack_arg = rng.name();
+        let m_pack = shell.add(
+            &mut rng,
+            &[&v_pack_arg, &kreg_n, &u_tbl, &u_dec, &u_kb],
+            format!("{} return {}({})", block_decoder_script, entry_func, v_pack_arg),
+        );
+        let s_hdr = rng.name();
+        let d_hdr = rng.name();
+        let m_hdr = shell.add_self(
+            &mut rng,
+            &s_hdr,
+            &[&kreg_n, &u_tbl, &u_dec, &u_kb, &native_type, &keys.tbl_p, &fn_s_byte, &fn_s_sub],
+            format!(
+                "local function {}({}) return {}:{}({},{},{},{},{}) end; {}{}{}{}",
+                entry_func, d_hdr, s_hdr, m_pack, d_hdr, kreg_n, u_tbl, u_dec, u_kb,
+                fun_stmt, mode_stmt, k_stmt, hdr_m_body
+            ),
+        );
+        let hdr_call_expr = shell.call(
+            &m_hdr,
+            &[&kreg_n, &u_tbl, &u_dec, &u_kb, &native_type, &keys.tbl_p, &fn_s_byte, &fn_s_sub],
+        );
+        let block_dec_header = hdr_wai_body.replace("@HDR_CALL@", &hdr_call_expr);
         // ㉛ 白化参数（逐构建随机）的产物侧拼写——read_dec 内每字节现算掩码用
         let rng_whiten_mul_s = rng.obfuscate_num(whiten_mul as i64, 1, &keys);
         let rng_whiten_add_s = rng.obfuscate_num(whiten_add as i64, 1, &keys);
@@ -712,14 +755,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let (v_rd_c1, v_rd_c2, v_rd_c3, v_rd_c4, v_rd_c5) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
 
-        // 注意：产物里的 k1..k4 是固定局部名，模板里只能写裸标识符 k1 —— 写成 {k1}
-        // 会被 format! 隐式捕获抓走同名生成器变量（产物语法错）；
-        // 同理 Lua 的空表要写 {{}}，裸 {} 是位置参数占位符。
-        // 原形态：逐位比较累权重、n==0早返回右移、滚动密钥顺序赋值
-        // 现在：位异或写成 (xa+xb)%2 乘权重、右移用 256/2^n 代 2^(8-n) 去早返回
-        // 解密链拆 5 个中间变量、密钥演化换等价变形（-229 代 +27、
-        // (v-v%d)/d 代 floor、k2*2+k2 代 k2*3，包单次循环+影子计数器。
-        let block_dec_helpers = format!(
+        let dh_body = format!(
             "local function {bx}({a},{b}) local {r},{w},{g},{s}=0,1,0,0; \
              while {g}<({r}*0X2-{r})-({r}-0X1) do \
              if {a}<=0 and {b}<=0 then {g}={g}+1 else \
@@ -730,16 +766,27 @@ pub(super) fn build_chain(x: ChainIn) -> String {
              while {g}<({t}*0X2-{t})-({t}-0X1) do \
              {t}=(({x}*(256/{d}))%256)+(({x}-({x}%{d}))/{d}); {g}={g}+1; end; \
              return {t} end; \
-             {rd_scatter} ",
+             return {bx},{rt}",
             bx = fn_bxor, a = v_bx_a, b = v_bx_b, r = v_bx_r, w = v_bx_w, g = v_bx_g, s = v_bx_s,
-            rt = fn_b_rotr, x = v_rt_x, n = v_rt_n, d = v_rt_d, t = v_rt_t,
-rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
-                &mut rng, fn_bxor.as_str(), fn_b_rotr.as_str(), fn_read_dec.as_str(), fn_a3.as_str(),
-                &v_bx_a, &v_bx_b, &v_bx_r, &v_bx_w, &v_bx_g, &v_bx_s,
-                &v_rt_x, &v_rt_n, &v_rt_d, &v_rt_g, &v_rt_t,
-                &v_rd_o, &v_rd_g, &v_rd_e, &v_rd_c1, &v_rd_c2, &v_rd_c3, &v_rd_c4, &v_rd_c5,
-                sc_add, sc_rot_in, sc_add_k1, sc_mul_k2, sc_rot_k2, sc_rot_k4, var_whiten.as_str(),
-                &rng_whiten_mul_s, &rng_whiten_add_s, &var_whiten_pos, var_a2.as_str())
+            rt = fn_b_rotr, x = v_rt_x, n = v_rt_n, d = v_rt_d, t = v_rt_t
+        );
+        let m_dh = shell.add(&mut rng, &[], dh_body);
+        let rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
+            &mut rng, fn_bxor.as_str(), fn_b_rotr.as_str(), fn_read_dec.as_str(), fn_a3.as_str(),
+            &v_bx_a, &v_bx_b, &v_bx_r, &v_bx_w, &v_bx_g, &v_bx_s,
+            &v_rt_x, &v_rt_n, &v_rt_d, &v_rt_g, &v_rt_t,
+            &v_rd_o, &v_rd_g, &v_rd_e, &v_rd_c1, &v_rd_c2, &v_rd_c3, &v_rd_c4, &v_rd_c5,
+            sc_add, sc_rot_in, sc_add_k1, sc_mul_k2, sc_rot_k2, sc_rot_k4, var_whiten.as_str(),
+            &rng_whiten_mul_s, &rng_whiten_add_s, &var_whiten_pos, var_a2.as_str());
+        let block_dec_helpers = format!(
+            "local {bx}; local {rd}; do local {rt}; {bx},{rt}={call}; {scatter} ",
+            bx = fn_bxor,
+            rd = fn_read_dec,
+            rt = fn_b_rotr,
+            call = shell.call(&m_dh, &[]),
+            scatter = rd_scatter
+                .strip_prefix(&format!("local {}; do ", fn_read_dec))
+                .unwrap_or(&rd_scatter)
         );
         let (kt_name, pj_name) = (rng.name(), rng.name());
         let kc = crate::VM::VM_Backend::Generator_flow::build_k(&mut rng, kt_name.as_str());
@@ -748,15 +795,22 @@ rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
         let (v_rs_l, v_rs_t, v_rs_i) = (rng.name(), rng.name(), rng.name());
         let (v_a10_v, v_a10_h) = (rng.name(), rng.name());
 
-        // 原形态：for 循环按 1..4 读、再按固定顺序累加、权重全是十进制常量
-        // 现在：while + 显式自增下标、累加项顺序打乱（整数加法精确，顺序无影响）
-        // 权重换 2^8/2^16/2^24 与自减零初值、零长度短路、有符号转换改形
+        let u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
+            &mut rng, &keys, &kc, kt_name.as_str(), pj_name.as_str(), fn_bxor.as_str(),
+            fn_u32_dec.as_str(), fn_a5.as_str(), fn_read_string.as_str(), fn_read_dec.as_str(), fn_a10.as_str(),
+            &v_u32_t, &v_u32_n, &v_u32_i, &v_u32_v, &v_rs_l, &v_a10_v, &v_a10_h);
+        let m_dr = shell.add(
+            &mut rng,
+            &[&keys.tbl_p, &fn_bxor, &fn_read_dec, "string_char", "table_concat"],
+            format!(
+                "{} return {},{},{},{},{},{}",
+                u32_family, fn_u32_dec, fn_a5, fn_read_string, fn_a10, kt_name, pj_name
+            ),
+        );
         let block_dec_readers = format!(
-            "{u32_family} ",
-u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
-                &mut rng, &keys, &kc, kt_name.as_str(), pj_name.as_str(), fn_bxor.as_str(),
-                fn_u32_dec.as_str(), fn_a5.as_str(), fn_read_string.as_str(), fn_read_dec.as_str(), fn_a10.as_str(),
-                &v_u32_t, &v_u32_n, &v_u32_i, &v_u32_v, &v_rs_l, &v_a10_v, &v_a10_h)
+            "local {},{},{},{},{},{}={}; ",
+            fn_u32_dec, fn_a5, fn_read_string, fn_a10, kt_name, pj_name,
+            shell.call(&m_dr, &[&keys.tbl_p, &fn_bxor, &fn_read_dec, "string_char", "table_concat"])
         );
         
         // ⑰ 旧统一 dec_num/dec_str 已由四组簇内专属解码器取代。
@@ -862,6 +916,8 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
         let mid = ChainMid {
             x: x_repacked,
             h_var,
+            fix_var,
+            root_kw,
             block_chacha_setup,
             ds_names,
             dn_names,
@@ -875,6 +931,7 @@ u32_family = crate::VM::VM_Backend::Generator_flow::build_readers(
             block_dec_header,
             block_dec_helpers,
             block_dec_readers,
+            shell,
         };
         super::Generator_chain_tail::build_chain_tail(mid)
 }

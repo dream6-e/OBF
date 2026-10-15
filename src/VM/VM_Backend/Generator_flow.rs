@@ -181,11 +181,11 @@ pub fn build_scatter(
     );
 
     lua.push_str(&format!(
-        "local function {rd}() local {out}=0; {open}local {raw}={a3}(); {pos}={cursor}-0X1; {chain}{whiten}{upds}{fake}{inc}{close}return {out} end; ",
+        "{rd}=function() local {out}=0; {open}local {raw}={a3}(); {pos}={cursor}-0X1; {chain}{whiten}{upds}{fake}{inc}{close}return {out} end; end; ",
         rd=fn_read_dec,out=v_rd_o,open=open,raw=v_rd_e,a3=fn_a3,pos=var_pos,cursor=var_cursor,
         chain=chain,whiten=whiten_step,upds=upds,fake=fake,inc=inc,close=close));
     let _ = (v_bx_a,v_bx_b,v_bx_r,v_bx_w,v_bx_g,v_bx_s,v_rt_x,v_rt_n,v_rt_d,v_rt_g,v_rt_t,v_rd_g);
-    lua
+    format!("local {}; do {}", fn_read_dec, lua)
 }
 
 /// 读取族（u32/a5/rS/a10）状态梯子：形态③④⑤ + ⑥ for 区间跳转 + ⑬ 包裹索引
@@ -813,7 +813,8 @@ lua.push_str(&format!(
                 (lua, agg_field)
 }
 
-/// 解头（防篡改探针+入口解密装配）—— 自 Generator.rs 拆出
+/// 解头（防篡改探针+入口解密装配）—— 自 Generator.rs 拆出。
+/// 返回 `(外层兄弟方法 m_hdr 的函数体, wai 内的解头调用与游标读取函数声明)`。
 #[allow(clippy::too_many_arguments)]
 pub fn build_header(
     vault: &mut crate::VM::VM_Backend::Generator_names::NameVault,
@@ -821,43 +822,44 @@ pub fn build_header(
     payload_str: &str, var_vc: &str, var_p: &str, var_a2: &str, entry_func: &str, fn_a3: &str, x: &str,
     fn_lit: &str, mode_lit: &str, k_lit: &str, var_whiten: &str, var_whiten_pos: &str,
     native_type: &str, psn: &str,
-) -> String {
+) -> (String, String) {
     // ㉜ 探针/弱表 API 名改走 NB 槽
     let v_pcall = vault.global("pcall");
     let v_tostring = vault.global("tostring");
     let v_sbyte = vault.member("string", "byte");
     let v_setmeta = vault.global("setmetatable");
-    // ㉓-D 去 KRYVEX 包裹标记后，载荷从第 1 字节开始读取。
-    let mut lua = format!(
-        "local {byte},{sub}={byte_name},{sub_name}; local {raw}=([=[{payload}]=]); ",
-        byte = fn_s_byte, sub = fn_s_sub, raw = var_raw_p, payload = payload_str,
-        byte_name = "string_byte", sub_name = "string_sub"
-    );
-
     // 旧版的累加循环彼此抵消，并未核对载荷；仅保留有意义的 API 类型探针。
     // 探针以运行期局部对象地址派生采样位，不消耗用户的 math.random 状态。
     let (gate_ok, gate_bit, gate_a, gate_b, gate_s, gate_h, gate_i) =
         (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
     let (type_ok, type_result) = (rng.name(), rng.name());
     let gate_seed = rng.range64(0x1000, 0x7FFF_FF00);
-    lua.push_str(&format!(
-        "local {ok},{bit}={pc}(function() local {a},{b}={{}},{{}}; local {s}={ts}({a})..{ts}({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+{sb}({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
-         local {tok},{tr}={pc}(function() return {nt}({byte})=={fn_lit} end); {psn}={psn} or ({ok} and {bit}==0X0 and {tok} and not {tr}); ",
+    let start = rng.obfuscate_num(1i64, 1, keys);
+    let one = rng.obfuscate_num(1i64, 1, keys);
+    let hdr_m = format!(
+        "local {raw}=([=[{payload}]=]); \
+         local {ok},{bit}={pc}(function() local {a},{b}={{}},{{}}; local {s}={ts}({a})..{ts}({b}); local {h}=0X{seed:X}; for {i}=1,#{s} do {h}=({h}*0X21+{sb}({s},{i}))%0X7FFFFF01 end; return {h}%0X2 end); \
+         local {tok},{tr}={pc}(function() return {nt}({byte})=={fn_lit} end); \
+         local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; \
+         return {entry}({sub}({raw},{start})), {sm}({{}},mt_vc), ({ok} and {bit}==0X0 and {tok} and not {tr})",
+        raw = var_raw_p, payload = payload_str,
         ok = gate_ok, bit = gate_bit, a = gate_a, b = gate_b, s = gate_s, h = gate_h, i = gate_i,
-        seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, nt = native_type, psn = psn,
-        pc = v_pcall, ts = v_tostring, sb = v_sbyte
-    ));
-    lua.push_str(&format!(
-        "local mt_vc={{}}; mt_vc[{mode_lit}]={k_lit}; {vc}={sm}({{}},mt_vc); \
-         local {p},{a2}={entry}({sub}({raw},{start})),{one}; \
+        seed = gate_seed, tok = type_ok, tr = type_result, byte = fn_s_byte, fn_lit = fn_lit, nt = native_type,
+        pc = v_pcall, ts = v_tostring, sb = v_sbyte,
+        mode_lit = mode_lit, k_lit = k_lit, sm = v_setmeta,
+        entry = entry_func, sub = fn_s_sub, start = start
+    );
+    let bad_v = rng.name();
+    let hdr_wai = format!(
+        "local {byte},{sub}={byte_name},{sub_name}; local {p},{a2}=nil,{one}; \
+         do local {bad}; {p},{vc},{bad}=@HDR_CALL@; {psn}={psn} or {bad} end; \
          local function {a3}() local {x}={byte}({p},{a2},{a2}); {a2}={a2}+{one}; return {x} end; \
          local k1,k2,k3,k4={a3}(),{a3}(),{a3}(),{a3}(); local {wk}=0X0; local {wp}=0X4; ",
-        mode_lit = mode_lit, k_lit = k_lit, vc = var_vc, sm = v_setmeta,
-        p = var_p, a2 = var_a2, entry = entry_func, sub = fn_s_sub, raw = var_raw_p,
-        start = rng.obfuscate_num(1i64, 1, keys), one = rng.obfuscate_num(1i64, 1, keys),
-        a3 = fn_a3, x = x, byte = fn_s_byte, wk = var_whiten, wp = var_whiten_pos
-    ));
-    lua
+        byte = fn_s_byte, sub = fn_s_sub, byte_name = "string_byte", sub_name = "string_sub",
+        p = var_p, a2 = var_a2, one = one, bad = bad_v, vc = var_vc, psn = psn,
+        a3 = fn_a3, x = x, wk = var_whiten, wp = var_whiten_pos
+    );
+    (hdr_m, hdr_wai)
 }
 
 /// 数值解码器（ChaCha 链式解密后按 IEEE-754 还原 double）—— 拆出。

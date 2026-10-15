@@ -334,22 +334,23 @@ impl Generator {
         let var_state_flag = rng.name();
         let wai = rng.name();
         let mut header_block = String::new();
-        header_block.push_str(&format!("return ({{ {} = function(agv,aggv,agv,agv,agv,aggv,agv,agv,aggv,aggv,aggv,agggv,agggv,agggv,agggv,aggv,{},{},{},{}, ...)\n", wai, p_out[0], p_out[1], p_out[2], p_out[3]));
-        // ㉘D1 头部两行声明换位（互无依赖）：位库 fallback 先、状态旗后
-        // ㉜ select 捕获推迟到 NB 之后（header_captures）；var_fU 位库捕获无消费点，退役。
-        header_block.push_str(&format!("local {} = {{}}; ", var_s));
-        header_block.push_str(&format!("local {} = false; ", var_state_flag));
+        header_block.push_str(&format!("local {} = {{}}; local {} = false; ", var_s, var_state_flag));
         let header_captures = format!(
             "local {} = function(q, s, M, C) s[{}] = {}; end; {}(nil, {}, nil, nil); ",
             fn_N_, hex_select_idx, vault.global("select"), fn_N_, var_s);
-        // 冷块状态校验的单向摘要（每产物一次）：产物只留摘要+每块独立 salt。
+        // 冷块状态校验的单向摘要（每产物一次）：拆入外层兄弟方法 m_digest。
         let fn_state_digest = rng.name();
         let sbox_state = rng.name();
         let mut sbox_vals: [u32; 256] = [0; 256];
         for v in sbox_vals.iter_mut() {
             *v = rng.range64(0, 0xFFFF_FFFF) as u32;
         }
-        header_block.push_str(&emit_state_digest(&sbox_state, &fn_state_digest, &sbox_vals));
+        header_block.push_str(&format!(
+            "local {}; @DIGEST@{} return {}",
+            fn_state_digest,
+            emit_state_digest(&sbox_state, &fn_state_digest, &sbox_vals),
+            fn_state_digest
+        ));
         
         // 8 个下标必须互不相同（撞车会让辅助表槽位互相覆盖），见 GenRng
         let idx = rng.distinct(8, 0x10, 0x7F);
@@ -397,6 +398,7 @@ impl Generator {
         );
         block_p_def.push_str(&tbl_def);
         block_p_def.push_str(&crate::VM::VM_Backend::Generator_kdf::emit_transport_slots(&mut rng, &keys, &fn_bx));
+        block_p_def.push_str(&format!(" @PDEF@{},{}", keys.tbl_p, fn_bxor2));
 
         // ㉜ vm_core 模板的库访问点收进 NB 槽（替换体在 Generator_names.rs）
         let block_vm_core = crate::VM::VM_Backend::Generator_names::vaultify_vm_core(
@@ -880,30 +882,10 @@ impl Generator {
         block_methods.push_str(&crate::VM::VM_Backend::Generator_names::emit_natives_capture(
             &mut rng, &mut uni, &mut vault, &native_tonumber, &native_error,
             &native_getfenv, &native_setfenv, &closure_env_registry));
-        // ㉓ 统一流取用：惰性解密语句+纯数字密文，替换原池调用
-        let (hash_stmt, hash_expr) = {
-            let id = uni.register("#");
-            uni.fetch(&mut rng, id)
-        };
-        block_methods.push_str(&hash_stmt);
-        block_methods.push_str(&format!("local {} = function(...) return {}[{}]({}, ...) end; ", var_get_count, var_s, hex_select_idx, hash_expr));
         let var_unpack = rng.name();
-        block_methods.push_str(&format!("local {}, zm = {} or function() end, function(...) return {{{}={}(...),...}} end; ", var_unpack, vault.unpack(), pf_vn, var_get_count));
-        let shard_names = method_shards.join(",");
-        let shard_tables = vec!["{}"; method_shard_count].join(",");
-        block_methods.push_str(&format!("local {}={};local {}={{}};", shard_names, shard_tables, var_proto));
-        for d in defs.iter() { block_methods.push_str(&rename_ident(d, "unpack", &var_unpack)); block_methods.push(' '); }
-        let (idx_stmt, idx_expr) = {
-            let id = uni.register("__index");
-            uni.fetch(&mut rng, id)
-        };
-        block_methods.push_str(&idx_stmt);
-        let mut method_order: Vec<usize> = (0..method_shard_count).collect();
-        rng.shuffle(&mut method_order);
-        for pair in method_order.windows(2) {
-            block_methods.push_str(&format!("{}({},{{[{}]={}}});", native_smeta, method_shards[pair[0]], idx_expr, method_shards[pair[1]]));
-        }
-        block_methods.push_str(&format!("{}[{}]={};", var_proto, idx_expr, method_shards[method_order[0]]));
+        block_methods.push_str(&crate::VM::VM_Backend::Generator_names::emit_methods_wire(
+            &mut rng, &mut uni, &mut vault, &var_get_count, &var_s, &hex_select_idx,
+            &pf_vn, &var_unpack, &method_shards, &var_proto, &defs, &native_smeta, rename_ident));
 
         block_execute_def.push_str(&format!(
             "{} = function(chunk, env, upvals, {}, {}, ...) ",

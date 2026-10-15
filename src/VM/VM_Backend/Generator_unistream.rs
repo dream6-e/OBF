@@ -13,7 +13,7 @@ pub struct UniStream {
     pub tbl: String,
     pub dec: String,
     // ㉓.2 高频数字（256/模数）提升为壳内局部常量，取用点只引名字
-    k_b: String, k_m: String,
+    pub k_b: String, k_m: String,
     seed: u64, d_mul: u64, d_rounds: u64,
     // 原生流（Native Stream）内核：参数 + 种子表 + 运行期 S-box 的 Rust 镜像
     nat: crate::VM::VM_Backend::Generator_native::Native,

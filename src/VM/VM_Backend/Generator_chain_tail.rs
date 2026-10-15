@@ -10,6 +10,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
     let ChainMid {
         x,
         h_var,
+        fix_var,
+        root_kw,
         block_chacha_setup,
         ds_names,
         dn_names,
@@ -23,6 +25,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         block_dec_header,
         block_dec_helpers,
         block_dec_readers,
+        shell: mut shell,
     } = mid;
     let ChainIn {
         rng: mut rng, global_names, gn_key, at: mut at, keys, enc,
@@ -451,7 +454,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 format!("do {} end;", body)
             } else {
                 format!(
-                    "local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sb}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then {body} end;",
+                    "do local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sb}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then {body} end end;",
                     go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi,
                     pc = v_lg_pc, ts = v_lg_ts, sb = v_lg_sb,
                     seed = gate_seed, body = body
@@ -485,13 +488,62 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             chain = chain
         );
 
+        let (pdef_body, pdef_exports) = block_p_def
+            .split_once(" @PDEF@")
+            .expect("block_p_def must contain @PDEF@");
+        let pdef_exports = pdef_exports.trim().to_string();
+        let fn_bxor2 = pdef_exports
+            .split(',')
+            .nth(1)
+            .expect("pdef_exports has fn_bxor2")
+            .trim()
+            .to_string();
+        let m_pdef = shell.add(
+            &mut rng,
+            &[&kreg_n],
+            format!("{} return {}", pdef_body, pdef_exports),
+        );
+        let block_p_def = format!(
+            "local {}={}; ",
+            pdef_exports,
+            shell.call(&m_pdef, &[&kreg_n])
+        );
+
+        let m_vmcore = shell.add(&mut rng, &[&kreg_n], block_vm_core);
+        let block_vm_core = format!("{}; ", shell.call(&m_vmcore, &[&kreg_n]));
+
+        let exec_marker = format!("{} = function(", fn_execute);
+        let block_execute_def = if let Some(pos) = block_execute_def.find(&exec_marker) {
+            let prefix = &block_execute_def[..pos];
+            let rest = &block_execute_def[pos..];
+            let dc_var = prefix
+                .trim_start()
+                .strip_prefix("local ")
+                .and_then(|s| s.split('=').next())
+                .unwrap()
+                .trim()
+                .to_string();
+            let m_dc = shell.add(
+                &mut rng,
+                &[&fn_bxor2, &kreg_n],
+                format!("{} return {}", prefix, dc_var),
+            );
+            format!(
+                "local {}={}; {}",
+                dc_var,
+                shell.call(&m_dc, &[&fn_bxor2, &kreg_n]),
+                rest
+            )
+        } else {
+            block_execute_def
+        };
+
         let mut parts = vec![
             block_p_def,
             block_methods,
             block_vm_core,
             block_packer_vars,
             block_execute_def,
-            block_decoder_script,
             block_dec_header,
             block_dec_helpers,
             block_dec_readers,
@@ -502,12 +554,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             block_dec_chunk,
         ];
 
-        // 外部 API 名 handle 映射（GlobalHandles pass 的产物侧）：字节码里只剩数字
-        // handle，名字进独立保险库——复用单根 KDF（独立组号），每次取用现解、
-        // 不落任何明文缓存（与主池惰性解码同律）。
-        // 位置：必须紧跟 block_chacha_setup 之后——解码器体引用其中声明的
-        // xor32/kdf/根 token 取用表达式（词序在后即未声明）。取用侧（GETGLOBAL/
-        // SETGLOBAL handler）经 kreg 注册表运行期查表，与声明位置解耦。
+        // 外部 API 名 handle 映射（GlobalHandles pass 的产物侧）：拆入外层兄弟方法 m_gn。
         if !global_names.is_empty() {
             let gr_gn = rng.range(0x0300, 0xFFFF) as u32;
             let rk = rng.range(0, 8);
@@ -539,9 +586,21 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 bx = fn_bxor, kdf = kdf_name, root = root_fetch[rk], g = gr_gn, w0 = w0,
                 kreg = kreg_n, key = gn_key
             );
+            let m_gn = shell.add(
+                &mut rng,
+                &[&kreg_n, &keys.tbl_p, &fn_bxor, &kdf_name, &root_kw, &fix_var, &fn_xor32, "string_char", "table_concat"],
+                gn_part,
+            );
+            let gn_call = format!(
+                "{}; ",
+                shell.call(
+                    &m_gn,
+                    &[&kreg_n, &keys.tbl_p, &fn_bxor, &kdf_name, &root_kw, &fix_var, &fn_xor32, "string_char", "table_concat"],
+                )
+            );
             // block_chacha_setup 在 vec 里按内容定位（其声明带 xor32/kdf/根 token）
             let chacha_pos = parts.iter().position(|p| *p == block_chacha_setup);
-            parts.insert(chacha_pos.map(|p| p + 1).unwrap_or(parts.len()), gn_part);
+            parts.insert(chacha_pos.map(|p| p + 1).unwrap_or(parts.len()), gn_call);
         }
 
         {
@@ -558,26 +617,44 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             parts.insert(gap_idx, guard);
         }
 
-        let mut out = String::new();
-        // 顶层只留「捕获 ...」这一条：投毒旗/type/pairs 三条声明按用户指示搬进 return({}) 壳，
-        // 落在 wai 函数体开头（wai 是唯一真正用它们的闭包，见下方 fu 只自带 type）。
-        // 物理行数不变（仍是 3 行），行完整性探针的目标行号不受影响。
-        out.push_str(&format!("local {} = ...;\n", var_l));
-        out.push_str(&header_block);
-        for pf_ in &psn_pool { out.push_str(&format!("local {}=false; ", pf_)); }
-        // ㉜ type/pairs 捕获推迟到 NB 建表之后（原 `local X=type; local Y=pairs;`）
-        // ㉓ 统一流前导（表+惰性解码器）：直接落在主 return({}) 壳内——header_block
-        // 打开的 wai 函数体开头（用户指示，不另起壳）；壳内所有取用点（守卫/散点/
-        // 打乱 parts/解码脚本）都在其后，解码脚本以 upvalue 捕获。fu 是兄弟字段且在
-        // wai 之前执行，其守卫的型别填充改用自足 string.char 数字拼装（见 line_guard）。
-        out.push_str(&uni.emit_prelude(&mut rng));
+        let mut wai_body = String::new();
+        let (hdr_pre, digest_body) = header_block
+            .split_once("@DIGEST@")
+            .expect("header_block must contain @DIGEST@");
+        let var_s_name = hdr_pre
+            .trim_start()
+            .strip_prefix("local ")
+            .and_then(|s| s.split('=').next())
+            .unwrap()
+            .trim()
+            .to_string();
+        let fn_digest_name = digest_body
+            .rsplit_once("return ")
+            .map(|(_, n)| n.trim().to_string())
+            .unwrap();
+        let m_digest = shell.add(&mut rng, &[], digest_body.to_string());
+        wai_body.push_str(&format!(
+            "{}{}={}; ",
+            hdr_pre,
+            fn_digest_name,
+            shell.call(&m_digest, &[])
+        ));
+        for pf_ in &psn_pool { wai_body.push_str(&format!("local {}=false; ", pf_)); }
+        // ㉓ 统一流前导拆入外层兄弟方法 m_uni，同时补上 uni.tbl 的 local 声明。
+        let (u_tbl, u_dec, u_kb) = (uni.tbl.clone(), uni.dec.clone(), uni.k_b.clone());
+        let uni_pre = uni.emit_prelude(&mut rng);
+        let m_uni = shell.add(
+            &mut rng,
+            &[],
+            format!("local {}; {} return {},{},{}", u_tbl, uni_pre, u_tbl, u_dec, u_kb),
+        );
+        wai_body.push_str(&format!(
+            "local {},{},{}={}; ",
+            u_tbl, u_dec, u_kb, shell.call(&m_uni, &[])
+        ));
         // ㉑ 保守版明文窗口：NP(原型数)/MD(=C.pr 别名)/TH(thunk 快照)/tw(回收水位)
         // 必须在 execute 定义（parts）之前声明，execute 内才能捕获为 upvalue
-        // ㉘D1 六件套声明形式打乱：名字-初值配对后洗牌发射；共享 poison 在外围先声明。
         {
-            // 注意：此处早于 block_p_def（键表），不能用 obfuscate_num 的键表形态，
-            // 只用纯算式零（大写十六进制）。㉚④：零用 x%x 恒零——不再用
-            // (x-x) 同字面量自抵消形态
             let zk = rng.range(0x100, 0xFFFFF);
             let z_rk = format!("(0X{:X}%0X{:X})", zk, zk);
             let mut decls: Vec<(String, String)> = vec![
@@ -586,15 +663,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 (th21.clone(), "{}".to_string()),
                 (tw21.clone(), "0X0".to_string()),
                 (rk21.clone(), z_rk),
-                (kreg_n.clone(), "{}".to_string()), // ㉜ 弱键元表由 NB 建表时补（setmetatable 不落明文）
+                (kreg_n.clone(), "{}".to_string()),
             ];
             rng.shuffle(&mut decls);
             let names: Vec<String> = decls.iter().map(|(n, _)| n.clone()).collect();
             let vals: Vec<String> = decls.iter().map(|(_, v)| v.clone()).collect();
-            out.push_str(&format!("local {}={}; ", names.join(","), vals.join(",")));
+            wai_body.push_str(&format!("local {}={}; ", names.join(","), vals.join(",")));
         }
-        // ㉜ chain_tail 所需 NB 槽表达式必须**先于 build 登记**（建表只装配此前
-        // 登记过的条目；建表后再请求的槽在产物里恒为 nil）。
+        // ㉜ chain_tail 所需 NB 槽表达式必须**先于 build 登记**。
         let v_type = vault.global("type");
         let v_pairs = vault.global("pairs");
         let v_tostring = vault.global("tostring");
@@ -605,42 +681,83 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let v_ssub = vault.member("string", "sub");
         let v_tconcat = vault.member("table", "concat");
         {
-            // ㉜ NB 建表 IIFE：uni prelude 与 kreg 声明之后、一切消费点之前；
-            // 顺带给 kreg 补 __mode='k' 弱键元表（原预声明处的 setmetatable 明文退役）。
-            out.push_str(&vault.build(&mut rng, &mut uni, Some(&kreg_n)));
-            // 头部 select 捕获与 type/pairs 捕获在 NB 之后落地（消费点全在 parts 里，词法安全）
-            out.push_str(&header_captures);
-            out.push_str(&format!("local {}={}; local {}={}; ", native_type, v_type, native_pairs, v_pairs));
-            // 复用 kreg 的私有槽，避免新增 Lua upvalue；地址哈希提供每次启动的小幅抖动，
-            // 不读取或消费 math.random。失败后先让 VM 继续一段随机指令数，再启用扰动。
+            // ㉜ NB 建表 + header_captures + 毒化延迟写拆入外层兄弟方法 m_vault。
+            let nb_build = vault.build(&mut rng, &mut uni, Some(&kreg_n));
             let poison_delay_seed = rng.range(32, 80);
-            out.push_str(&format!(
+            let delay_init = format!(
                 "{tab}[0X{key:X}]={seed}+(function()local s={ts}({tab});local h=0;for i=1,#s do h=(h*33+{sb}(s,i))%17 end;return h end)(); ",
                 tab = kreg_n, key = poison_delay_key, seed = poison_delay_seed,
                 ts = v_tostring, sb = v_sbyte
+            );
+            let m_vault = shell.add(
+                &mut rng,
+                &[&kreg_n, &u_tbl, &u_dec, &u_kb, &var_s_name],
+                format!("{}{}{}return {},{}", nb_build, header_captures, delay_init, v_type, v_pairs),
+            );
+            wai_body.push_str(&format!(
+                "local {},{}={}; ",
+                native_type,
+                native_pairs,
+                shell.call(&m_vault, &[&kreg_n, &u_tbl, &u_dec, &u_kb, &var_s_name])
             ));
         }
-        // ㉒② 焊接缓存表声明：长时状态只剩槽号；此后各站点以「一个 if 三件事」
-        // 形态（惰性缓存+随机大数键）发射焊接构造。
-        out.push_str(&weld.declare());
-        // ⑳.4 守卫必须在 return 壳内（用户指示）：三处采样全部作为壳方法体的
-        // 开头/缝隙语句，行 2 头部只留 local L=... 和 return({——壳外零检测代码
-        out.push_str(&line_guard(&mut rng, &mut uni, false));
-        // ④ 槽位键的运行期推导块必须在所有用键代码之前；
-        // finish_setup 把状态链种子/陷阱门等收尾语句并进 setup（在全部注册后调用）
-        out.push_str(&sk_setup);
-        at.finish_setup();
-        out.push_str(&at.setup);
-        // ㉘D1 key_seed 初值零改算式形态（此处早于键表；㉚④：x%x 恒零，
-        // 不再用同字面量自抵消）
+        wai_body.push_str(&weld.declare());
+        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
+        // ④ 槽位键的运行期推导游标机拆入外层兄弟方法 m_sk，wai 内用 do...end 解包 28 个键。
         {
-            let zk2 = rng.range(0x100, 0xFFFFF);
-            out.push_str(&format!(" local {} = (0X{:X}%0X{:X}); ", key_seed_var, zk2, zk2));
+            let (sk_walk_part, sk_bind_part) = sk_setup
+                .rsplit_once("local ")
+                .expect("sk_setup has local bindings");
+            let sk_arr_name = sk_walk_part
+                .split(";local ")
+                .nth(1)
+                .and_then(|s| s.split('=').next())
+                .unwrap()
+                .trim()
+                .to_string();
+            let (sk_names_str, sk_picks_str) = sk_bind_part
+                .trim()
+                .trim_end_matches(';')
+                .split_once('=')
+                .unwrap();
+            let m_sk = shell.add(
+                &mut rng,
+                &[],
+                format!("{} return {}", sk_walk_part, sk_arr_name),
+            );
+            wai_body.push_str(&format!(
+                "local {}; do local {}={}; {}={} end; ",
+                sk_names_str,
+                sk_arr_name,
+                shell.call(&m_sk, &[]),
+                sk_names_str,
+                sk_picks_str
+            ));
         }
-        out.push_str(" ");
-        // A 解码器前奏打散：五件套改从 NB 槽直取（㉜）——原「随机键库表 + .m/["m"]
-        // 混用访问」退役（[km]=math 与 .floor 都是明文面）；五个 local 名字-初值
-        // 配对后洗牌，单条多赋值发射；后续模板仍引用同名局部，语义不变
+        // AntiTamper 初始化拆入外层兄弟方法 m_at。
+        at.finish_setup();
+        let [at_env, at_dec, at_res, at_net, at_state, at_st] = at.exports.clone();
+        {
+            let at_psn_fn = rng.name();
+            let at_setup_body = at.setup.replace(
+                &format!("{}=true", at.poison_var),
+                &format!("{}()", at_psn_fn),
+            );
+            let m_at = shell.add(
+                &mut rng,
+                &[&kreg_n, &at_psn_fn],
+                format!(
+                    "{} return {},{},{},{},{},{}",
+                    at_setup_body, at_env, at_dec, at_res, at_net, at_state, at_st
+                ),
+            );
+            wai_body.push_str(&format!(
+                "local {},{},{},{},{},{}={}:{}({},function() {}=true end); ",
+                at_env, at_dec, at_res, at_net, at_state, at_st,
+                shell.self_var, m_at, kreg_n, at.poison_var
+            ));
+        }
+        // A 解码器前奏打散：五件套改从 NB 槽直取（㉜）
         {
             let mut members = vec![
                 ("math_floor".to_string(), v_mfloor.clone()),
@@ -650,47 +767,77 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 ("table_concat".to_string(), v_tconcat.clone()),
             ];
             rng.shuffle(&mut members);
-            // local 声明语法＝先名列后统一 `=`（逐名初始化不是合法 Lua）
             let mnames: Vec<&str> = members.iter().map(|(n, _)| n.as_str()).collect();
             let mexprs: Vec<String> = members.iter().map(|(_, e)| e.clone()).collect();
-            out.push_str(&format!("local {}={}; ", mnames.join(","), mexprs.join(",")));
+            wai_body.push_str(&format!("local {}={}; ", mnames.join(","), mexprs.join(",")));
         }
 
         for part in parts {
-            out.push_str(&part);
-            out.push_str(" ");
+            wai_body.push_str(&part);
+            wai_body.push_str(" ");
         }
 
-        out.push_str(&line_guard(&mut rng, &mut uni, false));
-        // ㉘D7 尾部形式改写：空的兼容 registry 与当前环境捕获前移到解码之前；
-        // 解码调用包一层函数边界，打破「解码→触发→取环境」的平铺调用链形态。全局名已走普通常量。
-        // ㉜ boot_env 尾部现求值：getfenv 走 NB 槽（执行环境可能被守卫改过，不吃 NB boot 快照）
-        let var_boot_gf = rng.name();
-        out.push_str(&format!("{}={{}}; local {}=(function() local {}={} return ({} and {}()) or _ENV or _G end)(); ",
-            var_builtin_reg, var_boot_env, var_boot_gf, v_boot_gf, var_boot_gf, var_boot_gf));
-        out.push_str(&format!("local main_chunk=(function() return {}() end)(); ", fn_decode_chunk));
-        out.push_str(&at.trigger);
-        // ㉑ thunk 快照：密文 thunk 常驻，明文可随时写回回收
-        // ㉒① thunk 快照环 → 动态分段游标机（上界=运行期原型数，P 表在作用域）。
+        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
+        wai_body.push_str(&format!(
+            "{}={{}}; local main_chunk=(function() return {}() end)(); ",
+            var_builtin_reg, fn_decode_chunk
+        ));
+        // 尾部 at.trigger + thunk_walk + boot_env 求值拆入外层兄弟方法 m_tail。
         let thunk_walk = {
             let (th2, md2) = (th21.clone(), md21.clone());
             let off = rng.range(0, 100);
             let unit = |iv: &str| format!("{th}[{iv}]={md}[{iv}]; ", th = th2, md = md2, iv = iv);
             crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &np21, 2, 3, &unit)
         };
-        out.push_str(&thunk_walk);
+        {
+            let tail_psn_fn = rng.name();
+            let zk2 = rng.range(0x100, 0xFFFFF);
+            let at_trig_body = at.trigger.replace(
+                &format!("{}=true", at.poison_var),
+                &format!("{}()", tail_psn_fn),
+            );
+            let var_boot_gf = rng.name();
+            let tail_body = format!(
+                "local {}=(0X{:X}%0X{:X}); {} {} local {}={}; return ({} and {}()) or _ENV or _G",
+                key_seed_var, zk2, zk2, at_trig_body, thunk_walk,
+                var_boot_gf, v_boot_gf, var_boot_gf, var_boot_gf
+            );
+            let m_tail = shell.add(
+                &mut rng,
+                &[&at_net, &at_st, &kreg_n, &th21, &md21, &np21, &keys.tbl_p, &tail_psn_fn],
+                tail_body,
+            );
+            wai_body.push_str(&format!(
+                "local {}={}:{}({},{},{},{},{},{},{},function() {}=true end); ",
+                var_boot_env, shell.self_var, m_tail,
+                at_net, at_st, kreg_n, th21, md21, np21, keys.tbl_p, at.poison_var
+            ));
+        }
         let fu = rng.name();
-        
-        // ⑳.5 尾部探针：此前最后一个采样点在 parts 之后——main_chunk 解码/
-        // thunk 快照/return 壳整段是"探针之下"的插入盲区（用户实测 print 插行未检出）。
-        // 紧贴 return 再布一枚，把盲区压缩到 return 语句本身；⑤ fu 壳内最后一针
-        // 封住 return 壳表达式内的语句缝隙。二者均在行 2 内，针式 :2: 一致。
-        out.push_str(&line_guard(&mut rng, &mut uni, false));
-        out.push_str(&line_guard(&mut rng, &mut uni, false));
-        out.push_str(" ");
-        // fu 是壳内 wai 的兄弟字段（顶层已无 type 局部）：自带给守卫用的 type 捕获，
-        // 投毒旗只在 wai 体内读写，不再需要兄弟共享作用域。
-        out.push_str(&format!("return {}(main_chunk, {}, {{}}, nil, nil, {}) end,{}=function(x) local {}=type; {} x:{}() end", fn_execute, var_boot_env, var_l, fu, native_type, line_guard(&mut rng, &mut uni, true), wai));
-        out.push_str(&format!(" }}):{}()", fu));
+        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
+        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
+        wai_body.push_str(&format!(
+            "return {}(main_chunk, {}, {{}}, nil, nil, {})",
+            fn_execute, var_boot_env, var_l
+        ));
+
+        let (wai_p0, wai_p1) = (rng.name(), rng.name());
+        let wai_field = format!(
+            "{}=function({},{},{})\n{} end",
+            wai, shell.self_var, wai_p0, wai_p1, wai_body
+        );
+        let (fu_self, fu_p0, fu_p1) = (rng.name(), rng.name(), rng.name());
+        let fu_field = format!(
+            "{}=function({},{},{}) local {}=type; {} return {}:{}() end",
+            fu, fu_self, fu_p0, fu_p1, native_type, line_guard(&mut rng, &mut uni, true), fu_self, wai
+        );
+        let mut shell_fields = shell.into_fields();
+        shell_fields.push(wai_field);
+        shell_fields.push(fu_field);
+        rng.shuffle(&mut shell_fields);
+
+        let mut out = String::new();
+        out.push_str(&format!("local {} = ...;\n", var_l));
+        out.push_str(&format!("return ({{ {} }}):{}()", shell_fields.join(", "), fu));
         out
 }
