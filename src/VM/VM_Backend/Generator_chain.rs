@@ -645,6 +645,29 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 };
                 cl.push_str(&format!("local function {sms}(e,pool_idx,kind,fold,rl) {nd}{core}", sms = sm_s, nd = nd, core = core));
             }
+            // 消灭可打印性锚点与 double 全零尾数特征：簇内按 KDF 派生字动态生成 256 项双射 S-Box 与 8 字节置换表
+            let (sbt, nbm, c1v, c2v, c3v, xv, u1v, u2v, u3v, u4v) = (
+                rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+                rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+            );
+            let [sa1, sa2, sa3] = enc.sbox_a[g];
+            let nbm_lits: Vec<String> = (0..8)
+                .map(|j| format!("0X{:X}", enc.num_bperm[g][j] + 1))
+                .collect();
+            cl.push_str(&format!(
+                "local {sbt}={{}}; local {nbm}={{{nbm_lits}}}; do local {c1},{c2},{c3}={sl}%0X100,{ks}%0X100,{kn}%0X100; for {xv}=0X0,0XFF do local {u1}=({xv}*0X{a1:X}+{c1})%0X100; local {u2}={xt}[{u1}][({u1}-{u1}%0X10)/0X10]; local {u3}=({u2}*0X{a2:X}+{c2})%0X100; local {u4}={xt}[{u3}][({u3}-{u3}%0X10)/0X10]; {sbt}[{xv}]=({u4}*0X{a3:X}+{c3})%0X100 end end; ",
+                sbt = sbt, nbm = nbm, nbm_lits = nbm_lits.join(","),
+                c1 = c1v, c2 = c2v, c3 = c3v, sl = slname, ks = kstr_var, kn = knum_var,
+                xv = xv, u1 = u1v, u2 = u2v, u3 = u3v, u4 = u4v,
+                a1 = sa1, a2 = sa2, a3 = sa3, xt = xor_tbl_var
+            ));
+            let sbox_params = (
+                enc.sbox_smul[g],
+                enc.sbox_pmul[g],
+                enc.sbox_cmul[g],
+                enc.sbox_cadd[g],
+                enc.num_bbstep[g],
+            );
             // 组专属解码器：kind 常量内嵌（每组不同随机值，同样是运行期现算的 token）
             let (vb, vs, ve, vm) = (rng.name(), rng.name(), rng.name(), rng.name());
             let mut f64_parts = vec![
@@ -672,7 +695,8 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                     &mut rng, f, nm.as_str(), sm_p.as_str(), knum_var.as_str(), vb.as_str(),
                     vs.as_str(), ve.as_str(), vm.as_str(), f64_parts.join("+"),
                     v_num_i.as_str(), v_num_g.as_str(), fd18n.as_str(), rl18n.as_str(),
-                    num_path_arg.as_str(), num_count_arg.as_str(), fn_bxor.as_str()));
+                    num_path_arg.as_str(), num_count_arg.as_str(), fn_bxor.as_str(),
+                    sbt.as_str(), nbm.as_str(), slname.as_str(), sbox_params));
             }
             cl.push_str(&bind2(&mut rng, out_dn.as_str(), dn_a.as_str(), dn_b.as_str()));
             let (v_str_i, v_str_g, v_str_s) = (rng.name(), rng.name(), rng.name());
@@ -691,7 +715,8 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 cl.push_str(&crate::VM::VM_Backend::Generator_flow::build_decstr(
                     &mut rng, f, nm.as_str(), sm_s.as_str(), kstr_var.as_str(),
                     v_str_s.as_str(), v_str_i.as_str(), v_str_g.as_str(), fd18s.as_str(), rl18s.as_str(),
-                    str_path_arg.as_str(), str_count_arg.as_str(), fn_bxor.as_str(), fn_s_byte.as_str()));
+                    str_path_arg.as_str(), str_count_arg.as_str(), fn_bxor.as_str(), fn_s_byte.as_str(),
+                    sbt.as_str(), sbox_params));
             }
             cl.push_str(&bind2(&mut rng, out_ds.as_str(), ds_a.as_str(), ds_b.as_str()));
             // 出口赋给簇外可见名。注意：派生表（密钥字表）**不能**在这里销毁——

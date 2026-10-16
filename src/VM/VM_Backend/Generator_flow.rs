@@ -529,7 +529,7 @@ pub fn build_consts(
                 let (fd1, rl1) = (rng.name(), rng.name());
                 let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&fd3, &rl3), fds = fds, fd = fd3, rl = rl3);
                 let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&fd2, &rl2), fdn = fdn, fd = fd2, rl = rl2);
-                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])~={zero}", pre = mac_pre(&fd1, &rl1), fdn = fdn, fd = fd1, rl = rl1, zero = zero);
+                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])>{zero}", pre = mac_pre(&fd1, &rl1), fdn = fdn, fd = fd1, rl = rl1, zero = zero);
                 let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%{m32})", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s, m32 = m32);
                 // ── ld 处理器体（参数 pos；逐体独立局部名）──
                 let (bn2, bj2) = (rng.name(), rng.name());
@@ -874,8 +874,13 @@ pub fn build_decnum(
     v_sign: &str, v_exp: &str, v_mant: &str, f64parts: String,
     v_num_i: &str, v_num_g: &str, fd: &str, rl: &str,
     path: &str, count: &str, fn_bxor: &str,
+    sbt: &str, nbm: &str, salt_var: &str, sbox_params: (u32, u32, u32, u32, u32),
 ) -> String {
-    let (mask_seed, mask_bytes, mask_i, plv) = (rng.name(), rng.name(), rng.name(), rng.name());
+    let (mask_seed, mask_bytes, mask_i, plv, acc_v, raw_v, bbo_v) = (
+        rng.name(), rng.name(), rng.name(), rng.name(),
+        rng.name(), rng.name(), rng.name(),
+    );
+    let (smul, pmul, cmul, cadd, bbstep) = sbox_params;
     let pm = (rng.range(0x101, 0xFFFF) as u32) | 1;
     let cm = (rng.range(0x101, 0xFFFF) as u32) | 1;
     let sm = (rng.range(0x101, 0xFFFF) as u32) | 1;
@@ -886,13 +891,20 @@ pub fn build_decnum(
         seed = mask_seed, path = path, count = count, pm = pm, cm = cm, sm = sm, salt = salt,
         bytes = mask_bytes, i = mask_i, bx = fn_bxor, stride = stride);
     let unmask = format!(
-        "for {i}=0X1,#{plv} do {plv}[{i}]={bx}({plv}[{i}],({seed}+{i}*0X{stride:X})%0X100) end; ",
-        i = mask_i, plv = plv, bx = fn_bxor, seed = mask_seed, stride = stride);
+        "local {acc}=((({kn}%0X100)+(pool_idx or 0X0)*0X{smul:X}+(R_fd%0X100)+(R_rl%0X100))%0X100); local {bbo}={bx}({sl},pool_idx or 0X0)%0X100; for {i}=0X1,#{plv} do local {raw}={bx}({plv}[{i}],({seed}+{i}*0X{stride:X})%0X100); {plv}[{i}]={sbt}[({raw}+{acc}+{i}*0X{pmul:X})%0X100]; {acc}=({acc}*0X{cmul:X}+{raw}+0X{cadd:X})%0X100 end; ",
+        acc = acc_v, kn = kind_num, smul = smul, bbo = bbo_v, bx = fn_bxor, sl = salt_var,
+        i = mask_i, plv = plv, raw = raw_v, seed = mask_seed, stride = stride,
+        sbt = sbt, pmul = pmul, cmul = cmul, cadd = cadd)
+        .replace("R_fd", &format!("({} or 0X0)", fd))
+        .replace("R_rl", &format!("({} or 0X0)", rl));
+    let vb_step = format!(
+        "{vb}[{nbm}[{i}]]=(({plv}[{i}]+0X10000-{bbo}-{i}*0X{bbstep:X})%0X100)",
+        vb = vb, nbm = nbm, i = v_num_i, plv = plv, bbo = bbo_v, bbstep = bbstep);
     match form {
         0 => format!(
             "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
              local {vb}, {i}, {g} = {{}}, 0, 0; \
-             while {i} < 8 do {i} = {i} + 1; {vb}[{i}] = {plv}[{i}] end; \
+             while {i} < 8 do {i} = {i} + 1; {vbs} end; \
              local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
              local {v_exp} = ({vb}[8] % 128) * 8 * 2 + (({vb}[7] - ({vb}[7] % 16)) / 16); \
              local {v_mant} = {f64parts}; \
@@ -900,11 +912,11 @@ pub fn build_decnum(
              elseif {v_exp} == 0 then return {v_sign} * {v_mant} * (2^(-1074)) \
              else return {v_sign} * ({v_mant} + 2^52) * (2^({v_exp} - 1075)) end end; ",
             i = v_num_i, g = v_num_g, plv = plv, pre = mask_pre, masked = mask_bytes,
-            unmask = unmask, path = path, count = count
+            unmask = unmask, path = path, count = count, vbs = vb_step
         ),
         1 => format!(
             "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
-             local {vb}={{}} for {i}=0X1,0X8 do {vb}[{i}]={plv}[{i}] end; \
+             local {vb}={{}} for {i}=0X1,0X8 do {vbs} end; \
              local {i}=0X6; local {v_mant}={vb}[0X7]%0X10; \
              while {i}>=0X1 do {v_mant}={v_mant}*0X100+{vb}[{i}]; {i}={i}-0X1 end; \
              local {v_sign}=(-1)^(({vb}[0X8]-{vb}[0X8]%0X80)/0X80); \
@@ -913,14 +925,14 @@ pub fn build_decnum(
              if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
              return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
             i = v_num_i, vb = vb, plv = plv, pre = mask_pre, masked = mask_bytes,
-            unmask = unmask, path = path, count = count
+            unmask = unmask, path = path, count = count, vbs = vb_step
         ),
         2 => {
             let w = rng.name();
             format!(
             "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
              local {vb}, {i} = {{}}, 0; \
-             repeat {i}={i}+0X1; {vb}[{i}]={plv}[{i}] until {i}>=0X8; \
+             repeat {i}={i}+0X1; {vbs} until {i}>=0X8; \
              local {v_mant}=({vb}[0X7]%0X10)*2^48; \
              local {w}={{2^40,2^32,2^24,2^16,2^8,1}}; \
              for {i}=0X6,0X1,-0X1 do {v_mant}={v_mant}+{vb}[{i}]*{w}[0X7-{i}] end; \
@@ -930,7 +942,7 @@ pub fn build_decnum(
              if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
              return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
             i = v_num_i, vb = vb, plv = plv, w = w, pre = mask_pre, masked = mask_bytes,
-            unmask = unmask, path = path, count = count
+            unmask = unmask, path = path, count = count, vbs = vb_step
             )
         }
         _ => {
@@ -939,7 +951,7 @@ pub fn build_decnum(
             format!(
             "local function {fn_dec_num}(v_enc, pool_idx, {fd}, {rl}, {path}, {count}) {pre} local {plv}={pl}({masked},pool_idx,{kind_num},{fd},{rl}); {unmask} \
              local {vb}={{}}; local {i}=0X8; \
-             while {i}>0X0 do {vb}[{i}]={plv}[{i}]; {i}={i}-0X1 end; \
+             while {i}>0X0 do {vbs}; {i}={i}-0X1 end; \
              local {v_mant}=({vb}[7]%0X10)*2^48+{vb}[6]*2^40+{vb}[5]*2^32+{vb}[4]*2^24+{vb}[3]*2^16+{vb}[2]*2^8+{vb}[1]; \
              local {v_sign}=1-2*(({vb}[8]-{vb}[8]%0X80)/0X80); \
              local {v_exp}=({vb}[8]%0X80)*0X8; {v_exp}={v_exp}*0X2+({vb}[7]-{vb}[7]%0X10)/0X10; \
@@ -947,7 +959,7 @@ pub fn build_decnum(
              local {fx}={sp}[{v_exp}]; if {fx} then return {fx}() end; \
              return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
             i = v_num_i, vb = vb, plv = plv, sp = sp, fx = fx, pre = mask_pre, masked = mask_bytes,
-            unmask = unmask, path = path, count = count
+            unmask = unmask, path = path, count = count, vbs = vb_step
             )
         }
     }
@@ -962,9 +974,13 @@ pub fn build_decstr(
     rng: &mut GenRng, form: usize, fn_dec_str: &str, pl: &str, kind_str: &str,
     v_str_s: &str, v_str_i: &str, v_str_g: &str, fd: &str, rl: &str,
     path: &str, count: &str, fn_bxor: &str, fn_s_byte: &str,
+    sbt: &str, sbox_params: (u32, u32, u32, u32, u32),
 ) -> String {
-    let (e, p, plv, mask_seed, mask_parts, mask_text, mask_i) =
-        (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+    let (e, p, plv, mask_seed, mask_parts, mask_text, mask_i, acc_v, raw_v) = (
+        rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
+        rng.name(), rng.name(), rng.name(), rng.name(),
+    );
+    let (smul, pmul, cmul, cadd, _) = sbox_params;
     let pm = (rng.range(0x101, 0xFFFF) as u32) | 1;
     let cm = (rng.range(0x101, 0xFFFF) as u32) | 1;
     let sm = (rng.range(0x101, 0xFFFF) as u32) | 1;
@@ -985,8 +1001,12 @@ pub fn build_decstr(
         salt = salt, parts = mask_parts, i = mask_i, e = e, bx = fn_bxor, sb = fn_s_byte,
         mask = mask_pre_byte, masked = mask_text);
     let unmask = format!(
-        "for {i}=0X1,#{plv} do {plv}[{i}]={bx}({plv}[{i}],{mask}) end; ",
-        i = mask_i, plv = plv, bx = fn_bxor, mask = mask_out_byte);
+        "local {acc}=((({ks}%0X100)+({p} or 0X0)*0X{smul:X}+(R_fd%0X100)+(R_rl%0X100))%0X100); for {i}=0X1,#{plv} do local {raw}={bx}({plv}[{i}],{mask}); {plv}[{i}]={sbt}[({raw}+{acc}+{i}*0X{pmul:X})%0X100]; {acc}=({acc}*0X{cmul:X}+{raw}+0X{cadd:X})%0X100 end; ",
+        acc = acc_v, ks = kind_str, p = p, smul = smul,
+        i = mask_i, plv = plv, raw = raw_v, bx = fn_bxor, mask = mask_out_byte,
+        sbt = sbt, pmul = pmul, cmul = cmul, cadd = cadd)
+        .replace("R_fd", &format!("({} or 0X0)", fd))
+        .replace("R_rl", &format!("({} or 0X0)", rl));
     match form {
         0 => format!(
             "local function {fn_dec_str}({e},{p},{fd},{rl},{path},{count}) {pre} local {plv}={pl}({masked},{p},{kind_str},{fd},{rl}); {unmask} local {n}=#{plv}; \

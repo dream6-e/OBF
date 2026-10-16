@@ -2,9 +2,10 @@ use crate::BytecodeCompiler::ir::chunk::{Chunk, Constant};
 use crate::BytecodeCompiler::ir::instruction::Instruction;
 use crate::BytecodeCompiler::ir::opcode::Opcode;
 use crate::VM::VM_Backend::Context::VmContext;
-use crate::VM::VM_Backend::CustomIsa::lower_to_custom;
+use crate::VM::VM_Backend::CustomIsa::{VmOp, lower_to_custom_with_splits};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::collections::{HashMap, HashSet};
 
 pub struct Serializer;
 
@@ -50,7 +51,65 @@ impl Serializer {
         } else {
             chunk.instructions.iter().map(|inst| inst.line).collect()
         };
-        let lowered = lower_to_custom(instructions, &chunk.protos)
+        // 自证常量拆解：仅由 LoadK/LoadKx 引用的 +0.0 与 1.0 槽在降级期拆为
+        // [PushConst(k), PushConst(k), Sub/Div, PopReg(a)]（r - r = 0.0、r / r = 1.0），
+        // 并将常量槽本身替换为 8 字节全非零的随机有限浮点数 r，使其不进常量池。
+        let mut rk_used: HashSet<i32> = HashSet::new();
+        let mut loadk_used: HashSet<i32> = HashSet::new();
+        let mut pc_scan = 0usize;
+        while pc_scan < instructions.len() {
+            let inst = &instructions[pc_scan];
+            match inst.opcode {
+                Opcode::LoadK => { loadk_used.insert(inst.b); }
+                Opcode::LoadKx => {
+                    if pc_scan + 1 < instructions.len() {
+                        loadk_used.insert(instructions[pc_scan + 1].b);
+                    }
+                }
+                Opcode::GetGlobal | Opcode::SetGlobal => { rk_used.insert(inst.b); }
+                Opcode::GetTable | Opcode::SelfOp => {
+                    if inst.c >= 128 { rk_used.insert(inst.c - 128); }
+                }
+                Opcode::SetTable
+                | Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod | Opcode::Pow
+                | Opcode::Eq | Opcode::Lt | Opcode::Le => {
+                    if inst.b >= 128 { rk_used.insert(inst.b - 128); }
+                    if inst.c >= 128 { rk_used.insert(inst.c - 128); }
+                }
+                _ => {}
+            }
+            pc_scan += 1;
+        }
+        let mut split_rng = StdRng::seed_from_u64(seed ^ 0x6A09_E667_F3BC_C908);
+        let mut zero_one_splits: HashMap<i32, VmOp> = HashMap::new();
+        let mut split_replacements: HashMap<usize, u64> = HashMap::new();
+        for (k_idx, constant) in chunk.constants.iter().enumerate() {
+            let k_i32 = k_idx as i32;
+            if loadk_used.contains(&k_i32) && !rk_used.contains(&k_i32) {
+                if let Constant::Number(n) = constant {
+                    let bits = n.to_bits();
+                    let split_op = if bits == 0 {
+                        Some(VmOp::Sub)
+                    } else if bits == 1.0f64.to_bits() {
+                        Some(VmOp::Div)
+                    } else {
+                        None
+                    };
+                    if let Some(op) = split_op {
+                        let sign: u64 = split_rng.random_range(0u64..=1u64);
+                        let exp: u64 = split_rng.random_range(0x3FAu64..=0x40Au64);
+                        let mut mant: u64 = 0;
+                        for sh in (0..48).step_by(8) {
+                            mant |= split_rng.random_range(1u64..=255u64) << sh;
+                        }
+                        mant |= split_rng.random_range(1u64..=15u64) << 48;
+                        zero_one_splits.insert(k_i32, op);
+                        split_replacements.insert(k_idx, (sign << 63) | (exp << 52) | mant);
+                    }
+                }
+            }
+        }
+        let lowered = lower_to_custom_with_splits(instructions, &chunk.protos, &zero_one_splits)
             .unwrap_or_else(|err| panic!("{err}"));
         let mut bytes = Vec::new();
 
@@ -78,7 +137,7 @@ impl Serializer {
         let const_count = chunk.constants.len() as u32;
         bytes.extend_from_slice(&const_count.to_le_bytes());
 
-        for constant in &chunk.constants {
+        for (k_idx, constant) in chunk.constants.iter().enumerate() {
             match constant {
                 Constant::Nil => bytes.push(0),
                 Constant::Boolean(b) => {
@@ -87,7 +146,8 @@ impl Serializer {
                 }
                 Constant::Number(n) => {
                     bytes.push(2);
-                    bytes.extend_from_slice(&n.to_bits().to_le_bytes());
+                    let bits = split_replacements.get(&k_idx).copied().unwrap_or_else(|| n.to_bits());
+                    bytes.extend_from_slice(&bits.to_le_bytes());
                 }
                 Constant::String(s) => {
                     bytes.push(3);

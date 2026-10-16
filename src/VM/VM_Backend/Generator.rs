@@ -212,27 +212,7 @@ impl Generator {
         let nat_k0 = crate::VM::VM_Backend::Generator_native::LegacyRootNative::new(&mut rng);
         let k0_seeds: Vec<u8> = (0..16).map(|_| rng.range(0, 256) as u8).collect();
         let k0 = crate::VM::VM_Backend::Generator_chacha::native_root(&nat_k0, &k0_seeds);
-        let mut chacha_keys: Vec<[u32; 8]> = Vec::with_capacity(CG);
-        let mut chacha_salts: Vec<u32> = Vec::with_capacity(CG);
-        let mut kstr: Vec<u32> = Vec::with_capacity(CG);
-        let mut knum: Vec<u32> = Vec::with_capacity(CG);
-        for g in 0..CG as u32 {
-            let gk = crate::VM::VM_Backend::Generator_chacha::group_keys(&k0, g);
-            chacha_keys.push(gk.key);
-            chacha_salts.push(gk.salt);
-            kstr.push(gk.kstr);
-            knum.push(gk.knum);
-        }
-        let mut nonce_layouts: Vec<[usize; 3]> = Vec::with_capacity(CG);
-        for _ in 0..CG {
-            let mut ly = [0usize, 1, 2];
-            for j in (1..3).rev() { let k = rng.range(0, j + 1); ly.swap(j, k); }
-            nonce_layouts.push(ly);
-        }
-        // 第 2 项：逐簇 ChaCha 状态布局（全状态置换 / 轮数 8·10·12 / counter 步进）
-        let chacha_layout: Vec<crate::VM::VM_Backend::Generator_chacha::ChaChaLayout> =
-            (0..CG).map(|_| crate::VM::VM_Backend::Generator_chacha::ChaChaLayout::new(&mut rng)).collect();
-        let enc = crate::VM::VM_Backend::Generator_util::EncCtx { keys: chacha_keys.clone(), salts: chacha_salts.clone(), layouts: nonce_layouts.clone(), kstr, knum, layout: chacha_layout, root: k0 };
+        let enc = crate::VM::VM_Backend::Generator_util::EncCtx::new(&mut rng, k0);
         let root_group = rng.range(0, CG);
         // ⑮ 指令格式改版：线上 op 字段不再是 8 万段别名，而是逐别名随机 32 位魔数；
         // 派发树在魔数空间二分（阈值=魔数），与操作类别的数值区间彻底解耦

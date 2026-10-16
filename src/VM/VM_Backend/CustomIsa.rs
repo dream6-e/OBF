@@ -252,7 +252,11 @@ fn rk(value: i32) -> i32 {
     value
 }
 
-fn expansion_lengths(instructions: &[Instruction], protos: &[Chunk]) -> Result<Vec<usize>, LowerError> {
+fn expansion_lengths(
+    instructions: &[Instruction],
+    protos: &[Chunk],
+    zero_one_splits: &std::collections::HashMap<i32, VmOp>,
+) -> Result<Vec<usize>, LowerError> {
     let len = instructions.len();
     let mut sizes = vec![0usize; len];
     let mut owned = vec![false; len];
@@ -265,7 +269,8 @@ fn expansion_lengths(instructions: &[Instruction], protos: &[Chunk]) -> Result<V
         let inst = &instructions[pc];
         let op = inst.opcode;
         sizes[pc] = match op {
-            Opcode::Move | Opcode::LoadK | Opcode::NewTable => 2,
+            Opcode::Move | Opcode::NewTable => 2,
+            Opcode::LoadK => if zero_one_splits.contains_key(&inst.b) { 4 } else { 2 },
             Opcode::LoadBool => 2 + usize::from(inst.c != 0),
             Opcode::LoadNil
             | Opcode::GetUpval
@@ -349,7 +354,7 @@ fn expansion_lengths(instructions: &[Instruction], protos: &[Chunk]) -> Result<V
                     return Err(error(pc, "LOADKX 缺少 EXTRAARG"));
                 }
                 owned[pc + 1] = true;
-                2
+                if zero_one_splits.contains_key(&instructions[pc + 1].b) { 4 } else { 2 }
             }
             Opcode::ExtraArg => return Err(error(pc, "孤立的 EXTRAARG")),
             other => return Err(error(pc, &format!("尚未定义 Lua 前端 opcode {other:?} 的降级"))),
@@ -365,8 +370,20 @@ fn expansion_lengths(instructions: &[Instruction], protos: &[Chunk]) -> Result<V
 /// 所有跳转；比较/TEST 与其后 JMP、以及 TFORLOOP/JMP 被合为一条条件分支，
 /// 不会把 Lua 5.1 的「测试后跳过下一条」协议带进最终载荷。
 pub fn lower_to_custom(instructions: &[Instruction], protos: &[Chunk]) -> Result<Vec<CustomInstruction>, LowerError> {
+    lower_to_custom_with_splits(instructions, protos, &std::collections::HashMap::new())
+}
+
+/// 带自证常量拆解（`0.0 -> r - r`、`1.0 -> r / r`）的指令流降级：
+/// 对 `zero_one_splits` 中登记的常量槽 `k -> Sub/Div`，将 `LoadK`/`LoadKx`
+/// 降级为 `[PushConst(k), PushConst(k), Sub/Div, PopReg(a)]`，使 `0.0`/`1.0`
+/// 不以全零尾数形态进入常量池。
+pub fn lower_to_custom_with_splits(
+    instructions: &[Instruction],
+    protos: &[Chunk],
+    zero_one_splits: &std::collections::HashMap<i32, VmOp>,
+) -> Result<Vec<CustomInstruction>, LowerError> {
     let source_len = instructions.len();
-    let sizes = expansion_lengths(instructions, protos)?;
+    let sizes = expansion_lengths(instructions, protos, zero_one_splits)?;
     let mut starts = vec![0usize; source_len + 1];
     for pc in 0..source_len {
         starts[pc + 1] = starts[pc]
@@ -388,13 +405,27 @@ pub fn lower_to_custom(instructions: &[Instruction], protos: &[Chunk]) -> Result
                 emit(&mut out, VmOp::PopReg, a, 0, 0, line_pc);
             }
             Opcode::LoadK => {
-                emit(&mut out, VmOp::PushConst, 0, b, 0, line_pc);
-                emit(&mut out, VmOp::PopReg, a, 0, 0, line_pc);
+                if let Some(&split_op) = zero_one_splits.get(&b) {
+                    emit(&mut out, VmOp::PushConst, 0, b, 0, line_pc);
+                    emit(&mut out, VmOp::PushConst, 0, b, 0, line_pc);
+                    emit(&mut out, split_op, 0, 0, 0, line_pc);
+                    emit(&mut out, VmOp::PopReg, a, 0, 0, line_pc);
+                } else {
+                    emit(&mut out, VmOp::PushConst, 0, b, 0, line_pc);
+                    emit(&mut out, VmOp::PopReg, a, 0, 0, line_pc);
+                }
             }
             Opcode::LoadKx => {
                 let extra = instructions.get(pc + 1).ok_or_else(|| error(pc, "LOADKX 缺少扩展常量索引"))?;
-                emit(&mut out, VmOp::PushConst, 0, extra.b, 0, line_pc);
-                emit(&mut out, VmOp::PopReg, a, 0, 0, line_pc);
+                if let Some(&split_op) = zero_one_splits.get(&extra.b) {
+                    emit(&mut out, VmOp::PushConst, 0, extra.b, 0, line_pc);
+                    emit(&mut out, VmOp::PushConst, 0, extra.b, 0, line_pc);
+                    emit(&mut out, split_op, 0, 0, 0, line_pc);
+                    emit(&mut out, VmOp::PopReg, a, 0, 0, line_pc);
+                } else {
+                    emit(&mut out, VmOp::PushConst, 0, extra.b, 0, line_pc);
+                    emit(&mut out, VmOp::PopReg, a, 0, 0, line_pc);
+                }
                 pc += 1;
             }
             Opcode::LoadBool => {
@@ -782,5 +813,37 @@ mod tests {
         assert_eq!(lowered[0].op, VmOp::IteratorNext);
         assert_eq!((lowered[0].a, lowered[0].b, lowered[0].c), (0, 1, -1));
         assert_eq!(lowered[1].op, VmOp::ReturnNone);
+    }
+
+    #[test]
+    fn zero_and_one_loadk_split_into_sub_and_div_and_relocate_jumps() {
+        let mut splits = std::collections::HashMap::new();
+        splits.insert(0, VmOp::Sub);
+        splits.insert(1, VmOp::Div);
+        let source = vec![
+            inst(Opcode::Jmp, 0, 2, 0),
+            inst(Opcode::LoadK, 0, 0, 0),
+            inst(Opcode::LoadK, 1, 1, 0),
+            inst(Opcode::Return, 0, 1, 0),
+        ];
+        let lowered = lower_to_custom_with_splits(&source, &[], &splits).unwrap();
+        let ops: Vec<VmOp> = lowered.iter().map(|item| item.op).collect();
+        assert_eq!(
+            ops,
+            vec![
+                VmOp::Jump,
+                VmOp::PushConst,
+                VmOp::PushConst,
+                VmOp::Sub,
+                VmOp::PopReg,
+                VmOp::PushConst,
+                VmOp::PushConst,
+                VmOp::Div,
+                VmOp::PopReg,
+                VmOp::ReturnNone,
+            ]
+        );
+        // Jump over two 4-instruction split LoadKs -> offset = 8
+        assert_eq!(lowered[0].b, 8);
     }
 }

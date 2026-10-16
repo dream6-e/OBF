@@ -48,6 +48,91 @@ pub(super) struct EncCtx {
     /// 第 3 项 D：单根 K0（8 字）——四组密钥/盐/kind 全部由它 KDF 现算；
     /// 它本身取自原生流（Native Stream），产物里以 token 掩码形态落一份
     pub root: [u32; 8],
+    /// 消灭可打印性锚点：每簇 KDF 驱动的 256 项双射 S-Box 参数与正逆表
+    pub sbox_a: Vec<[u8; 3]>,
+    pub sbox: Vec<[u8; 256]>,
+    pub inv_sbox: Vec<[u8; 256]>,
+    pub sbox_smul: Vec<u32>,
+    pub sbox_pmul: Vec<u32>,
+    pub sbox_cmul: Vec<u32>,
+    pub sbox_cadd: Vec<u32>,
+    /// 消除 double 全零尾数特征：每簇 8 字节下标置换与逐字节模偏移步长
+    pub num_bperm: Vec<[usize; 8]>,
+    pub num_bbstep: Vec<u32>,
+}
+
+impl EncCtx {
+    pub(super) fn new(rng: &mut GenRng, k0: [u32; 8]) -> Self {
+        let mut keys = Vec::with_capacity(CONST_GROUPS);
+        let mut salts = Vec::with_capacity(CONST_GROUPS);
+        let mut kstr = Vec::with_capacity(CONST_GROUPS);
+        let mut knum = Vec::with_capacity(CONST_GROUPS);
+        for g in 0..CONST_GROUPS as u32 {
+            let gk = super::Generator_chacha::group_keys(&k0, g);
+            keys.push(gk.key);
+            salts.push(gk.salt);
+            kstr.push(gk.kstr);
+            knum.push(gk.knum);
+        }
+        let mut layouts = Vec::with_capacity(CONST_GROUPS);
+        for _ in 0..CONST_GROUPS {
+            let mut ly = [0usize, 1, 2];
+            for j in (1..3).rev() {
+                let k = rng.range(0, j + 1);
+                ly.swap(j, k);
+            }
+            layouts.push(ly);
+        }
+        let layout: Vec<ChaChaLayout> =
+            (0..CONST_GROUPS).map(|_| ChaChaLayout::new(rng)).collect();
+        let mut sbox_a = Vec::with_capacity(CONST_GROUPS);
+        let mut sbox = Vec::with_capacity(CONST_GROUPS);
+        let mut inv_sbox = Vec::with_capacity(CONST_GROUPS);
+        let mut sbox_smul = Vec::with_capacity(CONST_GROUPS);
+        let mut sbox_pmul = Vec::with_capacity(CONST_GROUPS);
+        let mut sbox_cmul = Vec::with_capacity(CONST_GROUPS);
+        let mut sbox_cadd = Vec::with_capacity(CONST_GROUPS);
+        let mut num_bperm = Vec::with_capacity(CONST_GROUPS);
+        let mut num_bbstep = Vec::with_capacity(CONST_GROUPS);
+        for g in 0..CONST_GROUPS {
+            let a1 = (rng.range(1, 128) as u8) * 2 + 1;
+            let a2 = (rng.range(1, 128) as u8) * 2 + 1;
+            let a3 = (rng.range(1, 128) as u8) * 2 + 1;
+            let c1 = salts[g] & 0xFF;
+            let c2 = kstr[g] & 0xFF;
+            let c3 = knum[g] & 0xFF;
+            let mut sb = [0u8; 256];
+            let mut isb = [0u8; 256];
+            for x in 0..256u32 {
+                let u1 = (x * (a1 as u32) + c1) & 0xFF;
+                let u2 = u1 ^ (u1 >> 4);
+                let u3 = (u2 * (a2 as u32) + c2) & 0xFF;
+                let u4 = u3 ^ (u3 >> 4);
+                let y = ((u4 * (a3 as u32) + c3) & 0xFF) as u8;
+                sb[x as usize] = y;
+                isb[y as usize] = x as u8;
+            }
+            sbox_a.push([a1, a2, a3]);
+            sbox.push(sb);
+            inv_sbox.push(isb);
+            sbox_smul.push((rng.range(1, 128) as u32) * 2 + 1);
+            sbox_pmul.push((rng.range(1, 128) as u32) * 2 + 1);
+            sbox_cmul.push((rng.range(1, 128) as u32) * 2 + 1);
+            sbox_cadd.push((rng.range(1, 256) as u32) | 1);
+            let mut bp = [0usize, 1, 2, 3, 4, 5, 6, 7];
+            for j in (1..8).rev() {
+                let k = rng.range(0, j + 1);
+                bp.swap(j, k);
+            }
+            num_bperm.push(bp);
+            num_bbstep.push((rng.range(1, 128) as u32) * 2 + 1);
+        }
+        Self {
+            keys, salts, layouts, kstr, knum, layout, root: k0,
+            sbox_a, sbox, inv_sbox, sbox_smul, sbox_pmul, sbox_cmul, sbox_cadd,
+            num_bperm, num_bbstep,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -771,10 +856,55 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let s118 = enc.salts[group] ^ rl18 ^ fold;
                 let s218 = r7l18 ^ slot.wrapping_mul(6).wrapping_add(kind);
                 let s318 = enc.salts[group] ^ r7l18.rotate_left(7);
-                let payload18: Vec<u8> = if c_type == 1 {
-                    let dv: f64 = if bytes[0] != 0 { 1.0 } else { 0.0 };
-                    dv.to_le_bytes().to_vec()
-                } else { bytes.to_vec() };
+                let raw_plain: Vec<u8> = if c_type == 3 {
+                    bytes.to_vec()
+                } else {
+                    let f64_bytes: [u8; 8] = if c_type == 1 {
+                        // 消除 1.0/0.0 全零尾数特征：按正负号编码 true/false，8 字节全部非零
+                        let sign: u64 = if bytes[0] != 0 { 0 } else { 1 };
+                        let exp: u64 = rng.random_range(0x3FAu64..=0x40Au64);
+                        let mut mant: u64 = 0;
+                        for sh in (0..48).step_by(8) {
+                            mant |= rng.random_range(1u64..=255u64) << sh;
+                        }
+                        mant |= rng.random_range(1u64..=15u64) << 48;
+                        ((sign << 63) | (exp << 52) | mant).to_le_bytes()
+                    } else {
+                        bytes[0..8].try_into().unwrap()
+                    };
+                    let bboff = (enc.salts[group] ^ slot) & 0xFF;
+                    (0..8)
+                        .map(|j| {
+                            let b0 = f64_bytes[enc.num_bperm[group][j]] as u32;
+                            let i = (j as u32) + 1;
+                            ((b0 + bboff + i * enc.num_bbstep[group]) & 0xFF) as u8
+                        })
+                        .collect()
+                };
+                // 消灭可打印性锚点：进入 ChaCha 之前先过每簇 KDF 驱动的逆 S-Box 与级联反馈白化，
+                // 使 ChaCha 密文对应的中间字节流均匀分布在 0..255 全域，无 ASCII/UTF-8 可打印偏置。
+                let mut acc18: u32 = ((kind & 0xFF)
+                    .wrapping_add(slot.wrapping_mul(enc.sbox_smul[group]))
+                    .wrapping_add(fold & 0xFF)
+                    .wrapping_add(rl18 & 0xFF))
+                    & 0xFF;
+                let payload18: Vec<u8> = raw_plain
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &plain_b)| {
+                        let i = (j as u32) + 1;
+                        let raw = ((enc.inv_sbox[group][plain_b as usize] as u32)
+                            .wrapping_sub(acc18)
+                            .wrapping_sub(i.wrapping_mul(enc.sbox_pmul[group]))
+                            & 0xFF) as u8;
+                        acc18 = (acc18
+                            .wrapping_mul(enc.sbox_cmul[group])
+                            .wrapping_add(raw as u32)
+                            .wrapping_add(enc.sbox_cadd[group]))
+                            & 0xFF;
+                        raw
+                    })
+                    .collect();
                 let blob = chacha_xor_layout(&enc.keys[group], [s118, s218, s318], &payload18, &enc.layout[group]);
                 w.push(tag_map[c_type as usize]);
                 if c_type == 3 { write_string(w, &blob); } else { w.extend_from_slice(&blob); }
@@ -969,4 +1099,64 @@ pub fn loadstring_probe_lua(
         nat = nat, pl = pl);
     format!("{}{}", nat_body, getf_body)
 }
+
+#[cfg(test)]
+mod sbox_anchor_tests {
+    use super::*;
+
+    #[test]
+    fn enc_ctx_sbox_is_bijective_and_eliminates_ascii_and_zero_mantissa_anchors() {
+        let mut rng = GenRng::new(0x1357_9BDF_2468_ACE0);
+        let k0 = [
+            0x1234_5678, 0x9ABC_DEF0, 0x1357_2468, 0xCAFE_BABE,
+            0xDEAD_BEEF, 0x0F1E_2D3C, 0x4B5A_6978, 0x8796_A5B4,
+        ];
+        let enc = EncCtx::new(&mut rng, k0);
+        for g in 0..CONST_GROUPS {
+            let mut seen = [false; 256];
+            for x in 0..256 {
+                let y = enc.sbox[g][x] as usize;
+                seen[y] = true;
+                assert_eq!(enc.inv_sbox[g][y] as usize, x);
+            }
+            assert!(seen.iter().all(|&b| b), "S-Box 必须是 0..255 上的严格双射");
+
+            // 验证可打印字符串 "aaaaaaaaaa" 经逆 S-Box + CFB 级联后全异且含非 ASCII 字节
+            let msg = b"aaaaaaaaaa";
+            let mut acc = ((enc.kstr[g] & 0xFF) + 3 * enc.sbox_smul[g]) & 0xFF;
+            let mut encoded = Vec::with_capacity(msg.len());
+            for (j, &plain_b) in msg.iter().enumerate() {
+                let i = (j as u32) + 1;
+                let raw = ((enc.inv_sbox[g][plain_b as usize] as u32)
+                    .wrapping_sub(acc)
+                    .wrapping_sub(i.wrapping_mul(enc.sbox_pmul[g]))
+                    & 0xFF) as u8;
+                acc = (acc
+                    .wrapping_mul(enc.sbox_cmul[g])
+                    .wrapping_add(raw as u32)
+                    .wrapping_add(enc.sbox_cadd[g]))
+                    & 0xFF;
+                encoded.push(raw);
+            }
+            let unique_cnt = encoded.iter().copied().collect::<HashSet<u8>>().len();
+            assert!(unique_cnt >= 6, "重复可打印字符经 CFB 级联后不得残留重复模式");
+
+            // 验证 0.0 与 1.0 经 8 字节置换与模偏移后不再含连续零字节
+            for &val in &[0.0f64, 1.0f64] {
+                let f64_bytes = val.to_le_bytes();
+                let bboff = (enc.salts[g] ^ 5) & 0xFF;
+                let biased: Vec<u8> = (0..8)
+                    .map(|j| {
+                        let b0 = f64_bytes[enc.num_bperm[g][j]] as u32;
+                        let i = (j as u32) + 1;
+                        ((b0 + bboff + i * enc.num_bbstep[g]) & 0xFF) as u8
+                    })
+                    .collect();
+                let zero_cnt = biased.iter().filter(|&&b| b == 0).count();
+                assert!(zero_cnt <= 1, "{val} 的 8 字节偏置表示不得残留全零尾数特征");
+            }
+        }
+    }
+}
+
 
