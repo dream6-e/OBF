@@ -17,6 +17,26 @@ pub(super) struct FoldCtx {
     // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
     pub m1: u32, pub m2: u32, pub m3: u32, pub m4: u32, pub m5: u32,
     pub rs18: u32, // ⑤ R 链滚动初值种子（逐构建随机，替代固定 0x2545F491）
+    pub fk1: u32,  // 引用扫描动态左旋乘数（奇数 3..=31）
+    pub fk2: u32,  // Ftbl[slot] 逐槽异构左旋乘数（奇数 3..=31）
+    pub fk3: u32,  // Rtbl[slot] 逐槽异构左旋乘数（奇数 3..=31）
+    pub emul: u32, // 常量槽散列键奇数乘数（0x1001..=0xFFFF 内奇数）
+    pub eadd: u32, // 常量槽散列键加数（0x1000..=0xFF_FFFF）
+}
+
+fn fold_step(
+    fold_map: &mut std::collections::HashMap<u32, u32>,
+    roll_map: &mut std::collections::HashMap<u32, u32>,
+    sk: u32,
+    pc18: u32,
+    fp: u32,
+    roll18: u32,
+    fk1: u32,
+) {
+    let k_step = ((sk.wrapping_mul(fk1).wrapping_add(pc18)) % 15) + 1;
+    let e = fold_map.entry(sk).or_insert(0u32);
+    *e = e.rotate_left(k_step).wrapping_add(fp);
+    roll_map.insert(sk, roll18);
 }
 
 /// ③-3 每常量 MAC：对 (密文块, 槽号, 折叠值, R链值) 的滚动校验和——
@@ -541,16 +561,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
                         chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
                         if fb0 > 127 && fc_pb(mag) {
-                            let slot = fb0 - 128;
-                            let e = fold_map.entry(slot).or_insert(0u32);
-                            *e = e.wrapping_add(fc_f(pc18));
-                            roll_map.insert(slot, roll18);
+                            fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
                         }
                         if fc0 > 127 && fc_pc(mag) {
-                            let slot = fc0 - 128;
-                            let e = fold_map.entry(slot).or_insert(0u32);
-                            *e = e.wrapping_add(fc_f(pc18));
-                            roll_map.insert(slot, roll18);
+                            fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
                         }
                         fused_dead.extend(i + 1..=i + 3);
                         i += 1;
@@ -617,8 +631,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         let r718 = roll18.rotate_left(7);
                         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
                         chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                        if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
-                        if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+                        if fb0 > 127 && fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
+                        if fc0 > 127 && fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
                         fused_dead.insert(i + 1);
                         i += 1; // 被融合的那条 CALL 照常写出，成为永不执行的死槽
                         continue;
@@ -686,8 +700,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                                     let r718 = roll18.rotate_left(7);
                                     roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
                                     chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                                    if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
-                                    if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+                                    if fb0 > 127 && fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
+                                    if fc0 > 127 && fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
                                     // 冻结到比较 JMP 之后；比较记录本体作为死槽照常写出
                                     freeze_until = (j + 2).max(freeze_until);
                                     fused_dead.insert(j);
@@ -759,8 +773,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let r718 = roll18.rotate_left(7);
         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
         chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-        if fb0 > 127 && fc_pb(mag) { let e = fold_map.entry(fb0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fb0 - 128).or_insert(0u32); *e2 = roll18; }
-        if fc0 > 127 && fc_pc(mag) { let e = fold_map.entry(fc0 - 128).or_insert(0u32); *e = e.wrapping_add(fc_f(pc18)); let e2 = roll_map.entry(fc0 - 128).or_insert(0u32); *e2 = roll18; }
+        if fb0 > 127 && fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
+        if fc0 > 127 && fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
         i += 1;
     }
 
@@ -815,42 +829,55 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
             chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
             if fb0 > 127 && fc_pb(mag) {
-                let fold_slot = fb0 - 128;
-                let e = fold_map.entry(fold_slot).or_insert(0u32);
-                *e = e.wrapping_add(fc_f(pc18));
-                roll_map.insert(fold_slot, roll18);
+                fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
             }
             if fc0 > 127 && fc_pc(mag) {
-                let fold_slot = fc0 - 128;
-                let e = fold_map.entry(fold_slot).or_insert(0u32);
-                *e = e.wrapping_add(fc_f(pc18));
-                roll_map.insert(fold_slot, roll18);
+                fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
             }
         }
     }
     // ⑰ 组字节先行（组=本原型的参数组下标），然后逐条内联密文：
-    // 字符串=tag+长度前缀密文；数字=tag+8B 密文。每槽按自己的槽号派生 nonce，
-    // 不复用其他槽的密文，以保证洗牌后的折叠键与运行期解密键严格一致。
+    // 字符串=tag+加密槽号+长度前缀密文；数字=tag+加密槽号+8B 密文。
+    // 物理排放顺序 emit_order 与逻辑槽位 slot 经 Fisher-Yates 独立置换解耦（slot ≠ 排放序号）。
     w.push(group as u8);
-    // 常量记录按同一混排布局发射。诱饵使用有效 f64 明文，并与真实数值常量
-    // 共用 fold/R 派生、ChaCha 加密和聚合 MAC；其引用仅位于不可达尾部。
     w.extend_from_slice(&total_const_count.to_le_bytes());
-    let mut slot: u32 = 0;
-    // ③ 链式静默耦合：agg18 从头部 (hn18 ^ kp18 ^ rotl7(pb18)) 起步，逐个非 nil 常量
-    // 混入本槽 fold 解密键并以 const_mac18 推进，不回填校验和、不留二值比对 Oracle。
+    let mut emit_order: Vec<u32> = (0..total_const_count).collect();
+    for idx in (1..emit_order.len()).rev() {
+        let j = rng.random_range(0..=idx);
+        emit_order.swap(idx, j);
+    }
+    // ③ 链式静默耦合：agg18 从头部 (hn18 ^ kp18 ^ rotl7(pb18)) 起步，逐个常量加密逻辑槽号
+    // 并混入本槽 fold 解密键，以 const_mac18 推进，不回填校验和、不留二值比对 Oracle。
     let mut agg18: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7);
-    for layout_entry in &const_layout {
+    for (phys_idx, &slot) in emit_order.iter().enumerate() {
+        let pos18 = (phys_idx as u32) + 1;
+        let slot_mask = agg18
+            ^ kp18.rotate_left((pos18 % 13) + 1)
+            ^ pos18.wrapping_mul(fc18.emul);
+        let enc_slot = slot ^ slot_mask;
+        let layout_entry = &const_layout[slot as usize];
         let (c_type, bytes) = match *layout_entry {
             ConstantSlot::Source(idx) => (local_consts[idx].0, local_consts[idx].1.as_slice()),
             ConstantSlot::Decoy(idx) => (2, decoy_consts[idx].as_slice()),
         };
         match c_type {
-            0 => { w.push(tag_map[0]); }
+            0 => {
+                w.push(tag_map[0]);
+                w.extend_from_slice(&enc_slot.to_le_bytes());
+                agg18 = agg18
+                    .wrapping_mul(31)
+                    .wrapping_add(slot.wrapping_mul(fc18.emul))
+                    .wrapping_add(7);
+            }
             // bool 也走 8 字节 double 密文管线，线上 tag 与数字结构一致。
             1 | 2 | 3 => {
-                let fold0 = fold_map.get(&slot).copied().unwrap_or(0u32);
+                let raw_fold = fold_map.get(&slot).copied().unwrap_or(0u32);
+                let kf = ((slot.wrapping_mul(fc18.fk2).wrapping_add(hn18 % 29)) % 29) + 1;
+                let fold0 = raw_fold.rotate_left(kf);
                 let fold = fold0 ^ agg18;
-                let rl18 = roll_map.get(&slot).copied().unwrap_or(roll18);
+                let raw_roll = roll_map.get(&slot).copied().unwrap_or(roll18);
+                let kr = ((slot.wrapping_mul(fc18.fk3).wrapping_add(kp18 % 29)) % 29) + 1;
+                let rl18 = raw_roll.rotate_left(kr);
                 let r7l18 = rl18.rotate_left(7);
                 let kind = if c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
                 let s118 = enc.salts[group] ^ rl18 ^ fold;
@@ -907,13 +934,13 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     .collect();
                 let blob = chacha_xor_layout(&enc.keys[group], [s118, s218, s318], &payload18, &enc.layout[group]);
                 w.push(tag_map[c_type as usize]);
+                w.extend_from_slice(&enc_slot.to_le_bytes());
                 if c_type == 3 { write_string(w, &blob); } else { w.extend_from_slice(&blob); }
                 let mac18 = const_mac18(&blob, slot, fold0, rl18, fc18);
                 agg18 = agg18.wrapping_mul(31).wrapping_add(mac18).wrapping_add(1);
             }
             _ => panic!(),
         }
-        slot += 1;
     }
 
     let p_count = r.read_u32();
@@ -1149,13 +1176,87 @@ mod sbox_anchor_tests {
                     .map(|j| {
                         let b0 = f64_bytes[enc.num_bperm[g][j]] as u32;
                         let i = (j as u32) + 1;
-                        ((b0 + bboff + i * enc.num_bbstep[g]) & 0xFF) as u8
+                        ((b0 + bboff + i * enc.num_bbstep[group_idx_or(g)]) & 0xFF) as u8
                     })
                     .collect();
                 let zero_cnt = biased.iter().filter(|&&b| b == 0).count();
                 assert!(zero_cnt <= 1, "{val} 的 8 字节偏置表示不得残留全零尾数特征");
             }
         }
+    }
+
+    fn group_idx_or(g: usize) -> usize { g }
+
+    #[test]
+    fn const_index_decoupling_and_heterogeneous_rotation_roundtrips() {
+        let fc = FoldCtx {
+            r6b: 5, p1b: 0x1234_5678, p3b: 50,
+            r6c: 7, p1c: 0x9ABC_DEF0, p3c: 50,
+            f1: 0x1357_9BDF, f2: 0x2468_ACE0,
+            m1: 0xCAFE_BABE, m2: 0xDEAD_BEEF, m3: 11, m4: 0x0101_0103, m5: 7,
+            rs18: 0x8765_4321,
+            fk1: 13, fk2: 19, fk3: 23,
+            emul: 0x6B43, eadd: 0x3141_5926,
+        };
+        let hn18: u32 = 0x5A3C_96E1;
+        let kp18: u32 = 0xC3A5_1E69;
+        let pb18: u32 = 17;
+
+        // 1. 验证散列键 tk(slot) 在 0..4096 上双射无碰撞，且不等于线性 slot / slot+1
+        let mut tk_seen = HashSet::new();
+        for slot in 0..4096u32 {
+            let tk = slot
+                .wrapping_mul(fc.emul)
+                .wrapping_add(fc.eadd)
+                .wrapping_add(kp18);
+            assert!(tk_seen.insert(tk), "散列键 tk(slot) 必须无碰撞");
+            assert_ne!(tk, slot);
+            assert_ne!(tk, slot + 1);
+        }
+
+        // 2. 验证引用折叠 fold_step 与逐槽异构左旋 kf/kr 对相同引用历史的不同槽产生不同 fold0
+        let mut fold_map = std::collections::HashMap::new();
+        let mut roll_map = std::collections::HashMap::new();
+        fold_step(&mut fold_map, &mut roll_map, 2, 10, 0x1111_2222, 0xAAAA_BBBB, fc.fk1);
+        fold_step(&mut fold_map, &mut roll_map, 2, 25, 0x3333_4444, 0xCCCC_DDDD, fc.fk1);
+        let raw_f = fold_map[&2];
+        let kf_slot2 = ((2u32.wrapping_mul(fc.fk2).wrapping_add(hn18 % 29)) % 29) + 1;
+        let kf_slot3 = ((3u32.wrapping_mul(fc.fk2).wrapping_add(hn18 % 29)) % 29) + 1;
+        assert_ne!(kf_slot2, kf_slot3);
+        assert_ne!(raw_f.rotate_left(kf_slot2), raw_f.rotate_left(kf_slot3));
+
+        // 3. 验证乱序物理排放下 enc_slot 链式加解密（含 nil 槽推进 agg18）严格对齐
+        let emit_order: Vec<u32> = vec![5, 0, 7, 2, 1, 6, 3, 4];
+        let is_nil = [false, true, false, false, true, false, false, false];
+        let mut agg_w: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7);
+        let mut wire_enc_slots = Vec::new();
+        for (phys_idx, &slot) in emit_order.iter().enumerate() {
+            let pos18 = (phys_idx as u32) + 1;
+            let mask = agg_w ^ kp18.rotate_left((pos18 % 13) + 1) ^ pos18.wrapping_mul(fc.emul);
+            wire_enc_slots.push(slot ^ mask);
+            if is_nil[slot as usize] {
+                agg_w = agg_w.wrapping_mul(31).wrapping_add(slot.wrapping_mul(fc.emul)).wrapping_add(7);
+            } else {
+                let mac = const_mac18(&[slot as u8; 8], slot, slot.rotate_left(3), 0x1234_5678, &fc);
+                agg_w = agg_w.wrapping_mul(31).wrapping_add(mac).wrapping_add(1);
+            }
+        }
+        let mut agg_r: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7);
+        let mut decoded_slots = Vec::new();
+        for (phys_idx, &enc_s) in wire_enc_slots.iter().enumerate() {
+            let i = (phys_idx as u32) + 1;
+            let mask = agg_r ^ kp18.rotate_left((i % 13) + 1) ^ i.wrapping_mul(fc.emul);
+            let slot = enc_s ^ mask;
+            decoded_slots.push(slot);
+            if is_nil[slot as usize] {
+                agg_r = agg_r.wrapping_mul(31).wrapping_add(slot.wrapping_mul(fc.emul)).wrapping_add(7);
+            } else {
+                let mac = const_mac18(&[slot as u8; 8], slot, slot.rotate_left(3), 0x1234_5678, &fc);
+                agg_r = agg_r.wrapping_mul(31).wrapping_add(mac).wrapping_add(1);
+            }
+        }
+        assert_eq!(decoded_slots, emit_order);
+        assert_eq!(agg_r, agg_w);
     }
 }
 

@@ -253,6 +253,11 @@ impl Generator {
             m1: rng.next(), m2: rng.next(), m3: rng.range(1, 24) as u32,
             m4: rng.next() | 1, m5: rng.range(1, 24) as u32,
             rs18: rng.next(),
+            fk1: (rng.range(1, 16) as u32) * 2 + 1,
+            fk2: (rng.range(1, 16) as u32) * 2 + 1,
+            fk3: (rng.range(1, 16) as u32) * 2 + 1,
+            emul: (rng.range(0x800, 0x8000) as u32) * 2 + 1,
+            eadd: rng.range(0x1000, 0xFF_FFFF) as u32,
         };
         // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
         // 从 0..59∪251..255 取互不相同值（避开 60..250 诱饵键区）；写侧推送与

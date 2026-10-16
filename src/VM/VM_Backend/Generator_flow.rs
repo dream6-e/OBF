@@ -519,42 +519,44 @@ pub fn build_consts(
                 // ③ 链式静默耦合：agg 从头部三字段初值起步，逐常量混入本槽 fold 解密键，
                 // 并以 vmac 推进下一槽——不再挂 chunk 字段或做 debug 态等式裁定。
                 let agg_name = rng.name();
-                // ── dsp 处理器体：fd/rl 局部 + 解码表达式（逐支独立名）──
-                let mac_pre = |fdn_: &str, rln_: &str| -> String {
-                    format!("local {fd}=({ft} and {ft}[ev[(0X3)]] or 0X0)%{m32}; local {rl}=({rt} and {rt}[ev[(0X3)]] or {rf}); ",
-                        fd = fdn_, rl = rln_, ft = ftds, rt = rtds, rf = rfds, m32 = m32)
+                let (sl3, tk3, fd3, rl3) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let (sl2, tk2, fd2, rl2) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let (sl1, tk1, fd1, rl1) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let mac_pre = |sln_: &str, tkn_: &str, fdn_: &str, rln_: &str| -> String {
+                    format!("local {sl}=(ev[(0X3)]-{c}.{pld})%{m32}; local {tk}=({sl}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; local {fd}=({ft} and {ft}[{tk}] or 0X0)%{m32}; local {rl}=({rt} and {rt}[{tk}] or {rf}); ",
+                        sl = sln_, tk = tkn_, fd = fdn_, rl = rln_, c = fn_c, pld = pf_ld_key,
+                        em = fc.emul, ea = fc.eadd, ft = ftds, rt = rtds, rf = rfds, m32 = m32)
                 };
-                let (fd3, rl3) = (rng.name(), rng.name());
-                let (fd2, rl2) = (rng.name(), rng.name());
-                let (fd1, rl1) = (rng.name(), rng.name());
-                let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&fd3, &rl3), fds = fds, fd = fd3, rl = rl3);
-                let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&fd2, &rl2), fdn = fdn, fd = fd2, rl = rl2);
-                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],ev[(0X3)],{fd},{rl},ev[(0X4)],ev[(0X5)])>{zero}", pre = mac_pre(&fd1, &rl1), fdn = fdn, fd = fd1, rl = rl1, zero = zero);
+                let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&sl3, &tk3, &fd3, &rl3), fds = fds, sl = sl3, fd = fd3, rl = rl3);
+                let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&sl2, &tk2, &fd2, &rl2), fdn = fdn, sl = sl2, fd = fd2, rl = rl2);
+                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)])>{zero}", pre = mac_pre(&sl1, &tk1, &fd1, &rl1), fdn = fdn, sl = sl1, fd = fd1, rl = rl1, zero = zero);
                 let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%{m32})", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s, m32 = m32);
-                // ── ld 处理器体（参数 pos；逐体独立局部名）──
                 let (bn2, bj2) = (rng.name(), rng.name());
                 let (bn1, bj1) = (rng.name(), rng.name());
-                // ③ 逐常量 MAC 折叠入本槽解密键 fd，并推进 agg（与写侧 const_mac18 同式）
-                let (fd3a, rl3a) = (rng.name(), rng.name());
-                let (fd2a, rl2a) = (rng.name(), rng.name());
-                let (fd1a, rl1a) = (rng.name(), rng.name());
-                let mac_acc = |blob: &str, fdn: &str, rln: &str| -> String {
-                    format!("local {fd}=({ft} and {ft}[(pos-0X1)] or 0X0)%{m32}; local {rl}=({rt} and {rt}[(pos-0X1)] or {rf}); if {ft} then {ft}[(pos-0X1)]={bx}({fd},{agg}) end; {agg}=({agg}*0X1F+{vm}({blob},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
-                        fd = fdn, rl = rln, ft = ftds, rt = rtds, rf = rfds, vm = vm,
-                        agg = agg_name, m32 = m32, blob = blob, bx = fn_bxor)
+                // ③ 逐常量异构旋转 A=rotl(Ftbl[slot],kf)、R=rotl(Rtbl[slot],kr) 并混入 agg（与写侧 const_mac18 同式）
+                let (tk3a, fd3a, rl3a) = (rng.name(), rng.name(), rng.name());
+                let (tk2a, fd2a, rl2a) = (rng.name(), rng.name(), rng.name());
+                let (tk1a, fd1a, rl1a) = (rng.name(), rng.name(), rng.name());
+                let mac_acc = |blob: &str, tkn: &str, fdn: &str, rln: &str| -> String {
+                    format!("local {tk}=((pos-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; local {fd}={rot}(({ft} and {ft}[{tk}] or 0X0)%{m32},(((pos-0X1)*0X{fk2:X}+({c}.{pn}%0X1D))%0X1D)+0X1); local {rl}={rot}(({rt} and {rt}[{tk}] or {rf}),(((pos-0X1)*0X{fk3:X}+({c}.{pld}%0X1D))%0X1D)+0X1); if {ft} then {ft}[{tk}]={bx}({fd},{agg}) end; if {rt} then {rt}[{tk}]={rl} end; {agg}=({agg}*0X1F+{vm}({blob},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
+                        tk = tkn, fd = fdn, rl = rln, ft = ftds, rt = rtds, rf = rfds, vm = vm,
+                        agg = agg_name, m32 = m32, blob = blob, bx = fn_bxor, rot = fn_rotl,
+                        c = fn_c, pn = pf_n_key, pld = pf_ld_key, em = fc.emul, ea = fc.eadd, fk2 = fc.fk2, fk3 = fc.fk3)
                 };
-                let ld_body3 = format!("local bl={rs}() {acc} {ec}[(pos)]={{{tvm3},bl,pos-0X1}}",
-                    rs = fn_read_string, acc = mac_acc("bl", &fd3a, &rl3a), ec = var_enc_c, tvm3 = tag_map[3] as i64);
-                let ld_body2 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[(pos)]={{{tvm2},{bn},pos-0X1}}",
-                    bn = bn2, bj = bj2, rd = fn_read_dec, acc = mac_acc(bn2.as_str(), &fd2a, &rl2a), ec = var_enc_c, tvm2 = tag_map[2] as i64);
-                let ld_body1 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[(pos)]={{{tvm1},{bn},pos-0X1}}",
-                    bn = bn1, bj = bj1, rd = fn_read_dec, acc = mac_acc(bn1.as_str(), &fd1a, &rl1a), ec = var_enc_c, tvm1 = tag_map[1] as i64);
+                let ld_body3 = format!("local bl={rs}() {acc} {ec}[{tk}]={{{tvm3},bl,(pos-0X1+{c}.{pld})%{m32}}}",
+                    rs = fn_read_string, acc = mac_acc("bl", &tk3a, &fd3a, &rl3a), ec = var_enc_c, tk = tk3a, tvm3 = tag_map[3] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
+                let ld_body2 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm2},{bn},(pos-0X1+{c}.{pld})%{m32}}}",
+                    bn = bn2, bj = bj2, rd = fn_read_dec, acc = mac_acc(bn2.as_str(), &tk2a, &fd2a, &rl2a), ec = var_enc_c, tk = tk2a, tvm2 = tag_map[2] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
+                let ld_body1 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm1},{bn},(pos-0X1+{c}.{pld})%{m32}}}",
+                    bn = bn1, bj = bj1, rd = fn_read_dec, acc = mac_acc(bn1.as_str(), &tk1a, &fd1a, &rl1a), ec = var_enc_c, tk = tk1a, tvm1 = tag_map[1] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
+                let ld_body0 = format!("{agg}=({agg}*0X1F+((pos-0X1)*0X{em:X})%{m32}+0X7)%{m32}; ",
+                    agg = agg_name, em = fc.emul, m32 = m32);
                 let ld_bodydd = format!("{ec}[(pos)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}}",
                     ec = var_enc_c, tvm2 = tag_map[2] as i64);
                 let t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys);
                 let ld_tags: Vec<(String, String)> = vec![
                     (three.clone(), ld_body3), (two.clone(), ld_body2), (one.clone(), ld_body1),
-                    (t0.clone(), String::new()), (format!("{}", decoy_ld), ld_bodydd)];
+                    (t0.clone(), ld_body0), (format!("{}", decoy_ld), ld_bodydd)];
                 let dsp_tags: Vec<(String, String)> = vec![
                     (three.clone(), dsp_expr3), (two.clone(), dsp_expr2), (one.clone(), dsp_expr1),
                     (format!("{}", decoy_dsp), dsp_exprdd)];
@@ -679,17 +681,15 @@ pub fn build_consts(
                     mc1 = mc1, mc2 = mc2, mc3 = mc3, mc4 = mc4, mc5 = mc5,
                     tstr = v_t_str, ttbl = v_t_tbl,
                     kobf = sc_kobf, bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte, m32 = m32));
-                // ③-4 变体化的常量表基建——必须在 vmac 之后（V2/V3 的分派闭包
-                // 体内引用 vmac，词序先于其定义会把 vm 解析成全局）
+                // ③-4 变体化的常量表基建（在 vmac 之后定义）
                 lua.push_str(&ct_init);
                 for x in &dsp_defs { lua.push_str(x); }
-                // 缓存前哨：非字符串常量命中后短路；字符串必须在每次取用时重解密。
                 lua.push_str(&format!(
-                    "local {memo}=function({ddm},{ix}) local ev={ec}[({ix})]; if {nt}(ev)=={ttbl} and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[({ix})] if cd~=nil then return cd end end; ",
+                    "local {memo}=function({ddm},{ix}) local {tk}=((({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}); local ev={ec}[{tk}]; if {nt}(ev)=={ttbl} and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[{tk}] if cd~=nil then return cd end end; ",
                     memo = memo_name, nt = native_type, ix = var_idx_chunk, ca = var_cache, ddm = ddm,
-                    ec = var_enc_c, strtag = three, ttbl = v_t_tbl));
+                    ec = var_enc_c, strtag = three, ttbl = v_t_tbl, tk = rng.name(),
+                    em = fc.emul, ea = fc.eadd, m32 = m32, c = fn_c, pld = pf_ld_key));
                 lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
-                                // ③-4：记录解码调用点随调用制变体（表制走闭包表，函数制直调）
                 let kbh = if table_regime {
                     format!("local {h}={dsp}[({ev}[(0X1)])] if not {h} then {fake} return {x_ret1},{fv} end local {vv}={h}(0X1,{ev}) return {x_val1},{vv} end; ",
                         h = h_name, dsp = dsp_name, ev = var_e, vv = rng.name(), x_val1 = x_val1,
@@ -699,13 +699,13 @@ pub fn build_consts(
                         vv = rng.name(), dsp = dsp_name, ev = var_e, x_val1 = x_val1,
                         fake = fake_stmt.as_str(), fv = fake_fv.as_str(), x_ret1 = x_ret1)
                 };
-lua.push_str(&format!(
+                lua.push_str(&format!(
                     "local {hh}={{}}; \
                      {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in {np}({cab}) do {cab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
                        local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else if {psn} and {delay}<=0 then return {x_ret1},{pfn}(g) end; return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
-                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[({ix})] if {nt}({ev})~={ttbl} then {fake} return {x_nil1} end; \
+                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[(({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}] if {nt}({ev})~={ttbl} then {fake} return {x_nil1} end; \
                        {ev}[(0X4)]={tba}[{pathkey}] or 0X0; {ev}[(0X5)]=(({ev}[(0X5)] or 0X0)+0X1)%{m32}; {kbh}\
-                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~={tstr} then {ca}[({ix})]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
+                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~={tstr} then {ca}[(({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
                     wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, np = native_pairs, nt = native_type, pv = rng.name(),
                     pfn = pfn_n, psn = psn, delay = poison_delay,
@@ -715,9 +715,9 @@ lua.push_str(&format!(
                     ev = var_e, kbh = kbh, tba = hh_tb_arg, pathkey = const_path_key, m32 = m32,
                     ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v,
                     ttbl = v_t_tbl, tstr = v_t_str,
+                    em = fc.emul, ea = fc.eadd, c = fn_c, pld = pf_ld_key,
                     fake = fake_stmt.as_str()));
-                // ㉔ 解码链状态转移四形态化：基形已是键表引用表达式（②），
-                // 追加 ③ 惰性槽 / ④ 委托返回值；函数体开头落转移基建。
+                // ㉔ 解码链状态转移四形态化
                 let (dc_t, dc_s, dc_d) = (rng.name(), rng.name(), rng.name());
                 let dc_infra = format!("local {t},{sl}={{}},{{}}; local {d}=function(w,u) local z=w%0X2 return u+(z-z) end; ",
                     t = dc_t, sl = dc_s, d = dc_d);
@@ -753,25 +753,20 @@ lua.push_str(&format!(
                     "{c}.{pf}={sm}({{}},{mt}); {mt}=({{}})[{mtn}]; ",
                     c = fn_c, pf = pf_consts, mt = mt_name, sm = v_setmeta, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
                 for x in &ld_defs { lua.push_str(x); }
-                // #3 折叠 + ㉓-A（读侧）：body_insts 已把指令数组（op=文件魔数、
-                // a=文件A、b/c=dcb 解码后明文=预掩码预交换值）填进 c.pf_*。
-                // 同一扫描：R 链重算（roll 初值=0X2545F491^组盐，r7=rotl7(roll)，
-                // roll=(bx(r7,op)+a+bx(b,c))%2^32）+ Ftbl[li]=Σf(pc) + Rtbl[li]=
-                // 最后引用指令后的 roll。谓词与 Rust 写侧 FoldCtx 同式同常数。
-                // 谓词用 xor（32 位域同构）；随机 do..end 壳，静态读不出「哪些 op 参与」。
+                // #3 折叠 + ㉓-A（读侧）：R 链重算 + 动态左旋 Ftbl[tk]=rotl(Ftbl[tk],k_step)+f(pc) + Rtbl[tk]=roll
                 let sal_sel = format!(
                     "({g}==0X0 and {s0} or {g}==0X1 and {s1} or {g}==0X2 and {s2} or {s3})",
                     g = gname, s0 = salt_names[0], s1 = salt_names[1], s2 = salt_names[2], s3 = salt_names[3]);
-                // 链公式常量由公共格式器直接输出字面量，扫描重放时参数明确可读。
                 let mut ob1 = |v: u64| crate::VM::VM_Backend::Generator_kdf::obf_const(rng, v);
                 let (kmz, k100a, k2a, k100b, k100c, k100d, kma, kmb) = (ob1(0x100000000), ob1(0x100), ob1(0x2), ob1(0x100), ob1(0x100), ob1(0x100), ob1(0x100000000), ob1(0x100000000));
                 let (k10001, kmc, kmd, k80a, kme, k45d9, kmf, k80b, kmg) = (ob1(0x10001), ob1(0x100000000), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000), ob1(0x45D9), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000));
                 let (k3, k101, k1001, kmh, kmi, k11, kmj, ks32a, ks32b) = (ob1(0x3), ob1(0x101), ob1(0x1001), ob1(0x100000000), ob1(0x100000000), ob1(0x11), ob1(0x100000000), ob1(0x100000000), ob1(0x100000000));
+                let tk_scan = rng.name();
                 lua.push_str(&format!(
-                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
+                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end end; {rf}={rr} end; ",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
                     av = rng.name(), ob = rng.name(), bv = rng.name(),
-                    cv = rng.name(), fp = rng.name(), sk = rng.name(),
+                    cv = rng.name(), fp = rng.name(), sk = rng.name(), tk = tk_scan,
                     c = fn_c, pfo = pf_opcodes, pfa = pf_a_arr, pfb = pf_b_arr, pfc = pf_c_arr,
                     bx = fn_bxor, rot = fn_rotl, ft = ftds, rt = rtds, rf = rfds, sal = sal_sel,
                     rs = deep10(rng, fn_bxor, fc.rs18 as i64),
@@ -784,29 +779,30 @@ lua.push_str(&format!(
                     ma = rng.name(), mb = rng.name(), mc = rng.name(),
                     pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, pcnt = pf_cnt_key,
                     m32 = m32,
-                    f1 = fc.f1, f2 = fc.f2,
+                    f1 = fc.f1, f2 = fc.f2, fk1 = fc.fk1, em = fc.emul, ea = fc.eadd,
                     rb = fc.r6b, pb1 = fc.p1b, pb3 = fc.p3b,
                     rc = fc.r6c, pc1 = fc.p1c, pc3 = fc.p3c,
                     ch = rng.name(), cbv = rng.name(),
                     dl = deep10(rng, fn_bxor, chain_delta as i64),
                     chm = deep10(rng, fn_bxor, chain_m as i64),
                     chk0 = deep10(rng, fn_bxor, chain_k0 as i64)));
-                // ③-4：读回循环调用点随调用制变体
+                // ③-4：物理排放序号 i 与逻辑槽号 psl 解耦（读取流内加密槽号还原 psl = slot + 1）
+                let psl = rng.name();
                 let rdl = if table_regime {
-                    format!("local {h}={ld}[({t})]; if {h} then if {pj}[({pkC})]=={numC} then else {h}(0X0,{i}) end end end end; ",
-                        h = h_name, ld = ld_name, t = t, pj = pj_name, pkC = pkC, numC = numC, i = v_ch_i)
+                    format!("local {h}={ld}[({t})]; if {h} then if {pj}[({pkC})]=={numC} then else {h}(0X0,{psl}) end end end end; ",
+                        h = h_name, ld = ld_name, t = t, pj = pj_name, pkC = pkC, numC = numC, psl = psl)
                 } else {
-                    format!("if {pj}[({pkC})]=={numC} then else {ld}({t},{i}) end end end; ",
-                        pj = pj_name, pkC = pkC, numC = numC, ld = ld_name, t = t, i = v_ch_i)
+                    format!("if {pj}[({pkC})]=={numC} then else {ld}({t},{psl}) end end end; ",
+                        pj = pj_name, pkC = pkC, numC = numC, ld = ld_name, t = t, psl = psl)
                 };
                 lua.push_str(&format!(
                     "{agg}={bx}({c}.{pn},{bx}({c}.{pld},{rot}({c}.{plld},0X7))); \
                      local {i}=0; local {n}={a5}(); if not(not {pj}[({pk6})]) then {i}={n}; else \
-                     while {i}<{n} do {i}={i}+1; local {t}={rd}(); \
+                     while {i}<{n} do {i}={i}+1; local {t}={rd}(); local {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+0X1; \
                      {rdl}",
                     agg = agg_name, bx = fn_bxor, c = fn_c, pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, rot = fn_rotl,
                     i = v_ch_i, n = v_ch_n, a5 = fn_a5, pj = pj_name, pk6 = pk6,
-                    t = t, rd = fn_read_dec, rdl = rdl));
+                    t = t, rd = fn_read_dec, psl = psl, em = fc.emul, m32 = m32, rdl = rdl));
                 lua.push_str(&format!("{agg}=0X0; ", agg = agg_name));
                 lua
 }
