@@ -172,14 +172,15 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             + fb0 as u64 + (fc0 as u64) * 0x11) % 0x1_0000_0000
     };
     let _ = nochain18;
-    // 源 chunk 名是调试元数据，不落入最终载荷。复用原 name 字段保存 4B
-    // 原型常量汇总校验值；body_debug 从该字段校验，末尾不再保留可跳过的调试区。
+    // 源 chunk 名是调试元数据，不落入最终载荷。原 name 槽改为每原型随机 32 位盐 hn18
+    //（无固定 [4,0,0,0] 长度前缀），并掩码紧随其后的 kp18/pb18，消除头部已知明文不动点。
     let _ = r.read_string();
-    w.extend_from_slice(&4u32.to_le_bytes());
-    let checksum_offset = w.len();
-    w.extend_from_slice(&[0u8; 4]);
+    let hn18: u32 = rng.random_range(0x0101_0101u32..=0xFFFF_FFFEu32);
+    let kp_wire: u32 = kp18 ^ hn18.rotate_left(5);
+    let pb_wire: u32 = pb18 ^ hn18.rotate_left(13);
+    w.extend_from_slice(&hn18.to_le_bytes());
     let _ = r.read_u32(); let _ = r.read_u32();
-    w.extend_from_slice(&kp18.to_le_bytes()); w.extend_from_slice(&pb18.to_le_bytes());
+    w.extend_from_slice(&kp_wire.to_le_bytes()); w.extend_from_slice(&pb_wire.to_le_bytes());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
     let max_stack = r.read_u8();
     // Per-Proto 偏移受 max_stack 约束，确保寄存器仍落在 RK 的 7-bit 域。
@@ -330,8 +331,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // r7=rotl7(roll)、roll=(r7^文件魔数)+文件A+(预掩码预交换 b/c 异或和) (mod 2^32)。
     // 读侧 body_consts 扫描同式重算（数组 b/c 经 dcb 已是明文=fb0/fc0，含死槽/builtin）。
     // 第 li 槽密钥用「最后一条引用它的指令之后」的 roll（未引用槽用链末值）。
-    // ⑤ roll 初值逐构建随机（原 0x2545F491 是可识别算法指纹常量）
-    let mut roll18: u32 = fc18.rs18 ^ enc.salts[group];
+    // ⑤ roll 初值逐构建随机并混入本原型头部盐 hn18
+    let mut roll18: u32 = fc18.rs18 ^ enc.salts[group] ^ hn18;
     let mut roll_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     while i < n_insts {
         let (op, a, b, c) = raw_insts[i];
@@ -750,8 +751,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // 共用 fold/R 派生、ChaCha 加密和聚合 MAC；其引用仅位于不可达尾部。
     w.extend_from_slice(&total_const_count.to_le_bytes());
     let mut slot: u32 = 0;
-    // ③ 汇总校验器：每个非 nil 记录（含诱饵）都按落盘顺序累计；读侧使用同式。
-    let mut agg18: u32 = 0;
+    // ③ 链式静默耦合：agg18 从头部 (hn18 ^ kp18 ^ rotl7(pb18)) 起步，逐个非 nil 常量
+    // 混入本槽 fold 解密键并以 const_mac18 推进，不回填校验和、不留二值比对 Oracle。
+    let mut agg18: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7);
     for layout_entry in &const_layout {
         let (c_type, bytes) = match *layout_entry {
             ConstantSlot::Source(idx) => (local_consts[idx].0, local_consts[idx].1.as_slice()),
@@ -761,7 +763,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             0 => { w.push(tag_map[0]); }
             // bool 也走 8 字节 double 密文管线，线上 tag 与数字结构一致。
             1 | 2 | 3 => {
-                let fold = fold_map.get(&slot).copied().unwrap_or(0u32);
+                let fold0 = fold_map.get(&slot).copied().unwrap_or(0u32);
+                let fold = fold0 ^ agg18;
                 let rl18 = roll_map.get(&slot).copied().unwrap_or(roll18);
                 let r7l18 = rl18.rotate_left(7);
                 let kind = if c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
@@ -775,7 +778,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let blob = chacha_xor_layout(&enc.keys[group], [s118, s218, s318], &payload18, &enc.layout[group]);
                 w.push(tag_map[c_type as usize]);
                 if c_type == 3 { write_string(w, &blob); } else { w.extend_from_slice(&blob); }
-                let mac18 = const_mac18(&blob, slot, fold, rl18, fc18);
+                let mac18 = const_mac18(&blob, slot, fold0, rl18, fc18);
                 agg18 = agg18.wrapping_mul(31).wrapping_add(mac18).wrapping_add(1);
             }
             _ => panic!(),
@@ -793,19 +796,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     }
 
     // 目标五②：末尾行号、局部变量及 upvalue 调试区全部消费后丢弃。
-    // 汇总校验值已回填到 name 字段，不再依赖可识别的三段尾部结构。
     let l_count = r.read_u32();
     r.read_bytes((l_count * 4) as usize);
     let loc_count = r.read_u32();
     for _ in 0..loc_count { let _ = r.read_string(); let _ = r.read_u32(); let _ = r.read_u32(); }
     let upv_count = r.read_u32();
     for _ in 0..upv_count { let _ = r.read_string(); }
-
-    // 校验值与运行时 aggf 同式：整原型常量 MAC 混合 kp/pb，作为有意义的
-    // 4 字节 name-field 负载；源文件名和调试信息本身不会进入成品。
-    let mix18: u32 = kp18 ^ pb18.rotate_left(7);
-    let checksum = agg18 ^ mix18;
-    w[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
 }
 
 /// ④E：**加载器取用不再有标识符**——产物里不出现 `loadstring` / `load` 这两个词，

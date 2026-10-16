@@ -352,22 +352,34 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let w_seed_stmt = {
             let wg = rng.obfuscate_num(crate::VM::VM_Backend::Generator::WHITEN_GROUP as i64, 1, &keys);
             let ww = rng.obfuscate_num(crate::VM::VM_Backend::Generator::WHITEN_WORD as i64, 1, &keys);
+            let ww2 = rng.obfuscate_num((crate::VM::VM_Backend::Generator::WHITEN_WORD + 2) as i64, 1, &keys);
             let wmod = rng.obfuscate_num(2147483646i64, 1, &keys);
+            let mw_var = rng.name();
             let seed = format!("{kdf}({root},{g},{w})", kdf = kdf_name, root = root_fetch[3], g = wg, w = ww);
-            format!("local {wk}=({seed}%{m})+0X1; ", wk = var_whiten, seed = seed, m = wmod)
+            let mseed = format!("{kdf}({root},{g},{w2})", kdf = kdf_name, root = root_fetch[5], g = wg, w2 = ww2);
+            format!(
+                "local {mw}={mseed}; \
+                 k1={x32}(k1,{mw}%0X100); \
+                 k2={x32}(k2,math_floor({mw}/0X100)%0X100); \
+                 k3={x32}(k3,math_floor({mw}/0X10000)%0X100); \
+                 k4={x32}(k4,math_floor({mw}/0X1000000)%0X100); \
+                 local {wk}=(({seed}+k1*0X10001+k2*0X101+k3*0X11+k4)%{m})+0X1; ",
+                mw = mw_var, mseed = mseed, x32 = fn_xor32,
+                wk = var_whiten, seed = seed, m = wmod
+            )
         };
         let m_kdf = shell.add(
             &mut rng,
-            &[&keys.tbl_p, &h_var, &fix_var, &fn_xor32, &fn_rotl32],
+            &[&keys.tbl_p, &h_var, &fix_var, &fn_xor32, &fn_rotl32, "math_floor", "k1", "k2", "k3", "k4"],
             format!(
-                "{}{}{}{}return {},{},{}",
+                "{}{}{}{}return {},{},{},k1,k2,k3,k4",
                 root_tok.decl, dispose_s, kdf_decl, w_seed_stmt, root_kw, kdf_name, var_whiten
             ),
         );
         block_chacha_setup.push_str(&format!(
-            "local {},{}; {},{},{}={}; ",
+            "local {},{}; {},{},{},k1,k2,k3,k4={}; ",
             root_kw, kdf_name, root_kw, kdf_name, var_whiten,
-            shell.call(&m_kdf, &[&keys.tbl_p, &h_var, &fix_var, &fn_xor32, &fn_rotl32])
+            shell.call(&m_kdf, &[&keys.tbl_p, &h_var, &fix_var, &fn_xor32, &fn_rotl32, "math_floor", "k1", "k2", "k3", "k4"])
         ));
         let m_qr1 = mk_m(&mut rng); let m_qr2 = mk_m(&mut rng);
         let x32 = fn_xor32.as_str(); let rt = fn_rotl32.as_str();

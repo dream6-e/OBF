@@ -161,8 +161,8 @@ pub fn build_scatter(
             SS=s6,QE=qe,PP=p6,Q1=q1,Q2=q2,Q3=q3)
     };
     let upds = format!(
-        "{st}[{u1}]({white},{cipher}); {st}[{u2}]({white},{cipher}); {st}[{u3}]({white},{cipher}); {st}[{u4}]({white},{cipher}); ",
-        st=v_rd_c4,u1=u1,u2=u2,u3=u3,u4=u4,white=v_rd_c1,cipher=v_rd_e);
+        "{st}[{u1}]({plain},{cipher}); {st}[{u2}]({plain},{cipher}); {st}[{u3}]({plain},{cipher}); {st}[{u4}]({plain},{cipher}); ",
+        st=v_rd_c4,u1=u1,u2=u2,u3=u3,u4=u4,plain=v_rd_o,cipher=v_rd_e);
 
     let (s0, sl) = [(0i32,1i32),(5,6),(17,18),(-3,-2)][rng.range(0,4)];
     let big = rng.range(9,99);
@@ -423,10 +423,10 @@ pub fn build_consts(
     fc: &crate::VM::VM_Backend::Generator_util::FoldCtx,
     tag_map: &[u8; 4],
     salt_names: &[String; 4],
-    pf_ld_key: &str, pf_lld_key: &str, pf_cnt_key: &str,
+    pf_n_key: &str, pf_ld_key: &str, pf_lld_key: &str, pf_cnt_key: &str,
     chain_delta: u32, chain_m: u64, chain_k0: u64,
     psn: &str, poison_delay: &str,
-) -> (String, String) {
+) -> String {
     // ㉜ 明文 API 名改走 NB 槽（build_consts 落 parts，NB 已建表）
     let v_setmeta = vault.global("setmetatable");
     let v_newproxy = vault.global("newproxy");
@@ -516,14 +516,10 @@ pub fn build_consts(
                 // V0/V1 = 表调用制（调用点 ld[(t)]/dsp[(ev[1])]）；V2/V3 = 函数制。
                 let ctv = rng.range(0, 4);
                 let table_regime = ctv < 2;
-                // ③ 汇总校验：agg=整函数累计值（常量态内逐常量折叠）；aggf 挂到
-                // 本次解码的 chunk 表，debug 态读回远端落盘值并静默置共享投毒旗。
+                // ③ 链式静默耦合：agg 从头部三字段初值起步，逐常量混入本槽 fold 解密键，
+                // 并以 vmac 推进下一槽——不再挂 chunk 字段或做 debug 态等式裁定。
                 let agg_name = rng.name();
-                let agg_field = rng.name();
-                // ── dsp 处理器体：fd/rl 局部 + MAC 先验 + 解码表达式（逐支独立名）──
-                // ③ 逐常量 MAC 不再存线上、也不在分派闭包里比对：折叠进 agg（见 ld 处理器），
-                // 由 debug 态的汇总比对一次性裁定（错就整体投毒）。但 fd/rl 两个键仍必须
-                // 在闭包内现算（解码器入参），只是不再与任何线上校验值比较。
+                // ── dsp 处理器体：fd/rl 局部 + 解码表达式（逐支独立名）──
                 let mac_pre = |fdn_: &str, rln_: &str| -> String {
                     format!("local {fd}=({ft} and {ft}[ev[(0X3)]] or 0X0)%{m32}; local {rl}=({rt} and {rt}[ev[(0X3)]] or {rf}); ",
                         fd = fdn_, rl = rln_, ft = ftds, rt = rtds, rf = rfds, m32 = m32)
@@ -538,15 +534,14 @@ pub fn build_consts(
                 // ── ld 处理器体（参数 pos；逐体独立局部名）──
                 let (bn2, bj2) = (rng.name(), rng.name());
                 let (bn1, bj1) = (rng.name(), rng.name());
-                // ③ 逐常量 MAC 折叠：fd/rl 取本槽的折叠键与 R 链值（与写侧 const_mac18 同入参），
-                // vmac 复用既有助手；倍数 31、尾 +1 与写侧同式
+                // ③ 逐常量 MAC 折叠入本槽解密键 fd，并推进 agg（与写侧 const_mac18 同式）
                 let (fd3a, rl3a) = (rng.name(), rng.name());
                 let (fd2a, rl2a) = (rng.name(), rng.name());
                 let (fd1a, rl1a) = (rng.name(), rng.name());
                 let mac_acc = |blob: &str, fdn: &str, rln: &str| -> String {
-                    format!("local {fd}=({ft} and {ft}[(pos-0X1)] or 0X0)%{m32}; local {rl}=({rt} and {rt}[(pos-0X1)] or {rf}); {agg}=({agg}*0X1F+{vm}({blob},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
+                    format!("local {fd}=({ft} and {ft}[(pos-0X1)] or 0X0)%{m32}; local {rl}=({rt} and {rt}[(pos-0X1)] or {rf}); if {ft} then {ft}[(pos-0X1)]={bx}({fd},{agg}) end; {agg}=({agg}*0X1F+{vm}({blob},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
                         fd = fdn, rl = rln, ft = ftds, rt = rtds, rf = rfds, vm = vm,
-                        agg = agg_name, m32 = m32, blob = blob)
+                        agg = agg_name, m32 = m32, blob = blob, bx = fn_bxor)
                 };
                 let ld_body3 = format!("local bl={rs}() {acc} {ec}[(pos)]={{{tvm3},bl,pos-0X1}}",
                     rs = fn_read_string, acc = mac_acc("bl", &fd3a, &rl3a), ec = var_enc_c, tvm3 = tag_map[3] as i64);
@@ -773,7 +768,7 @@ lua.push_str(&format!(
                 let (k10001, kmc, kmd, k80a, kme, k45d9, kmf, k80b, kmg) = (ob1(0x10001), ob1(0x100000000), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000), ob1(0x45D9), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000));
                 let (k3, k101, k1001, kmh, kmi, k11, kmj, ks32a, ks32b) = (ob1(0x3), ob1(0x101), ob1(0x1001), ob1(0x100000000), ob1(0x100000000), ob1(0x11), ob1(0x100000000), ob1(0x100000000), ob1(0x100000000));
                 lua.push_str(&format!(
-                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({rs},{sal}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
+                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; {ft}[{sk}]=({ft}[{sk}] or 0)+{fp}; {rt}[{sk}]={rr} end end end; {rf}={rr} end; ",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
                     av = rng.name(), ob = rng.name(), bv = rng.name(),
                     cv = rng.name(), fp = rng.name(), sk = rng.name(),
@@ -787,7 +782,7 @@ lua.push_str(&format!(
                     ks32a = ks32a, ks32b = ks32b,
                     pb = rng.name(),
                     ma = rng.name(), mb = rng.name(), mc = rng.name(),
-                    pld = pf_ld_key, plld = pf_lld_key, pcnt = pf_cnt_key,
+                    pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, pcnt = pf_cnt_key,
                     m32 = m32,
                     f1 = fc.f1, f2 = fc.f2,
                     rb = fc.r6b, pb1 = fc.p1b, pb3 = fc.p3b,
@@ -805,21 +800,15 @@ lua.push_str(&format!(
                         pj = pj_name, pkC = pkC, numC = numC, ld = ld_name, t = t, i = v_ch_i)
                 };
                 lua.push_str(&format!(
-                    "local {i}=0; local {n}={a5}(); if not(not {pj}[({pk6})]) then {i}={n}; else \
+                    "{agg}={bx}({c}.{pn},{bx}({c}.{pld},{rot}({c}.{plld},0X7))); \
+                     local {i}=0; local {n}={a5}(); if not(not {pj}[({pk6})]) then {i}={n}; else \
                      while {i}<{n} do {i}={i}+1; local {t}={rd}(); \
                      {rdl}",
+                    agg = agg_name, bx = fn_bxor, c = fn_c, pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, rot = fn_rotl,
                     i = v_ch_i, n = v_ch_n, a5 = fn_a5, pj = pj_name, pk6 = pk6,
                     t = t, rd = fn_read_dec, rdl = rdl));
-                // ③ 收尾：聚合值挂到本次解码的 chunk 表，debug 态随机采样核对后置共享投毒旗。
-                // 目标一② 层间耦合（读侧）：汇总值挂载前与本原型明文头部字段同式混入
-                // （写侧落盘值 = agg18 ^ (kp18 ^ rotl(pb18,7))）；诱饵槽仍走 `or 0X0`。
-                let mx_expr = format!("{bx}({c}.{pld},{rot}({c}.{plld},0X7))",
-                    bx = fn_bxor, c = fn_c, pld = pf_ld_key, plld = pf_lld_key, rot = fn_rotl);
-                lua.push_str(&format!(
-                    "{c}.{aggf}=({bx})({agg},{mx}); ",
-                    c = fn_c, aggf = agg_field, agg = agg_name, mx = mx_expr, bx = fn_bxor));
-                // 返回值：常量态代码 + 汇总值字段名（debug 态随机采样核对）
-                (lua, agg_field)
+                lua.push_str(&format!("{agg}=0X0; ", agg = agg_name));
+                lua
 }
 
 /// 解头（防篡改探针+入口解密装配）—— 自 Generator.rs 拆出。

@@ -202,9 +202,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let cpp = rng.name();
         let cpq = rng.name();
         let body_init = format!(
-            "local function {cpp}({cpq},{cpq}) {cpq}=0X1; return {cpq} end; {st}={nxt}; {c}.{pf_n}={rs}(); {c}.{pf_ld}={a5}(); {c}.{pf_lld}={a5}(); {c}.{pf_nups}={rd}(); \
+            "local function {cpp}({cpq},{cpq}) {cpq}=0X1; return {cpq} end; {st}={nxt}; {c}.{pf_n}={a5}(); {c}.{pf_ld}={bx}({a5}(),{rot}({c}.{pf_n},0X5)); {c}.{pf_lld}={bx}({a5}(),{rot}({c}.{pf_n},0XD)); {c}.{pf_nups}={rd}(); \
              {c}.{pf_numparams}={rd}(); {c}.{pf_is_vararg}={rd}(); {c}.{pf_maxstack}={rd}(); if {i} > {cpp}({cpq},{cpq}) then {i} = {i} - {cpp}({cpq},{cpq}) end; ",
-            st = var_state, nxt = obf_s_insts, c = fn_c, rs = fn_read_string, a5 = fn_a5, rd = fn_read_dec,
+            st = var_state, nxt = obf_s_insts, c = fn_c, a5 = fn_a5, rd = fn_read_dec,
+            bx = fn_bxor, rot = fn_rotl32,
             pf_n = pf_n, pf_ld = pf_ld, pf_lld = pf_lld, pf_nups = pf_nups,
             pf_numparams = pf_numparams, pf_is_vararg = pf_is_vararg, pf_maxstack = pf_maxstack, i = v_ch_i,
             cpp = cpp, cpq = cpq
@@ -273,7 +274,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let (gk_stmt, sc_kobf) = uni.fetch(&mut rng, cid_gk);
         let psn_pick = psn_pool[rng.range(0, psn_pool.len())].as_str().to_string();
         let psn_pick = psn_pick.as_str();
-                let (bc_scatter, agg_field) = crate::VM::VM_Backend::Generator_flow::build_consts(
+                let bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &mut vault, &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
                 sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
@@ -282,7 +283,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 fn_c.as_str(), pf_consts.as_str(), const_path_key.as_str(),
                 &v_ch_i, &v_ch_n, &t,
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
-                &tag_map18, &salt_names, pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
+                &tag_map18, &salt_names, pf_n.as_str(), pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
                 chain_delta, chain_m, chain_k0, {psn_pick},
                 poison_delay_expr.as_str());
         let body_consts = format!("{st}={nxt}; {ci_stmt}{gk_stmt} {bc_scatter} ",
@@ -309,22 +310,21 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             rr = rr18, scan = scan18, scan_flag = scan_flag18,
             tree9 = it9(&mut rng, var_state.as_str())
         );
-        // ③ 汇总校验：随机选中的采样点发现不符时只置共享投毒旗，不调用失败闭包。
-        // 采样位来自局部对象地址哈希，不消耗用户 math.random 的状态。
-        // 目标五②：调试尾区已从载荷中删除；校验值改放在原 name 槽。
-        // 运行时仅在随机采样点把 4 个字节还原为 u32，并与常量态聚合值比较。
-        let (go, gb, ga, gx, gs, gh, gi, co, cm, b1, b2, b3, b4) =
+        // ③ 移除整程序校验和 Oracle：头部盐 pf_n 已静默混入 R 链与逐常量 fold 链，
+        // debug 态抹除 pf_n 并仅做运行期对象地址熵探针，不提供任何载荷等式判据。
+        let (go, gb, ga, gx, gs, gh, gi, co, cm) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
-             rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+             rng.name(), rng.name());
         let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
+        let wipe_k = rng.range(0x1000, 0xFFFFF);
         let (v_va_pc, v_va_ts, v_va_sb, v_va_tnum) = (
             vault.global("pcall"), vault.global("tostring"),
             vault.member("string", "byte"), vault.lit("number"));
         let verify_agg = format!(
-            "local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sby}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}={pc}(function() local {b1},{b2},{b3},{b4}={sb}({c}.{pn},0X1,0X4);return #{c}.{pn}~=0X4 or {nt}({b1})~={tnum} or {nt}({b2})~={tnum} or {nt}({b3})~={tnum} or {nt}({b4})~={tnum} or ({b1}+{b2}*0X100+{b3}*0X10000+{b4}*0X1000000)~={c}.{aggf} end);{psn}={psn} or (not {co} or {cm}) end;",
+            "{c}.{pn}=({{}})[0X{wk:X}];local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sby}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}={pc}(function() local {ga},{gx}={{}},{{}};return {ts}({ga})=={ts}({gx}) or {nt}(#{ts}({ga}))~={tnum} end);{psn}={psn} or (not {co} or {cm}) end;",
+            c = fn_c, pn = pf_n, wk = wipe_k,
             go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
-            co = co, cm = cm, b1 = b1, b2 = b2, b3 = b3, b4 = b4,
-            sb = fn_s_byte, c = fn_c, pn = pf_n, aggf = agg_field, nt = native_type,
+            co = co, cm = cm, nt = native_type,
             pc = v_va_pc, ts = v_va_ts, sby = v_va_sb, tnum = v_va_tnum,
             psn = psn_pool[rng.range(0, psn_pool.len())].as_str()
         );

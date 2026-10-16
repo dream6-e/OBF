@@ -73,26 +73,27 @@ fn roll_update(state: &mut [u8; 4], pos: u64, plain: u8, cipher: u8, p: RollPara
     *state = [n1, n2, n3, n4];
 }
 
-/// 把白化后的 payload 字节滚动变换成密文（绝对 1-based 位置）。
-pub(super) fn roll_encrypt_byte(state: &mut [u8; 4], pos: u64, plain: u8, p: RollParams) -> u8 {
+/// 把白化后的 payload 字节滚动变换成密文（绝对 1-based 位置）；状态更新吸收解白化后的真明文字节。
+pub(super) fn roll_encrypt_byte(state: &mut [u8; 4], pos: u64, white: u8, plain: u8, p: RollParams) -> u8 {
     let [k1, k2, k3, k4] = *state;
     let at = pos as u8;
     let bias = k1.wrapping_add(k2).wrapping_add(at.wrapping_mul(p.add));
-    let mixed = plain.wrapping_add(bias) ^ k3;
+    let mixed = white.wrapping_add(bias) ^ k3;
     let cipher = mixed.rotate_left(p.rot_in).wrapping_add(k4)
         .wrapping_add(at.wrapping_mul(p.add_k1));
     roll_update(state, pos, plain, cipher, p);
     cipher
 }
 
-/// 逆变换；状态更新与写端同式，便于分段/惰性读取时续接。
-pub(super) fn roll_decrypt_byte(state: &mut [u8; 4], pos: u64, cipher: u8, p: RollParams) -> u8 {
+/// 逆变换；状态更新与写端同式（吸收解白化后的真明文字节），使滚动层与白化层逐字节耦合。
+pub(super) fn roll_decrypt_byte(state: &mut [u8; 4], pos: u64, cipher: u8, whiten_mask: u8, p: RollParams) -> u8 {
     let [k1, k2, k3, k4] = *state;
     let at = pos as u8;
     let mixed = cipher.wrapping_sub(k4).wrapping_sub(at.wrapping_mul(p.add_k1))
         .rotate_right(p.rot_in) ^ k3;
-    let plain = mixed.wrapping_sub(k1).wrapping_sub(k2)
+    let white = mixed.wrapping_sub(k1).wrapping_sub(k2)
         .wrapping_sub(at.wrapping_mul(p.add));
+    let plain = white ^ whiten_mask;
     roll_update(state, pos, plain, cipher, p);
     plain
 }
@@ -290,42 +291,38 @@ impl Generator {
         let mut alloc18: u32 = rng.range(4, 64) as u32;
         rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18);
 
-        // ⑰ 中央密文池废除：payload = 4 字节滚动密钥 + 各原型常量节（密文内联）
+        // ⑰ 载荷前 4 字节滚动初态经运行期 KDF(root[5]) 掩码后落盘，且混入白化种子与后续 keystream。
         let mut combined_payload = Vec::new();
         let (k1, k2, k3, k4) = ((rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8, (rng.next() & 0xFF) as u8);
-        combined_payload.push(k1); combined_payload.push(k2); combined_payload.push(k3); combined_payload.push(k4);
-        
+        let [hm1, hm2, hm3, hm4] = crate::VM::VM_Backend::Generator_chacha::derive_word(
+            enc.root[5], WHITEN_GROUP as u32, WHITEN_WORD + 2,
+        ).to_le_bytes();
+        combined_payload.extend_from_slice(&[k1 ^ hm1, k2 ^ hm2, k3 ^ hm3, k4 ^ hm4]);
         combined_payload.extend(rewritten_chunks);
 
-        // 对 4 字节密钥之后的**全部内容**做同一道滚动字节变换 —— 常量池和指令流
-        // 共用一条连续的 keystream。指令流此前是明文追加的，固定 10 字节一条
-        // 剥掉外层 base86 之后可以直接切片还原；现在和池一样被覆盖。
-        // Lua 侧的 chunk 读取器相应改成走 fn_read_dec（见 block_dec_readers）。
-        // 自定义滚动层参数逐产物随机；写端与 Lua 逆变换共享这些值。
-        let sc_add: u8 = (rng.range(0, 128) * 2 + 1) as u8; // 奇数 1..255
+        let sc_add: u8 = (rng.range(0, 128) * 2 + 1) as u8;
         let sc_rot_in: u32 = rng.range(1, 8) as u32;
         let sc_add_k1: u8 = rng.range(1, 8) as u8;
         let sc_mul_k2: u8 = rng.range(2, 8) as u8;
         let sc_rot_k2: u32 = rng.range(1, 8) as u32;
         let sc_rot_k4: u32 = rng.range(1, 8) as u32;
-        // ㉛ 白化种子：kdf(根字, 组号, 字序)，与 Lua 侧同式；产物不落白化参数。
+        // ㉛ 白化种子：kdf(root[3]) 叠加前 4 字节解掩码初态偏置，不写进头部且无固定明文锚点。
         let whiten_seed: u64 = {
             let w = crate::VM::VM_Backend::Generator_chacha::derive_word(
                 enc.root[3], WHITEN_GROUP as u32, WHITEN_WORD) as u64;
-            w % 2147483646 + 1
+            let hdr_mix = (k1 as u64) * 0x10001 + (k2 as u64) * 0x101 + (k3 as u64) * 0x11 + (k4 as u64);
+            (w + hdr_mix) % 2147483646 + 1
         };
-        // 乘法器/加数逐构建随机（奇数乘法器；乘积仍 < 2^45，double 精确）
         let whiten_mul: u64 = (rng.range(0x1001, 0x100000) as u64) | 1;
         let whiten_add: u64 = rng.range(0x1000000, 0x7FFF_FFFF) as u64;
         let roll_params = RollParams { add: sc_add, rot_in: sc_rot_in, add_k1: sc_add_k1,
             mul_k2: sc_mul_k2, rot_k2: sc_rot_k2, rot_k4: sc_rot_k4 };
         let mut roll_state = [k1, k2, k3, k4];
         for (pos4, b) in combined_payload[4..].iter_mut().enumerate() {
-            let pos = pos4 + 4; // 0-based payload byte offset
-            // 先白化，再把白化字节与绝对位置送入自创的耦合滚动变换。
-            *b ^= whiten_byte(whiten_seed, (pos + 1) as u64, whiten_mul, whiten_add);
-            let white = *b;
-            *b = roll_encrypt_byte(&mut roll_state, (pos + 1) as u64, white, roll_params);
+            let pos = (pos4 + 5) as u64;
+            let plain = *b;
+            let white = plain ^ whiten_byte(whiten_seed, pos, whiten_mul, whiten_add);
+            *b = roll_encrypt_byte(&mut roll_state, pos, white, plain, roll_params);
         }
         
         let key_kryvex = String::from("x1"); let p_out: Vec<String> = (0..6).map(|_| rng.name()).collect();
@@ -1239,18 +1236,33 @@ mod payload_crypto_tests {
         for (idx, &plain) in input.iter().enumerate() {
             let pos = idx as u64 + 5;
             let white = plain ^ whiten_byte(seed, pos, mul, add);
-            cipher.push(roll_encrypt_byte(&mut enc_state, pos, white, params));
+            cipher.push(roll_encrypt_byte(&mut enc_state, pos, white, plain, params));
         }
 
         let mut dec_state = [0x12, 0xA7, 0x5C, 0xE1];
         let mut recovered = Vec::with_capacity(input.len());
         for (idx, &byte) in cipher.iter().enumerate() {
             let pos = idx as u64 + 5;
-            let white = roll_decrypt_byte(&mut dec_state, pos, byte, params);
-            recovered.push(white ^ whiten_byte(seed, pos, mul, add));
+            let mask = whiten_byte(seed, pos, mul, add);
+            recovered.push(roll_decrypt_byte(&mut dec_state, pos, byte, mask, params));
         }
         assert_eq!(recovered, input);
         assert_eq!(dec_state, enc_state);
         assert_ne!(cipher, input);
+
+        // 错误白化种子在首字节后即改变滚动状态，证明无法脱离白化层独立剥离滚动层
+        let mut wrong_state = [0x12, 0xA7, 0x5C, 0xE1];
+        for (idx, &byte) in cipher.iter().take(4).enumerate() {
+            let pos = idx as u64 + 5;
+            let wrong_mask = whiten_byte(seed ^ 1, pos, mul, add);
+            let _ = roll_decrypt_byte(&mut wrong_state, pos, byte, wrong_mask, params);
+        }
+        let mut right_state4 = [0x12, 0xA7, 0x5C, 0xE1];
+        for (idx, &byte) in cipher.iter().take(4).enumerate() {
+            let pos = idx as u64 + 5;
+            let mask = whiten_byte(seed, pos, mul, add);
+            let _ = roll_decrypt_byte(&mut right_state4, pos, byte, mask, params);
+        }
+        assert_ne!(wrong_state, right_state4);
     }
 }
