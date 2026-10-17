@@ -112,12 +112,23 @@ impl Serializer {
         let lowered = lower_to_custom_with_splits(instructions, &chunk.protos, &zero_one_splits)
             .unwrap_or_else(|err| panic!("{err}"));
         let mut extra_consts: Vec<u64> = Vec::new();
-        let lowered = inflate_small_custom_proto(
-            lowered,
-            chunk.constants.len(),
-            &mut extra_consts,
-            seed ^ 0x9E37_79B9_7F4A_7C15,
-        );
+        let lowered = if lowered.len() < 24 {
+            inflate_small_custom_proto(
+                lowered,
+                chunk.constants.len(),
+                &mut extra_consts,
+                seed ^ 0x9E37_79B9_7F4A_7C15,
+            )
+        } else {
+            weave_custom_cfg_hubs(
+                lowered,
+                &chunk.instructions,
+                reordered.as_ref().map(|r| r.source_pc.as_slice()),
+                chunk.constants.len(),
+                &mut extra_consts,
+                seed ^ 0x9E37_79B9_7F4A_7C15,
+            )
+        };
         let mut bytes = Vec::new();
 
         Self::write_string(&mut bytes, chunk.name.as_bytes());
@@ -462,6 +473,372 @@ fn inflate_small_custom_proto(
     }
 }
 
+/// 字节码级控制流平坦化与多路分发枢纽交织（针对 `lowered.len() >= 24` 的中大型函数，如 `u10`）：
+/// 1. 向常量池注入 4 个严格递增的全非零尾数有限浮点状态常量 `v0 < v1 < v2 < v3`（满足 `v0 + v1 < v2`）；
+/// 2. 通过 BFS 识别可达指令流中的非热环 `VmOp::Jump`（含基本块裂解产生的桥接跳转与分支合流跳转）；
+/// 3. 将多达 16 条块间跳转分组接入 **4 路 `vstack` 二叉状态分发枢纽（Dispatcher Hub）**：
+///    跳板 `Pad_m` 在 `vstack` 压入双份状态常量 `k_m` 后统一跳入 `Hub_Root`，由 `Hub_Root -> Hub_Left / Hub_Right`
+///    经两次运行期常量比较分派至真实目标块 `T_0..T_3` 或静态可达的诱饵块 `Decoy`（全程 `vstack` 严格平衡、零触碰 `stk` 寄存器）；
+/// 4. 其余多达 8 条块间跳转改写为运行期常量条件门（`Gate`），并将所有 `Pad / Hub / Decoy / Gate` 块随机洗牌后
+///    分置在原指令流前后的 Prefix/Suffix Arena 中（原指令流作为连续核心切片置于中部，内部相对分支偏移天然保持不变）。
+fn weave_custom_cfg_hubs(
+    lowered: Vec<CustomInstruction>,
+    orig_instructions: &[Instruction],
+    reordered_source_pc: Option<&[usize]>,
+    base_const_count: usize,
+    extra_consts: &mut Vec<u64>,
+    seed: u64,
+) -> Vec<CustomInstruction> {
+    if lowered.len() < 24 {
+        return lowered;
+    }
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xD1B5_4A32_D192_ED03);
+    let e0 = rng.random_range(0x400u64..=0x401u64); // [2.0, 8.0)
+    let e1 = rng.random_range(0x403u64..=0x404u64); // [16.0, 64.0)
+    let e2 = rng.random_range(0x406u64..=0x407u64); // [128.0, 512.0)
+    let e3 = rng.random_range(0x409u64..=0x40Au64); // [1024.0, 4096.0)
+    let raw_vals = [
+        full_entropy_f64_bits(&mut rng, e0),
+        full_entropy_f64_bits(&mut rng, e1),
+        full_entropy_f64_bits(&mut rng, e2),
+        full_entropy_f64_bits(&mut rng, e3),
+    ];
+    let mut c_perm = [0usize, 1, 2, 3];
+    c_perm.shuffle(&mut rng);
+    let mut k_slots = [0i32; 4];
+    for (slot_offset, &logical_idx) in c_perm.iter().enumerate() {
+        extra_consts.push(raw_vals[logical_idx]);
+        k_slots[logical_idx] = (base_const_count + slot_offset) as i32;
+    }
+    let (k0, k1, k2, k3) = (k_slots[0], k_slots[1], k_slots[2], k_slots[3]);
+
+    // 识别原始未重排指令中的循环区间（后向跳转覆盖区间），避免对紧密内层循环注入分发跳板
+    let orig_len = orig_instructions.len();
+    let mut orig_in_loop = vec![false; orig_len];
+    for (pc, inst) in orig_instructions.iter().enumerate() {
+        if is_relative_jump(inst.opcode) {
+            if let Some(target) = relative_target(pc, inst, orig_len) {
+                if target <= pc {
+                    for slot in orig_in_loop.iter_mut().take(pc + 1).skip(target) {
+                        *slot = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // BFS 找出 lowered 中从入口 0 可达的指令（排除 reorder_basic_blocks 末尾追加的不可达自环死块）
+    let n_low = lowered.len();
+    let mut reachable = vec![false; n_low];
+    let mut queue = std::collections::VecDeque::new();
+    reachable[0] = true;
+    queue.push_back(0usize);
+    while let Some(pc) = queue.pop_front() {
+        let inst = lowered[pc];
+        if let Some(off) = inst.op.branch_offset(inst.b as u32, inst.c as u32) {
+            let target = pc as i64 + 1 + off as i64;
+            if target >= 0 && (target as usize) < n_low && !reachable[target as usize] {
+                reachable[target as usize] = true;
+                queue.push_back(target as usize);
+            }
+        }
+        if !inst.op.is_terminator() && inst.op != VmOp::Jump {
+            let step = if inst.op == VmOp::MakeClosure && inst.c > 0 {
+                1 + inst.c as usize
+            } else {
+                1
+            };
+            if pc + step < n_low && !reachable[pc + step] {
+                reachable[pc + step] = true;
+                queue.push_back(pc + step);
+            }
+        }
+    }
+
+    let mut non_loop_jumps: Vec<(usize, usize)> = Vec::new();
+    let mut loop_fwd_jumps: Vec<(usize, usize)> = Vec::new();
+    for (pc, inst) in lowered.iter().enumerate() {
+        if !reachable[pc] || inst.op != VmOp::Jump {
+            continue;
+        }
+        let target = pc as i64 + 1 + inst.b as i64;
+        if target < 0 || (target as usize) >= n_low {
+            continue;
+        }
+        let orig_pc = reordered_source_pc
+            .and_then(|map| map.get(inst.source_pc).copied())
+            .unwrap_or(inst.source_pc);
+        let is_loop = orig_in_loop.get(orig_pc).copied().unwrap_or(false);
+        if !is_loop {
+            non_loop_jumps.push((pc, target as usize));
+        } else if inst.b > 0 {
+            loop_fwd_jumps.push((pc, target as usize));
+        }
+    }
+    non_loop_jumps.shuffle(&mut rng);
+    loop_fwd_jumps.shuffle(&mut rng);
+    let mut candidates = non_loop_jumps;
+    if candidates.len() < 4 {
+        for item in loop_fwd_jumps {
+            if candidates.len() >= 4 {
+                break;
+            }
+            candidates.push(item);
+        }
+    }
+
+    // 构造 Arena 基本块池
+    let mut arena_blocks: Vec<Vec<CustomInstruction>> = Vec::new();
+    let mut add_block = |ins: Vec<CustomInstruction>| -> usize {
+        let id = arena_blocks.len();
+        arena_blocks.push(ins);
+        id
+    };
+
+    struct HubPatch {
+        pads: [usize; 4],
+        root: usize,
+        left: usize,
+        right: usize,
+        decoy: usize,
+        targets_in_low: [usize; 4],
+    }
+    struct GatePatch {
+        gate: usize,
+        target_in_low: usize,
+        decoy_block: usize,
+    }
+
+    let mut hub_patches: Vec<HubPatch> = Vec::new();
+    let mut gate_patches: Vec<GatePatch> = Vec::new();
+    let mut jump_redirs: Vec<(usize, usize)> = Vec::new(); // (low_pc, target_arena_block_id)
+
+    let num_full_hubs = (candidates.len() / 4).min(4);
+    let mut cursor = 0usize;
+    let hub_count = if num_full_hubs > 0 {
+        num_full_hubs
+    } else if !candidates.is_empty() {
+        1
+    } else {
+        0
+    };
+
+    for _ in 0..hub_count {
+        let mut group = [(0usize, 0usize); 4];
+        for g_idx in 0..4 {
+            if cursor < candidates.len() {
+                group[g_idx] = candidates[cursor];
+                cursor += 1;
+            } else {
+                group[g_idx] = group[0];
+            }
+        }
+        let k_arr = [k0, k1, k2, k3];
+        let mut pads = [0usize; 4];
+        for m in 0..4 {
+            pads[m] = add_block(vec![
+                ci(VmOp::PushConst, 0, k_arr[m], 0),
+                ci(VmOp::PushConst, 0, k_arr[m], 0),
+                ci(VmOp::Jump, 0, 0, 0),
+            ]);
+        }
+        let root = add_block(vec![
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 1, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        let left = add_block(vec![
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 1, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        let right = add_block(vec![
+            ci(VmOp::PushConst, 0, k3, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 1, 0, 0),
+            ci(VmOp::PushConst, 0, k3, 0),
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 0, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        let decoy = add_block(vec![
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::Sub, 0, 0, 0),
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 1, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        for m in 0..4 {
+            let (low_pc, _) = group[m];
+            if !jump_redirs.iter().any(|&(p, _)| p == low_pc) {
+                jump_redirs.push((low_pc, pads[m]));
+            }
+        }
+        hub_patches.push(HubPatch {
+            pads,
+            root,
+            left,
+            right,
+            decoy,
+            targets_in_low: [group[0].1, group[1].1, group[2].1, group[3].1],
+        });
+    }
+
+    // 兜底诱饵块（当无可用 Jump 时仍构造静态可达的前后缀混淆块）
+    let fallback_decoy = if let Some(hp) = hub_patches.first() {
+        hp.decoy
+    } else {
+        let d_id = add_block(vec![
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::Sub, 0, 0, 0),
+            ci(VmOp::Drop, 0, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        let t_id = add_block(vec![
+            ci(VmOp::PushConst, 0, k3, 0),
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 0, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        gate_patches.push(GatePatch {
+            gate: t_id,
+            target_in_low: 0,
+            decoy_block: d_id,
+        });
+        d_id
+    };
+
+    // 剩余候选 Jump（至多 8 条）改写为条件常量门 Gate
+    let max_gates = 8usize;
+    let mut gates_added = 0usize;
+    while cursor < candidates.len() && gates_added < max_gates {
+        let (low_pc, target_in_low) = candidates[cursor];
+        cursor += 1;
+        let truthy = rng.random_range(0..2u8) == 1;
+        let (ka, kb, pol) = if truthy { (k0, k2, 1u8) } else { (k3, k1, 0u8) };
+        let gate = add_block(vec![
+            ci(VmOp::PushConst, 0, ka, 0),
+            ci(VmOp::PushConst, 0, kb, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, pol, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        let decoy_block = if !hub_patches.is_empty() {
+            hub_patches[gates_added % hub_patches.len()].decoy
+        } else {
+            fallback_decoy
+        };
+        jump_redirs.push((low_pc, gate));
+        gate_patches.push(GatePatch {
+            gate,
+            target_in_low,
+            decoy_block,
+        });
+        gates_added += 1;
+    }
+
+    // 洗牌全部 Arena 块并平分到 lowered 前（Prefix Arena）与后（Suffix Arena）
+    let mut arena_order: Vec<usize> = (0..arena_blocks.len()).collect();
+    arena_order.shuffle(&mut rng);
+    let split_half = arena_order.len() / 2;
+    let prefix_ids = &arena_order[..split_half];
+    let suffix_ids = &arena_order[split_half..];
+
+    let blk_entry = vec![
+        ci(VmOp::PushConst, 0, k0, 0),
+        ci(VmOp::PushConst, 0, k1, 0),
+        ci(VmOp::Add, 0, 0, 0),
+        ci(VmOp::PushConst, 0, k2, 0),
+        ci(VmOp::Less, 0, 0, 0),
+        ci(VmOp::Branch, 1, 0, 0),
+    ];
+
+    let mut out = Vec::with_capacity(blk_entry.len() + lowered.len() + arena_blocks.len() * 6);
+    out.extend_from_slice(&blk_entry);
+    let end_entry = out.len() - 1;
+
+    let mut arena_starts = vec![0usize; arena_blocks.len()];
+    let mut arena_ends = vec![0usize; arena_blocks.len()];
+    for &b_id in prefix_ids {
+        arena_starts[b_id] = out.len();
+        out.extend_from_slice(&arena_blocks[b_id]);
+        arena_ends[b_id] = out.len() - 1;
+    }
+
+    let start_core = out.len();
+    out.extend_from_slice(&lowered);
+
+    for &b_id in suffix_ids {
+        arena_starts[b_id] = out.len();
+        out.extend_from_slice(&arena_blocks[b_id]);
+        arena_ends[b_id] = out.len() - 1;
+    }
+
+    let rel = |from: usize, to: usize| -> i32 { (to as i64 - (from as i64 + 1)) as i32 };
+
+    // 入口块跳至核心块起点（若无后继 Prefix 块则跳至首个 Suffix 块再跳回 start_core）
+    out[end_entry].b = rel(end_entry, start_core);
+
+    // 修补全部 4 路 Dispatcher Hub 偏移
+    for hp in &hub_patches {
+        let root_start = arena_starts[hp.root];
+        let left_start = arena_starts[hp.left];
+        let right_start = arena_starts[hp.right];
+        let decoy_start = arena_starts[hp.decoy];
+        for &pad_id in &hp.pads {
+            let pad_end = arena_ends[pad_id];
+            out[pad_end].b = rel(pad_end, root_start);
+        }
+        out[root_start + 2].b = rel(root_start + 2, left_start);
+        out[root_start + 3].b = rel(root_start + 3, right_start);
+
+        let t0 = start_core + hp.targets_in_low[0];
+        let t1 = start_core + hp.targets_in_low[1];
+        let t2 = start_core + hp.targets_in_low[2];
+        let t3 = start_core + hp.targets_in_low[3];
+
+        out[left_start + 2].b = rel(left_start + 2, t0);
+        out[left_start + 3].b = rel(left_start + 3, t1);
+
+        out[right_start + 2].b = rel(right_start + 2, t2);
+        out[right_start + 6].b = rel(right_start + 6, t3);
+        out[right_start + 7].b = rel(right_start + 7, decoy_start);
+
+        out[decoy_start + 5].b = rel(decoy_start + 5, t0);
+        out[decoy_start + 6].b = rel(decoy_start + 6, t2);
+    }
+
+    if hub_patches.is_empty() {
+        let d_end = arena_ends[fallback_decoy];
+        out[d_end].b = rel(d_end, start_core);
+    }
+
+    // 修补全部条件常量门 Gate 偏移
+    for gp in &gate_patches {
+        let g_start = arena_starts[gp.gate];
+        let t_pc = start_core + gp.target_in_low;
+        let d_pc = arena_starts[gp.decoy_block];
+        out[g_start + 3].b = rel(g_start + 3, t_pc);
+        out[g_start + 4].b = rel(g_start + 4, d_pc);
+    }
+
+    // 重定向核心块内被选中的 VmOp::Jump 至对应 Pad / Gate
+    for &(low_pc, target_arena_id) in &jump_redirs {
+        let from_pc = start_core + low_pc;
+        let to_pc = arena_starts[target_arena_id];
+        out[from_pc].b = rel(from_pc, to_pc);
+    }
+
+    out
+}
+
 /// 重排仅在完整识别控制流和指令附属区后启用；遇到不完整/非规范配对则保留原型布局。
 fn reorder_basic_blocks(
     instructions: &[Instruction],
@@ -592,6 +969,48 @@ fn reorder_basic_blocks(
     }
     block_starts.sort_unstable();
     block_starts.dedup();
+    // 基本块裂解（Block Fission）：将含多个原子 Unit 的非热环基本块切分为 1..=2 Unit 的微基本块，
+    // 打碎原始基本块边界（如 u10 的 23 块被裂解为 45+ 个微块并彻底打乱穿插）。
+    let mut in_loop = vec![false; len];
+    for (pc, inst) in instructions.iter().enumerate() {
+        if is_relative_jump(inst.opcode) {
+            if let Some(target) = relative_target(pc, inst, len) {
+                if target <= pc {
+                    for slot in in_loop.iter_mut().take(pc + 1).skip(target) {
+                        *slot = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut fission_rng = StdRng::seed_from_u64(seed ^ 0x517C_C1B7_2722_0A95);
+    let mut fissioned_starts = Vec::with_capacity(block_starts.len() * 2);
+    let orig_block_count = block_starts.len();
+    for (index, &first_unit) in block_starts.iter().enumerate() {
+        let last_unit = block_starts.get(index + 1).copied().unwrap_or(units.len()) - 1;
+        fissioned_starts.push(first_unit);
+        let unit_span = last_unit.saturating_sub(first_unit) + 1;
+        let blk_in_loop = in_loop[units[first_unit].start];
+        if unit_span >= 2 && (!blk_in_loop || orig_block_count < 3) && fissioned_starts.len() < 56 {
+            let mut cur = first_unit;
+            while cur < last_unit && fissioned_starts.len() < 56 {
+                let step = if orig_block_count < 3 {
+                    1
+                } else {
+                    fission_rng.random_range(1..=2)
+                };
+                if cur + step <= last_unit {
+                    cur += step;
+                    fissioned_starts.push(cur);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    fissioned_starts.sort_unstable();
+    fissioned_starts.dedup();
+    let block_starts = fissioned_starts;
     if block_starts.len() < 3 {
         return None;
     }
@@ -796,5 +1215,60 @@ mod cfg_tests {
             }
         }
         assert!(has_forward && has_backward, "膨胀后的最小闭包必须同时含前向与后向跳转边");
+    }
+
+    #[test]
+    fn block_fission_and_cfg_hubs_flatten_clean_cfg() {
+        // 构造一个原仅含 1 个线性基本块、8 条顺序指令的函数，验证 Block Fission + 4 路 Dispatcher Hub
+        let orig = vec![
+            inst(Opcode::LoadK, 0, -1),
+            inst(Opcode::LoadK, 1, -1),
+            inst(Opcode::Add, 0, 1),
+            inst(Opcode::Move, 2, 0),
+            inst(Opcode::LoadK, 0, -1),
+            inst(Opcode::Sub, 2, 0),
+            inst(Opcode::Move, 3, 2),
+            inst(Opcode::Return, 2, 0),
+        ];
+        let reordered = reorder_basic_blocks(&orig, &[], 4, 0xCAFE_BABE)
+            .expect("Block Fission 应将单块 8 指令函数裂解为 >= 4 个微基本块并重排");
+        let lowered = lower_to_custom_with_splits(
+            &reordered.instructions,
+            &[],
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert!(lowered.len() >= 24);
+        let mut extra_consts = Vec::new();
+        let woven = weave_custom_cfg_hubs(
+            lowered.clone(),
+            &orig,
+            Some(&reordered.source_pc),
+            2,
+            &mut extra_consts,
+            0xCAFE_BABE,
+        );
+        assert_eq!(extra_consts.len(), 4, "应注入 4 个有序全非零尾数状态常量");
+        for &bits in &extra_consts {
+            assert!(bits.to_le_bytes().iter().all(|&b| b != 0));
+        }
+        assert!(
+            woven.len() >= lowered.len() + 30,
+            "weave_custom_cfg_hubs 应编织 Entry + 4 路 Dispatcher Hub + Decoy 块"
+        );
+        let mut cond_branches = 0usize;
+        for (pc, ci_inst) in woven.iter().enumerate() {
+            if ci_inst.op == VmOp::Branch {
+                cond_branches += 1;
+            }
+            if let Some(off) = ci_inst.op.branch_offset(ci_inst.b as u32, ci_inst.c as u32) {
+                let target = pc as i64 + 1 + off as i64;
+                assert!(
+                    target >= 0 && (target as usize) < woven.len(),
+                    "所有 Hub/Pad/Gate/Core 跳转目标必须落在合法指令范围内"
+                );
+            }
+        }
+        assert!(cond_branches >= 5, "4 路 Dispatcher Hub + Entry + Decoy 至少引入 5 条条件分支");
     }
 }
