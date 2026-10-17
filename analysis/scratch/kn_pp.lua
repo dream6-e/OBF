@@ -1,0 +1,2624 @@
+nd,kn=
+function
+  (R,_,_)local Rh,vd,vH,vA=1658955252,0X6D65A503,0X60112166,0X798AA78B;
+  local vM={}local RJ=false;
+  local RU RU=R:kr()local RW=false;
+  local RM=false;
+  local RO=false;
+  local RP,RB,Rj=R:kg()local vD,vL,vm,vl,vI,Ry=(0X540BB%0X540BB),{},0,{},0,{}local Rt,Re=R:bR(Ry,RP,RB,Rj,vM)local Ra,Ri,Rn={},{},{}R:kD(Ry,Rt)local Rb,Rf,Rk,vN,vG,vr,vV,Rg,vK,vW,RY,vB,vO,vw,RQ,RC,vR,vv,vE,vQ,vY,vc,vo,vx,Rz,vs,RD,vk
+  do
+    local RR=R:bv()Rb,Rf,Rk,vN,vG,vr,vV,Rg,vK,vW,RY,vB,vO,vw,RQ,RC,vR,vv,vE,vQ,vY,vc,vo,vx,Rz,vs,RD,vk=RR[1],RR[0X002],RR[0X003],RR[0X00004],RR[5],RR[6],RR[7],RR[0X09],RR[0X0A],RR[11],RR[12],RR[13],RR[14],RR[15],RR[16],RR[17],RR[18],RR[19],RR[0X0014],RR[21],RR[0X0016],RR[23],RR[0X18],RR[25],RR[29],RR[30],RR[0X021],RR[34]
+  end
+  ;
+  local vi,vn,vg,ve,kR,vq,kv=R:kJ(Ry,
+  function
+    ()RO=true;
+  end
+  )local vb,kk,vy,vC,kb=Ry[0X3DEFC115],Ry[0X49E8C28B],Ry[0X638C2532],Ry[0X685B2FE4],Ry[0X3C4BF2E3]local Rv,Rs=R:bk(Ry)local Rl;
+  if RP[vA]
+  then
+  else
+    RP[vA]=RB({(254+0X8)%Rj,(0X32+0X00E4)%Rj,0X00E7,0X78,(250+221)%Rj,3},366)
+  end
+  ;
+  if RP[vH]
+  then
+  else
+    RP[vH]=RB({(0X0000FD+68)%Rj},0X0000174)
+  end
+  ;
+  local vS=Ry[0X5DACFF37]local vJ=Ry[0X5201C6EE]local RK=Ry[0X14BFA38C]local RG=Ry[0X6057E1FF]local Rr=Ry[vd]({},{[RP[vA]]=RP[vH]})local vF
+  do
+    if not RP[0X2DD9F9B6]
+    then
+      repeat
+        RP[0X2DD9F9B6]=RB({0X9F},373)break
+      until
+      false;
+    end
+    vF=
+    function
+      (...)return vM[0X61](RP[0X2DD9F9B6],...)
+    end
+    ;
+  end
+  ;
+  local vj,RE=Ry[0X6E32F2E5]or
+  function
+    ()
+  end
+  ,
+  function
+    (...)return{bb=vF(...),...}
+  end
+  ;
+  local RA,RI,RH,RN={},{},{},{}local vZ={}RI.by=
+  function
+    (R,v,_,k,_)local RR=R[Rf]local _,_;
+    if not RM
+    then
+      RM=(RU(R[RC],Rv[96][0X27](0XC965A87A,0X125A613C))~=Rv[0X79][107](0X00ABE755CC,0X1EE95357))
+    end
+    ;
+    local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+  end
+  RH.bC=
+  function
+    (R,_,_,_,_)local RX=0X33E4929;
+    if not RW
+    then
+      RW=(RU(R[RC],Rv[0X00035][0X64](0XAF1E4E6F,0X3A4F9F27))~=Rv[53][0X20](0X64FE4891,0X38D6EE66))
+    end
+    ;
+    local _,_;
+    local Rs,Rj=R[vs],R[Rf]if Rj.bX
+    then
+      for _,RR in Re(Rj.bX)
+      do
+        RR[1]={RR[1][RR[2]]}RR[2]=1;
+      end
+      Rj.bX=nil;
+    end
+    ;
+    local Rd=#Rs;
+    local Rk=Rs[Rd][1]local Rb;
+    if Rt(Rk.bs)==Ry[RX]
+    then
+      Rb=Rr[Rk.bs]
+    end
+    ;
+    local RR;
+    if Rb
+    then
+      RR=RE(Rl(Rb.bj,Rb.bf,Rb.bU,Rk.bs,R[RD],vj(Rk.bd,1,Rk.bM)))elseif RK and Rk.bs==RK
+      then
+        local Rv=Rk.bd[1]if Rv==nil
+        then
+          Rv=1;
+        end
+        ;
+        if Rt(Rv)==Ry[0X2267BA0C]
+        then
+          if Rv==0
+          then
+            RR=RE(RK(0))elseif Rv>=1 and Rv%1==0
+            then
+              local Rk=R;
+              local Rb=Rv;
+              while Rb>1 and Rk
+              do
+                Rk=Rk[RD]Rb=Rb-1;
+              end
+              ;
+              if Rk
+              then
+                RR=RE(Rk[RY])
+              else
+                RR=RE(RK(Rv))
+              end
+            else
+              RR=RE(RK(Rv))
+            end
+          else
+            if Rt(Rv)==Ry[RX]and Rr[Rv]
+            then
+              RR=RE(Rr[Rv].bf)
+            else
+              RR=RE(RK(Rv))
+            end
+            ;
+          end
+          elseif RG and Rk.bs==RG
+          then
+            local Rv=Rk.bd[1]local RC=Rk.bd[2]if Rt(Rv)==Ry[0X2267BA0C]
+            then
+              if Rv==0
+              then
+                RR=RE(RG(0,RC))elseif Rt(RC)~=Ry[0X227B29E5]
+                then
+                  RR=RE(RG(Rv,RC))elseif Rv>=1 and Rv%1==0
+                  then
+                    local Rk=R;
+                    local Rb=Rv;
+                    while Rb>1 and Rk
+                    do
+                      Rk=Rk[RD]Rb=Rb-1;
+                    end
+                    ;
+                    if Rk
+                    then
+                      Rk[RY]=RC;
+                      local Rv=Rk[vk]if Rv
+                      then
+                        local RR=Rr[Rv]if RR
+                        then
+                          RR.bf=RC;
+                        end
+                        ;
+                      end
+                      RR=RE(Rv or Rl)
+                    else
+                      RR=RE(RG(Rv,RC))
+                    end
+                  else
+                    RR=RE(RG(Rv,RC))
+                  end
+                  elseif Rt(Rv)==Ry[RX]and Rr[Rv]
+                  then
+                    if Rt(RC)~=Ry[0X227B29E5]
+                    then
+                      RR=RE(RG(Rv,RC))
+                    else
+                      Rb=Rr[Rv]Rb.bf=RC;
+                      local Rk=R;
+                      while Rk
+                      do
+                        if Rk[vk]==Rv
+                        then
+                          Rk[RY]=RC;
+                        end
+                        Rk=Rk[RD]
+                      end
+                      RR=RE(Rv)
+                    end
+                  else
+                    RR=RE(RG(Rv,RC))
+                  end
+                else
+                  RR=RE(Rk.bs(vj(Rk.bd,1,Rk.bM)))
+                end
+                Rs[Rd]=nil;
+                return R:bL(RR,1,RR.bb)
+              end
+              RN.bW=
+              function
+                (R,_,v,_,k)local _,_ RO=((RU(R[RC],Rv[123][0X21](0XF0E89B60,0X35B4BE58))~=Rv[0X6F][0X51](0X508877CB,0X168217BB))or RO)local RR=R[Rf]local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+              end
+              RA.bO=
+              function
+                (R,v,k,_,_)local RR=R[Rf]local _,_ RO=((RU(R[RC],Rv[0X62][120](0XFD282340,0X3DDBD813))~=Rv[0X35][0X64](1822769797,0X1945B34F))or RO)RR[k]=R[RQ][(Rs(v,R[Rz])+1)]
+              end
+              RN.bE=
+              function
+                (R,v,_,_,_)local RR=Rs(v,0X2B289786)%4294967296;
+                local Rv=R[Rf]Rv[R[Rk]+1]=RR R[Rk]=R[Rk]+1 RM=RM or((RR+#Rv)>=0 and R[Rk]~=nil)
+              end
+              RH.bQ=
+              function
+                (R,v,k,_,_)local RR=R[Rf]RO=RO or(RU(R[RC],Rv[121][0X6B](0XCD884BF7,0X34D0338C))~=Rv[0X75][0X68](0X4DB88C07,0X38E01E07))local _,_;
+                local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+              end
+              RA.bz=
+              function
+                (R,_,v,_,k)local RR=R[Rf]if not RW
+                then
+                  RW=(RU(R[RC],Rv[0X7B][0X63](0X5BD4D002,644917691))~=Rv[0X000075][0X68](0XADF41E1C,0X114436C9))
+                end
+                ;
+                local _,_;
+                local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+              end
+              RA.bP=
+              function
+                (R,_,_,v,k)local RR=R[Rf]local _,_ RO=RO or(RU(R[RC],Rv[0X62][100](0X14D98AB67,0X16178ABC))~=Rv[111][94](0XDFBC4CAC,331273768))local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+              end
+              RI.bt=
+              function
+                (R,_,v,k,_)local RR=R[Rf]if not RM
+                then
+                  RM=(RU(R[RC],Rv[0X60][45](0X96704AE1,638280771))~=Rv[117][0X00068](2631170195,995424301))
+                end
+                ;
+                local _,_;
+                local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+              end
+              RA.bH=
+              function
+                (R,_,v,k,_)if not RO
+                then
+                  RO=(RU(R[RC],Rv[0X60][39](2786011169,0X1DDB4591))~=Rv[38][0X32](0X1CCB4D32,733513797))
+                end
+                ;
+                local _,_;
+                local RR=R[Rf]local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+              end
+              RA.bA=
+              function
+                (R,_,_,_,v)RW=((RU(R[RC],Rv[98][0X00064](0X000012CFA5B97,416282846))~=Rv[0X79][0X6B](0X10EE59034,466312292))or RW)local RR=R[Rf]local _,_;
+                if RR.bX
+                then
+                  for Rk,Rv in Re(RR.bX)
+                  do
+                    if Rk>=v
+                    then
+                      Rv[1]={Rv[1][Rv[0X00002]]}Rv[0X2]=1 RR.bX[Rk]=nil;
+                    end
+                    ;
+                  end
+                  ;
+                end
+                ;
+              end
+              RN.bI=
+              function
+                (R,v,k,_,_)local _,_ RW=((RU(R[RC],Rv[0X26][0X32](0X159C7E2C,0X3919794B))~=Rv[0X06A][0X00052](0X00009B54AD19,696152215))or RW)local RR=R[Rf]local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+              end
+              RI.bN=
+              function
+                (R,v,k,_,_)RM=RM or(RU(R[RC],Rv[0X7B][0X21](0X9BC3B96,0X26D21E27))~=Rv[121][107](3321415346,0X029E41099))local _,_;
+                local RR=R[Rf]local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+              end
+              RA.bG=
+              function
+                (R,_,v,k,_)local RR,Rk=R[Rg],R[Rf]if not RO
+                then
+                  RO=(RU(R[RC],Rv[0X6F][0X51](0XD7479855,0X00294491FC))~=Rv[0X6A][0X1B](0XAD8D3715,661781395))
+                end
+                ;
+                local Rb=R[RY]local _,_;
+                local RX=Ry[0X692ADDD](RR[v+1])local Rs=Rb Rk[k]=Rs[RX]
+              end
+              RN.br=
+              function
+                (R,_,_,_,_)local Rb=0X33E4929;
+                local _,_;
+                local RX=R[vs]if not RW
+                then
+                  RW=(RU(R[RC],Rv[123][0X63](2391457698,672515783))~=Rv[0X35][0X64](0X11DDCF5FA,0X000327C8211))
+                end
+                ;
+                local Rs=#RX;
+                local RR=RX[Rs][1]local Rk;
+                if Rt(RR.bs)==Ry[Rb]
+                then
+                  Rk=Rr[RR.bs]
+                end
+                ;
+                if Rk
+                then
+                  RR.bV=RE(Rl(Rk.bj,Rk.bf,Rk.bU,RR.bs,R,vj(RR.bd,1,RR.bM)))elseif RK and RR.bs==RK
+                  then
+                    local Rv=RR.bd[1]if Rv==nil
+                    then
+                      Rv=1;
+                    end
+                    ;
+                    if Rt(Rv)==Ry[0X2267BA0C]
+                    then
+                      if Rv==0
+                      then
+                        RR.bV=RE(RK(0))elseif Rv>=1 and Rv%1==0
+                        then
+                          local Rk=R;
+                          local Rb=Rv;
+                          while Rb>1 and Rk
+                          do
+                            Rk=Rk[RD]Rb=Rb-1;
+                          end
+                          ;
+                          if Rk
+                          then
+                            RR.bV=RE(Rk[RY])
+                          else
+                            RR.bV=RE(RK(Rv))
+                          end
+                        else
+                          RR.bV=RE(RK(Rv))
+                        end
+                      else
+                        if Rt(Rv)==Ry[Rb]and Rr[Rv]
+                        then
+                          RR.bV=RE(Rr[Rv].bf)
+                        else
+                          RR.bV=RE(RK(Rv))
+                        end
+                        ;
+                      end
+                      elseif RG and RR.bs==RG
+                      then
+                        local Rv=RR.bd[1]local RC=RR.bd[2]if Rt(Rv)==Ry[0X2267BA0C]
+                        then
+                          if Rv==0
+                          then
+                            RR.bV=RE(RG(0,RC))elseif Rt(RC)~=Ry[0X227B29E5]
+                            then
+                              RR.bV=RE(RG(Rv,RC))elseif Rv>=1 and Rv%1==0
+                              then
+                                local Rk=R;
+                                local Rb=Rv;
+                                while Rb>1 and Rk
+                                do
+                                  Rk=Rk[RD]Rb=Rb-1;
+                                end
+                                ;
+                                if Rk
+                                then
+                                  Rk[RY]=RC;
+                                  local Rv=Rk[vk]if Rv
+                                  then
+                                    local RR=Rr[Rv]if RR
+                                    then
+                                      RR.bf=RC;
+                                    end
+                                    ;
+                                  end
+                                  RR.bV=RE(Rv or Rl)
+                                else
+                                  RR.bV=RE(RG(Rv,RC))
+                                end
+                              else
+                                RR.bV=RE(RG(Rv,RC))
+                              end
+                              elseif Rt(Rv)==Ry[Rb]and Rr[Rv]
+                              then
+                                if Rt(RC)~=Ry[0X227B29E5]
+                                then
+                                  RR.bV=RE(RG(Rv,RC))
+                                else
+                                  Rk=Rr[Rv]Rk.bf=RC;
+                                  local Rb=R;
+                                  while Rb
+                                  do
+                                    if Rb[vk]==Rv
+                                    then
+                                      Rb[RY]=RC;
+                                    end
+                                    Rb=Rb[RD]
+                                  end
+                                  RR.bV=RE(Rv)
+                                end
+                              else
+                                RR.bV=RE(RG(Rv,RC))
+                              end
+                            else
+                              RR.bV=RE(RR.bs(vj(RR.bd,1,RR.bM)))
+                            end
+                            ;
+                          end
+                          RN.bK=
+                          function
+                            (R,v,_,k,_)local RR=R[Rf]local _,_ RW=RW or(RU(R[RC],Rv[0X6A][0X0052](0XAE85BFAF,0X31C05359))~=Rv[0X79][0X4C](585793454,0X2286D08D))local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RH.bB=
+                          function
+                            (R,v,k,b,_)local RR=R[Rf]local _,_ RM=((RU(R[RC],Rv[0X6A][0X1B](2475688608,0X1CD56F43))~=Rv[0X0079][0X00006B](3737212270,0X2DB5E572))or RM)local Rd=R[RY]local RL=R[vx]local RW=R[vW]local Rj=R[vK]local Rk=Rj[v+1]if Rt(Rk)==Ry[0X33E4929]
+                            then
+                              Rk=Rk()Rj[v+1]=Rk;
+                            end
+                            ;
+                            local Rs={}RR.bX=RR.bX or{}for Rk=1,b
+                            do
+                              local Rv=RL[R[Rb]]R[Rb]=R[Rb]+1;
+                              if Rv[1]==345277572 or Rv[1]==803502060 or Rv[1]==2412706481 or Rv[1]==0X019381E2B
+                              then
+                                local Rb=Rv[3]if not RR.bX[Rb]
+                                then
+                                  RR.bX[Rb]={RR,Rb}
+                                end
+                                Rs[Rk]=RR.bX[Rb]
+                              else
+                                Rs[Rk]=RW[Rv[3]+1]
+                              end
+                              ;
+                            end
+                            ;
+                            local RX RX=
+                            function
+                              (...)return Rl(Rk,Rr[RX].bf,Rs,RX,nil,...)
+                            end
+                            ;
+                            local RO={bj=Rk,bU=Rs,bf=Rd}Rr[RX]=RO RR[k]=RX;
+                          end
+                          RI.bY=
+                          function
+                            (R,v,_,k,_)local _,_;
+                            local RR=R[Rf]RW=((RU(R[RC],Rv[53][0X020](0XBE9C8580,0X2F6E00E3))~=Rv[0X62][0X64](0X40FD922C,879340777))or RW)local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RH.bc=
+                          function
+                            (R,_,v,k,_)local _,_;
+                            if not RO
+                            then
+                              RO=(RU(R[RC],Rv[106][27](0X708FD987,0X2645637B))~=Rv[0X62][0X64](0X156517296,0X141C96EA))
+                            end
+                            ;
+                            local RR=R[Rf]local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RN.bx=
+                          function
+                            (R,v,_,_,_)local RR=Rs(v,0X5E82CEF)%4294967296;
+                            local Rv=R[Rf]Rv[R[Rk]+1]=RR R[Rk]=R[Rk]+1 RM=RM or((RR+#Rv)>=0 and R[Rk]~=nil)
+                          end
+                          RI.bS=
+                          function
+                            (R,v,k,_,_)local RR=R[Rf]local Rk=R[RY]RW=RW or(RU(R[RC],Rv[0X1D][0X51](0X9061875B,0X00180D2B45))~=Rv[121][0X6B](0X9FE51099,0X17DB2BC7))local Rb=R[Rg]local _,_;
+                            local RX=Ry[0X692ADDD](Rb[k+1])local Rs=Rk Rs[RX]=RR[v]
+                          end
+                          RA.bJ=
+                          function
+                            (R,_,v,_,k)local _,_ RO=((RU(R[RC],Rv[0X000062][0X64](0X0000694BB548,504273679))~=Rv[121][0X4C](2074204795,0X2AAA6366))or RO)local RR=R[Rf]local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RI.bF=
+                          function
+                            (R,v,k,_,_)RM=((RU(R[RC],Rv[0X62][0X00078](1836874650,0X26650165))~=Rv[0X79][0X6B](2793114399,925506901))or RM)local RR=R[Rf]local _,_;
+                            local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RA.bu=
+                          function
+                            (R,v,_,_,k)local RR=R[Rf]local _,_ RW=RW or(RU(R[RC],Rv[0X026][50](0X00008EF6F93F,637365908))~=Rv[0X1D][0X20](0X000D6D120EC,759217365))local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RH.bD=
+                          function
+                            (R,_,_,_,_)local RR=R[Rf]RM=((RU(R[RC],Rv[0X000075][104](0X62355CC8,0X143B8ACD))~=Rv[96][39](3143901448,811557858))or RM)local _,_;
+                            if RR.bX
+                            then
+                              for _,RR in Re(RR.bX)
+                              do
+                                RR[1]={RR[1][RR[0X00002]]}RR[0X00002]=1;
+                              end
+                              RR.bX=nil;
+                            end
+                            ;
+                            return R:bm()
+                          end
+                          RI.bl=
+                          function
+                            (R,_,v,k,_)if not RW
+                            then
+                              RW=(RU(R[RC],Rv[121][0X6B](4274986905,0X1A9C609F))~=Rv[0X75][0X68](0X121F39E15,0X1280091A))
+                            end
+                            ;
+                            local RR=R[Rf]local _,_;
+                            local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RH.bw=
+                          function
+                            (R,_,_,v,k)if not RO
+                            then
+                              RO=(RU(R[RC],Rv[29][81](0X4A20298A,0X1F9F6F45))~=Rv[0X00006F][0X5E](0XFEDBABB,0X003E9E3E12))
+                            end
+                            ;
+                            local RR=R[Rf]local _,_;
+                            if RR.bX
+                            then
+                              for _,RR in Re(RR.bX)
+                              do
+                                RR[1]={RR[1][RR[0X0002]]}RR[2]=1;
+                              end
+                              RR.bX=nil;
+                            end
+                            ;
+                            local Rb=k>0 and k or R[Rk]-v+1;
+                            return R:bo(RR,v,v+Rb-1)
+                          end
+                          RA.be=
+                          function
+                            (R,v,_,k,_)local RR=R[Rf]local _,_;
+                            if not RW
+                            then
+                              RW=(RU(R[RC],Rv[0X35][0X64](1980746218,0X21D254C3))~=Rv[117][0X4C](3616184576,0X002B2B4ABD))
+                            end
+                            ;
+                            local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RH.bq=
+                          function
+                            (R,v,_,_,k)if not RM
+                            then
+                              RM=(RU(R[RC],Rv[0X000079][0X6B](0X3EB06144,1020914878))~=Rv[0X6F][94](0X0000B6C53B3D,0X39B2C849))
+                            end
+                            ;
+                            local _,_;
+                            local RR=R[Rf]local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RH.bZ=
+                          function
+                            (v,k,_,b,R)local RR=v[Rf]RO=((RU(v[RC],Rv[106][0X52](1147765623,901734846))~=Rv[0X1D][0X20](0X47EE0892,0X33B19B90))or RO)local _,_;
+                            local RX=RR[R]local Rk;
+                            if Rt(RX)==Ry[0X33E4929]
+                            then
+                              Rk=Rr[RX]
+                            end
+                            ;
+                            local Rs;
+                            if Rk
+                            then
+                              Rs=RE(Rl(Rk.bj,Rk.bf,Rk.bU,RX,v,RR[R+1],RR[R+2]))
+                            else
+                              Rs=RE(RX(RR[R+1],RR[R+0X2]))
+                            end
+                            ;
+                            for Rv=1,b
+                            do
+                              RR[R+0X2+Rv]=Rs[Rv]
+                            end
+                            ;
+                            if RR[R+0X003]~=nil
+                            then
+                              RR[R+2]=RR[R+0X003]v[Rb]=v[Rb]+k;
+                            end
+                            ;
+                          end
+                          RH.bp=
+                          function
+                            (R,_,v,k,_)local _,_ RM=RM or(RU(R[RC],Rv[0X35][0X20](41699630,0X15147CBB))~=Rv[0X26][0X32](0X4D9DDB3E,529754064))local RR=R[Rf]local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RN.bT=
+                          function
+                            (R,_,k,_,v)RM=RM or(RU(R[RC],Rv[0X7B][33](0X843E1CB1,0X2537E079))~=Rv[29][32](1867348383,0X3B080E6C))local Ry,RR,Rb=R[vO],R[Rf],R[vB]local _,_;
+                            if k>0
+                            then
+                              for Rv=1,k-1
+                              do
+                                RR[v+Rv-1]=Rb[Rv]
+                              end
+                            else
+                              R[Rk]=v-1;
+                              for Rv=1,Ry
+                              do
+                                RR[v+Rv-1]=Rb[Rv]R[Rk]=R[Rk]+1;
+                              end
+                              ;
+                            end
+                            ;
+                          end
+                          RH.bh=
+                          function
+                            (R,v,_,k,_)RW=((RU(R[RC],Rv[0X6A][0X52](4135439929,0X178A1DCC))~=Rv[0X00006F][81](1186092557,0X1B6444C1))or RW)local RR=R[Rf]local _,_;
+                            local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RH.ba=
+                          function
+                            (R,v,_,_,k)if not RM
+                            then
+                              RM=(RU(R[RC],Rv[0X60][45](0XCD3335C8,431431958))~=Rv[0X62][100](0X00D7F47F56,0X1281B51A))
+                            end
+                            ;
+                            local _,_;
+                            local RR=R[Rf]local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RA.bi=
+                          function
+                            (R,_,_,v,k)local _,_;
+                            if not RM
+                            then
+                              RM=(RU(R[RC],Rv[0X00062][0X00064](0XF0C0B29A,484020129))~=Rv[53][32](3738824830,0X00012176947))
+                            end
+                            ;
+                            local RR=R[Rf]local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RA.bn=
+                          function
+                            (R,_,v,k,_)RW=RW or(RU(R[RC],Rv[98][0X78](0XF7EA756C,0X2D744B9C))~=Rv[0X26][0X0032](876389164,0X35F5832A))local RR=R[Rf]local _,_;
+                            local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RI.bg=
+                          function
+                            (R,v,_,_,k)RW=((RU(R[RC],Rv[0X0079][0X4C](3985127998,0X28906556))~=Rv[0X000035][0X20](0XE9FFD8CB,0X255FFB2C))or RW)local RR=R[Rf]local _,_;
+                            local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RI.yR=
+                          function
+                            (R,v,_,k,_)local RR=R[Rf]local _,_ RW=((RU(R[RC],Rv[0X1D][0X00051](0X5DD30A96,585614980))~=Rv[0X35][0X20](0X91CA6051,0X1EB4E3BE))or RW)local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RH.yv=
+                          function
+                            (R,_,_,v,k)local _,_;
+                            local RR=R[Rf]if not RO
+                            then
+                              RO=(RU(R[RC],Rv[0X75][0X68](0X11295692F,0X0003B1D57BE))~=Rv[0X7B][0X21](0X90031DD5,1020369922))
+                            end
+                            ;
+                            local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RA.yk=
+                          function
+                            (R,_,v,k,_)if not RW
+                            then
+                              RW=(RU(R[RC],Rv[0X75][0X68](3173619354,0X27E9A1AC))~=Rv[0X75][0X68](1427086230,361354626))
+                            end
+                            ;
+                            local _,_;
+                            local RR=R[Rf]local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RI.yb=
+                          function
+                            (R,v,_,k,_)local RR=R[Rf]local _,_ RO=RO or(RU(R[RC],Rv[0X26][0X33](4979224501,480560513))~=Rv[0X35][0X20](0X2AC140C2,0X3B439FDB))local Rk=R[RQ][(Rs(v,R[Rz])+1)]RR[k]=Rk;
+                          end
+                          RA.yy=
+                          function
+                            (R,_,v,_,k)if not RO
+                            then
+                              RO=(RU(R[RC],Rv[0X6F][94](0X3C2C551F,0X107EFDA4))~=Rv[0X26][0X000032](0X7955F8FF,0X3AB65289))
+                            end
+                            ;
+                            local RR=R[Rf]local _,_;
+                            local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RH.yC=
+                          function
+                            (R,_,v,_,k)local _,_;
+                            local RR=R[Rf]if not RO
+                            then
+                              RO=(RU(R[RC],Rv[0X1D][0X051](1891433632,891484047))~=Rv[0X6F][0X51](2078728788,0X2876D0B8))
+                            end
+                            ;
+                            local Rk=R[RQ][(Rs(k,R[Rz])+1)]RR[v]=Rk;
+                          end
+                          RN.yX=
+                          function
+                            (R,v,_,_,_)if not RM
+                            then
+                              RM=(RU(R[RC],Rv[123][0X63](0X61A0663A,0X003DAE81DD))~=Rv[0X6A][27](0XCB9AED24,0X151501B9))
+                            end
+                            ;
+                            local RR=R[Rf]local _,_;
+                            if RR.bX
+                            then
+                              for _,RR in Re(RR.bX)
+                              do
+                                RR[1]={RR[1][RR[2]]}RR[2]=1;
+                              end
+                              RR.bX=nil;
+                            end
+                            ;
+                            return R:ys(RR[v])
+                          end
+                          do
+                            if not RP[Rh]
+                            then
+                              repeat
+                                RP[Rh]=RB({149,0XD0,0X59,0X31,0X000094,0XDC,0X50},374)break
+                              until
+                              false;
+                            end
+                            Ry[vd](RN,{[RP[Rh]]=RI})Ry[vd](RI,{[RP[Rh]]=RH})Ry[vd](RH,{[RP[Rh]]=RA})vZ[RP[Rh]]=RN;
+                          end
+                          RI.yj=
+                          function
+                            (R)R[vR]=Rv[0X35][0X64](0X000064B133FC,408770465)return true;
+                          end
+                          RH.ys=
+                          function
+                            (R,v)R[vR]=Rv[111][0X51](0X02CEB0CC8,716176292)R[vv]=v;
+                            return true;
+                          end
+                          RN.bL=
+                          function
+                            (R,v,k,b)R[vR]=Rv[38][0X32](0X1BF63486,0X1A1B8BF7)R[vv]=v R[vE]=k R[vQ]=b;
+                            return true;
+                          end
+                          RI.yf=RI.yj RI.bm=RI.yj RH.yU=RH.ys RH.yd=RH.ys RN.yM=RN.bL RN.bo=RN.bL R:kN(Ry)local vp,vT;
+                          local ky=
+                          function
+                            (v,k,b,y,C,X,s,j,f,U,d,M)local RR,Rk,Rb vD,Ry,RR,Rk,Rb=R:kp(Rv,vD,Ry,vL,vl,Rt,Re,Rs,Ra,Ri,Rn,vY,vc,v,k,b,y,C,X,s,j,f,U,d,M)return RR,Rk,Rb;
+                          end
+                          ;
+                          local kC=R:yL(Rs,Ry)Rl=
+                          function
+                            (R,v,k,b,y,...)local RT=vF(...)local RR=Ry[0X6D65A503]({},vZ)local Ru=Rs;
+                            local RV=R.yW;
+                            local RG=R.yO;
+                            if not RG
+                            then
+                              RV=Ru(Ru(R.kP,R.yE),R.yQ)%0X40 RG={}for RR=0,0X031
+                              do
+                                RG[Ru(RR,RV)+1]=vT[RR+1]
+                              end
+                              R.yW=RV R.yO=RG;
+                            end
+                            RR[Rb]=R.kP+(1)RR[Rf]={}RR[vs]={}RR[Rk]=(0)RR[vN]=R.kM RR[vG]=R.kL RR[vr]=R.kW RR[vV]=R.kO RR[Rg]=R.yz RR[vK]=R.yP RR[vW]=k RR[RY]=v RR[RD]=y RR[vk]=b RR[vw]=vp RR[RQ]=RG RR[Rz]=RV;
+                            for Rv=1,R.yt
+                            do
+                              RR[Rf][Rv-1+R.yQ]=vM[0X61](Rv,...)
+                            end
+                            ;
+                            local Rh=RT-R.yt;
+                            local Ra={vM[0X61](R.yt+1,...)}RR[vB]=Ra RR[vO]=Rh RR[RC]=(0)RR[vR]=(0)RR[vv]=nil RR[vE]=(0)RR[vQ]=(0)local Rd,RX,RL,Rr,Rm Rd,RX,RL,Rr,Rm=RR[Rf],RR[vs],RR[Rg],RR[vW],RR[vO]local Rp,Rl,Rw,Ro Rp,Rl,Rw,Ro=RR[vN],RR[vG],RR[vr],RR[vV]local Rv,RU=RR[Rb],RR[Rk]local Re=(Rv*0X5189+0X60C56373)%0X100000000;
+                            local RE=Ry[R]if not RE
+                            then
+                              RE=R.kz Ry[R]=RE,R.kQ;
+                            end
+                            ;
+                            local Rq=Rs(R.kP,RE)local RK=Rs(R.kP,Rq)local Rc=Rs(Rq,RE)local Rx=Rq RR[vc]=Rc RR[vo]=RK RR[vY]=Rx;
+                            local RS={}local RF={yH=(Rs(RE,R.kP)*Rs(Rs(76832,0X0B0865),716104)+Rs(Rs(Rs(309731,0X015CE4),0X00076AAECA9),R.kP))%4294967296,ka=RK,kT=Rx,kh=Rc,yA=R.kP}local Ri=kC(RS,Rl,Rp,Rs,RF,Ro,Rw,Rs(Rs(126299,832393),299022364))local Rn=R.kP+R.kQ Ry[0X6D65A503](RS,{[Ry[0X65B70E97]]=
+                            function
+                              (v,R)while RF.yA<R and RF.yA<Rn
+                              do
+                                Ri()
+                              end
+                              ;
+                              return Ry[0X1F44A56F](v,R)
+                            end
+                            })RR[vx]=RS;
+                            local
+                            function
+                              RZ(...)local RO,RQ,RD,Rq,Rp,RT,Rh,RG=0X3368270D,0,0X0FF,60,50,62,0X100000000,64414;
+                              local
+                              function
+                                Ra(R,v,k,b)local _,_;
+                                local Ry,RX,Rs RR[Rb]=Rv RR[Rk]=RU RR[RC]=(0X92164FF)local Rj=RR;
+                                local Rf=RA.bJ Ry,RX,Rs=Rf(Rj,b,v,R,k)RU=RR[Rk]Rv=RR[Rb]return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                Ri(R,v,k,b)local Ry,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                repeat
+                                  RR[Rb]=Rv RR[Rk]=RU RR[RC]=(0X14582DD0)local RL=RN.yX RX,Rs,Rj=RL(RR,Rf,Rd,Ry,RM)Rv=RR[Rb]RU=RR[Rk]
+                                until
+                                Ry~=nil;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ;
+                              local
+                              function
+                                Rn(v,k,R,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                  Rr[R+1][1][Rr[R+1][2]]=Rd[k]
+                                until
+                                v~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vk(R,_,_,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                  local RR=#RX;
+                                  local Rv=RX[RR-1][1]local Rk=RX[RR][1]RX[RR-1][1]=Rv+Rk RX[RR]=nil
+                                until
+                                R~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vb(R,v,k,b)local _,Rb,RR,Rk=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                local Ry=Rd[Rb]if RR<0X0080
+                                then
+                                  yI=Rd[RR]
+                                else
+                                  yI=RL[RR-127]
+                                end
+                                ;
+                                if Rk>127
+                                then
+                                  yN=RL[Rk-127]
+                                else
+                                  yN=Rd[Rk]
+                                end
+                                Ry[yI]=yN Rv=Rv+0X3;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vy(R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                local Rj=R;
+                                while Rj==R
+                                do
+                                  Rj=nil RR[RC],RR[Rb]=(0X31C1BEB8),Rv RR[Rk]=RU;
+                                  local Rf=RR Ry,RX,Rs=Rf.yR(Rf,v,b,k,R)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vC(R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                local Rj=R;
+                                while Rj==R
+                                do
+                                  Rj=nil RR[Rk]=RU RR[RC]=(0X6229CF8)RR[Rb]=Rv;
+                                  local Rf=RN.bI Ry,RX,Rs=Rf(RR,k,v,R,b)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vX(R,v,k,b)local Rf,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs RR[Rk]=RU RR[RC],RR[Rb]=(0X6DE2DBDA),Rv;
+                                local Rj=RR Ry,RX,Rs=Rj.bz(Rj,RL,Rd,Rf,RM)Rv=RR[Rb]RU=RR[Rk]return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vs(R,v,k,b)local Ry,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                repeat
+                                  RR[Rk]=RU RR[Rb],RR[RC]=Rv,(0X14884BF0)local RL=RR;
+                                  local RW=RA.yk RX,Rs,Rj=RW(RL,RM,Rd,Rf,Ry)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                Ry~=nil;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ;
+                              local
+                              function
+                                vf(_,R,_,_)local _,_;
+                                local _,_,_;
+                                local Ry=#RX;
+                                local RR=Ry-R+1;
+                                local Rk=Ry;
+                                local Rb=RX[Rk][1]for RR=Rk-1,RR,-1
+                                do
+                                  Rb=RX[RR][1]..Rb;
+                                end
+                                RX[RR][1]=Rb;
+                                for RR=RR+1,Rk
+                                do
+                                  RX[RR]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vU(_,_,_,_)local _,_;
+                                local _,_,_
+                                do
+                                  local RR=#RX;
+                                  local Rv=RX[RR-1][1]local Rk=RX[RR][1]RX[RR-1][1]=Rv%Rk RX[RR]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vd(_,_,_,_)local _,_;
+                                local _,_,_;
+                                local RR=#RX;
+                                local Rk=RX[RR][1]local Rb=RX[RR-1][1]local Ry=Rb[Rk]RX[RR-1][1]=Ry RX[RR]=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vM(R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                local Rj=R;
+                                while Rj==R
+                                do
+                                  Rj=nil RR[RC],RR[Rk],RR[Rb]=(0X6CF3D733),RU,Rv;
+                                  local Rf=RR Ry,RX,Rs=Rf.bT(Rf,R,k,b,v)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vL(R,_,v,k)local _,_;
+                                local _,_,_;
+                                repeat
+                                  for RR=v,k
+                                  do
+                                    RX[#RX+1]={Rd[RR]}
+                                  end
+                                until
+                                R~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vW(R,v,k,b)local Ry,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                local Rf=Ry;
+                                while Rf==Ry
+                                do
+                                  Rf=nil RR[RC],RR[Rk],RR[Rb]=(0X4CF2D6EB),RU,Rv;
+                                  local RW=RR RX,Rs,Rj=RW:bu(RM,RL,Ry,Rd)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ;
+                              local
+                              function
+                                vO(R,v,k,b)local Rf,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs RR[RC]=(0X35D218E1)RR[Rk],RR[Rb]=RU,Rv;
+                                local Rj=RR Ry,RX,Rs=Rj.bD(Rj,RL,RM,Rf,Rd)Rv=RR[Rb]RU=RR[Rk]return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vz(R,v,k,b)local Rk,Rb,RR,Ry=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                repeat
+                                  if(Rd[RR]~=nil and Rd[RR]~=false)
+                                  then
+                                    Rd[Rb]=Rd[RR]Rv=Rv+Ry;
+                                  end
+                                until
+                                Rk~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vP(R,_,v,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                  Rv=Rv+v
+                                until
+                                R~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vt(R,v,_,_)local _,_;
+                                local _,_,_;
+                                local RR=R;
+                                while RR==R
+                                do
+                                  RR=nil;
+                                  local Rv=#RX Rd[v]=RX[Rv][1]RX[Rv]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vH(_,R,_,_)local _,_;
+                                local _,_,_
+                                do
+                                  RX[#RX+1]={R~=0}
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vA(R,v,k,b)local Rb,Ry,RC=0X30E26FA4,1919924853,677471538;
+                                local _,RR,Rf,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                local Rs=vS(Rd[RR])if Rs==nil
+                                then
+                                  if not RP[Ry]
+                                  then
+                                    RP[Ry]=RB({(157+0X0B9)%Rj,0X5D,0X8A,(0XFF+0X00066)%Rj,(0X99+0X00F0)%Rj,(0X000C5+0XA5)%Rj,63,0X45,0XB5,0X26,0X8,0X002C,(151+0X00075)%Rj,(0X0005B+121)%Rj,0X8B,(5+124)%Rj,(0X2D+0X00002A)%Rj,(45+163)%Rj,(39+59)%Rj,0X4A,18,(0X000B4+95)%Rj,239,131,0X97,0XA5,0XC5,(9+154)%Rj,123,0X00003E,0XAD,0X37,(141+29)%Rj,0X39,(0X0D0+29)%Rj,(26+228)%Rj},275)
+                                  end
+                                  vJ(RP[Ry],0)
+                                end
+                                ;
+                                local RX=vS(Rd[RR+1])if RX==nil
+                                then
+                                  if not RP[RC]
+                                  then
+                                    RP[RC]=RB({252,0X4B,(0X0000B9+237)%Rj,(219+0X000D7)%Rj,(0X3E+13)%Rj,(200+176)%Rj,30,0X0DE,107,0XCF,141,0X77,0XC1,0X5C,0XF8,(104+0X85)%Rj,(0X09F+114)%Rj,(33+0X2B)%Rj,(114+158)%Rj,(184+5)%Rj,0X1B,0X1D,0X55,240,0XA7,(0X00044+107)%Rj,0X45,61},311)
+                                  end
+                                  vJ(RP[RC],0)
+                                end
+                                ;
+                                local Rk=vS(Rd[RR+2])if Rk==nil
+                                then
+                                  if not RP[Rb]
+                                  then
+                                    repeat
+                                      RP[Rb]=RB({(0X00DE+0XDE)%Rj,0X08F,(0X46+209)%Rj,0X80,(0X001F+0XC3)%Rj,0X55,(0XD9+85)%Rj,0X70,0X00076,(0X000A6+0X2)%Rj,0X43,(162+0XDB)%Rj,(167+108)%Rj,0X73,(226+0X000077)%Rj,16,0XA,(104+177)%Rj,0X8F,(250+217)%Rj,0X60,27,252,(141+30)%Rj,42,96,0XCB},339)break
+                                    until
+                                    false;
+                                  end
+                                  vJ(RP[Rb],0)
+                                end
+                                Rd[RR]=Rs-Rk Rd[RR+1]=RX Rd[RR+0X002]=Rk;
+                                local RU={RX,Rk}Rd[-RR-1]=RU Rv=Rv+Rf;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vI(R,v,k,b)local _,RR,Rk,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_
+                                do
+                                  local Rb=#RX;
+                                  local Ry=RX[Rb][1]RX[Rb]=nil;
+                                  if((Ry~=nil and Ry~=false)==(RR~=0))
+                                  then
+                                    Rv=Rv+Rk;
+                                  end
+                                  ;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vN(R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                repeat
+                                  RR[Rk]=RU RR[RC]=(0X421E5B11)RR[Rb]=Rv;
+                                  local Rj=RR Ry,RX,Rs=Rj:yy(R,v,b,k)Rv=RR[Rb]RU=RR[Rk]
+                                until
+                                R~=nil;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vG(v,k,b,R)local _,_;
+                                local _,_,_;
+                                local RR=v;
+                                while RR==v
+                                do
+                                  RR=nil;
+                                  local Rk=Rd[b]if R<128
+                                  then
+                                    yN=Rd[R]
+                                  else
+                                    yN=RL[R-127]
+                                  end
+                                  Rd[k]=Rk[yN]Rv=Rv+0X3;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vr(k,b,R,v)local _,_;
+                                local _,_,_;
+                                local RR=k;
+                                while RR==k
+                                do
+                                  RR=nil;
+                                  if R<0X80
+                                  then
+                                    yI=Rd[R]
+                                  else
+                                    yI=RL[R-127]
+                                  end
+                                  ;
+                                  if v>0X7F
+                                  then
+                                    yN=RL[v-127]
+                                  else
+                                    yN=Rd[v]
+                                  end
+                                  Rd[b]=yI%yN Rv=Rv+3;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vV(_,k,R,v)local _,_;
+                                local _,_,_
+                                do
+                                  if R<128
+                                  then
+                                    yI=Rd[R]
+                                  else
+                                    yI=RL[R-127]
+                                  end
+                                  ;
+                                  if v<0X00080
+                                  then
+                                    yN=Rd[v]
+                                  else
+                                    yN=RL[v-127]
+                                  end
+                                  Rd[k]=yI^yN Rv=Rv+0X3;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vK(R,v,k,b)local _,_,RR,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_ RX[#RX+1]={RL[RR+1]}return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vB(R,v,k,b)local Ry,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                local Rf=Ry;
+                                while Rf==Ry
+                                do
+                                  Rf=nil RR[Rk]=RU RR[Rb]=Rv RR[RC]=(0X3419904C)local RW=RR RX,Rs,Rj=RW.bQ(RW,Rd,RM,RL,Ry)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ;
+                              local
+                              function
+                                vY(R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                repeat
+                                  RR[Rb],RR[Rk],RR[RC]=Rv,RU,(0X731C8D0C)local Rj=RR Ry,RX,Rs=Rj:bS(v,k,R,b)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                R~=nil;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vc(_,_,_,_)local _,_;
+                                local _,_,_
+                                do
+                                  local RR=#RX;
+                                  local Rv=RX[RR-1][1]local Rk=RX[RR][1]RX[RR-1][1]=(Rv==Rk)RX[RR]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vx(R,v,k,b)local _,RR,Rk,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_
+                                do
+                                  local RC=Rd[-RR-1]local RX=RC[1]local Ry=RC[0X2]local Rb=Rd[RR]+Ry Rd[RR]=Rb;
+                                  if(Ry>0 and Rb<=RX)or(Ry<=0 and Rb>=RX)
+                                  then
+                                    Rd[RR+3]=Rb Rv=Rv+Rk;
+                                  end
+                                  ;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vF(R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                repeat
+                                  RR[Rb],RR[RC]=Rv,(0X20ED08D8)RR[Rk]=RU;
+                                  local Rj=RR;
+                                  local Rf=RN.bK Ry,RX,Rs=Rf(Rj,v,b,k,R)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                R~=nil;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vu(R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                repeat
+                                  RR[Rb],RR[Rk]=Rv,RU RR[RC]=(0X43718DD9)local Rj=RR Ry,RX,Rs=Rj.bc(Rj,R,k,v,b)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                R~=nil;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vD(R,v,k,b)local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rk]=RU RR[RC],RR[Rb]=(0X63C647F1),Rv;
+                                  local Rj=RR Ry,RX,Rs=Rj:bN(v,k,b,R)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vl(R,_,_,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                until
+                                R~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vw(R,v,k,b)local Rj,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs RR[Rb],RR[RC],RR[Rk]=Rv,(0X1AD6181C),RU;
+                                local RL=RI.bl Ry,RX,Rs=RL(RR,Rj,Rd,Rf,RM)Rv=RR[Rb]RU=RR[Rk]return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vo(R,v,k,b)local _,_;
+                                local Ry,RX,Rs RR[Rb],RR[Rk]=Rv,RU RR[RC]=(0X5DC73FED)Ry,RX,Rs=RR.bA(RR,R,k,b,v)RU=RR[Rk]Rv=RR[Rb]return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                ve(_,_,_,_)local _,_;
+                                local _,_,_
+                                do
+                                  local RR=#RX;
+                                  local Rv=RX[RR][1]RX[RR][1]=#Rv;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vq(R,v,k,b)local _,_;
+                                local Ry,RX,Rs RR[RC],RR[Rb],RR[Rk]=(0X65296A2E),Rv,RU;
+                                local Rj=RR Ry,RX,Rs=Rj:bF(v,k,b,R)RU=RR[Rk]Rv=RR[Rb]return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vZ(R,v,k,b)local Ry,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                repeat
+                                  RR[Rk],RR[RC]=RU,(0X35EB8A21)RR[Rb]=Rv;
+                                  local RL=RR RX,Rs,Rj=RL:bp(Ry,Rf,Rd,RM)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                Ry~=nil;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ;
+                              local
+                              function
+                                vp(R,v,k,b)local Ry,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                repeat
+                                  RR[RC]=(0X358E93EE)RR[Rk]=RU RR[Rb]=Rv;
+                                  local RL=RR RX,Rs,Rj=RL:be(Rd,Ry,Rf,RM)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                Ry~=nil;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ;
+                              local
+                              function
+                                vT(_,_,_,_)local _,_;
+                                local _,_,_
+                                do
+                                  local RR=#RX RX[RR]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vh(R,v,k,b)local _,_,_,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_
+                                do
+                                  local RR=#RX;
+                                  local Rv=RX[RR][1]local Rk=RX[RR-1][1]local Rb=RX[RR-2][1]Rb[Rk]=Rv RX[RR]=nil RX[RR-1]=nil RX[RR-2]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                va(R,v,k,b)local Rb,Ry,RR,Rk=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                repeat
+                                  if RR<128
+                                  then
+                                    yI=Rd[RR]
+                                  else
+                                    yI=RL[RR-127]
+                                  end
+                                  ;
+                                  if Rk>127
+                                  then
+                                    yN=RL[Rk-0X7F]
+                                  else
+                                    yN=Rd[Rk]
+                                  end
+                                  Rd[Ry]=yI+yN Rv=Rv+3
+                                until
+                                Rb~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vi(R,k,v,_)local _,_;
+                                local _,_,_;
+                                local RR=R;
+                                while RR==R
+                                do
+                                  RR=nil Rd[k]=Rr[v+1][1][Rr[v+1][0X02]]
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                vn(R,v,k,b)local _,_;
+                                local Ry,RX,Rs RR[RC],RR[Rk],RR[Rb]=(0X298672BA),RU,Rv;
+                                local Rj=RR;
+                                local Rf=RA.bH Ry,RX,Rs=Rf(Rj,b,v,k,R)Rv=RR[Rb]RU=RR[Rk]return Rv,Ry,RX,Rs;
+                              end
+                              ;
+                              local
+                              function
+                                vg(v,k,R,b)local _,_;
+                                local _,_,_;
+                                repeat
+                                  if not(Rd[R]~=nil and Rd[R]~=false)
+                                  then
+                                    Rd[k]=Rd[R]Rv=Rv+b;
+                                  end
+                                until
+                                v~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local
+                              function
+                                kR(v,_,R,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                  if R>127
+                                  then
+                                    yI=RL[R-127]
+                                  else
+                                    yI=Rd[R]
+                                  end
+                                  RX[#RX+1]={yI}
+                                until
+                                v~=nil;
+                                return Rv;
+                              end
+                              ;
+                              local Rz={
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[RC]=(0X7C4B52C6)RR[Rk]=RU RR[Rb]=Rv;
+                                  local Rj=RR;
+                                  local Rf=RH.bw Ry,RX,Rs=Rf(Rj,R,b,v,k)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,Ra,
+                              function
+                                (_,_,_,_)local _,_;
+                                local _,_,_
+                                do
+                                  local RR=#RX;
+                                  local Rv=RX[RR-1][1]local Rk=RX[RR][1]RX[RR-1][1]=(Rv<Rk)RX[RR]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,Ri,Rn,vk,vb,vy,
+                              function
+                                (R,_,_,_)local _,_;
+                                local _,_,_;
+                                local RR=R;
+                                while RR==R
+                                do
+                                  RR=nil;
+                                  local Rv=#RX;
+                                  local Rk=RX[Rv][1]RX[Rv][1]=-Rk;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local Rj,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rb],RR[RC]=Rv,(0X35330236)RR[Rk]=RU;
+                                  local RL=RR Ry,RX,Rs=RL.bg(RL,Rf,RM,Rj,Rd)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,vC,
+                              function
+                                (R,v,k,b)local RR,_,_,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                repeat
+                                  local Rv=#RX;
+                                  local Rk=RX[Rv-1][1]local Rb=RX[Rv][1]RX[Rv-1][1]=Rk/Rb RX[Rv]=nil
+                                until
+                                RR~=nil;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local Ry,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                local Rf=Ry;
+                                while Rf==Ry
+                                do
+                                  Rf=nil RR[RC]=(0X59959A13)RR[Rk]=RU RR[Rb]=Rv RX,Rs,Rj=RR:bY(RM,Ry,Rd,RL)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local _,_;
+                                local _,_,_;
+                                local RR=R;
+                                while RR==R
+                                do
+                                  RR=nil;
+                                  local Rk=Rs(Rs(Rv,RE),b)if Rt(Rd)==Ry[0X227B29E5]and(Rk%0X2)<0X2
+                                  then
+                                    Rv=Rs(v,Rk)
+                                  else
+                                    Rv=Rs(k,Rk)
+                                  end
+                                  ;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local Ry,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                local Rf=Ry;
+                                while Rf==Ry
+                                do
+                                  Rf=nil RR[Rk]=RU RR[RC],RR[Rb]=(0X2253FEAD),Rv;
+                                  local RW=RH.bh RX,Rs,Rj=RW(RR,RM,RL,Rd,Ry)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ,vX,vs,vf,vU,vd,
+                              function
+                                (R,v,k,b)local Ry,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                repeat
+                                  RR[Rb],RR[Rk]=Rv,RU RR[RC]=(0X33FFDCBB)local RL=RH.yv RX,Rs,Rj=RL(RR,RM,Ry,Rf,Rd)Rv=RR[Rb]RU=RR[Rk]
+                                until
+                                Ry~=nil;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ,vM,
+                              function
+                                (R,v,k,b)local RR,_,_,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                local Rk=RR;
+                                while Rk==RR
+                                do
+                                  Rk=nil;
+                                  local RR=#RX;
+                                  local Rv=RX[RR-1][1]local Rb=RX[RR][1]RX[RR-1][1]=Rv*Rb RX[RR]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,vL,vW,
+                              function
+                                (R,v,k,b)local Rj,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs RR[Rb],RR[RC],RR[Rk]=Rv,(0X3F0A7ABF),RU;
+                                local RL=RR;
+                                local RW=RH.bC Ry,RX,Rs=RW(RL,Rf,Rd,RM,Rj)Rv=RR[Rb]RU=RR[Rk]return Rv,Ry,RX,Rs;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                local Rj=R;
+                                while Rj==R
+                                do
+                                  Rj=nil RR[Rk],RR[RC]=RU,(0X72A5AF38)RR[Rb]=Rv Ry,RX,Rs=RR.bt(RR,R,k,v,b)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,vO,
+                              function
+                                (R,_,_,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                  RX[#RX+1]={{}}
+                                until
+                                R~=nil;
+                                return Rv;
+                              end
+                              ,vz,
+                              function
+                                (R,v,k,b)local Rb,Ry,RR,Rk=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                repeat
+                                  if RR<0X00080
+                                  then
+                                    yI=Rd[RR]
+                                  else
+                                    yI=RL[RR-0X7F]
+                                  end
+                                  ;
+                                  if Rk<128
+                                  then
+                                    yN=Rd[Rk]
+                                  else
+                                    yN=RL[Rk-0X07F]
+                                  end
+                                  Rd[Ry]=yI*yN Rv=Rv+0X3
+                                until
+                                Rb~=nil;
+                                return Rv;
+                              end
+                              ,vP,
+                              function
+                                (R,v,k,b)local _,Rb,RR,Rk=R,v,k,b;
+                                local _,_;
+                                local _,_,_
+                                do
+                                  if RR>127
+                                  then
+                                    yI=RL[RR-0X7F]
+                                  else
+                                    yI=Rd[RR]
+                                  end
+                                  ;
+                                  if Rk>0X0007F
+                                  then
+                                    yN=RL[Rk-127]
+                                  else
+                                    yN=Rd[Rk]
+                                  end
+                                  Rd[Rb]=yI/yN Rv=Rv+0X3;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (_,_,_,_)local _,_;
+                                local _,_,_;
+                                local RR=#RX;
+                                local Rk=RX[RR][1]RX[RR][1]=not Rk;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (k,R,v,b)local _,_;
+                                local _,_,_;
+                                local RR=k;
+                                while RR==k
+                                do
+                                  RR=nil;
+                                  local Rv=v>0 and v-1 or RU-R;
+                                  if Rv<0
+                                  then
+                                    Rv=0;
+                                  end
+                                  ;
+                                  local Rk={yG=R,yr=b,bM=Rv,bs=Rd[R],bd={}}for RR=1,Rv
+                                  do
+                                    Rk.bd[RR]=Rd[R+RR]
+                                  end
+                                  ;
+                                  if v==0
+                                  then
+                                    RU=R;
+                                  end
+                                  RX[#RX+1]={Rk}
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rb],RR[Rk]=Rv,RU RR[RC]=(0X4FD209D)Ry,RX,Rs=RR:bq(v,R,b,k)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,
+                              function
+                                (_,R,v,k)local _,_;
+                                local _,_,_;
+                                local RR=v>0 and v or RU-R;
+                                if RR<0
+                                then
+                                  RR=0;
+                                end
+                                ;
+                                local Rk=(k-1)*50;
+                                for RR=1,RR
+                                do
+                                  Rd[R][Rk+RR]=Rd[R+RR]
+                                end
+                                ;
+                                if v==0
+                                then
+                                  RU=R;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,vt,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                repeat
+                                  RR[RC],RR[Rb]=(0X1243BFDC),Rv RR[Rk]=RU;
+                                  local Rj=RI.yb Ry,RX,Rs=Rj(RR,k,R,v,b)Rv=RR[Rb]RU=RR[Rk]
+                                until
+                                R~=nil;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,vH,
+                              function
+                                (R,v,k,b)local Rj,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs RR[Rb],RR[Rk]=Rv,RU RR[RC]=(0X17838D81)Ry,RX,Rs=RR.ba(RR,Rf,Rj,RM,Rd)Rv=RR[Rb]RU=RR[Rk]return Rv,Ry,RX,Rs;
+                              end
+                              ,vA,
+                              function
+                                (R,v,k,b)local Rj,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rb],RR[RC],RR[Rk]=Rv,(0X464A4819),RU;
+                                  local RL=RR Ry,RX,Rs=RL:bn(Rj,Rf,Rd,RM)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,vI,
+                              function
+                                (R,v,k,b)local Rj,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rb],RR[RC]=Rv,(0X1C4F1F0D)RR[Rk]=RU;
+                                  local RL=RH.bZ Ry,RX,Rs=RL(RR,RM,Rj,Rd,Rf)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,vN,vG,vr,vV,vK,vB,
+                              function
+                                (k,b,R,v)local _,_;
+                                local _,_,_;
+                                local RR=k;
+                                while RR==k
+                                do
+                                  RR=nil;
+                                  if R>127
+                                  then
+                                    yI=RL[R-127]
+                                  else
+                                    yI=Rd[R]
+                                  end
+                                  ;
+                                  if v>0X7F
+                                  then
+                                    yN=RL[v-0X7F]
+                                  else
+                                    yN=Rd[v]
+                                  end
+                                  Rd[b]=yI-yN Rv=Rv+3;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,vY,vc,
+                              function
+                                (R,_,_,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                  local RR=#RX;
+                                  local Rv=RX[RR-1][1]local Rk=RX[RR][1]RX[RR-1][1]=Rv^Rk RX[RR]=nil
+                                until
+                                R~=nil;
+                                return Rv;
+                              end
+                              ,vx,vF,vu,
+                              function
+                                (_,R,_,_)local _,_;
+                                local _,_,_
+                                do
+                                  RX[#RX+1]={Rd[R]}
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,vD,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rk],RR[RC],RR[Rb]=RU,(0X1AF840FE),Rv;
+                                  local Rj=RA.bi Ry,RX,Rs=Rj(RR,R,b,v,k)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,vl,vw,vo,
+                              function
+                                (R,v,k,b)local Ry,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                local Rf=Ry;
+                                while Rf==Ry
+                                do
+                                  Rf=nil RR[Rk]=RU RR[RC],RR[Rb]=(0X3EEE849A),Rv;
+                                  local RW=RR RX,Rs,Rj=RW:by(RM,RL,Rd,Ry)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ,ve,vq,
+                              function
+                                (R,v,k,b)local _,_,_,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_
+                                do
+                                  local RR=#RX;
+                                  local Rv=RX[RR-1][1]local Rk=RX[RR][1]RX[RR-1][1]=(Rv<=Rk)RX[RR]=nil;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local Ry,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                repeat
+                                  RR[Rk],RR[Rb],RR[RC]=RU,Rv,(0X5A3DCC3A)local RL=RH.yC RX,Rs,Rj=RL(RR,Ry,Rf,RM,Rd)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                Ry~=nil;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                repeat
+                                  RR[RC]=(0X68383483)RR[Rb],RR[Rk]=Rv,RU Ry,RX,Rs=RR:bG(R,k,v,b)Rv=RR[Rb]RU=RR[Rk]
+                                until
+                                R~=nil;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs RR[RC],RR[Rk]=(0X74B3F3DA),RU RR[Rb]=Rv;
+                                local Rj=RR Ry,RX,Rs=Rj.bP(Rj,b,R,k,v)RU=RR[Rk]Rv=RR[Rb]return Rv,Ry,RX,Rs;
+                              end
+                              ,vZ,vp,vT,
+                              function
+                                (R,v,k,b)local Rj,Rf,Rd,RM=R,v,k,b;
+                                local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rk]=RU RR[Rb],RR[RC]=Rv,(0X33C46192)local RL=RR Ry,RX,Rs=RL.bB(RL,Rd,Rf,RM,Rj)RU=RR[Rk]Rv=RR[Rb]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local RR,_,_,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                repeat
+                                  local Ry=#RX;
+                                  local Rv=RX[Ry][1]local Rk=Rv.bV;
+                                  local Rb=Rv.yG;
+                                  local RC=Rv.yr;
+                                  if RC>0
+                                  then
+                                    for RR=1,RC-1
+                                    do
+                                      Rd[Rb+RR-1]=Rk[RR]
+                                    end
+                                  else
+                                    local RR=Rk.bb RU=Rb-1;
+                                    for RR=1,RR
+                                    do
+                                      Rd[Rb+RR-1]=Rk[RR]RU=RU+1;
+                                    end
+                                    ;
+                                  end
+                                  RX[Ry]=nil
+                                until
+                                RR~=nil;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local _,_,_,_=R,v,k,b;
+                                local _,_;
+                                local _,_,_;
+                                local RR=#RX;
+                                if RR>0
+                                then
+                                  local Rk=RX[RR][1]local Rb=((Rv+RR+Rm)%2)if Rt(Rd)==Ry[0X227B29E5]and(Rv+RR)>0
+                                  then
+                                    RX[RR][1]=Rk+Rb-((Rv+#RX+Rm)%0X2)
+                                  else
+                                    RX[RR][1]=Rk-Rv-RE;
+                                  end
+                                  ;
+                                end
+                                ;
+                                return Rv;
+                              end
+                              ,vh,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs
+                                do
+                                  RR[Rk],RR[RC],RR[Rb]=RU,(0X3432416F),Rv;
+                                  local Rj=RA.bO Ry,RX,Rs=Rj(RR,k,v,b,R)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local Ry,Rd,RM,RL=R,v,k,b;
+                                local _,_;
+                                local RX,Rs,Rj;
+                                local Rf=Ry;
+                                while Rf==Ry
+                                do
+                                  Rf=nil RR[Rb]=Rv RR[RC]=(0X6B3B4C07)RR[Rk]=RU RX,Rs,Rj=RR:br(Rd,RM,RL,Ry)Rv=RR[Rb]RU=RR[Rk]
+                                end
+                                ;
+                                return Rv,RX,Rs,Rj;
+                              end
+                              ,
+                              function
+                                (_,_,_,_)local _,_;
+                                local _,_,_;
+                                local RR=#RX;
+                                local Rk=RX[RR-1][1]local Rb=RX[RR][1]RX[RR-1][1]=Rk-Rb RX[RR]=nil;
+                                return Rv;
+                              end
+                              ,
+                              function
+                                (R,v,k,b)local _,_;
+                                local Ry,RX,Rs;
+                                repeat
+                                  RR[Rb],RR[RC],RR[Rk]=Rv,(0X47ED7174),RU;
+                                  local Rj=RR Ry,RX,Rs=Rj:bW(R,k,b,v)RU=RR[Rk]Rv=RR[Rb]
+                                until
+                                R~=nil;
+                                return Rv,Ry,RX,Rs;
+                              end
+                              ,va,
+                              function
+                                (v,R,k,_)local _,_;
+                                local _,_,_;
+                                repeat
+                                  for RR=R,R+k
+                                  do
+                                    Rd[RR]=nil;
+                                  end
+                                until
+                                v~=nil;
+                                return Rv;
+                              end
+                              ,vi,vn,vg,kR}local RV=
+                              function
+                                ()local _;
+                                return Rv,nil,nil,nil;
+                              end
+                              ;
+                              local RW={0X8DDFD566,0X40310D,0X236767A9,0X40314B,0X47A371EA,0X403124,0X8BCF4CC0,0X40314B,0X53041039,0X40310E,0X52B5662B,0X403114,0X24FFE333,0X403149,0X667EF9D1,0X40314B,0X526C193D,0X4030FF,0X33E8CC6F,0X403116,0X4BD4C03F,0X40314B,0X68D9F57E,0X403116,0X6EFAE065,0X40314B,0X489F40CC,0X40311A,0X9003E467,0X40310D,0X89AE330E,0X403119,0X8527E53F,0X403112,0X46D422FC,0X403152,0X219AD384,0X403142,0X18D636C0,0X403133,0X326E4B1F,0X403139,0X73316FAC,0X403121,0X6501D8C4,0X40312C,0X5F2F86D7,0X40313D,0X89B069E2,0X403120,0X22F48D0A,0X40310F,0X592A7008,0X40311F,0X6C66729D,0X403129,0X6DACA1AB,0X403119,0X3344A8F7,0X40314B,0X847BB09F,0X403109,0X673FD66F,0X40313E,0X7F035EAC,0X403140,0X3063E10A,0X40314B,0X158D7BA5,0X40314B,0X4BB99E42,0X403122,0X7FE2B3AA,0X403111,0X19381E2B,0X40313A,0X84EAC933,0X40310B,0X20A50D92,0X40314B,0X46D6F95F,0X40310C,0X21EDA4C6,0X403120,0X89C9B336,0X40314B,0X7830F578,0X40314C,0X7C5D5734,0X403147,0X35DEBF3E,0X403104,0X5285D7F2,0X40311B,0X4CFF570C,0X403128,0X52C78E74,0X403143,0X7DDCA939,0X403124,0X535FB478,0X403100,0X76417B2C,0X40314B,0X4D9CB7AD,0X403114,0X692400EE,0X40314B,0X788BCD07,0X40314A,0X1F639678,0X40314B,0X68CD4BD1,0X403127,0X6E6D6C58,0X403132,0X5DBD20FD,0X40312A,0X42C78697,0X403141,0X6BD01771,0X40314B,0X3BEC2724,0X403124,0X80F41DC8,0X403106,0X1F7BB075,0X403109,0X76B26AB8,0X40314B,0X30C6C347,0X40314B,0X1F0A2080,0X403152,0X64CBE594,0X403129,0X695F9460,0X40314C,0X525ADFF2,0X403102,0X3230E22A,0X40314B,0X532BBFFA,0X403108,0X73A8642C,0X4030FD,0X64E195B4,0X40313F,0X4EDFC38B,0X40314B,0X7523D549,0X403111,0X7EE963A0,0X403143,0X26CB8150,0X403139,0X76FFAA24,0X403105,0X5977A6E4,0X403118,0X866BBB6F,0X40311D,0X27401908,0X403120,0X442EF9C1,0X403150,0X49A772E0,0X403121,0X42A85AC5,0X40310A,0X5F5EA39F,0X40314B,0X44AAB168,0X40314E,0X43D8C3F8,0X40314C,0X38D92CAF,0X403136,0X495B17D6,0X40313B,0X2F345573,0X40313E,0X566AD5FB,0X403132,0X5FCC7B2D,0X403139,0X4EBDBEE7,0X40314B,0X90ECCEFB,0X403123,0X91D27496,0X40314B,0X211747FD,0X403151,0X6AEF9922,0X403135,0X72954A5F,0X403150,0X827E7DBC,0X40314E,0X81341C4A,0X40314B,0X63B65578,0X40311A,0X6EF0BD93,0X403102,0X4283EEB8,0X403135,0X71BDD7B1,0X40312D,0X26ACB3AC,0X40314B,0X5A9ACF07,0X40313D,0X1AD968AF,0X40312E,0X2A004601,0X40313F,0X696EFC18,0X40314B,0X4B25278E,0X40314B,0X77B7943B,0X40314A,0X549F2DEE,0X403116,0X33BFF256,0X403100,0X61668F66,0X40310A,0X671F93EF,0X40313E,0X5943967A,0X40313B,0X32E56532,0X403109,0X5F7AEA38,0X403101,0X75478FA7,0X40313F,0X31897800,0X40313C,0X71E0744D,0X403100,0X27CE7CD0,0X40314B,0X409E0633,0X40314B,0X25BAFCF9,0X40314B,0X27DD3A01,0X403133,0X704AF8B2,0X403107,0X37B7ED07,0X40314B,0X5D0052BA,0X403149,0X28F573B5,0X403140,0X8F95C933,0X40314B,0X58E7D57D,0X40314B,0X1577379F,0X4030FF,0X29AB9B67,0X4030FE,0X2087089E,0X40310A,0X8E49CD96,0X40313A,0X4C6CB842,0X40310E,0X5763DBE1,0X40310D,0X871BDF34,0X403109,0X656B7FDE,0X40314E,0X653BA10A,0X403131,0X24A2014C,0X403142,0X246E3F13,0X40312E,0X5A80C592,0X403154,0X2DAF9B63,0X40314B,0X6C6DC870,0X403152,0X5E6D4CE5,0X403123,0X42BC423A,0X403143,0X3C3B6FFB,0X403110,0X6701A308,0X40314B,0X74C1F189,0X40314A,0X3E97D9B4,0X40310E,0X3251C80C,0X40314B,0X3D788343,0X403109,0X75366622,0X403151,0X7C984291,0X40314B,0X3F5F371A,0X40314B,0X1DFF634B,0X403125,0X32BE5936,0X403138,0X4C22AFE3,0X403102,0X9104AC48,0X40311A,0X2DF1DEAA,0X40311C,0X26099C83,0X403108,0X2057AC91,0X403145,0X874D66EB,0X40314B,0X77256F1E,0X40314A,0X89C6639C,0X40313A,0X46FEF92B,0X403143,0X63B4760B,0X40314B,0X620A422E,0X403104,0X2CBE0739,0X403118,0X2649E2D7,0X403141,0X82302343,0X403147,0X547E2C1B,0X40314B,0X7E6CEAA1,0X40310E,0X524EE68C,0X40314B,0X51D72194,0X403108,0X17F6F5D8,0X40314B,0X1F50EABB,0X40311C,0X4D038821,0X40310D,0X8BA8B5CE,0X40314B,0X672B9A71,0X403147,0X3EC1BCB3,0X403117,0X8FA186FF,0X40314B,0X772D153D,0X40313B,0X4A286B5C,0X40314C,0X746C39D3,0X403128,0X7C75124C,0X40313C,0X136CD722,0X403150,0X3181177D,0X40312F,0X21021B9E,0X403140,0X2BF66C85,0X40314A,0X87F1BEF7,0X403150,0X171AA133,0X40313C,0X51F0024A,0X403136,0X5BA11DC8,0X403154,0X85395D0B,0X403114,0X2E0DB3D2,0X403101,0X259CA8D6,0X40310C,0X1CEB612A,0X40314B,0X83166D1E,0X403137,0X36AAE0FB,0X403111,0X18BCEEB2,0X403124,0X2ABA3A0E,0X40314B,0X3D16179A,0X40313F,0X8A6984FE,0X4030FE,0X6FCB83AF,0X40310C,0X359968E9,0X40313C,0X5C9DE485,0X403106,0X3AFA3741,0X40314B,0X2A8B4DCB,0X403105,0X4299A2AD,0X40314B,0X153B7392,0X403138,0X2FCBBD9F,0X40314B,0X43C681C1,0X40313C,0X4BACB238,0X403146,0X5436B1D0,0X403104,0X25364B56,0X403126,0X3F76E39F,0X40310F,0X8D0E6AD5,0X403148,0X6C5D46CE,0X403142,0X24B23DF8,0X403114,0X6B646C29,0X40314B,0X4C27DD38,0X403104,0X84BACCC6,0X40310A,0X324B2415,0X403108,0X77B73802,0X403135,0X5DBDCD68,0X40314E,0X3AEC4EFE,0X403115,0X5C06C035,0X403113,0X518EF493,0X40312A,0X34913D82,0X40314D,0X326F6C64,0X403145,0X130A2715,0X40314B,0X22462D7B,0X40310E,0X3EBABC41,0X40310B,0X58A1C776,0X40314B,0X72EDFB60,0X403136,0X50E97662,0X40314B,0X1642517B,0X40311F,0X7E996FA9,0X40314B,0X7E8A75E6,0X403117,0X6F200026,0X403133,0X2FE477EC,0X40313A,0X2954D367,0X403142,0X40A7357E,0X403114,0X4C414B68,0X403120,0X26854BA9,0X40310C,0X873ECEF4,0X403145,0X4BC909AF,0X403144,0X3880C6C0,0X403138,0X47D10628,0X40310A,0X1876F49E,0X403120,0X1EB70412,0X403139,0X470FE2E2,0X40312A,0X41517A46,0X4030FD,0X62E35650,0X403148,0X84611CF8,0X40311A,0X4F026DCF,0X4030FD,0X41934C3D,0X403144,0X3644CC21,0X403127,0X38349880,0X40314B,0X2089033F,0X403129,0X3762213F,0X403101,0X742F6EEE,0X403132,0X514CF4B8,0X403130,0X6C1472A2,0X403122,0X5A28BC5C,0X40314B,0X3D8E4146,0X40310F,0X2527B1A3,0X403111,0X8FCEFAB1,0X40313A,0X3E3FAEE9,0X40314B,0X7A3C427A,0X40314B,0X36C9CD61,0X40314B,0X3D9CF0C2,0X40313A,0X8383CF40,0X403146,0X4E710988,0X403111,0X2168866F,0X403102,0X5D96463E,0X403103,0X4A2B9898,0X403106,0X1C01C0B1,0X40310B,0X65B7A1B6,0X403111,0X1623451A,0X403122,0X6383AD71,0X403142,0X26C64811,0X40314B,0X2F9D9746,0X4030FF,0X42A11F8A,0X40312E,0X74AFFC4B,0X40314B,0X2245D273,0X403134,0X2F086C1C,0X40314B,0X6FD9A084,0X40314C,0X6E635DA0,0X403110,0X647A28AA,0X40310F,0X2390B947,0X403140,0X8EDA927F,0X40310C,0X7B314B04,0X40311C,0X684F549D,0X40312F,0X8E2BB077,0X40312F,0X66FF9DDA,0X40311F,0X77F43358,0X40314B,0X8771F62E,0X403144,0X7F9B4BCD,0X40314B,0X68D410AF,0X403125,0X6E562869,0X403113,0X3379525F,0X403118,0X6B78CD9C,0X403113,0X2B8A09AC,0X40314B,0X4C2DBBCD,0X403120,0X77408943,0X40314B,0X44AF33EE,0X40310F,0X22F618AC,0X403148,0X71A2F4EE,0X403125,0X6F66FF46,0X403149,0X33C79881,0X403107,0X7DE349FD,0X403113,0X4379D2F2,0X403122,0X8ADFDC3A,0X40314D,0X4CD642DA,0X40313D,0X179F3851,0X403148,0X7E31D064,0X40313E,0X14948484,0X40313A,0X377A270C,0X40314B,0X8513692F,0X403142,0X5CC57D25,0X40312A,0X3CD8B9C9,0X403132,0X8EE3382A,0X40314B,0X69D14945,0X403108,0X71F6F4F9,0X40314B,0X7423408D,0X403140,0X68CAD20E,0X40314B,0X6E298489,0X40313B,0X8F4CF695,0X40314B,0X338E7C07,0X403146,0X66D68285,0X403121,0X372BBA71,0X40314B,0X37297C3B,0X40311F,0X56D013F9,0X403122,0X1F35D84D,0X403151,0X79C305BD,0X40314D,0X6DA9AD93,0X40314D,0X77BC21D3,0X40314B,0X634CA197,0X40310B,0X678109B2,0X403126,0X7721272A,0X40310C,0X89A9C9F3,0X403115,0X3E52859B,0X403154,0X7E377EC0,0X40314B,0X22B1D5A6,0X403117,0X2B286AA7,0X403117,0X1913D929,0X40314B,0X8AB0E7D0,0X403119,0X6A2A89BB,0X40314F,0X42A54D9C,0X403152,0X47D3040E,0X40314B,0X177A1518,0X403126,0X3AD46793,0X403149,0X8C2B5252,0X40314B,0X66947A45,0X40313D,0X188AFA9B,0X403150,0X585649DB,0X40314B,0X6FB47B9A,0X4030FE,0X46D3FBCE,0X403138,0X527A9F84,0X403105,0X82D7A19E,0X40311F,0X66B6D3EE,0X40314C,0X6AF3ACD4,0X40313E,0X176CF3F6,0X40312F,0X3210698F,0X403106,0X46567A72,0X403128,0X900D050C,0X40314B,0X736784C9,0X40313C,0X39930DCD,0X40314B,0X1AF34937,0X403136,0X7DA96EC1,0X403100,0X5242DA23,0X40314B,0X8F1186DE,0X40312B,0X6CBA21C9,0X40314B,0X149D4D7B,0X40313F,0X7B918D02,0X40313D,0X16D4A43B,0X40313B,0X61B36D1A,0X40311E,0X4E61C363,0X40313B,0X6AEEC3BF,0X403104,0X366389A2,0X40314B,0X788D6937,0X40312F,0X25377444,0X403127,0X64124B8F,0X40314B,0X4F1111D5,0X403148,0X38950F99,0X40314B,0X8552E31D,0X403122,0X434D2632,0X40314B,0X8733B340,0X403137,0X6E714282,0X403151,0X5AA4EEC1,0X40314B,0X52368A37,0X403119,0X531AC25A,0X40311F,0X88EAC2C8,0X40310B,0X7EB24534,0X403134,0X2E272E35,0X40314B,0X6110834A,0X403115,0X8E4AE994,0X403124,0X85DD13BD,0X403110,0X1B1F9A0F,0X403114,0X7D542E9B,0X40311C,0X6FAD3BCF,0X40311C,0X713F773A,0X403134,0X436A9265,0X40314B,0X69265034,0X40313A,0X85A9A14B,0X403117,0X31F9EBC7,0X40313D,0X30B8760C,0X403105,0X7ED9459C,0X403115,0X5BA6A9A2,0X403141,0X38594CFC,0X403153,0X916F5809,0X403113,0X380B83FD,0X403152,0X33DDA738,0X40314B,0X311E0CB4,0X40310F,0X81DF71A6,0X40314E,0X53C9C7B6,0X403113,0X1EFE830C,0X403137,0X31C4C68C,0X403149,0X6C988784,0X403123,0X16B65F1F,0X40314B,0X3E5F2B49,0X40314B,0X329AAD10,0X4030FE,0X342002C3,0X403136,0X82BA929E,0X403107,0X168F6D33,0X403123,0X62AE42BE,0X4030FD,0X7F595627,0X40314B,0X6CCC57B9,0X40314B,0X4C6FAB1C,0X403150,0X5B2B1769,0X403146,0X3BAA38BA,0X403147,0X36FB8EAC,0X403140,0X841811BD,0X403152,0X29231701,0X403104}local Rf=0;
+                              local
+                              function
+                                RY(R)local RR=1;
+                                while RR<=876
+                                do
+                                  Ry[0X5D589E29](R,RW[RR],Rz[RW[RR+1]-0X4030FC])RR=RR+0X0002;
+                                end
+                                RW=nil Ry[0X6D65A503](R,nil)
+                              end
+                              ;
+                              local kv=Ry[0X6D65A503]({},{[Ry[0X65B70E97]]=
+                              function
+                                (R,v)local RR=1;
+                                while RR<=0X036C
+                                do
+                                  if RW[RR]==v
+                                  then
+                                    local Rv=Rz[RW[RR+1]-0X4030FC]Ry[0X5D589E29](R,v,Rv)Rf=Rf+1;
+                                    if Rf>=2776
+                                    then
+                                      RY(R)
+                                    end
+                                    ;
+                                    return Rv;
+                                  end
+                                  RR=RR+2;
+                                end
+                                Rf=Rf+1;
+                                if Rf>=2776
+                                then
+                                  RY(R)
+                                end
+                                ;
+                                return nil;
+                              end
+                              })if#Rz==0 or RV==nil
+                              then
+                                local RR=
+                                function
+                                  (R,v,k,b)local RR=(R+v)%(k+1)local Rv=RR*b;
+                                  return Rv;
+                                end
+                                ;
+                                local Rv={}Rv[0X3A30D89C]=RR Rv[0X7E9B0E2E]=RR;
+                                local Rk={}Rk[0X3A30D89C]=0X7E9B0E2E;
+                              end
+                              ;
+                              local
+                              function
+                                Ru(...)while Ru~=RZ
+                                do
+                                  RJ=true RM=RM;
+                                  local Rk=Ry[0X7036BF33]if RM and Rk>0
+                                  then
+                                    Rk=Rk-1 Ry[0X7036BF33]=Rk;
+                                  end
+                                  ;
+                                  if RM and Rk>0
+                                  then
+                                    RQ=RO%RG
+                                  else
+                                    RQ=(RO*0XB974)%RG;
+                                  end
+                                  ;
+                                  local RU=Rv;
+                                  local Rb=RS[Rv]local RC,RX,Rs,Rj=Rb[1],Rb[0X02],Rb[4],Rb[0X0003]Rv=Rv+1 RR[Rg][(-0X790F8114)]=(Re+RC*0XED75+RX*0X81A5+Rj*0X1B49+Rs*0XB5E3)%0X100000000;
+                                  local Rd=RC+RQ;
+                                  local _,_;
+                                  local Rf,RL,RW;
+                                  local Rz=kv[Rd-RQ]local RP=Rz or RV yV,yK,yB,yY=RP(RC,RX,Rj,Rs)if yV==true
+                                  then
+                                    Rf=true
+                                  else
+                                    Rv=yV Rf,RL,RW=yK,yB,yY;
+                                  end
+                                  Re=(Re+(Rv-RU)*0X5189)%0X100000000 RO=(RO*RD+RC+RX*Rq+Rj*Rp+Rs*RT)%Rh;
+                                  if Rf
+                                  then
+                                    local Rv=RR[vR]if Rv==(1)
+                                    then
+                                      return RR[vv]elseif Rv==(0X2)
+                                      then
+                                        return vj(RR[vv],RR[vE],RR[vQ])
+                                      end
+                                      ;
+                                      return;
+                                    end
+                                    ;
+                                    if RJ and Rv>vm
+                                    then
+                                      vm=Rv+0X6981 Rx,Rc,RK=ky(R,Rv,RE,Rx,Rc,RK,RR,RF,Rl,Rw,Ro)
+                                    end
+                                    RJ=false;
+                                  end
+                                  ;
+                                end
+                                ;
+                                return Ru(...)
+                              end
+                              ;
+                              local
+                              function
+                                vb(...)return RZ(...)
+                              end
+                              ;
+                              local
+                              function
+                                vy(...)return RZ(...)
+                              end
+                              ;
+                              local RW,RO={},{}RW[0X1569711]=
+                              function
+                                (R,...)if R and RW~=RO
+                                then
+                                  return 0X156C811;
+                                end
+                                ;
+                                return 0X1568911;
+                              end
+                              RO[0X155E211]=
+                              function
+                                (R,...)if not R or RW==RO
+                                then
+                                  return 0X155FE11;
+                                end
+                                ;
+                                return 0X155D911;
+                              end
+                              RO[0X156C811]=
+                              function
+                                (_,...)local RR;
+                                repeat
+                                  RR=0X1565E11
+                                until
+                                RR~=nil and RW~=RO;
+                                return RR;
+                              end
+                              RW[0X1568911]=
+                              function
+                                (...)return 0X155E511;
+                              end
+                              RW[0X155D911]=
+                              function
+                                (...)return 0X1565E11;
+                              end
+                              RW[0X155FE11]=
+                              function
+                                (R,...)local _,RR;
+                                for _=1,1
+                                do
+                                  if not R or RW==RO
+                                  then
+                                    RR=0X155E511;
+                                  end
+                                  ;
+                                  if R and RW~=RO
+                                  then
+                                    RR=0X1565E11;
+                                  end
+                                  ;
+                                  break;
+                                end
+                                ;
+                                return RR or 0X155E511;
+                              end
+                              RW[0X1565E11]=
+                              function
+                                (_,...)return vb(...)
+                              end
+                              RO[0X155E511]=
+                              function
+                                (_,...)return vy(...)
+                              end
+                              ;
+                              local
+                              function
+                                vC(...)local Rv=(R~=nil and RW~=RO)or RW==RO;
+                                local RR=not Rv and 0X1569711 or 0X155E211;
+                                repeat
+                                  RR=(RW[RR]or RO[RR])(Rv,...)
+                                until
+                                RR==0X1565E11 or RR==0X155E511;
+                                return(RW[RR]or RO[RR])(Rv,...)
+                              end
+                              ;
+                              return vC(...)
+                            end
+                            ;
+                            local Rq,kX=kk,kb;
+                            local vh,Rm=nil,Rv[0X026][0X32](0X22F953DC,0X2314ECAE)
+                            do
+                              local RR,Rk=nil,(
+                              @@@BLOB@@@
+                              ]=])vh,vp,RR=R:yc(Rk,Ry,RP,RB,Rj,Rt,Rv,Rq,kX)RO=RO or RR;
+                            end
+                            ;
+                            local
+                            function
+                              vf()local RR=Rq(vh,Rm,Rm)Rm=Rm+Rv[0X26][0X32](0X22F953DC,0X2314ECAE)return RR;
+                            end
+                            ;
+                            local Rc,RF,Ru,Rx=vf(),vf(),vf(),vf()local va=0;
+                            local vU=0X4;
+                            local RX;
+                            local RS
+                            do
+                              local Rk RX,Rk=R:kA()local RR={}RR[48]=
+                              function
+                                (R)return Rk(R,0X03)
+                              end
+                              RR[41]=
+                              function
+                                (R)local RR=0X100;
+                                return(R+RR-((Rx+(vU%RR)*7)%RR))%RR;
+                              end
+                              RR[40]=
+                              function
+                                (R,v)Rx=Rk((Rx+v+R+Rc+Ru+0X7)%0X100,1)
+                              end
+                              RR[0X60]=
+                              function
+                                (R,v)RF=Rk((RF*5+v+RX(R,Rc))%0X100,2)
+                              end
+                              RR[12]=
+                              function
+                                (R,v)Ru=RX(Rk((Ru+R+v+RF+0X7)%0X100,0X5),Rx)
+                              end
+                              RR[44]=
+                              function
+                                (R,v)Rc=RX(Rk((Rc+R+Rx+(vU%0X100))%0X100,0X5),v)
+                              end
+                              RR[82]=
+                              function
+                                (R)return RX(R,Ru)
+                              end
+                              RR[22]=
+                              function
+                                (R)local RR=0X100;
+                                return(R+RR-((Rc+RF+(vU%RR)*0XC3)%RR))%RR;
+                              end
+                              ;
+                              local Rb={41,48,82,0X016}RS=
+                              function
+                                ()local RC,Rk,Rj,Rf,RU,RM,Rd=0X7FFFFFFF,0X100,0X71479ABB,606349989,0X10000,0X101,0X32;
+                                local Ry=0;
+                                local Rs=-3;
+                                repeat
+                                  local RW=vf()vU=Rm-1;
+                                  local Rz=RW;
+                                  local RQ=1;
+                                  while RQ<=4
+                                  do
+                                    Rz=RR[Rb[RQ]](Rz)RQ=RQ+1;
+                                  end
+                                  Ry=Rz;
+                                  local RO=vU%RC;
+                                  local RP=Rv[0X79][0X6B](240575207,0X0003EDEBA07)%RU;
+                                  local RH=Rv[38][Rd](Rj,Rf)%RU;
+                                  local Rt=va%RC;
+                                  local RE=(Rt+RO*RP+(Rv[38][Rd](Rj,Rf)%RC))%RC;
+                                  local RL=(Rt*RM+RO*RH+RP*0X11)%RC;
+                                  for _=1,0X3
+                                  do
+                                    local RR=(RE*((RL%RU)+RP+RM)+RL*RM+RO*(0X11+Rv[0X26][Rd](Rj,Rf)%0X1F)+Rt)%RC;
+                                    local Rk=(RL*((RR%RU)+RH+0X107)+RR*0X81+RO*(0X17+Rv[0X79][0X6B](240575207,1054784007)%0X1D)+Rv[0X0026][Rd](Rj,Rf))%RC RE=RR RL=Rk;
+                                  end
+                                  ;
+                                  local RA=(RE%Rk+(RL%Rk)*0X3+(RO%Rk)*0X5+((RE-RE%Rk)/Rk)%Rk+((RL-RL%Rk)/Rk)%Rk)%Rk Ry=RX(Ry,RA)RR[0X02C](Ry,RW)RR[96](Ry,RW)RR[12](Ry,RW)RR[40](Ry,RW)if Rs>81
+                                  then
+                                    Rs=-0X002;
+                                  end
+                                  Rs=Rs+1
+                                until
+                                Rs>=-0X2;
+                                return Ry;
+                              end
+                              ;
+                            end
+                            R:kV(Ry,Rt)R:yx(Ry,vi,vn,vg,ve,kR,vq,kv)local _,Rw,ks,kj,RL=R:yS(Rv,RX,RS,vC,vb)local vX,RZ=R:kF(Ry)local vz,Ro,Rd=R:yJ(vy)local Rp,RT Rp,RT,va,Rc,RF,Ru,Rx=R:kI(Rv,vX,RZ,Ro,Rd,vy,Rc,RF,Ru,Rx)local vP=R:yF(vX,Ro,Rd,Ra,Ri,Rn)R:ku(Rv,Ry,RT,Rp,RZ,Ro,Rd,RX,vz,vP,vX,Rq,vy,vC,vb,Ra,Ri,Rn,RW,RM,RO)R:yu(Ry,Rv,RX,RT,Rp,RZ,Ro,vC,vb)R:ki(Rv,Ry,RT,Rp,RZ,Ro,Rd,RX,vz,vP,vX,Rq,vy,vC,vb,Ra,Ri,Rn,RW,RM,RO)R:kG(Rv,Ry,RT,Rp,RZ,Ro,Rd,RX,vz,vP,vX,Rq,vy,vC,vb,Ra,Ri,Rn,RW,RM,RO)R:yD(Rv,Ry,RT,Rp,RZ,Ro,Rd,RX,vz,vP,vX,Rq,vy,vC,vb,Ra,Ri,Rn,RW,RM,RO)local vt=false;
+                            local RV=RT(Ro(Rp[Rv[0X00026][51](873077588,0X3FDF5B7B)],(RZ*0X001F33+0XB7D0034E)%0X100000000),Rv[0X62][0X64](0X447C0104,0X2FBAE375),Rv[0X0006A][0X52](0X0003848B5A5,0X3D111408))local
+                            function
+                              vu()local RU,RW,RC,Rs=0X208FEE2B,646378259,0X2,0X7F;
+                              local RR,_,Rb={},nil,0XD1E;
+                              local Rk,RO,Rf,_=0,nil,0,0;
+                              while Rk<1
+                              do
+                                if Rb==19613
+                                then
+                                  Rb=0X005AB0;
+                                  if((Rb+Rf)%RC)==0
+                                  then
+                                    Rk=(Rk*0X3)%Rs
+                                  else
+                                    Rk=(Rk*0X5)%Rs;
+                                  end
+                                  ;
+                                  if R:ym(RR,Ry,Rt)
+                                  then
+                                    RM=true;
+                                  end
+                                  elseif Rb==3358
+                                  then
+                                    local
+                                    function
+                                      Rv(R,R)R=1;
+                                      return R;
+                                    end
+                                    Rb=6806 RR.kE=RX(Rw(),RV)RR.kz=RX(Rw(),RX(Rd(RR.kE,0X5),Rd(RV,0XB)))RR.kP=RX(Rw(),RX(Rd(RR.kE,0XD),Rd(RV,0X13)))RR.yE=RS()RR.yt=RS()RR.yl=RS()RR.yQ=RS()if Rf>Rv(yw,yw)
+                                    then
+                                      Rf=Rf-Rv(yw,yw)
+                                    end
+                                    elseif Rb==23216
+                                    then
+                                      if(RR.kP%RC)==0
+                                      then
+                                        RO=RR Rk=Rk+1+(RR.kP%RC)
+                                      else
+                                        RO=RR Rk=Rk+(RR.kP%RC)
+                                      end
+                                      elseif Rb==0X3C5A
+                                      then
+                                        Rb=0X004C9D;
+                                        if((Rb+Rf)%RC)==0
+                                        then
+                                          Rk=(Rk*0X3)%Rs
+                                        else
+                                          Rk=(Rk*0X5)%Rs;
+                                        end
+                                        RR.yP={}local Rv=0;
+                                        local Ry=RX(Rw(),RX(Rd(RR.kE,0XF),Rd(RV,0X5)))vL=RR.yP vI=Ry;
+                                        while Rv<Ry
+                                        do
+                                          Rv=Rv+1;
+                                          local Rb,RX=Rm,RV;
+                                          local Rs,Rj,Rf,RU=Rc,RF,Ru,Rx;
+                                          local Rd=RJ RJ=true;
+                                          local RM=vt vt=true;
+                                          local RL=vu()vt=RM RJ=Rd RL=nil;
+                                          local Rk=
+                                          function
+                                            ()local RR,Rv=Rm,RV;
+                                            local Rk=RJ;
+                                            local Ry,RC,Rd,RM=Rc,RF,Ru,Rx Rm=Rb RV=RX Rc,RF,Ru,Rx=Rs,Rj,Rf,RU RJ=true;
+                                            local RL=vu()Rm=RR RV=Rv Rc,RF,Ru,Rx=Ry,RC,Rd,RM RJ=Rk;
+                                            return RL;
+                                          end
+                                          ;
+                                          if(Rv%RC)==0
+                                          then
+                                            RR.yP[Rv+(Rv%RC)]=Rk
+                                          else
+                                            RR.yP[Rv+((Rv%RC)-1)]=Rk;
+                                          end
+                                          vL=RR.yP vI=Ry;
+                                        end
+                                        elseif Rb==0X01A96
+                                        then
+                                          Rb=12057;
+                                          if((Rb+Rf)%RC)==0
+                                          then
+                                            Rk=(Rk*0X3)%Rs
+                                          else
+                                            Rk=(Rk*0X5)%Rs;
+                                          end
+                                          RV=R:kd(RR,vt,Ry,Rv,RX,Rd,Rw,kj,RS,RV)elseif Rb==12057
+                                          then
+                                            Rb=0X3C5A;
+                                            if RP[RW]
+                                            then
+                                            else
+                                              RP[RW]=RB({0XA4,(104+0X000E7)%Rj,0X76,22,(0X060+0XC9)%Rj,0XBC,(205+8)%Rj},396)
+                                            end
+                                            ;
+                                            if not RP[RU]
+                                            then
+                                              repeat
+                                                RP[RU]=RB({(176+0X078)%Rj,0XF6,0X6B,197,(246+101)%Rj,(81+30)%Rj,0X37,(0X0093+241)%Rj,(144+107)%Rj,0X45},0X00193)break
+                                              until
+                                              false;
+                                            end
+                                            ;
+                                            local Ru,RG=RP[RW],RP[RU]local Rk=4294967296;
+                                            local Rs,Rz=0,0;
+                                            local Rf,RO,RE;
+                                            local Rr=0;
+                                            local _,RD,RA,Rm,Rc,Rx,Ro,RZ,Rp=R:yo(Rv,Ry,Rk,Rt,Ru,RG,RX,Rd,Rq)local RH=RS()local Rl,RK=(RH==0 and Ry[0X46FACF60]or RH==1 and Ry[0X37F0C56]or RH==0X0002 and Ry[0X130BEFD0]or Ry[0X230B8900]),(RH==0 and Ry[0X1E7EA57C]or RH==1 and Ry[0X1592EDF7]or RH==0X2 and Ry[0X1E12DB33]or Ry[0X103C111A])local RN,RI={},{}RN[218]=
+                                            function
+                                              (_,_)return RG..(((218*0XE33CE131))%Rk)
+                                            end
+                                            RN[Rv[29][32](0X15D0CC6B,272319508)]=
+                                            function
+                                              (_,R)local Rv=(R[(0X3)]-RR.kz)%Rk;
+                                              local Rb=(Rv*0X4003+0XEDD533+RR.kz)%Rk;
+                                              local Ry=(Rf and Rf[Rb]or 0)%Rk;
+                                              local RC=(RO and RO[Rb]or RE)return Rl(R[(0X2)],Rv,Ry,RC,R[(0X4)],R[(0X5)])
+                                            end
+                                            RN[Rv[0X6F][94](0X229043FB,0X287D690E)]=
+                                            function
+                                              (_,R)local Rb=(R[(0X3)]-RR.kz)%Rk;
+                                              local Ry=(Rb*0X4003+0XEDD533+RR.kz)%Rk;
+                                              local RC=(Rf and Rf[Ry]or 0)%Rk;
+                                              local RX=(RO and RO[Ry]or RE)return RK(R[(0X2)],Rb,RC,RX,R[(0X4)],R[(0X5)])>Rv[0X7B][0X63](0X5025C859,0X1B0DF560)
+                                            end
+                                            RN[Rv[0X1D][0X000051](0X353EA99A,0X242AFBF7)]=
+                                            function
+                                              (_,R)local Rv=(R[(0X3)]-RR.kz)%Rk;
+                                              local Rb=(Rv*0X4003+0XEDD533+RR.kz)%Rk;
+                                              local Ry=(Rf and Rf[Rb]or 0)%Rk;
+                                              local RC=(RO and RO[Rb]or RE)return RK(R[(0X2)],Rv,Ry,RC,R[(0X4)],R[(0X5)])
+                                            end
+                                            ;
+                                            local RT=
+                                            function
+                                              (_,R)local Rb=(((R-1)*0X4003+0XEDD533+RR.kz)%Rk)local RC=RA[Rb]if Rt(RC)==Ry[0X227B29E5]and RC[(1)]==(Rv[29][32](0X15D0CC6B,272319508))
+                                              then
+                                                return nil;
+                                              end
+                                              ;
+                                              local RX=Rm[Rb]if RX~=nil
+                                              then
+                                                return RX;
+                                              end
+                                              ;
+                                            end
+                                            ;
+                                            local RF={}local RY={}RY[RL[9]+RL[(0X03)]]=
+                                            function
+                                              (R,R)Rr=Rr+1;
+                                              if Rr>=0X9992
+                                              then
+                                                Rr=0;
+                                                for RR in Re(RD)
+                                                do
+                                                  RD[RR]=nil;
+                                                end
+                                                ;
+                                              end
+                                              RM=RM or not RJ;
+                                              local RR=RT(1,R)if RR~=nil
+                                              then
+                                                if(R%0X2)==0
+                                                then
+                                                  if RM and Ry[0X7036BF33]<=0
+                                                  then
+                                                    return RL[0X003]+RL[(0X6)],Rc(RR)
+                                                  end
+                                                  ;
+                                                  return RL[3]+RL[(6)],RR
+                                                else
+                                                  if not(RM and Ry[0X7036BF33]<=0)
+                                                  then
+                                                    return RL[3]+RL[(6)],RR;
+                                                  end
+                                                  ;
+                                                  return RL[3]+RL[(6)],Rc(RR)
+                                                end
+                                                ;
+                                              end
+                                              ;
+                                              while Ro
+                                              do
+                                                return RL[(2)]+RL[(0X00006)]
+                                              end
+                                              ;
+                                            end
+                                            RY[RL[(8)]-RL[(0X5)]]=
+                                            function
+                                              (R,R,v)local Rv=RA[((R-1)*0X4003+0XEDD533+RR.kz)%Rk]if Rt(Rv)~=Ry[0X227B29E5]
+                                              then
+                                                local _=((R%0X2)==0)and((R*0X400D+0X6F3CA)%Rk)or(RG..((R*0XE0D3)%0X1000))return RL[(0X00004)]+RL[7]
+                                              end
+                                              Rv[(0X4)]=v[(-0X790F8114)]or 0 Rv[(0X5)]=((Rv[(0X5)]or 0)+1)%Rk;
+                                              local Rb=RN[(Rv[(1)])]if not Rb
+                                              then
+                                                local RR=((R%0X2)==0)and((R*0X400D+0X6F3CA)%Rk)or(RG..((R*0XE0D3)%0X1000))return RL[3]+RL[(0X00006)],RR;
+                                              end
+                                              ;
+                                              local RC=Rb(1,Rv)return RL[(1)]+RL[7],RC;
+                                            end
+                                            RY[RL[(6)]+RL[4]]=
+                                            function
+                                              (v,R)local Rv=R;
+                                              if RM and Ry[0X7036BF33]<=0
+                                              then
+                                                Rv=Rc(R)
+                                              end
+                                              ;
+                                              if Rt(Rv)~=Ry[0X3049FC1B]
+                                              then
+                                                Rm[((v-1)*0X4003+0XEDD533+RR.kz)%Rk]=Rv;
+                                              end
+                                              ;
+                                              while RZ
+                                              do
+                                                return RL[3]+RL[(0X0006)],Rv;
+                                              end
+                                              ;
+                                            end
+                                            RF[Ru]=
+                                            function
+                                              (v,R)local Rk=0XCFF6E;
+                                              local Ry,RR={},{}local _=
+                                              function
+                                                (R,v)local Rv=(R+#Ry)%0X2;
+                                                return v+Rv-((R+#RR)%0X2)
+                                              end
+                                              ;
+                                              local Rv=RL[0X00009]+RL[(3)]local Rb;
+                                              while true
+                                              do
+                                                local Ry;
+                                                if Rv==RL[(0X006)]+RL[0X00004]
+                                                then
+                                                  Ry=Rb
+                                                else
+                                                  Ry=R;
+                                                end
+                                                ;
+                                                local RC,RX=RY[Rv](R,Ry,v)if RC==RL[3]+RL[(0X0006)]
+                                                then
+                                                  return RX;
+                                                end
+                                                ;
+                                                if RC==RL[(4)]+RL[7]
+                                                then
+                                                  while Rp
+                                                  do
+                                                    return nil;
+                                                  end
+                                                  ;
+                                                end
+                                                ;
+                                                if RC==RL[(2)]+RL[(0X006)]
+                                                then
+                                                  if not RR[Rk]
+                                                  then
+                                                    RR[Rk]=RL[(0X008)]-RL[(0X005)]
+                                                  end
+                                                  Rv=RR[Rk]
+                                                else
+                                                  Rv=RL[(6)]+RL[0X00004]Rb=RX;
+                                                end
+                                                ;
+                                              end
+                                              ;
+                                            end
+                                            RR.yz=Ry[0X6D65A503]({},RF)RF=({})[0XD64B5]RI[Rv[0X0001D][32](0X15D0CC6B,0X00103B4414)]=
+                                            function
+                                              (_,R)local RC=0X1D;
+                                              local Rj=ks()local Rv=((R-1)*0X4003+0XEDD533+RR.kz)%Rk;
+                                              local Rb=Rd((Rf and Rf[Rv]or 0)%Rk,(((R-1)*0X13+(RR.kE%RC))%RC)+1)local Ry=Rd((RO and RO[Rv]or RE),(((R-1)*0X1B+(RR.kz%RC))%RC)+1)Rb=RX(Rb,RX(Rs,Rd(Rz,(((R-1)%0X11)+1))))Ry=RX(Ry,RX(Rd(Rs,0XB),Rd(Rz,(((R-1)%0X13)+1))))if Rf
+                                              then
+                                                Rf[Rv]=Rb;
+                                              end
+                                              ;
+                                              if RO
+                                              then
+                                                RO[Rv]=Ry;
+                                              end
+                                              ;
+                                              local RU=Rl(Rj,(R-1),Rb,Ry,0,0)Rs=(Rs*0X1F+Rx(RU,(R-1),Rb,Ry)+1)%Rk RA[Rv]={0X04,Rj,(R-1+RR.kz)%Rk}
+                                            end
+                                            RI[Rv[0X1D][81](893299098,0X242AFBF7)]=
+                                            function
+                                              (_,R)local RC=0X1D;
+                                              local Rj={}for RR=1,0X08
+                                              do
+                                                Rj[RR]=RS()
+                                              end
+                                              ;
+                                              local Rv=((R-1)*0X4003+0XEDD533+RR.kz)%Rk;
+                                              local Rb=Rd((Rf and Rf[Rv]or 0)%Rk,(((R-1)*0X13+(RR.kE%RC))%RC)+1)local Ry=Rd((RO and RO[Rv]or RE),(((R-1)*0X1B+(RR.kz%RC))%RC)+1)Rb=RX(Rb,RX(Rs,Rd(Rz,(((R-1)%0X11)+1))))Ry=RX(Ry,RX(Rd(Rs,0XB),Rd(Rz,(((R-1)%0X13)+1))))if Rf
+                                              then
+                                                Rf[Rv]=Rb;
+                                              end
+                                              ;
+                                              if RO
+                                              then
+                                                RO[Rv]=Ry;
+                                              end
+                                              ;
+                                              local _,RU=RK(Rj,(R-1),Rb,Ry,0,0)Rs=(Rs*0X1F+Rx(RU,(R-1),Rb,Ry)+1)%Rk RA[Rv]={0X01A,Rj,(R-1+RR.kz)%Rk}
+                                            end
+                                            RI[Rv[0X6F][94](0X0229043FB,0X287D690E)]=
+                                            function
+                                              (_,R)local RC=0X1D;
+                                              local Rj={}for RR=1,0X8
+                                              do
+                                                Rj[RR]=RS()
+                                              end
+                                              ;
+                                              local Rv=((R-1)*0X4003+0XEDD533+RR.kz)%Rk;
+                                              local Rb=Rd((Rf and Rf[Rv]or 0)%Rk,(((R-1)*0X13+(RR.kE%RC))%RC)+1)local Ry=Rd((RO and RO[Rv]or RE),(((R-1)*0X1B+(RR.kz%RC))%RC)+1)Rb=RX(Rb,RX(Rs,Rd(Rz,(((R-1)%0X11)+1))))Ry=RX(Ry,RX(Rd(Rs,0XB),Rd(Rz,(((R-1)%0X13)+1))))if Rf
+                                              then
+                                                Rf[Rv]=Rb;
+                                              end
+                                              ;
+                                              if RO
+                                              then
+                                                RO[Rv]=Ry;
+                                              end
+                                              ;
+                                              local _,RU=RK(Rj,(R-1),Rb,Ry,0,0)Rs=(Rs*0X1F+Rx(RU,(R-1),Rb,Ry)+1)%Rk RA[Rv]={56,Rj,(R-1+RR.kz)%Rk}
+                                            end
+                                            RI[Rv[0X079][0X6B](867642701,427602970)]=
+                                            function
+                                              (_,R)Rs=(Rs*0X1F+((R-1)*0X4003)%Rk+0X7)%Rk;
+                                            end
+                                            RI[228]=
+                                            function
+                                              (_,R)RA[(R)]={0X0001A,{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13},0}
+                                            end
+                                            Rf,RO,RE=R:kH(Ry,RR,RH,Rk,RX,Rd)Rz=RX(RX(RX(RR.kE,Rd(RR.kz,0XB)),RX(Rd(RR.kP,0X13),Rd(RE,0X5))),Rd(RV,0X17))Rs=RX(RX(RX(RR.kE,RR.kz),RX(Rd(RR.kP,0X7),Rd(RE,0XD))),Rd(RV,0X11))local RQ=0;
+                                            local Rh=RX(Rw(),RX(Rd(RR.kE,0X9),Rd(RV,0XF)))while RQ<Rh
+                                            do
+                                              RQ=RQ+1;
+                                              local Ry=RS()local Rv;
+                                              if(RQ%RC)==0
+                                              then
+                                                Rv=RX(Rw(),RX(Rs,RX(Rd(RR.kz,(RQ%0XD)+1),(RQ*0X4003)%Rk)))+1+(RQ%RC)
+                                              else
+                                                Rv=RX(Rw(),RX(Rs,RX(Rd(RR.kz,(RQ%0XD)+1),(RQ*0X4003)%Rk)))+(RQ%RC)
+                                              end
+                                              ;
+                                              local Rb=RI[(Ry)]if Rb
+                                              then
+                                                Rb(0,Rv)
+                                              end
+                                              ;
+                                            end
+                                            RV=RX(RX(Rd(RV,0X7),Rd(RE,0XD)),RX(Rs,RR.kE))Rs=0 Rz=0
+                                          else
+                                            Rk=Rk+1;
+                                          end
+                                          ;
+                                        end
+                                        ;
+                                        return RO;
+                                      end
+                                      R:kV(Ry,Rt)vT={}local kf=(
+                                      function
+                                        ()return vu()
+                                      end
+                                      )()local kU=R:kt(ve,vq,Ry,vl,vL,vI,Rv,
+                                      function
+                                        ()RO=true;
+                                      end
+                                      )R:kD(Ry,Rt)R:kV(Ry,Rt)return Rl(kf,kU,{},nil,nil,RR)
+                                    end
+                                    ,

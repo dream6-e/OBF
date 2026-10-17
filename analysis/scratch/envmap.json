@@ -1,0 +1,263 @@
+{
+ "1779917151": {
+  "rhs": "R[748985799]",
+  "names": [
+   "1%@"
+  ]
+ },
+ "1848832741": {
+  "rhs": "RR[R[0X6A74453D]]or(Rk and Rk[R[0X00006D24F4D9]])",
+  "names": [
+   "unpack",
+   "unpack"
+  ]
+ },
+ "524592495": {
+  "rhs": "RR[R[985296126]]",
+  "names": [
+   "rawget"
+  ]
+ },
+ "54413609": {
+  "rhs": "R[0X742AFBF]",
+  "names": [
+   "function"
+  ]
+ },
+ "1058429444": {
+  "rhs": "RR[R[0X53C096DC]]",
+  "names": [
+   "pcall"
+  ]
+ },
+ "1566088745": {
+  "rhs": "RR[R[1713210661]]",
+  "names": [
+   "rawset"
+  ]
+ },
+ "1992224777": {
+  "rhs": "(RC and RC[R[407819507]])",
+  "names": [
+   "random"
+  ]
+ },
+ "1835377923": {
+  "rhs": "RR[R[Rj]]",
+  "names": []
+ },
+ "1693353316": {
+  "rhs": "R[1437463909]",
+  "names": [
+   "Luau"
+  ]
+ },
+ "957893920": {
+  "rhs": "R[RW]",
+  "names": []
+ },
+ "1589481399": {
+  "rhs": "RR[R[0X000012EBB56D]]",
+  "names": [
+   "type"
+  ]
+ },
+ "354541358": {
+  "rhs": "RR[R[Rs]]",
+  "names": []
+ },
+ "1670128946": {
+  "rhs": "(RC and RC[R[0X000016D22B87]])",
+  "names": [
+   "floor"
+  ]
+ },
+ "457763724": {
+  "rhs": "(Rb and Rb[R[0X0000512B21EB]])or(Ry and Ry[R[2033052434]])",
+  "names": [
+   "band",
+   "band"
+  ]
+ },
+ "1769497013": {
+  "rhs": "RR[R[RO]]",
+  "names": []
+ },
+ "1968211128": {
+  "rhs": "(Rv and Rv[R[0X551AF307]])",
+  "names": [
+   "reverse"
+  ]
+ },
+ "1039122709": {
+  "rhs": "(Rk and Rk[R[666255192]])",
+  "names": [
+   "concat"
+  ]
+ },
+ "1706495639": {
+  "rhs": "R[87090223",
+  "names": []
+ },
+ "1971630888": {
+  "rhs": "RR;",
+  "names": []
+ },
+ "577223180": {
+  "rhs": "R[0X24D80404]",
+  "names": [
+   "number"
+  ]
+ },
+ "578496997": {
+  "rhs": "R[0X715F2BFE]",
+  "names": [
+   "table"
+  ]
+ },
+ "1011610339": {
+  "rhs": "(Rv and Rv[R[0X76445C21]])",
+  "names": [
+   "sub"
+  ]
+ },
+ "1571618615": {
+  "rhs": "RR[R[1706405532]]",
+  "names": [
+   "tonumber"
+  ]
+ },
+ "1239990923": {
+  "rhs": "(Rv and Rv[R[0X00CAC54F9]])",
+  "names": [
+   "byte"
+  ]
+ },
+ "312860952": {
+  "rhs": "(RC and RC[R[0X029BBB027]])",
+  "names": [
+   "sqrt"
+  ]
+ },
+ "1788349638": {
+  "rhs": "RR[R[RM]]",
+  "names": []
+ },
+ "1617397402": {
+  "rhs": "(Rv and Rv[R[0X000037EDCEEA]])",
+  "names": [
+   "find"
+  ]
+ },
+ "377737245": {
+  "rhs": "RR[R[Rd]]",
+  "names": []
+ },
+ "831707246": {
+  "rhs": "(Rk and Rk[R[295778943]])",
+  "names": [
+   "remove"
+  ]
+ },
+ "69824981": {
+  "rhs": "(Rb and Rb[R[556797655]])or(Ry and Ry[R[0X0005E19BCA2]])",
+  "names": [
+   "bxor",
+   "bxor"
+  ]
+ },
+ "190942555": {
+  "rhs": "RR[R[0X4EC5EFB9]]",
+  "names": [
+   "raknet"
+  ]
+ },
+ "1002532994": {
+  "rhs": "RR[R[1085580364]]",
+  "names": [
+   "getmetatable"
+  ]
+ },
+ "179259521": {
+  "rhs": "R[0XAE99EC6]",
+  "names": [
+   "boolean"
+  ]
+ },
+ "654768456": {
+  "rhs": "R[0X6071D126]",
+  "names": [
+   "__newindex"
+  ]
+ },
+ "348103564": {
+  "rhs": "RR[R[RE]]",
+  "names": []
+ },
+ "263407811": {
+  "rhs": "RR[R[767413176]]",
+  "names": [
+   "collectgarbage"
+  ]
+ },
+ "1603271065": {
+  "rhs": "RR[R[0X00433B6AC1]]",
+  "names": [
+   "getgenv"
+  ]
+ },
+ "134298080": {
+  "rhs": "(Rk and Rk[R[RL]])",
+  "names": []
+ },
+ "754634147": {
+  "rhs": "RR[R[83205127]]",
+  "names": [
+   "pairs"
+  ]
+ },
+ "810155035": {
+  "rhs": "R[0X7F269804]",
+  "names": [
+   "string"
+  ]
+ },
+ "1750806500": {
+  "rhs": "(Rv and Rv[R[0X04327647A]])",
+  "names": [
+   "char"
+  ]
+ },
+ "1322978912": {
+  "rhs": "RR[R[0X2BEF0525]]",
+  "names": [
+   "typeof"
+  ]
+ },
+ "1616372223": {
+  "rhs": "RR[R[Rf]]",
+  "names": []
+ },
+ "321531893": {
+  "rhs": "(Rb and Rb[R[RU]])or(Ry and Ry[R[RX]])",
+  "names": []
+ },
+ "1375848174": {
+  "rhs": "RR[R[0X74E74DC6]]",
+  "names": [
+   "error"
+  ]
+ },
+ "830993164": {
+  "rhs": "RR[R[RQ]]",
+  "names": []
+ },
+ "1225768113": {
+  "rhs": "RH;",
+  "names": []
+ },
+ "1882636083": {
+  "rhs": "59+(function()local Rv=b[0X6A980CC6](b)local RR=0;for Rk=1,#Rv do RR=(RR*33+b[0X49E8C28B](Rv,Rk))%0X000011;end;return RR;end)()return b[0X5EBD8FB7],b[0X2CFACDA3]end",
+  "names": []
+ }
+}

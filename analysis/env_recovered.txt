@@ -1,0 +1,129 @@
+test1: '__mode'
+test2: 'k'
+test3: '#'
+test4: 'function'
+test5: '__mode'
+test6: 'k'
+# V2.7.lua (Kryvex) -- 运行时环境表 Ry 的完整静态恢复
+# 来源: R:bR(Ry,RP,RB,Rj,vM)   (fn/bR, 8586 B)
+# 方法: bR 用 kg 字符串 VM (RB=解码函数, Rj=256) 把每个标准库名字解码成
+#       R[<hash>] = <字符串>, 再写 b[<hash>] = _ENV[<字符串>] / <字符串>。
+#       下面每一行都是纯静态求值结果, 未运行任何目标代码。
+#
+# bR 内部解析出的宿主全局 (RR = _ENV or _G, 经 getfenv 探测):
+#   _ENV['setmetatable'] -> 局部变量 Rt
+#   _ENV['bit32'       ] -> 局部变量 Rb
+#   _ENV['bit'         ] -> 局部变量 Ry
+#   _ENV['string'      ] -> 局部变量 Rv
+#   _ENV['table'       ] -> 局部变量 Rk
+#   _ENV['math'        ] -> 局部变量 RC
+#   _ENV['getfenv'     ] -> 局部变量 (getfenv 探测名)
+
+Ry[hash]     kind   value
+------------------------------------------------------------
+0x033E4929   str   function
+0x042971D5   expr  (Rb and R
+0x080139E0   env   insert
+0x0AAF4881   str   boolean
+0x0B618D5B   env   raknet
+0x0FB348C3   env   collectgarbage
+0x12A5E118   env   sqrt
+0x132A2FF5   expr  (Rb and R
+0x14BFA38C   env   getfenv
+0x1521DF2E   env   debug
+0x1683D01D   env   print
+0x1B48EB8C   expr  (Rb and R
+0x1F44A56F   env   rawget
+0x2267BA0C   str   number
+0x227B29E5   str   table
+0x2706F948   str   __newindex
+0x2CFACDA3   env   pairs
+0x3049FC1B   str   string
+0x3187F30C   env   newproxy
+0x3192D86E   env   remove
+0x39184D20   str   what
+0x3BC17082   env   getmetatable
+0x3C4BF2E3   env   sub
+0x3DEFC115   env   concat
+0x3F165A04   env   pcall
+0x49E8C28B   env   byte
+0x4EDB0E60   env   typeof
+0x5201C6EE   env   error
+0x5D589E29   env   rawset
+0x5DACFF37   env   tonumber
+0x5EBD8FB7   env   type
+0x5F8FF999   env   getgenv
+0x6057E1FF   env   setfenv
+0x6067869A   env   find
+0x638C2532   env   floor
+0x64EE8564   str   Luau
+0x65B70E97   str   __index
+0x685B2FE4   env   char
+0x697861B5   env   select
+0x6A17615F   str   1%@
+0x6A980CC6   env   tostring
+0x6D65A503   env   setmetatable
+0x6E32F2E5   env   unpack
+0x7036BF33   expr  59+(function()local Rv=
+0x755084B8   env   reverse
+0x76BEF009   env   random
+
+# 全部 58 条 kg 解码字符串字面量 (bR 内部):
+#   R[0x04F59C07] = 'pairs'
+#   R[0x0742AFBF] = 'function'
+#   R[0x0AE99EC6] = 'boolean'
+#   R[0x0CAC54F9] = 'byte'
+#   R[0x11A13A7F] = 'remove'
+#   R[0x12EBB56D] = 'type'
+#   R[0x16D22B87] = 'floor'
+#   R[0x16ECF362] = 'rshift'
+#   R[0x184ED4F3] = 'random'
+#   R[0x1DBF38C7] = 'debug'
+#   R[0x1DEA7FFE] = 'setmetatable'
+#   R[0x1F0FDCE4] = 'setfenv'
+#   R[0x21300ED7] = 'bxor'
+#   R[0x24D80404] = 'number'
+#   R[0x25747177] = 'rshift'
+#   R[0x27B63F58] = 'concat'
+#   R[0x282B9897] = 'k'
+#   R[0x29BBB027] = 'sqrt'
+#   R[0x2A232E08] = 'print'
+#   R[0x2BEF0525] = 'typeof'
+#   R[0x2CA49DC7] = '1%@'
+#   R[0x2DBDCBB8] = 'collectgarbage'
+#   R[0x2E4EAEEA] = 'tostring'
+#   R[0x313052B9] = 'insert'
+#   R[0x31673118] = 'what'
+#   R[0x31F0476F] = 'select'
+#   R[0x33E8E9DA] = '__index'
+#   R[0x37A31244] = 'bit'
+#   R[0x37EDCEEA] = 'find'
+#   R[0x3ABA6CFE] = 'rawget'
+#   R[0x3F6CD6CD] = 'getfenv'
+#   R[0x40B4A44C] = 'getmetatable'
+#   R[0x42D323C3] = '__mode'
+#   R[0x4327647A] = 'char'
+#   R[0x433B6AC1] = 'getgenv'
+#   R[0x4E5D3E2F] = 'newproxy'
+#   R[0x4EC5EFB9] = 'raknet'
+#   R[0x512B21EB] = 'band'
+#   R[0x53C096DC] = 'pcall'
+#   R[0x551AF307] = 'reverse'
+#   R[0x55ADF565] = 'Luau'
+#   R[0x582000EC] = 'string'
+#   R[0x5CAEBEDD] = 'table'
+#   R[0x5E19BCA2] = 'bxor'
+#   R[0x6071D126] = '__newindex'
+#   R[0x647D1499] = 'setmetatable'
+#   R[0x6534C1BF] = 'bit32'
+#   R[0x65B5AE9C] = 'tonumber'
+#   R[0x661D8525] = 'rawset'
+#   R[0x6A74453D] = 'unpack'
+#   R[0x6D24F4D9] = 'unpack'
+#   R[0x6E76CAD4] = 'getfenv'
+#   R[0x715F2BFE] = 'table'
+#   R[0x71E79002] = 'math'
+#   R[0x74E74DC6] = 'error'
+#   R[0x76445C21] = 'sub'
+#   R[0x792DEB12] = 'band'
+#   R[0x7F269804] = 'string'
