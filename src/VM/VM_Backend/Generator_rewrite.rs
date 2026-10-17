@@ -879,7 +879,18 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let kr = ((slot.wrapping_mul(fc18.fk3).wrapping_add(kp18 % 29)) % 29) + 1;
                 let rl18 = raw_roll.rotate_left(kr);
                 let r7l18 = rl18.rotate_left(7);
-                let kind = if c_type == 3 { enc.kstr[group] } else { enc.knum[group] };
+                let sl_low = enc.salts[group] & 0xFFFF;
+                let kind = if c_type == 3 {
+                    if slot % 2 == 0 {
+                        enc.kstr[group].wrapping_add(sl_low * 3 + 0x11)
+                    } else {
+                        enc.kstr[group].wrapping_add(sl_low * 5 + 0x23)
+                    }
+                } else if slot % 2 == 0 {
+                    enc.knum[group].wrapping_add(sl_low * 7 + 0x37)
+                } else {
+                    enc.knum[group].wrapping_add(sl_low * 11 + 0x4D)
+                };
                 let s118 = enc.salts[group] ^ rl18 ^ fold;
                 let s218 = r7l18 ^ slot.wrapping_mul(6).wrapping_add(kind);
                 let s318 = enc.salts[group] ^ r7l18.rotate_left(7);

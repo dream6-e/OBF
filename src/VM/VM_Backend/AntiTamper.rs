@@ -12,9 +12,9 @@ pub struct AntiTamperResult {
     /// 流加密键表（解码器匿名挂在表里）。Generator 的解头/方法原型/body_consts
     /// 与守卫同作用域，复用同一张表；探测块的调用点也在收表前注册完毕。
     pub st: StreamTable,
-    /// 供外层 `return({...})` 壳兄弟方法导出给 `wai` 守卫闭包捕获的 6 个局部名：
-    /// `[v_env, v_dec, v_res, v_net, v_state, st.name]`。
-    pub exports: [String; 6],
+    /// 供外层 `return({...})` 壳兄弟方法导出给 `wai` 守卫闭包捕获的 7 个局部名：
+    /// `[v_env, v_dec, v_res, v_net, v_state, st.name, v_tripwire]`。
+    pub exports: [String; 7],
     /// 绑定的毒化旗变量名（供外层兄弟方法替换为回调闭包）。
     pub poison_var: String,
 }
@@ -654,8 +654,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
                     .collect::<Vec<_>>()
                     .join(",");
                 check_code = format!(
-                    "local {sb},{sc},{sf},{ss},{tp},{d},{tb},{nm},{fn},{sg},{gi},{tn},{i1},{i2},{l1},{l2},{sp},{ep},{num},{u},{v},{clv}; local {f1}=function() local {q}=nil; return {q}[1] end; local {f2}=function() return 1 end; local {f3}=function() return 2 end; local {pt}={{{reg_s}}}; local {po}={{{ka},{kb},{kc}}}; for {pj}=1,0X3 do local {pr}={pt}[{po}[{pj}]](); if {pr}~=nil then return {pr} end end; {good}\n",
-                    sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, tp = g_tp, d = g_d,
+                    "local {st},{pc},{sb},{sc},{sf},{ss},{tp},{d},{tb},{nm},{fn},{sg},{gi},{tn},{i1},{i2},{l1},{l2},{sp},{ep},{num},{u},{v},{clv}; local {f1}=function() local {q}=nil; return {q}[1] end; local {f2}=function() return 1 end; local {f3}=function() return 2 end; local {pt}={{{reg_s}}}; local {po}={{{ka},{kb},{kc}}}; for {pj}=1,0X3 do local {pr}={pt}[{po}[{pj}]](); if {pr}~=nil then return {pr} end end; {good}\n",
+                    st = g_st, pc = g_pc, sb = g_sb, sc = g_sc, sf = g_sf, ss = g_ss, tp = g_tp, d = g_d,
                     tb = g_ts_tab, nm = g_ts_num, fn = g_ts_fun, sg = g_ts_str,
                     gi = g_gi, tn = g_tn, i1 = g_i1, i2 = g_i2, l1 = g_l1, l2 = g_l2,
                     sp = g_sp, ep = g_ep, num = g_num, u = g_u, v = g_v, clv = g_clv,
@@ -725,7 +725,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         trigger: minify_lua(&trigger),
         expected_final: current_expected,
         st,
-        exports: [v_env, v_dec, v_res, v_net, v_state, st_name],
+        exports: [v_env, v_dec, v_res, v_net, v_state, st_name, v_tripwire],
         poison_var: poison_var.to_string(),
     }
 }

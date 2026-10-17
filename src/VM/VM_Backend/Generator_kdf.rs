@@ -206,15 +206,17 @@ pub fn key_tokens(rng: &mut GenRng, keys: &CipherKeys, words: &[u32; 8], h: &str
     let mut slots: Vec<usize> = (1..=8).collect();
     rng.shuffle(&mut slots);
     let slot_lits: Vec<String> = slots.iter().map(|s| rng.obfuscate_num(*s as i64, 1, keys)).collect();
+    let kb_bias = (rng.range(0x101, 0x3FFF_FFFF) as u32) | 1;
+    let kb_comp = 0x1_0000_0000u64 - (kb_bias as u64);
     let decl = format!(
         "local {kw}={{}}; local {xt}={{{xs}}}; local {mt}={{{ms}}}; local {pt}={{{ps}}}; \
          local {op}={p}[{tg}][{tk}]; \
-         if ({h}%0X2)==0X0 then for {i}=0X1,0X8 do local {j}={pt}[{i}]; {kw}[{j}]={op}({xt}[{i}],{mt}[{i}]) end \
-         else {i}=0X0; while {i}<0X8 do {i}={i}+0X1; local {j}={pt}[{i}]; {kw}[{j}]={op}({xt}[{i}],{mt}[{i}]) end end; ",
+         if ({h}%0X2)==0X0 then for {i}=0X1,0X8 do local {j}={pt}[{i}]; {kw}[{j}]=({op}({xt}[{i}],{mt}[{i}])+0X{kb:X}+0X{kc:X})%{m} end \
+         else local {i}=0X0; while {i}<0X8 do {i}={i}+0X1; local {j}={pt}[{i}]; {kw}[{j}]=(({op}({xt}[{i}],{mt}[{i}])+0X{kb:X})%{m}+0X{kc:X})%{m} end end; ",
         kw = kw, xt = xt, mt = mt, pt = pt, op = op, h = h,
         xs = xs.join(","), ms = ms.join(","), ps = slot_lits.join(","),
         p = keys.tbl_p, tg = rng.format_num(tg as i64), tk = rng.format_num(tk as i64),
-        i = i, j = j
+        i = i, j = j, kb = kb_bias, kc = kb_comp, m = m32
     );
     let fetch = slot_lits.iter().enumerate()
         .map(|(k, s)| format!("{x32}({kw}[{s}],({hf}*{a}+{b})%{m})",

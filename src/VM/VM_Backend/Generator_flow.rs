@@ -318,69 +318,54 @@ pub fn build_readers(
                     let comb = combine_u32(
                         [&comb_bytes[0], &comb_bytes[1], &comb_bytes[2], &comb_bytes[3]], &mut rng
                     );
-                    // 形态③⑤：状态梯子（elseif+嵌套 else if 混用），双否定探针臂=诱饵
                     let sv = rng.name();
                     let (lit_a, lit_b, lit_c) = (e_a, e_b, e_c);
-                    let pk1 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    let pkA = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
+                    let b0 = &comb_bytes[0];
                     if collect.is_empty() {
-                        // B 变体：收集在声明段完成，第一态直接拼装返回
                         family.push_str(&format!(
                             "local function {f}() {head}local {sv}={e_a}; while true do \
-                             if {sv}=={lit_a} then if {pj}[({pkA})]=={numA} then else return {comb} end; \
-                             elseif not(not {pj}[({pk1})]) then {sv}={e_c}; \
-                             else if {sv}=={lit_b} then return ({b0}-{b0}) end; {sv}={e_d}; end; end end; ",
+                             if {sv}=={lit_a} then if ({b0}%0X2)==0X0 then {sv}={e_b} else {sv}={e_c} end; \
+                             elseif {sv}=={lit_b} then return ({comb})+({b0}%0X2); \
+                             else if {sv}=={lit_c} then return ({comb})+(({b0}%0X2)-0X1) end; {sv}={e_a}; end; end end; ",
                             f = fname, head = head, sv = sv, e_a = e_a, lit_a = lit_a, comb = comb,
-                            pj = pj_name, pk1 = pk1, pkA = pkA, numA = numA, e_c = e_c, lit_b = lit_b, b0 = comb_bytes[0],
-                            e_d = e_d));
+                            e_b = e_b, e_c = e_c, lit_b = lit_b, lit_c = lit_c, b0 = b0));
                     } else {
-                        // A/C 变体：收集、拼装拆成两个真实状态
                         family.push_str(&format!(
                             "local function {f}() {head}local {sv}={e_a}; while true do \
-                             if {sv}=={lit_a} then {collect}{sv}={e_b}; \
-                             elseif not(not {pj}[({pk1})]) then {sv}={e_c}; \
-                             else if {sv}=={lit_b} then if {pj}[({pkA})]=={numA} then else return {comb} end end; {sv}={e_d}; end; end end; ",
+                             if {sv}=={lit_a} then {collect}if ({b0}%0X2)==0X0 then {sv}={e_b} else {sv}={e_c} end; \
+                             elseif {sv}=={lit_b} then return ({comb})+({b0}%0X2); \
+                             else if {sv}=={lit_c} then return ({comb})+(({b0}%0X2)-0X1) end; {sv}={e_a}; end; end end; ",
                             f = fname, head = head, sv = sv, e_a = e_a, lit_a = lit_a,
-                            collect = collect, e_b = e_b, pj = pj_name, pk1 = pk1, pkA = pkA, numA = numA,
-                            e_c = e_c, lit_b = lit_b, comb = comb, e_d = e_d));
+                            collect = collect, e_b = e_b, e_c = e_c, lit_b = lit_b, lit_c = lit_c, comb = comb, b0 = b0));
                     }
                 }
-                // read_string 四态梯子
+                // read_string：按运行期串长奇偶分流至两条不同循环形态（真分支）
                 {
                     let (t, i, j) = (rng.name(), rng.name(), rng.name());
-                    // ㉘D5 第三形态：逐字符读取也走动态游标机（上界=运行期长度
-                    // v_rs_l），while/for 两种线性壳只在 2/3 概率保留
-                    let shell = match rng.range(0, 3) {
-                        0 => format!("local {i}=0; while {i}<{l} do {i}={i}+1; {t}[({i})]=string_char({rd}()) end", i = i, l = v_rs_l, t = t, rd = fn_read_dec),
-                        1 => format!("for {j}=0X1,{l} do {t}[({j})]=string_char({rd}()) end", j = j, l = v_rs_l, t = t, rd = fn_read_dec),
+                    let shell_even = format!("local {i}=0; while {i}<{l} do {i}={i}+1; {t}[({i})]=string_char({rd}()) end", i = i, l = v_rs_l, t = t, rd = fn_read_dec);
+                    let shell_odd = match rng.range(0, 2) {
+                        0 => format!("for {j}=0X1,{l} do {t}[({j})]=string_char({rd}()) end", j = j, l = v_rs_l, t = t, rd = fn_read_dec),
                         _ => {
                             let off = rng.range(0, 100);
                             let unit = |iv: &str| format!("{t}[({iv})]=string_char({rd}())", t = t, iv = iv, rd = fn_read_dec);
                             crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(keys), off, v_rs_l, 2, 3, &unit)
                         }
                     };
-                    // cursor_walk_dyn 的随机形态可能自带尾随分号，而下方模板还会追加
-                    // 一个语句分隔符；剥掉尾部分号，避免偶发生成 `;;` 使 Lua 5.1 拒绝解析。
-                    let shell = shell.trim_end().trim_end_matches(';').trim_end().to_string();
+                    let shell_odd = shell_odd.trim_end().trim_end_matches(';').trim_end().to_string();
                     let sv = rng.name();
                     let (lit_a, lit_b, lit_c) = (e_a, e_b, e_c);
-                    let pk2 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                    let pk3 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
                     family.push_str(&format!(
                         "local function {rs}() local {l},{tb}=0,{{}}; local {sv}={e_a}; while true do \
-                         if {sv}=={lit_a} then {l}={a5}(); {sv}={e_b}; \
-                         elseif {sv}=={lit_b} then if {l}~={zero} then else return '' end; {sv}={e_c}; \
-                         elseif not(not {pj}[({pk2})]) then {sv}={e_d}; {pj}[({pk3})]={l}; \
-                         else if {sv}=={lit_c} then {shell}; while {w1v} do return table_concat({tb}) end end; {sv}={e_a}; end; end end; ",
+                         if {sv}=={lit_a} then {l}={a5}(); if {l}=={zero} then return '' elseif ({l}%0X2)==0X0 then {sv}={e_b} else {sv}={e_c} end; \
+                         elseif {sv}=={lit_b} then {se}; return table_concat({tb}); \
+                         else if {sv}=={lit_c} then {so}; while {w1v} do return table_concat({tb}) end end; {sv}={e_a}; end; end end; ",
                         rs = fn_read_string, l = v_rs_l, tb = t, sv = sv, e_a = e_a,
                         lit_a = lit_a, a5 = fn_a5, e_b = e_b, lit_b = lit_b,
                         zero = rng.obfuscate_num(0i64, 1, &keys), e_c = e_c,
-                        pj = pj_name, pk2 = pk2, e_d = e_d, pk3 = pk3,
-                        lit_c = lit_c, shell = shell, w1v = w1v));
+                        lit_c = lit_c, se = shell_even, so = shell_odd, w1v = w1v));
                 }
-                // a10（i32 符号还原）
+                // a10（i32 符号还原：按运行期 v 奇偶走不同补偿支）
                 {
-                    // 2^31 直接使用十进制字面量，避免拆成乘积表达式。
                     let hexp = "2147483648";
                     let cond = match rng.range(0, 3) {
                         0 => format!("{v}>=2*{h}-{h}", v = v_u32_v, h = v_a10_h),
@@ -393,16 +378,15 @@ pub fn build_readers(
                         _ => format!("{v}-2*{h}", v = v_u32_v, h = v_a10_h),
                     };
                     let sv = rng.name();
-                    let (lit_c, lit_d) = (e_c, e_d);
-                    let pk4 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
+                    let (lit_b, lit_c, lit_d) = (e_b, e_c, e_d);
                     family.push_str(&format!(
                         "local function {a10}() local {v},{h}=0,0; local {sv}={e_c}; while true do \
-                         if {sv}=={lit_c} then {v}={a5}(); if not(not {pj}[({pk4})]) then {h}=0X0; else {h}={hexp}; end; {sv}={e_d}; \
-                         elseif {sv}=={lit_d} then if not {pj}[({pk4})] then if {cond} then return {ret} end end; return {v}; \
-                         else {sv}={e_c}; end; end end; ",
-                        a10 = fn_a10, v = v_u32_v, h = v_a10_h, sv = sv, e_c = e_c,
-                        lit_c = lit_c, a5 = fn_a5, hexp = hexp, e_d = e_d,
-                        lit_d = lit_d, pj = pj_name, pk4 = pk4, cond = cond, ret = ret
+                         if {sv}=={lit_c} then {v}={a5}(); {h}={hexp}; if ({v}%0X2)==0X0 then {sv}={e_d} else {sv}={e_b} end; \
+                         elseif {sv}=={lit_d} then if {cond} then return ({ret})+({v}%0X2) end; return {v}+({v}%0X2); \
+                         else if {sv}=={lit_b} then if {cond} then return ({ret})+(({v}%0X2)-0X1) end; return {v}+(({v}%0X2)-0X1) end; {sv}={e_c}; end; end end; ",
+                        a10 = fn_a10, v = v_u32_v, h = v_a10_h, sv = sv, e_b = e_b, e_c = e_c,
+                        lit_b = lit_b, lit_c = lit_c, a5 = fn_a5, hexp = hexp, e_d = e_d,
+                        lit_d = lit_d, cond = cond, ret = ret
                     ));
                 }
                 family
@@ -411,8 +395,10 @@ pub fn build_readers(
 /// 常量池查表协议：HH 三 handler 返回码状态机（形态①②）+ ④⑤ 探针反转臂
 #[allow(clippy::too_many_arguments)]
 pub fn build_consts(
+    shell: &mut crate::VM::VM_Backend::Generator_names::ShellMethods,
+    kreg_n: &str,
     vault: &mut crate::VM::VM_Backend::Generator_names::NameVault,
-    rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, pj_name: &str, fn_bxor: &str,
+    rng: &mut GenRng, keys: &CipherKeys, k: &KConsts, _pj_name: &str, fn_bxor: &str,
     sc_index2: &str, sc_kobf: &str, var_state_flag: &str, var_idx_chunk: &str,
     var_tbl: &str, var_e: &str, ds: &[String; 4], dn: &[String; 4], fn_read_string: &str, fn_s_byte: &str,
     fn_a5: &str, fn_read_dec: &str, native_type: &str, native_pairs: &str,
@@ -427,7 +413,6 @@ pub fn build_consts(
     chain_delta: u32, chain_m: u64, chain_k0: u64,
     psn: &str, poison_delay: &str,
 ) -> String {
-    // ㉜ 明文 API 名改走 NB 槽（build_consts 落 parts，NB 已建表）
     let v_setmeta = vault.global("setmetatable");
     let v_newproxy = vault.global("newproxy");
     let v_getmeta = vault.global("getmetatable");
@@ -440,32 +425,20 @@ pub fn build_consts(
     let v_mm_newidx = vault.lit("__newindex");
     let (e_ka, e_kb, e_kc) = (k.e_ka.as_str(), k.e_kb.as_str(), k.e_kc.as_str());
     let (eh_ret, eh_nil, eh_next, eh_val) =
-        (k.eh_ret.as_str(), k.eh_nil.as_str(), k.eh_next.as_str(), k.eh_val.as_str());                // ── ⑥ 常量池查表打散
-                // 读入侧/访问侧各一张调度表，键 = 混淆数字展开式（运行期才是 1/2/3）
-                // 注册洗牌；挂永不命中诱饵键
-                // 缓存检查拆成独立前哨闭包。缓存值只可能是 string/number/false
-                // 用 ~=nil 判命中无歧义。
+        (k.eh_ret.as_str(), k.eh_nil.as_str(), k.eh_next.as_str(), k.eh_val.as_str());
                 let mt_name = rng.name();
                 let dsp_name = rng.name();
-                // 形态①②：__index 三handler+驱动换相
                 let hh_name = rng.name();
                 let (hh_cur, hh_c, hh_a2, hh_aux, hh_tb_arg) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-                        let (x_ret1, x_nil1, x_next1, x_val1) =
+                let (x_ret1, x_nil1, x_next1, x_val1) =
                     (eh_ret, eh_nil, eh_next, eh_val);
                 let x_ka = e_ka;
-                let pk6 = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                let pkB = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                let numB = { let v = rng.range(100000, 9999999) as i64; deep10(rng, fn_bxor, v) };
-                let pkC = format!("0X{:X}", rng.range(0x10000, 0xFFFFF));
-                let numC = { let v = rng.range(100000, 9999999) as i64; deep10(rng, fn_bxor, v) };
                 let wk2 = { let v = rng.range(0x51, 0xFFFFF) as i64; deep10(rng, fn_bxor, v) };
                 let wk3 = { let v = rng.range(0x51, 0xFFFFF) as i64; deep10(rng, fn_bxor, v) };
                 let wk4 = { let v = rng.range(0x51, 0xFFFFF) as i64; deep10(rng, fn_bxor, v) };
                 let ld_name = rng.name();
                 let memo_name = rng.name();
                 let h_name = rng.name();
-                let _got_name = rng.name();
-                let val_name = rng.name();
                 let ddm = rng.name(); let ddd = rng.name(); let ddl = rng.name();
                 // ㉓-B 线上 tag 键 = tag_map（逐 build 随机字母表，与写侧同源）；
                 // one/two/three 曾是固定 1/2/3（DF 缺陷），record 内部标记沿用同值
@@ -631,19 +604,10 @@ pub fn build_consts(
                         ct_init = init;
                     }
                 }
-                let (nBv, nCv, w2v, w3v, w4v) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-                // 高危③：明文记忆缓存水位清空——ca 驻留的明文常量按访问计数周期性
-                // 全清（㉑ 同款窗口模型）：纪元内只有热集明文，dump 不再能拿到
-                // 「程序运行至今累计」的完整常量明文表；记录保留可重复解密
+                let (w2v, w3v, w4v) = (rng.name(), rng.name(), rng.name());
                 let (ecb_n, cab_n) = (rng.name(), rng.name());
                 let pfn_n = rng.name();
-                // 字符串常量按短命对象地址低概率采样扰动，避免每次篡改都落在同一失败点；不触碰 math.random。
                 let (poison_s, poison_h, poison_i) = (rng.name(), rng.name(), rng.name());
-                // 诱饵/投毒常数逐产物随机（去黄金比例 2654435761/9E3779B9 指纹）：
-                // 乘数取奇数保证双射性（mod 2^32 下奇乘可逆）
-
-                // ④ 错键/缺记录时的**像样伪值**：奇槽给伪数字（同域同量级），偶槽给伪字符串
-                // （前缀同 kobf、长度随槽号）——不再返回 nil，「这槽错了」这一位信息被抹掉。
                 let fake_fv = rng.name();
                 let fake_stmt = format!(
                     "local {fv}=(({ix}%0X2)==0X0) and (({ix}*0X{km:X}+0X{ka:X})%{m32}) or ({kobf}..(({ix}*0X{ks:X})%0X{klen:X})); ",
@@ -651,37 +615,37 @@ pub fn build_consts(
                     km = (k_mul as u64) & 0xFFFF, ka = (k_add as u64) & 0xFFFFF,
                     ks = (k_smul as u64) & 0xFFFF, klen = 0x1000i64);
                 let (wctr, wlim) = (rng.name(), rng.range(0x2000, 0x10000));
-                let mut lua = format!(
-                    // ⑱ 密文/明文缓存两表 proxy 化（打折版）：newproxy(true) 返回 userdata，
-                    // pairs 遍历直接报错；后备退化为普通表（fail-open）
-                    "local {m32}={m32v}; local {agg}=0X0; local {ft}={{}}; local {rt}={{}}; local {rf}=0X0; local {ecb},{cab}={{}},{{}}; local {ec}={np} and {np}(true) or {ecb}; local {ca}={np} and {np}(true) or {cab}; local {wctr}=0X0; \
+                let cmac_params: [&str; 9] = [
+                    &keys.tbl_p, kreg_n, m32.as_str(), native_type, sc_index2, sc_kobf, fn_bxor, fn_rotl, fn_s_byte,
+                ];
+                let cmac_body = format!(
+                    "local {ecb},{cab}={{}},{{}}; local {ec}={np} and {np}(true) or {ecb}; local {ca}={np} and {np}(true) or {cab}; \
                      do local {m1}={gm}({ec}) if {m1} then {m1}[{idx}]={ecb} {m1}[{nidx}]={ecb} end; local {m2}={gm}({ca}) if {m2} then {m2}[{idx}]={cab} {m2}[{nidx}]={cab} end end; \
-                     local {nB_}={nB0}; local {nC_}={nC0}; local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
-                     local {pfn}=function(q) local tq={nt}(q) if tq=={tnum} then return (q*{kmul}+{kadd})%{m32} elseif tq=={tstr} then local {ps}={ts}({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+{sb}({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=={tbool} then return not q end return q end; ",
-                    m32 = m32, m32v = m32v, agg = agg_name,
-                    ft = ftds, rt = rtds, rf = rfds,
+                     local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
+                     local {pfn}=function(q) local tq={nt}(q) if tq=={tnum} then return (q*{kmul}+{kadd})%{m32} elseif tq=={tstr} then local {ps}={ts}({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+{sb}({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=={tbool} then return not q end return q end; \
+                     local {vm}=function({vb},{vl},{vf},{vr}) if {vl}==nil then {vl}=0X0 end; if {vf}==nil then {vf}=0X0 end; if {vr}==nil then {vr}=0X0 end; if {nt}({vb})~={tstr} and {nt}({vb})~={ttbl} then {vb}={kobf}..({vb} or 0X0) end; local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if {nt}({vb})=={tstr} then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; \
+                     return {ecb},{cab},{ec},{ca},{pfn},{vm},{w2_},{w3_},{w4_}",
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
-                    wctr = wctr, pfn = pfn_n, nt = native_type, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
+                    pfn = pfn_n, nt = native_type, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
                     np = v_newproxy, gm = v_getmeta, ts = v_tostring, sb = v_sbyte,
                     idx = sc_index2, nidx = v_mm_newidx,
-                    tnum = v_t_num, tstr = v_t_str, tbool = v_t_bool,
+                    tnum = v_t_num, tstr = v_t_str, tbool = v_t_bool, ttbl = v_t_tbl,
                     ps = poison_s, ph = poison_h, pi = poison_i,
                     m1 = rng.name(), m2 = rng.name(),
-                    nB_ = nBv, nB0 = numB, nC_ = nCv, nC0 = numC,
-                    w2_ = w2v, w20 = wk2, w3_ = w3v, w30 = wk3, w4_ = w4v, w40 = wk4);
-                lua.push_str(&format!(
-                    "local {g}={rd}(); local {fds},{fdn}={ss},{sn}; ",
-                    g = gname, rd = fn_read_dec, fds = fds, fdn = fdn, ss = sel_s, sn = sel_n));
-                // ③-3 每常量 MAC 校验器（写侧 const_mac18 同式）：
-                // s=m1^(slot*m2)^fold^rotl(roll,m3)；逐字节 s=(s+b*m4)%2^32, s^=rotl(s,m5)
-                // ——乘数域均 <2^40，Lua double 全精确；串/表两种 blob 分支取字节
-                lua.push_str(&format!(
-                    "local {vm}=function({vb},{vl},{vf},{vr}) if {vl}==nil then {vl}=0X0 end; if {vf}==nil then {vf}=0X0 end; if {vr}==nil then {vr}=0X0 end; if {nt}({vb})~={tstr} and {nt}({vb})~={ttbl} then {vb}={kobf}..({vb} or 0X0) end; local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if {nt}({vb})=={tstr} then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; ",
-                    vm = vm, nt = native_type, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
+                    w2_ = w2v, w20 = wk2, w3_ = w3v, w30 = wk3, w4_ = w4v, w40 = wk4,
+                    vm = vm, vb = vb, vl = vl, vf = vf, vr = vr, vs = vs, vn = vn, vj = vj,
                     mc1 = mc1, mc2 = mc2, mc3 = mc3, mc4 = mc4, mc5 = mc5,
-                    tstr = v_t_str, ttbl = v_t_tbl,
-                    kobf = sc_kobf, bx = fn_bxor, rot = fn_rotl, sb = fn_s_byte, m32 = m32));
-                // ③-4 变体化的常量表基建（在 vmac 之后定义）
+                    bx = fn_bxor, rot = fn_rotl, m32 = m32);
+                let m_cmac = shell.add(rng, &cmac_params, cmac_body);
+                let mut lua = format!(
+                    "local {m32}={m32v}; local {agg}=0X0; local {ft},{rt},{rf}; local {wctr}=0X0; \
+                     local {ecb},{cab},{ec},{ca},{pfn},{vm},{w2_},{w3_},{w4_}={cmac_call}; \
+                     local {g}={rd}(); local {fds},{fdn}={ss},{sn}; ",
+                    m32 = m32, m32v = m32v, agg = agg_name,
+                    ft = ftds, rt = rtds, rf = rfds, wctr = wctr,
+                    ecb = ecb_n, cab = cab_n, ec = var_enc_c, ca = var_cache, pfn = pfn_n, vm = vm,
+                    w2_ = w2v, w3_ = w3v, w4_ = w4v, cmac_call = shell.call(&m_cmac, &cmac_params),
+                    g = gname, rd = fn_read_dec, fds = fds, fdn = fdn, ss = sel_s, sn = sel_n);
                 lua.push_str(&ct_init);
                 for x in &dsp_defs { lua.push_str(x); }
                 lua.push_str(&format!(
@@ -702,7 +666,7 @@ pub fn build_consts(
                 lua.push_str(&format!(
                     "local {hh}={{}}; \
                      {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in {np}({cab}) do {cab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
-                       local g={memo}(0X1,{ix}) if g~=nil then if {pj}[{pkB}]=={nBv} then else if {psn} and {delay}<=0 then return {x_ret1},{pfn}(g) end; return {x_ret1},g end end while {w2v} do return {x_next1} end end; \
+                       local g={memo}(0X1,{ix}) if g~=nil then if ({ix}%0X2)==0X0 then if {psn} and {delay}<=0 then return {x_ret1},{pfn}(g) end; return {x_ret1},g else if not({psn} and {delay}<=0) then return {x_ret1},g end; return {x_ret1},{pfn}(g) end end while {w2v} do return {x_next1} end end; \
                      {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[(({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}] if {nt}({ev})~={ttbl} then {fake} return {x_nil1} end; \
                        {ev}[(0X4)]={tba}[{pathkey}] or 0X0; {ev}[(0X5)]=(({ev}[(0X5)] or 0X0)+0X1)%{m32}; {kbh}\
                      {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~={tstr} then {ca}[(({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
@@ -713,11 +677,10 @@ pub fn build_consts(
                     memo = memo_name,
                     x_ret1 = x_ret1, x_next1 = x_next1, ec = var_enc_c,
                     ev = var_e, kbh = kbh, tba = hh_tb_arg, pathkey = const_path_key, m32 = m32,
-                    ca = var_cache, pj = pj_name, pkB = pkB, nBv = nBv, w2v = w2v, w3v = w3v,
+                    ca = var_cache, w2v = w2v, w3v = w3v,
                     ttbl = v_t_tbl, tstr = v_t_str,
                     em = fc.emul, ea = fc.eadd, c = fn_c, pld = pf_ld_key,
                     fake = fake_stmt.as_str()));
-                // ㉔ 解码链状态转移四形态化
                 let (dc_t, dc_s, dc_d) = (rng.name(), rng.name(), rng.name());
                 let dc_infra = format!("local {t},{sl}={{}},{{}}; local {d}=function(w,u) local z=w%0X2 return u+(z-z) end; ",
                     t = dc_t, sl = dc_s, d = dc_d);
@@ -753,7 +716,6 @@ pub fn build_consts(
                     "{c}.{pf}={sm}({{}},{mt}); {mt}=({{}})[{mtn}]; ",
                     c = fn_c, pf = pf_consts, mt = mt_name, sm = v_setmeta, mtn = format!("0X{:X}", rng.range(0x1000, 0xFFFFF))));
                 for x in &ld_defs { lua.push_str(x); }
-                // #3 折叠 + ㉓-A（读侧）：R 链重算 + 动态左旋 Ftbl[tk]=rotl(Ftbl[tk],k_step)+f(pc) + Rtbl[tk]=roll
                 let sal_sel = format!(
                     "({g}==0X0 and {s0} or {g}==0X1 and {s1} or {g}==0X2 and {s2} or {s3})",
                     g = gname, s0 = salt_names[0], s1 = salt_names[1], s2 = salt_names[2], s3 = salt_names[3]);
@@ -762,8 +724,11 @@ pub fn build_consts(
                 let (k10001, kmc, kmd, k80a, kme, k45d9, kmf, k80b, kmg) = (ob1(0x10001), ob1(0x100000000), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000), ob1(0x45D9), ob1(0x100000000), ob1(0x80000000), ob1(0x100000000));
                 let (k3, k101, k1001, kmh, kmi, k11, kmj, ks32a, ks32b) = (ob1(0x3), ob1(0x101), ob1(0x1001), ob1(0x100000000), ob1(0x100000000), ob1(0x11), ob1(0x100000000), ob1(0x100000000), ob1(0x100000000));
                 let tk_scan = rng.name();
-                lua.push_str(&format!(
-                    "do {ft}={{}}; {rt}={{}}; {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end end; {rf}={rr} end; ",
+                let cscan_params: [&str; 6] = [
+                    kreg_n, fn_c, gname.as_str(), m32.as_str(), fn_bxor, fn_rotl,
+                ];
+                let cscan_body = format!(
+                    "local {ft},{rt}={{}},{{}}; local {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end end; {rf}={rr}; return {ft},{rt},{rf}",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
                     av = rng.name(), ob = rng.name(), bv = rng.name(),
                     cv = rng.name(), fp = rng.name(), sk = rng.name(), tk = tk_scan,
@@ -785,23 +750,27 @@ pub fn build_consts(
                     ch = rng.name(), cbv = rng.name(),
                     dl = deep10(rng, fn_bxor, chain_delta as i64),
                     chm = deep10(rng, fn_bxor, chain_m as i64),
-                    chk0 = deep10(rng, fn_bxor, chain_k0 as i64)));
-                // ③-4：物理排放序号 i 与逻辑槽号 psl 解耦（读取流内加密槽号还原 psl = slot + 1）
+                    chk0 = deep10(rng, fn_bxor, chain_k0 as i64));
+                let m_cscan = shell.add(rng, &cscan_params, cscan_body);
+                lua.push_str(&format!("{ft},{rt},{rf}={cscan_call}; ",
+                    ft = ftds, rt = rtds, rf = rfds, cscan_call = shell.call(&m_cscan, &cscan_params)));
                 let psl = rng.name();
                 let rdl = if table_regime {
-                    format!("local {h}={ld}[({t})]; if {h} then if {pj}[({pkC})]=={numC} then else {h}(0X0,{psl}) end end end end; ",
-                        h = h_name, ld = ld_name, t = t, pj = pj_name, pkC = pkC, numC = numC, psl = psl)
+                    format!("local {h}={ld}[({t})]; if {h} then {h}(0X0,{psl}) end end; ",
+                        h = h_name, ld = ld_name, t = t, psl = psl)
                 } else {
-                    format!("if {pj}[({pkC})]=={numC} then else {ld}({t},{psl}) end end end; ",
-                        pj = pj_name, pkC = pkC, numC = numC, ld = ld_name, t = t, psl = psl)
+                    format!("{ld}({t},{psl}) end; ",
+                        ld = ld_name, t = t, psl = psl)
                 };
                 lua.push_str(&format!(
                     "{agg}={bx}({c}.{pn},{bx}({c}.{pld},{rot}({c}.{plld},0X7))); \
-                     local {i}=0; local {n}={a5}(); if not(not {pj}[({pk6})]) then {i}={n}; else \
-                     while {i}<{n} do {i}={i}+1; local {t}={rd}(); local {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+0X1; \
+                     local {i}=0; local {n}={a5}(); \
+                     while {i}<{n} do {i}={i}+1; local {t}={rd}(); local {psl}; \
+                     if ({i}%0X2)==0X0 then {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+0X1+({i}%0X2) \
+                     else {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+({i}%0X2) end; \
                      {rdl}",
                     agg = agg_name, bx = fn_bxor, c = fn_c, pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, rot = fn_rotl,
-                    i = v_ch_i, n = v_ch_n, a5 = fn_a5, pj = pj_name, pk6 = pk6,
+                    i = v_ch_i, n = v_ch_n, a5 = fn_a5,
                     t = t, rd = fn_read_dec, psl = psl, em = fc.emul, m32 = m32, rdl = rdl));
                 lua.push_str(&format!("{agg}=0X0; ", agg = agg_name));
                 lua

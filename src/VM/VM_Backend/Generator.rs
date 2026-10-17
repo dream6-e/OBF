@@ -1117,21 +1117,16 @@ impl Generator {
                     format!("{}[{}]={};", var_vm, k_mk3, nc_n),
                 ];
                 rng.shuffle(&mut stmts);
-                // ㉚：换钥后把新钥同步进 ds，否则后续填充用旧钥解新掩码→垃圾。
-                format!("{}[{}][1]={}; {}{}{} {},{},{}={},{},{}; {}.{}={}; {}.{}={}; {}.{}={}; ",
+                format!("{}[{}][1]={}; {}{}{} {}.{}={}; {}.{}={}; {}.{}={}; return {},{},{},{},{} ",
                     kreg_n, "chunk", nk1_n, stmts[0], stmts[1], stmts[2],
-                    n_mk1, n_mk2, n_mk3, na_n, nb_n, nc_n,
-                    dc_ds, ds_m1, na_n, dc_ds, ds_m2, nb_n, dc_ds, ds_m3, nc_n)
+                    dc_ds, ds_m1, na_n, dc_ds, ds_m2, nb_n, dc_ds, ds_m3, nc_n,
+                    rk21, kreg_n, na_n, nb_n, nc_n)
             };
-            // ㉒② 焊接 2^32 模数（execute 换钥分支每次重走——第二次起逻辑无分支）；
-            // ㉒① thunk 回写环、寄存器键轮换环 → 动态分段数值游标机
-            // （execute 作用域内 P 表已建，状态常数走 obfuscate_num 的运行时查表表示）。
             let w2_dst = weld.dst();
             let w2_mv = crate::VM::VM_Backend::Generator_kdf::kdf_m32(&mut rng);
             let w2_stmt = format!("local {};", w2_dst) + &weld.weld(&mut rng, &w2_dst, &w2_mv);
             let md_walk = {
-                let (md2, th2) = (md21.clone(), md21.clone());
-                let (md2, th2, tt2) = (md2, th21.clone(), cfg.type_tbl.clone());
+                let (md2, th2, tt2) = (md21.clone(), th21.clone(), cfg.type_tbl.clone());
                 let off = rng.range(0, 100);
                 let unit = |iv: &str| format!("if {nt}({md}[{iv}])=={tt} then {md}[{iv}]={th}[{iv}] end; ", nt = native_type, md = md2, th = th2, iv = iv, tt = tt2);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &format!("#{}", md21), 2, 3, &unit)
@@ -1143,25 +1138,26 @@ impl Generator {
                 let unit = |iv: &str| format!("{aa}[{iv}]={bx}({aa}[{iv}],{d1}); {bb}[{iv}]={bx}({bb}[{iv}],{d2}); {cc}[{iv}]={bx}({cc}[{iv}],{d3}); ", aa = aa2, bb = bb2, cc = cc2, bx = bx2, d1 = d12, d2 = d22, d3 = d32, iv = iv);
                 crate::VM::VM_Backend::Generator_util::cursor_walk_dyn(&mut rng, Some(&keys), off, &nexp, 3, 3, &unit)
             };
+            let fn_rkey = rng.name();
+            let rkey_hdr = format!(
+                "{rkey},{tp},{rk},{kreg},{md},{th},{nt},{pf},{bx},{w0},{w1},{w2t},{km1},{km2},{km3},chunk,{pc},{kon},{m1},{m2},{m3},{vm},{ds},{aa},{bb},{cc}@RKEY@{mdw} {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; local {kold}={kreg}; {kreg}={sm}({{}},{kmt}); for {kc1},{kv1} in {pf}({kold}) do {kreg}[{kc1}]={kv1} end; local {lv}=chunk.{lld}; {w2} local {nk1}={bx}({kon},{pc}%{m32})%{m32}; {nn} {dline} {rotw} {rk_tail} end; return {rk},{kreg},{m1},{m2},{m3}@RKEY@",
+                rkey = fn_rkey, tp = keys.tbl_p, rk = rk21, kreg = kreg_n, md = md21, th = th21,
+                nt = native_type, pf = native_pairs, sm = native_smeta, kmt = native_smt, bx = fn_bxor2,
+                w0 = weld.tables[0], w1 = weld.tables[1], w2t = weld.tables[2],
+                km1 = k_mk1, km2 = k_mk2, km3 = k_mk3,
+                pc = var_pc, kon = n_kon, m1 = n_mk1, m2 = n_mk2, m3 = n_mk3,
+                vm = var_vm, ds = dc_ds, aa = var_a_arr, bb = var_b_arr, cc = var_c_arr,
+                mdw = md_walk, rn = rng.format_num(rkey_every as i64),
+                lld = pf_lld, w2 = w2_stmt, m32 = w2_dst, nk1 = nk1_n, lv = lv_n,
+                nn = nn_seg, dline = dline_seg, rk_tail = rk_tail_seg, rotw = rot_walk,
+                kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()
+            );
+            block_execute_def = format!("{}{}", rkey_hdr, block_execute_def);
             dispatch_body.push_str(&format!(
-                "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; {mdw} \
-                 {rk}={rk}+0X1; if {rk}>={rn} then {rk}=0X0; \
-                   local {kold}={kreg}; {kreg}={smeta}({{}},{kmt}); for {kc1},{kv1} in {pairs_fn}({kold}) do {kreg}[{kc1}]={kv1} end; \
-                   local {lv}={c}.{lld}; {w2} local {nk1}={bx}({kon},{pc}%{m32})%{m32}; {nn} \
-                   {dline} \
-                   {rotw} \
-                   {rk_tail} \
-                 end end; ",
+                "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; {m1},{m2},{m3}={rkey}(chunk,{pc},{kon},{m1},{m2},{m3},{vm},{ds},{aa},{bb},{cc}) end; ",
                 flg = format!("({}) and true", var_state_flag), pc = var_pc, tw = tw21, sx = step21,
-                mdw = md_walk,
-                rk = rk21, rn = rng.format_num(rkey_every as i64),
-                bx = fn_bxor2.as_str(),
-                lld = pf_lld, kon = n_kon,
-                w2 = w2_stmt, m32 = w2_dst,
-                nk1 = nk1_n, lv = lv_n,
-                nn = nn_seg, dline = dline_seg, rk_tail = rk_tail_seg,
-                kreg = kreg_n, c = "chunk", rotw = rot_walk, pairs_fn = native_pairs,
-                smeta = native_smeta, kmt = native_smt, kold = rng.name(), kc1 = rng.name(), kv1 = rng.name()));
+                m1 = n_mk1, m2 = n_mk2, m3 = n_mk3, rkey = fn_rkey, kon = n_kon,
+                vm = var_vm, ds = dc_ds, aa = var_a_arr, bb = var_b_arr, cc = var_c_arr));
             dispatch_body.push_str(&format!("{}={};", var_state_flag, "false"));
             let split = crate::VM::VM_Backend::Generator_flow_split::wrap_for_build(
                 &dispatch_state.setup, &dispatch_body, true, "chunk",

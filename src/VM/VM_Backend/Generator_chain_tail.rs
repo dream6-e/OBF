@@ -118,53 +118,6 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         ..
     } = x;
     let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
-    let psn_read = |rng: &mut GenRng| -> String {
-            let mut idx: Vec<usize> = (0..psn_pool.len()).collect();
-            rng.shuffle(&mut idx);
-            let names: Vec<&str> = idx.iter().map(|&i| psn_pool[i].as_str()).collect();
-            match rng.range(0, 2) {
-                0 => format!("({})", names.join(" or ")),
-                _ => format!("(({}))", names.iter().map(|n| format!("({})", n)).collect::<Vec<_>>().join(" or ")),
-            }
-        };
-        let poison_ks = |rng: &mut GenRng, ks: &str| -> String {
-            let pe = psn_read(rng);
-        let k1 = rng.range(0x100, 0xFFFF) as u32;
-        let k2 = rng.range(0x100, 0xFFFF) as u32;
-        match rng.range(0, 4) {
-            0 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=(0X{k:X}-{ks}[0X1])%0X100 end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1),
-            1 => format!("if {psn} and {delay}<=0 then local {z}=#{ks} while {z}>0X0 do {ks}[{z}]=(0X{k:X}-{ks}[{z}])%0X100; {z}={z}-0X1 end end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1, z = rng.name()),
-            2 => format!("if {psn} and {delay}<=0 then {ks}[0X1]=({ks}[0X1]+0X{k:X})%0X100; {ks}[#{ks}]=(0X{k2:X})%0X100 end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2),
-            _ => format!("if {psn} and {delay}<=0 then for {z}=0X1,#{ks} do {ks}[{z}]=({ks}[{z}]*0X{k:X}+0X{k2:X})%0X100 end end; ", psn = pe, delay = poison_delay_expr, ks = ks, k = k1, k2 = k2, z = rng.name()),
-        }
-    };
-    let bind2 = |rng: &mut GenRng, dst: &str, n0: &str, n1: &str| -> String {
-        let (a, b) = if rng.range(0, 2) == 0 { (n0, n1) } else { (n1, n0) };
-        match rng.range(0, 3) {
-            0 => format!("{d}={b}; if ({h}%0X2)==0X0 then {d}={a} end; ", d = dst, a = a, b = b, h = h_var),
-            1 => format!("if ({h}%0X2)==0X0 then {d}={a} else {d}={b} end; ", d = dst, a = a, b = b, h = h_var),
-            _ => format!("local {t}={{{a},{b}}}; {d}={t}[({h}%0X2)+0X1]; ", d = dst, a = a, b = b, h = h_var, t = rng.name()),
-        }
-    };
-    let mk_m = |_rng: &mut GenRng| -> String { "4294967296".to_string() };
-    let mk_rounds = |rng: &mut GenRng, qrn: &str, ly: &crate::VM::VM_Backend::Generator_chacha::ChaChaLayout| -> String {
-        let mut cols: Vec<(u32, u32, u32, u32)> = vec![(0,4,8,12),(1,5,9,13),(2,6,10,14),(3,7,11,15)];
-        let mut dias: Vec<(u32, u32, u32, u32)> = vec![(0,5,10,15),(1,6,11,12),(2,7,8,13),(3,4,9,14)];
-        rng.shuffle(&mut cols); rng.shuffle(&mut dias);
-        let mut ents: Vec<String> = Vec::new();
-        for &(a, b, c, d) in cols.iter().chain(dias.iter()) {
-            let m = |v: u32| (ly.rho[v as usize] + 1) as u32;
-            let f = |rng: &mut GenRng, v: u32| -> String { rng.format_num(v as i64) };
-            ents.push(format!("{{{},{},{},{}}}", f(rng, m(a)), f(rng, m(b)), f(rng, m(c)), f(rng, m(d))));
-        }
-        let (tv, iv, ev) = (rng.name(), rng.name(), rng.name());
-        let rounds = (ly.rounds / 2) as u32;
-        format!(
-            "local {tv}={{{ents}}}; for _=1,{rounds} do for {iv}=1,#{tv} do local {ev}={tv}[{iv}]; {qrn}({sv},{ev}[1],{ev}[2],{ev}[3],{ev}[4]) end end; ",
-            tv = tv, iv = iv, ev = ev, ents = ents.join(","), qrn = qrn, sv = "s", rounds = rounds)
-    };
-// ⑰ 中央字符串/数值池初始化块废除（池不存在了）。⑦ 的 while/repeat
-        // 抽签壳保留在 body_ret/body_debug；池壳随池一起退役。
         let var_enc_c = rng.name();
         let var_tbl = rng.name();
         let var_idx_chunk = rng.name();
@@ -172,7 +125,6 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let var_cache = rng.name();
 
         let var_state = rng.name();
-        // 独立于反篡改旗的扫描模式：扫描子 proto 时使用临时数组，不污染持久 VM 指令区。
         let var_scan_only = rng.name();
         let s_init = rng.range(0x100, 0xFFF) as i64;
         let s_insts = rng.range(0x1000, 0x1FFF) as i64;
@@ -187,18 +139,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let obf_s_protos = rng.format_num(s_protos);
         let obf_s_debug = rng.format_num(s_debug);
         let obf_s_ret = rng.format_num(s_ret);
-        
-        // ── 状态机（第 6 项：解密逻辑打乱）──
-        // 原形态：if state==A then <体>
-        // 状态推进总在体尾，一眼就是「顺序状态机」。现在：
-        //   ① 六个状态体各自构造后 **shuffle**（分支条件互相排斥，顺序无关）
-        //   ② 状态推进提到体首（体内不读 state，等价）；
-        //   ③ 所有 for 循环换成 while + 显式自增下标 + 独立局部下标；
-        //   ④ 结尾统一 return（不再是分支内 return），并带一个恒假谓词与影子守卫
-        // 注意：体内的**读流顺序**一个字都不能动 —— 那些字节是按顺序读进来的
         let (v_ch_g, v_ch_out, v_ch_i, v_ch_n) = (rng.name(), rng.name(), rng.name(), rng.name());
 
-        // ⑧ 常数提供者：连常数 1 都要过一次形参重名函数
         let cpp = rng.name();
         let cpq = rng.name();
         let body_init = format!(
@@ -210,26 +152,16 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             pf_numparams = pf_numparams, pf_is_vararg = pf_is_vararg, pf_maxstack = pf_maxstack, i = v_ch_i,
             cpp = cpp, cpq = cpq
         );
-        // ⑨ 区间二分树诱饵：not(x<=k) 双重否定嵌套（恒空转，美化后深度剧增）
-        let it9 = |rng: &mut GenRng, st: &str| format!(
-            "if not({st}<=0X{:X}) then if not({st}<=0X{:X}) then else end else end; ",
-            rng.range(0x1000, 0xFFFF), rng.range(0x10000, 0xFFFFF));
-        // ① B/C 解掩码：线上=值^(mag^ki)^k（k/ki 逐产物、mag 逐条别名魔数）。
-        // a10 返回带符号值：先回 2^32 域异或，再按 2^31 还原符号——与旧 a10 语义逐位一致
+        // ⑨ 真分支状态扰动：按运行期 (st+i)%2 走两条不同算术更新支（取代原先空 then/else）
+        let it9 = |_rng: &mut GenRng, st: &str| format!(
+            "if (({st}+{i})%0X2)==0X0 then {g}=({g}*0X3)%0X2 else {g}=({g}*0X5)%0X2 end; ",
+            st = st, i = v_ch_i, g = v_ch_g);
         let (kb_x, kc_x, ki1_x, ki2_x) = (
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_kb as i64),
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_kc as i64),
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki1 as i64),
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_ki2 as i64),
         );
-        // 目标二③（第二部分，共享指令空间）：正常执行及闭包按需解码时，所有原型共用
-        // 同一批持久指令数组；每个原型只占其中一段互不重叠的下标区间（基址 = payload
-        // 头 pf_lld，先序分配、段间随机死槽）。子 proto 的边界扫描则使用下方独立临时表，
-        // 避免尚未执行的子原型预先填充共享区间。静态读者再也不能靠「一个数组 = 一个函数」
-        // 划边界；运行期入口把 pc 切到本原型基址，相对跳转与记录条数语义不变。
-        // 注册表挂在既有的弱键长存表上（数字键，注册表本身**零新增局部**——payload
-        // 顶层局部数已接近 Lua 的 200 上限，多一枚都可能让整份产物编译失败）：首次取用时
-        // 惰性建 4 张表，后续正常解码的原型共用同一批数组。
         let sh_key_v = rng.range(0x10000, 0xFFFFFFF) as i64;
         let sh_key = rng.obfuscate_num(sh_key_v, 1, &keys);
         let mut sh_idx: Vec<usize> = (1..=4).collect();
@@ -241,42 +173,50 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let sh_assign: String = sh_arrs.iter().zip(sh_idx.iter())
             .map(|(f, i)| format!("{c}.{f}={kr}[{k}][{i}]; ", c = fn_c, f = f, kr = kreg_n, k = sh_key, i = i))
             .collect();
-        // 边界扫描仍完整解码以重算常量 fold/R 链，但只挂临时 scratch 数组；
-        // 正常执行/闭包按需解码时才连接持久共享指令数组。
         let arr_init = format!(
             "if {scan_only} then {c}.{op}={{}}; {c}.{a}={{}}; {c}.{b}={{}}; {c}.{cc}={{}}; else {sh_get}{sh_assign} end; ",
             scan_only = var_scan_only, c = fn_c, op = pf_opcodes, a = pf_a_arr,
             b = pf_b_arr, cc = pf_c_arr, sh_get = sh_get, sh_assign = sh_assign
         );
-        let body_insts = format!(
-            "{st}={nxt}; {tree9} {arr_init} \
+        let insts_params: [&str; 8] = [
+            &fn_c, &var_scan_only, &kreg_n, &keys.tbl_p, &fn_bxor, &fn_a5, &fn_a10, &fn_read_dec,
+        ];
+        let insts_body = format!(
+            "{arr_init} \
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+{m32v} end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>={m31v} then {w}={w}-{m32v} end return {w} end; \
              local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
              while {i} < {n} do {i} = {i} + 1; \
              local {mv}={a5}() if {mv}<0 then {mv}={mv}+{m32v} end local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%{m32v},{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%{m32v},{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%{m32v},{kc18}) local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {rd}() end end; ",
-            tree9 = it9(&mut rng, var_state.as_str()),
             m32v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 32),
             m31v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 31),
-            st = var_state, nxt = obf_s_consts, c = fn_c, a5 = fn_a5, a10 = fn_a10,
+            c = fn_c, a5 = fn_a5, a10 = fn_a10,
             pf_opcodes = pf_opcodes, pf_a_arr = pf_a_arr, pf_b_arr = pf_b_arr, pf_c_arr = pf_c_arr,
             arr_init = arr_init,
-            i = v_ch_i, n = v_ch_n, cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
+            i = rng.name(), n = rng.name(), cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
             pb = rng.name(), ka = rng.name(), kb18 = rng.name(), kc18 = rng.name(),
             pf_ld = pf_ld, pf_lld = pf_lld,
             dcb = rng.name(), w = rng.name(), m = rng.name(), k = rng.name(), q = rng.name(),
             bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x,
             jv = rng.name(), rd = fn_read_dec.as_str()
         );
-        // ㉓ 统一流守卫："__index"/"KryvexObf_" 不留明文（惰性解密）
+        let m_insts = shell.add(&mut rng, &insts_params, insts_body);
+        let body_insts = format!(
+            "{st}={nxt}; {tree9} {call}; ",
+            st = var_state, nxt = obf_s_consts,
+            tree9 = it9(&mut rng, var_state.as_str()),
+            call = shell.call(&m_insts, &insts_params)
+        );
         let cid_index = uni.register("__index");
         let cid_gk = uni.register("KryvexObf_");
         let (ci_stmt, sc_index2) = uni.fetch(&mut rng, cid_index);
         let (gk_stmt, sc_kobf) = uni.fetch(&mut rng, cid_gk);
+        let (v_sc_idx, v_sc_kobf) = (rng.name(), rng.name());
         let psn_pick = psn_pool[rng.range(0, psn_pool.len())].as_str().to_string();
         let psn_pick = psn_pick.as_str();
-                let bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
+        let bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
+                &mut shell, kreg_n.as_str(),
                 &mut vault, &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
-                sc_index2.as_str(), sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
+                v_sc_idx.as_str(), v_sc_kobf.as_str(), var_state_flag.as_str(), var_idx_chunk.as_str(),
                 var_tbl.as_str(), var_e.as_str(), &ds_names, &dn_names, fn_read_string.as_str(), fn_s_byte.as_str(),
                 fn_a5.as_str(), fn_read_dec.as_str(), native_type.as_str(), native_pairs.as_str(),
                 var_enc_c.as_str(), var_cache.as_str(),
@@ -286,32 +226,33 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 &tag_map18, &salt_names, pf_n.as_str(), pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
                 chain_delta, chain_m, chain_k0, {psn_pick},
                 poison_delay_expr.as_str());
-        let body_consts = format!("{st}={nxt}; {ci_stmt}{gk_stmt} {bc_scatter} ",
-            st = var_state, nxt = obf_s_protos);
-        let pkx1 = { let v = rng.range(0x10000, 0xFFFFF) as i64; crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), v) };
-        // 目标五①：子 proto 没有长度前缀。先递归完整解析每个子树以顺序抵达
-        // 下一个兄弟的起点，再保存其起始游标/滚动密钥快照供 CLOSURE 按需重解。
-        // 扫描模式独立于防篡改状态，并在递归返回后恢复；闭包 thunk 稍后实际解码时仍走共享表。
-        let (p18, s1a, b1a, sv18, svf18, rr18, scan18, scan_flag18, scan_mode_snapshot) =
-            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let body_consts = format!(
+            "{st}={nxt}; {ci_stmt}{gk_stmt} local {vi},{vk}={sci},{sck}; {bc_scatter} ",
+            st = var_state, nxt = obf_s_protos,
+            ci_stmt = ci_stmt, gk_stmt = gk_stmt,
+            vi = v_sc_idx, vk = v_sc_kobf, sci = sc_index2, sck = sc_kobf,
+            bc_scatter = bc_scatter
+        );
+        let (p18, s1a, b1a, sv18, svf18, rr18, scan18, scan_flag18, scan_mode_snapshot, thk18) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let body_protos = format!(
             "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); {md18}={c}.{pf_protos}; {np18}={n}; \
-             if not {pj}[({pkx1})] then while {i} < {n} do {i} = {i} + 1; \
+             while {i} < {n} do {i} = {i} + 1; \
                local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan_mode_snapshot}={scan_mode}; {scan_mode}=true; local {scan}={dc}(); {scan_mode}={scan_mode_snapshot}; {flg}={scan_flag}; {scan}=nil; \
-               {c}.{pf_protos}[{i}]=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
+               local {thk}=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
                  {a2}={p0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
-                 {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end; {md18}={c}.{pf_protos}; {np18}={n}; \
-               end else {i}={n}; {n}=0X0; end; ",
+                 {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end; \
+               if ({i}%0X2)==0X0 then {c}.{pf_protos}[{i}+({i}%0X2)]={thk} else {c}.{pf_protos}[{i}+(({i}%0X2)-0X1)]={thk} end; \
+               {md18}={c}.{pf_protos}; {np18}={n}; \
+             end; ",
             st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
-            dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, pj = pj_name, pkx1 = pkx1,
+            dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, thk = thk18,
             md18 = md21, np18 = np21, a2 = var_a2, flg = var_state_flag,
             scan_mode = var_scan_only, scan_mode_snapshot = scan_mode_snapshot,
             p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18,
             rr = rr18, scan = scan18, scan_flag = scan_flag18,
             tree9 = it9(&mut rng, var_state.as_str())
         );
-        // ③ 移除整程序校验和 Oracle：头部盐 pf_n 已静默混入 R 链与逐常量 fold 链，
-        // debug 态抹除 pf_n 并仅做运行期对象地址熵探针，不提供任何载荷等式判据。
         let (go, gb, ga, gx, gs, gh, gi, co, cm) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(),
              rng.name(), rng.name());
@@ -320,25 +261,27 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let (v_va_pc, v_va_ts, v_va_sb, v_va_tnum) = (
             vault.global("pcall"), vault.global("tostring"),
             vault.member("string", "byte"), vault.lit("number"));
-        let verify_agg = format!(
-            "{c}.{pn}=({{}})[0X{wk:X}];local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sby}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}={pc}(function() local {ga},{gx}={{}},{{}};return {ts}({ga})=={ts}({gx}) or {nt}(#{ts}({ga}))~={tnum} end);{psn}={psn} or (not {co} or {cm}) end;",
+        let dbg_params: [&str; 3] = [&fn_c, &kreg_n, &native_type];
+        let dbg_body = format!(
+            "{c}.{pn}=({{}})[0X{wk:X}];local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sby}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then local {co},{cm}={pc}(function() local {ga},{gx}={{}},{{}};return {ts}({ga})=={ts}({gx}) or {nt}(#{ts}({ga}))~={tnum} end);return (not {co} or {cm}) end;return false",
             c = fn_c, pn = pf_n, wk = wipe_k,
             go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi, seed = gate_seed,
             co = co, cm = cm, nt = native_type,
-            pc = v_va_pc, ts = v_va_ts, sby = v_va_sb, tnum = v_va_tnum,
-            psn = psn_pool[rng.range(0, psn_pool.len())].as_str()
+            pc = v_va_pc, ts = v_va_ts, sby = v_va_sb, tnum = v_va_tnum
         );
-        let dbg_locals: Vec<String> = (0..9).map(|_| rng.name()).collect();
+        let m_dbg = shell.add(&mut rng, &dbg_params, dbg_body);
+        let dbg_psn = psn_pool[rng.range(0, psn_pool.len())].clone();
         let body_debug = format!(
-            "{st}={nxt}; {tree9} repeat local {locals}; {verify} break; until false; ",
-            st = var_state, nxt = obf_s_ret, locals = dbg_locals.join(","),
-            verify = verify_agg, tree9 = it9(&mut rng, var_state.as_str())
+            "{st}={nxt}; {tree9} if {call} then {psn}=true end; ",
+            st = var_state, nxt = obf_s_ret,
+            call = shell.call(&m_dbg, &dbg_params),
+            psn = dbg_psn,
+            tree9 = it9(&mut rng, var_state.as_str())
         );
-        // ⑦ while true 壳 + ⑭ return nil 兜底（ret 态跑完显式出）
-        // ⑦ while true 壳 + ⑭ return nil 兜底（藏在恒假守卫内，真死代码）
-        let r14 = rng.name();
-        let body_ret = format!("while true do if not(not {pj}[({pkx1})]) then {g}={g}+1; else {out}={c}; {g}={g}+1; end; local {r14}=nil; if {r14} then return nil end; break; end; ",
-            out = v_ch_out, c = fn_c, g = v_ch_g, pj = pj_name, pkx1 = pkx1, r14 = r14);
+        let body_ret = format!(
+            "if ({c}.{plld}%0X2)==0X0 then {out}={c}; {g}={g}+0X1+({c}.{plld}%0X2) else {out}={c}; {g}={g}+({c}.{plld}%0X2) end; ",
+            out = v_ch_out, c = fn_c, plld = pf_lld, g = v_ch_g
+        );
 
         // ⑳ 行信息探针仅作兼容性检查：宿主错误栈格式/行号不同或不可用时必须 fail-open，
         // 不得把正常 Lua 运行环境判成篡改。采样位来自对象地址，不消费 math.random。
@@ -376,16 +319,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let needle = format!("{s}({c})..(0X2)..{s}({c})", s = sc, c = c58);
             let pb = probe_body(rng);
             let (ts, tolerant) = trig_stmt(rng, &p_u);
-            // 若宿主没有预期行号信息则 fail-open；填充语句及探针仍按产物随机化。
-            let (f1, f2) = (rng.name(), rng.name());
-            let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}={nt}({u}); ",
-                u = p_u, h = p_hit, tol = tolerant, f1 = f1, nt = native_type);
-            // ㉓ 填充语型别串与 string.find：壳内守卫走 NameVault(UniStream) 预解槽；
-            // fu 内守卫（inline）用 string.char 数字拼装自足表达，二者都零明文字面量、零 :find 冒号调用。
+            let (f1, f2, f3) = (rng.name(), rng.name(), rng.name());
+            let mut ht_body = format!("local {u}={h} and {tol} or nil; local {f1}={nt}({u}); local {f3}=0X1; ",
+                u = p_u, h = p_hit, tol = tolerant, f1 = f1, nt = native_type, f3 = f3);
             let (xh_pre, jf_expr, js_expr, sf_expr) = if inline {
-                // ㉓.4 fu 守卫型别串：字节先与随机掩码异或落为密文数字，运行期用
-                // 自带算术 XOR（不依赖 bit32/bit，Lua 5.1 与 Luau 通吃）还原——
-                // ASCII 明文数字消失，string.char 只做字节→字符拼装。
                 let mask = rng.range(1, 256) as u8;
                 let (xh, mv) = (rng.name(), rng.name());
                 let (pa, pb, pr, pw, pv, pda, pdb) = (rng.name(), rng.name(), rng.name(),
@@ -404,27 +341,26 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                         .join(",");
                     format!("string.char({})", args)
                 };
-                let jf = xstr(&[102, 117, 110, 99, 116, 105, 111, 110]); // "function"
-                let js = xstr(&[115, 116, 114, 105, 110, 103]); // "string"
-                let sfind = format!("string[{}]", xstr(&[102, 105, 110, 100])); // string["find"]
+                let jf = xstr(&[102, 117, 110, 99, 116, 105, 111, 110]);
+                let js = xstr(&[115, 116, 114, 105, 110, 103]);
+                let sfind = format!("string[{}]", xstr(&[102, 105, 110, 100]));
                 (pre, jf, js, sfind)
             } else {
                 (String::new(), v_lg_sfun.clone(), v_lg_sstr.clone(), v_lg_sf.clone())
             };
             let mut hopts = vec![
-                format!("if {u}~={u} then {u}={u} end; ", u = p_u),
-                format!("if {f1}=={jf_expr} then {u}={u} end; ", f1 = f1, jf_expr = jf_expr, u = p_u),
-                format!("if {f1}=={js_expr} and #{u}>0X0 then {u}={u} end; ", f1 = f1, js_expr = js_expr, u = p_u),
-                format!("for {f2}=0X1,0X{} do if {u} then break end end; ", rng.range(2, 6), f2 = f2, u = p_u),
-                format!("local {f2}=({u})and 0X1 or 0X0; ", f2 = f2, u = p_u),
+                format!("if {f1}=={jf_expr} then {f3}=({f3}*0X3+0X1)%0X7F else {f3}=({f3}*0X5+0X3)%0X7F end; ", f1 = f1, jf_expr = jf_expr, f3 = f3),
+                format!("if {f1}=={js_expr} and #{u}>0X0 then {f3}=({f3}+#{u})%0X7F else {f3}=({f3}*0X7+0X2)%0X7F end; ", f1 = f1, js_expr = js_expr, u = p_u, f3 = f3),
+                format!("for {f2}=0X1,0X{} do if {u} then {f3}=({f3}+{f2})%0X7F break else {f3}=({f3}*0X2+0X1)%0X7F end end; ", rng.range(2, 6), f2 = f2, u = p_u, f3 = f3),
+                format!("local {f2}=({u})and ({f3}+0X1) or ({f3}+0X2); {f3}={f2}%0X7F; ", f2 = f2, u = p_u, f3 = f3),
             ];
             rng.shuffle(&mut hopts);
             let hn = 1 + rng.range(0, 2);
             for i in 0..hn { ht_body.push_str(&hopts[i]); }
             if rng.range(0, 2) == 0 {
-                ht_body.push_str(&format!("if not {u} then {u}={u} else {ts} end; ", u = p_u, ts = ts));
+                ht_body.push_str(&format!("if not {u} then {f3}=({f3}*0X3+0X5)%0X7F else {ts} end; ", u = p_u, f3 = f3, ts = ts));
             } else {
-                ht_body.push_str(&format!("if not {u} then {u}={u} end; if {u} then {ts} end; ", u = p_u, ts = ts));
+                ht_body.push_str(&format!("if {u} then {ts} else {f3}=({f3}*0X5+0X7)%0X7F end; ", u = p_u, f3 = f3, ts = ts));
             }
             let mut ms = vec![
                 format!("{t}.{drv}=function({s})local {o},{e}={s}:{pc}() {s}:{ht}({s}:{ck}({e}))end; ",
@@ -454,20 +390,24 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             let (go, gb, ga, gx, gs, gh, gi) =
                 (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
             let gate_seed = rng.range(0x1000, 0x7FFF_FF00);
-            // inline=true 落在兄弟方法 fu 体内：fu 在 wai 之前执行，不在 wai 词法作用域内，
-            // NB 尚未建表——该处直接走 {body}（内部 pcall/string.char 已用环境或自足拼装）；
-            // wai 壳内（inline=false）照旧走 NB 槽采样门。
             if inline {
                 format!("do {} end;", body)
             } else {
                 format!(
-                    "do local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sb}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then {body} end end;",
+                    "local {go},{gb}={pc}(function() local {ga},{gx}={{}},{{}};local {gs}={ts}({ga})..{ts}({gx});local {gh}=0X{seed:X};for {gi}=1,#{gs} do {gh}=({gh}*0X21+{sb}({gs},{gi}))%0X7FFFFF01 end;return {gh}%0X2 end);if {go} and {gb}==0X0 then {body} end",
                     go = go, gb = gb, ga = ga, gx = gx, gs = gs, gh = gh, gi = gi,
                     pc = v_lg_pc, ts = v_lg_ts, sb = v_lg_sb,
                     seed = gate_seed, body = body
                 )
             }
         };
+        let lg_params: [&str; 2] = [&kreg_n, &native_type];
+        let lg_b0 = line_guard(&mut rng, &mut uni, false);
+        let lg_b1 = line_guard(&mut rng, &mut uni, false);
+        let m_lg0 = shell.add(&mut rng, &lg_params, lg_b0);
+        let m_lg1 = shell.add(&mut rng, &lg_params, lg_b1);
+        let lg_call0 = format!("{}; ", shell.call(&m_lg0, &lg_params));
+        let lg_call1 = format!("{}; ", shell.call(&m_lg1, &lg_params));
         let mut ch_pairs: Vec<(String, String)> = vec![
             (obf_s_init.clone(), body_init),
             (obf_s_insts.clone(), body_insts),
@@ -521,6 +461,28 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
 
         let v_mm_idx = vault.lit("__index");
         let block_execute_def = block_execute_def.replace("{__index=", &format!("{{[{}]=", v_mm_idx));
+        let (rkey_stmt, block_execute_def) = if let Some((hdr_and_body, rest)) = block_execute_def.split_once("@RKEY@") {
+            let (body, after_rkey) = rest.split_once("@RKEY@").expect("second @RKEY@");
+            let hdr_items: Vec<&str> = hdr_and_body.split(',').map(|s| s.trim()).collect();
+            let fn_rkey_name = hdr_items[0];
+            let rkey_params: Vec<&str> = hdr_items[1..].to_vec();
+            let rk_var = rkey_params[1];
+            let kr_var = rkey_params[2];
+            let call_params: Vec<&str> = rkey_params[13..].to_vec();
+            let m_rkey = shell.add(&mut rng, &rkey_params, body.to_string());
+            let (rn1, rn2, rn3) = (rng.name(), rng.name(), rng.name());
+            let stmt = format!(
+                "local {fn_rkey}=function({cargs}) local {rn1},{rn2},{rn3}; {rk},{kr},{rn1},{rn2},{rn3}={call}; return {rn1},{rn2},{rn3} end; ",
+                fn_rkey = fn_rkey_name,
+                cargs = call_params.join(","),
+                rn1 = rn1, rn2 = rn2, rn3 = rn3,
+                rk = rk_var, kr = kr_var,
+                call = shell.call(&m_rkey, &rkey_params),
+            );
+            (stmt, after_rkey.to_string())
+        } else {
+            (String::new(), block_execute_def)
+        };
         let exec_marker = format!("{} = function(", fn_execute);
         let block_execute_def = if let Some(pos) = block_execute_def.find(&exec_marker) {
             let prefix = &block_execute_def[..pos];
@@ -538,13 +500,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 format!("{} return {}", prefix, dc_var),
             );
             format!(
-                "local {}={}; {}",
+                "{}local {}={}; {}",
+                rkey_stmt,
                 dc_var,
                 shell.call(&m_dc, &[&fn_bxor2, &kreg_n]),
                 rest
             )
         } else {
-            block_execute_def
+            format!("{}{}", rkey_stmt, block_execute_def)
         };
 
         let mut parts = vec![
@@ -613,17 +576,18 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         }
 
         {
-            let lg20 = line_guard(&mut rng, &mut uni, false);
             let gap20 = rng.range(0, parts.len() + 1);
-            parts.insert(gap20, lg20);
+            parts.insert(gap20, lg_call0.clone());
         }
 
         let mut shuffled_guards = at.guards.clone();
         rng.shuffle(&mut shuffled_guards);
-
-        for guard in shuffled_guards {
+        let [at_env, at_dec, at_res, at_net, at_state, at_st, at_tw] = at.exports.clone();
+        {
+            let atg_params: [&str; 8] = [&kreg_n, &at_env, &at_dec, &at_res, &at_net, &at_state, &at_st, &at_tw];
+            let m_atg = shell.add(&mut rng, &atg_params, shuffled_guards.join(" "));
             let gap_idx = rng.range(0, parts.len() + 1);
-            parts.insert(gap_idx, guard);
+            parts.insert(gap_idx, format!("{}; ", shell.call(&m_atg, &atg_params)));
         }
 
         let mut wai_body = String::new();
@@ -711,7 +675,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             ));
         }
         wai_body.push_str(&weld.declare());
-        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
+        wai_body.push_str(&lg_call1);
         // ④ 槽位键的运行期推导游标机拆入外层兄弟方法 m_sk，wai 内用 do...end 解包 28 个键。
         {
             let (sk_walk_part, sk_bind_part) = sk_setup
@@ -745,7 +709,6 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         }
         // AntiTamper 初始化拆入外层兄弟方法 m_at。
         at.finish_setup();
-        let [at_env, at_dec, at_res, at_net, at_state, at_st] = at.exports.clone();
         {
             let at_psn_fn = rng.name();
             let at_setup_body = at.setup.replace(
@@ -756,13 +719,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 &mut rng,
                 &[&kreg_n, &at_psn_fn],
                 format!(
-                    "{} return {},{},{},{},{},{}",
-                    at_setup_body, at_env, at_dec, at_res, at_net, at_state, at_st
+                    "{} return {},{},{},{},{},{},{}",
+                    at_setup_body, at_env, at_dec, at_res, at_net, at_state, at_st, at_tw
                 ),
             );
             wai_body.push_str(&format!(
-                "local {},{},{},{},{},{}={}:{}({},function() {}=true end); ",
-                at_env, at_dec, at_res, at_net, at_state, at_st,
+                "local {},{},{},{},{},{},{}={}:{}({},function() {}=true end); ",
+                at_env, at_dec, at_res, at_net, at_state, at_st, at_tw,
                 shell.self_var, m_at, kreg_n, at.poison_var
             ));
         }
@@ -786,7 +749,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             wai_body.push_str(" ");
         }
 
-        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
+        wai_body.push_str(&lg_call0);
         wai_body.push_str(&format!(
             "{}={{}}; local main_chunk=(function() return {}() end)(); ",
             var_builtin_reg, fn_decode_chunk
@@ -823,8 +786,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             ));
         }
         let fu = rng.name();
-        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
-        wai_body.push_str(&line_guard(&mut rng, &mut uni, false));
+        wai_body.push_str(&lg_call1);
+        wai_body.push_str(&lg_call0);
         wai_body.push_str(&format!(
             "return {}(main_chunk, {}, {{}}, nil, nil, {})",
             fn_execute, var_boot_env, var_l
