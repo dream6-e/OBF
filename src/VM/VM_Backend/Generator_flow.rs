@@ -489,9 +489,11 @@ pub fn build_consts(
                 // V0/V1 = 表调用制（调用点 ld[(t)]/dsp[(ev[1])]）；V2/V3 = 函数制。
                 let ctv = rng.range(0, 4);
                 let table_regime = ctv < 2;
-                // ③ 链式静默耦合：agg 从头部三字段初值起步，逐常量混入本槽 fold 解密键，
-                // 并以 vmac 推进下一槽——不再挂 chunk 字段或做 debug 态等式裁定。
+                // ③ 常量真链式（明文反馈入链 + 按单元派生独立常量密钥 pck）：
+                // agg 与 pck 从头部及整原型指令流终态 rf 起步，逐常量混入 (fd, rl) 解密键，
+                // 并对解密还原后的**真实明文**（字符串明文或 IEEE-754 8 字节明文）算 vmac 推进下一槽。
                 let agg_name = rng.name();
+                let pck_name = rng.name();
                 let (sl3, tk3, fd3, rl3) = (rng.name(), rng.name(), rng.name(), rng.name());
                 let (sl2, tk2, fd2, rl2) = (rng.name(), rng.name(), rng.name(), rng.name());
                 let (sl1, tk1, fd1, rl1) = (rng.name(), rng.name(), rng.name(), rng.name());
@@ -506,22 +508,25 @@ pub fn build_consts(
                 let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%{m32})", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s, m32 = m32);
                 let (bn2, bj2) = (rng.name(), rng.name());
                 let (bn1, bj1) = (rng.name(), rng.name());
-                // ③ 逐常量异构旋转 A=rotl(Ftbl[slot],kf)、R=rotl(Rtbl[slot],kr) 并混入 agg（与写侧 const_mac18 同式）
-                let (tk3a, fd3a, rl3a) = (rng.name(), rng.name(), rng.name());
-                let (tk2a, fd2a, rl2a) = (rng.name(), rng.name(), rng.name());
-                let (tk1a, fd1a, rl1a) = (rng.name(), rng.name(), rng.name());
-                let mac_acc = |blob: &str, tkn: &str, fdn: &str, rln: &str| -> String {
-                    format!("local {tk}=((pos-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; local {fd}={rot}(({ft} and {ft}[{tk}] or 0X0)%{m32},(((pos-0X1)*0X{fk2:X}+({c}.{pn}%0X1D))%0X1D)+0X1); local {rl}={rot}(({rt} and {rt}[{tk}] or {rf}),(((pos-0X1)*0X{fk3:X}+({c}.{pld}%0X1D))%0X1D)+0X1); if {ft} then {ft}[{tk}]={bx}({fd},{agg}) end; if {rt} then {rt}[{tk}]={rl} end; {agg}=({agg}*0X1F+{vm}({blob},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
+                // ③ 逐常量异构旋转 A=rotl(Ftbl[slot],kf)、R=rotl(Rtbl[slot],kr)，混入 agg 与 pck 后现场还原明文并推进 agg
+                let (tk3a, fd3a, rl3a, ps3a) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let (tk2a, fd2a, rl2a, pb2a) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let (tk1a, fd1a, rl1a, pb1a) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let mac_acc = |dec_stmt: &str, plain: &str, tkn: &str, fdn: &str, rln: &str| -> String {
+                    format!("local {tk}=((pos-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; local {fd}={rot}(({ft} and {ft}[{tk}] or 0X0)%{m32},(((pos-0X1)*0X{fk2:X}+({c}.{pn}%0X1D))%0X1D)+0X1); local {rl}={rot}(({rt} and {rt}[{tk}] or {rf}),(((pos-0X1)*0X{fk3:X}+({c}.{pld}%0X1D))%0X1D)+0X1); {fd}={bx}({fd},{bx}({agg},{rot}({pck},(((pos-0X1)%0X11)+0X1)))); {rl}={bx}({rl},{bx}({rot}({agg},0XB),{rot}({pck},(((pos-0X1)%0X13)+0X1)))); if {ft} then {ft}[{tk}]={fd} end; if {rt} then {rt}[{tk}]={rl} end; {dec} {agg}=({agg}*0X1F+{vm}({plain},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
                         tk = tkn, fd = fdn, rl = rln, ft = ftds, rt = rtds, rf = rfds, vm = vm,
-                        agg = agg_name, m32 = m32, blob = blob, bx = fn_bxor, rot = fn_rotl,
+                        agg = agg_name, pck = pck_name, m32 = m32, dec = dec_stmt, plain = plain, bx = fn_bxor, rot = fn_rotl,
                         c = fn_c, pn = pf_n_key, pld = pf_ld_key, em = fc.emul, ea = fc.eadd, fk2 = fc.fk2, fk3 = fc.fk3)
                 };
+                let dec3 = format!("local {ps}={fds}(bl,(pos-0X1),{fd},{rl},0X0,0X0);", ps = ps3a, fds = fds, fd = fd3a, rl = rl3a);
+                let dec2 = format!("local _,{pb}={fdn}({bn},(pos-0X1),{fd},{rl},0X0,0X0);", pb = pb2a, fdn = fdn, bn = bn2, fd = fd2a, rl = rl2a);
+                let dec1 = format!("local _,{pb}={fdn}({bn},(pos-0X1),{fd},{rl},0X0,0X0);", pb = pb1a, fdn = fdn, bn = bn1, fd = fd1a, rl = rl1a);
                 let ld_body3 = format!("local bl={rs}() {acc} {ec}[{tk}]={{{tvm3},bl,(pos-0X1+{c}.{pld})%{m32}}}",
-                    rs = fn_read_string, acc = mac_acc("bl", &tk3a, &fd3a, &rl3a), ec = var_enc_c, tk = tk3a, tvm3 = tag_map[3] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
+                    rs = fn_read_string, acc = mac_acc(&dec3, ps3a.as_str(), &tk3a, &fd3a, &rl3a), ec = var_enc_c, tk = tk3a, tvm3 = tag_map[3] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
                 let ld_body2 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm2},{bn},(pos-0X1+{c}.{pld})%{m32}}}",
-                    bn = bn2, bj = bj2, rd = fn_read_dec, acc = mac_acc(bn2.as_str(), &tk2a, &fd2a, &rl2a), ec = var_enc_c, tk = tk2a, tvm2 = tag_map[2] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
+                    bn = bn2, bj = bj2, rd = fn_read_dec, acc = mac_acc(&dec2, pb2a.as_str(), &tk2a, &fd2a, &rl2a), ec = var_enc_c, tk = tk2a, tvm2 = tag_map[2] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
                 let ld_body1 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm1},{bn},(pos-0X1+{c}.{pld})%{m32}}}",
-                    bn = bn1, bj = bj1, rd = fn_read_dec, acc = mac_acc(bn1.as_str(), &tk1a, &fd1a, &rl1a), ec = var_enc_c, tk = tk1a, tvm1 = tag_map[1] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
+                    bn = bn1, bj = bj1, rd = fn_read_dec, acc = mac_acc(&dec1, pb1a.as_str(), &tk1a, &fd1a, &rl1a), ec = var_enc_c, tk = tk1a, tvm1 = tag_map[1] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
                 let ld_body0 = format!("{agg}=({agg}*0X1F+((pos-0X1)*0X{em:X})%{m32}+0X7)%{m32}; ",
                     agg = agg_name, em = fc.emul, m32 = m32);
                 let ld_bodydd = format!("{ec}[(pos)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}}",
@@ -638,10 +643,10 @@ pub fn build_consts(
                     bx = fn_bxor, rot = fn_rotl, m32 = m32);
                 let m_cmac = shell.add(rng, &cmac_params, cmac_body);
                 let mut lua = format!(
-                    "local {m32}={m32v}; local {agg}=0X0; local {ft},{rt},{rf}; local {wctr}=0X0; \
+                    "local {m32}={m32v}; local {agg},{pck}=0X0,0X0; local {ft},{rt},{rf}; local {wctr}=0X0; \
                      local {ecb},{cab},{ec},{ca},{pfn},{vm},{w2_},{w3_},{w4_}={cmac_call}; \
                      local {g}={rd}(); local {fds},{fdn}={ss},{sn}; ",
-                    m32 = m32, m32v = m32v, agg = agg_name,
+                    m32 = m32, m32v = m32v, agg = agg_name, pck = pck_name,
                     ft = ftds, rt = rtds, rf = rfds, wctr = wctr,
                     ecb = ecb_n, cab = cab_n, ec = var_enc_c, ca = var_cache, pfn = pfn_n, vm = vm,
                     w2_ = w2v, w3_ = w3v, w4_ = w4v, cmac_call = shell.call(&m_cmac, &cmac_params),
@@ -728,10 +733,11 @@ pub fn build_consts(
                     kreg_n, fn_c, gname.as_str(), m32.as_str(), fn_bxor, fn_rotl,
                 ];
                 let cscan_body = format!(
-                    "local {ft},{rt}={{}},{{}}; local {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*0X{f1:X})%{m32},0X{f2:X})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if {bv}>127 then if (({bx}({rot}({ob},0X{rb:X}),0X{pb1:X}))%0X64)<0X{pb3:X} then local {sk}={bv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; if {cv}>127 then if (({bx}({rot}({ob},0X{rc:X}),0X{pc1:X}))%0X64)<0X{pc3:X} then local {sk}={cv}-128; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*0X{fk1:X}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end end; {rf}={rr}; return {ft},{rt},{rf}",
+                    "local {ft},{rt}={{}},{{}}; local {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {f1p}={bx}(0X{f1:X},(({c}.{pn}%0X10000)*0X2)+0X1); local {f2p}={bx}(0X{f2:X},{bx}({c}.{pld},{rot}({c}.{plld},0X9))); local {pb1p}={bx}(0X{pb1:X},{rot}({c}.{pn},0X3)); local {pc1p}={bx}(0X{pc1:X},{rot}({c}.{pld},0X5)); local {fk1p}=((0X{fk1:X}+({c}.{pn}%0XF)*0X2)%0X1E)+0X1; local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*{f1p})%{m32},{f2p})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if (({bx}({rot}({ob},0X{rb:X}),{pb1p}))%0X64)<0X{pb3:X} then local {sk}={bv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end; if (({bx}({rot}({ob},0X{rc:X}),{pc1p}))%0X64)<0X{pc3:X} then local {sk}={cv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; {rf}={rr}; return {ft},{rt},{rf}",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
                     av = rng.name(), ob = rng.name(), bv = rng.name(),
                     cv = rng.name(), fp = rng.name(), sk = rng.name(), tk = tk_scan,
+                    f1p = rng.name(), f2p = rng.name(), pb1p = rng.name(), pc1p = rng.name(), fk1p = rng.name(),
                     c = fn_c, pfo = pf_opcodes, pfa = pf_a_arr, pfb = pf_b_arr, pfc = pf_c_arr,
                     bx = fn_bxor, rot = fn_rotl, ft = ftds, rt = rtds, rf = rfds, sal = sal_sel,
                     rs = deep10(rng, fn_bxor, fc.rs18 as i64),
@@ -763,16 +769,17 @@ pub fn build_consts(
                         ld = ld_name, t = t, psl = psl)
                 };
                 lua.push_str(&format!(
-                    "{agg}={bx}({c}.{pn},{bx}({c}.{pld},{rot}({c}.{plld},0X7))); \
+                    "{pck}={bx}({bx}({c}.{pn},{rot}({c}.{pld},0XB)),{bx}({rot}({c}.{plld},0X13),{rot}({rf},0X5))); \
+                     {agg}={bx}({bx}({c}.{pn},{c}.{pld}),{bx}({rot}({c}.{plld},0X7),{rot}({rf},0XD))); \
                      local {i}=0; local {n}={a5}(); \
                      while {i}<{n} do {i}={i}+1; local {t}={rd}(); local {psl}; \
                      if ({i}%0X2)==0X0 then {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+0X1+({i}%0X2) \
                      else {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+({i}%0X2) end; \
                      {rdl}",
-                    agg = agg_name, bx = fn_bxor, c = fn_c, pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, rot = fn_rotl,
+                    pck = pck_name, agg = agg_name, bx = fn_bxor, c = fn_c, pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, rf = rfds, rot = fn_rotl,
                     i = v_ch_i, n = v_ch_n, a5 = fn_a5,
                     t = t, rd = fn_read_dec, psl = psl, em = fc.emul, m32 = m32, rdl = rdl));
-                lua.push_str(&format!("{agg}=0X0; ", agg = agg_name));
+                lua.push_str(&format!("{agg}=0X0; {pck}=0X0; ", agg = agg_name, pck = pck_name));
                 lua
 }
 
@@ -856,7 +863,7 @@ pub fn build_decnum(
         seed = mask_seed, path = path, count = count, pm = pm, cm = cm, sm = sm, salt = salt,
         bytes = mask_bytes, i = mask_i, bx = fn_bxor, stride = stride);
     let unmask = format!(
-        "local {acc}=((({kn}%0X100)+(pool_idx or 0X0)*0X{smul:X}+(R_fd%0X100)+(R_rl%0X100))%0X100); local {bbo}={bx}({sl},pool_idx or 0X0)%0X100; for {i}=0X1,#{plv} do local {raw}={bx}({plv}[{i}],({seed}+{i}*0X{stride:X})%0X100); {plv}[{i}]={sbt}[({raw}+{acc}+{i}*0X{pmul:X})%0X100]; {acc}=({acc}*0X{cmul:X}+{raw}+0X{cadd:X})%0X100 end; ",
+        "local {acc}=((({kn}%0X100)+(pool_idx or 0X0)*0X{smul:X}+(R_fd%0X100)+(R_rl%0X100))%0X100); local {bbo}={bx}({bx}({sl},pool_idx or 0X0),{bx}(R_fd,R_rl))%0X100; for {i}=0X1,#{plv} do local {raw}={bx}({plv}[{i}],({seed}+{i}*0X{stride:X})%0X100); {plv}[{i}]={sbt}[({raw}+{acc}+{i}*0X{pmul:X})%0X100]; {acc}=({acc}*0X{cmul:X}+{raw}+0X{cadd:X})%0X100 end; ",
         acc = acc_v, kn = kind_num, smul = smul, bbo = bbo_v, bx = fn_bxor, sl = salt_var,
         i = mask_i, plv = plv, raw = raw_v, seed = mask_seed, stride = stride,
         sbt = sbt, pmul = pmul, cmul = cmul, cadd = cadd)
@@ -873,9 +880,9 @@ pub fn build_decnum(
              local {v_sign} = 1 - 2 * (({vb}[8] - ({vb}[8] % 128)) / 128); \
              local {v_exp} = ({vb}[8] % 128) * 8 * 2 + (({vb}[7] - ({vb}[7] % 16)) / 16); \
              local {v_mant} = {f64parts}; \
-             if {v_exp} == 2047 then return {v_mant} == 0 and {v_sign} * (1/0) or (0/0) \
-             elseif {v_exp} == 0 then return {v_sign} * {v_mant} * (2^(-1074)) \
-             else return {v_sign} * ({v_mant} + 2^52) * (2^({v_exp} - 1075)) end end; ",
+             if {v_exp} == 2047 then return {v_mant} == 0 and {v_sign} * (1/0) or (0/0), {vb} \
+             elseif {v_exp} == 0 then return {v_sign} * {v_mant} * (2^(-1074)), {vb} \
+             else return {v_sign} * ({v_mant} + 2^52) * (2^({v_exp} - 1075)), {vb} end end; ",
             i = v_num_i, g = v_num_g, plv = plv, pre = mask_pre, masked = mask_bytes,
             unmask = unmask, path = path, count = count, vbs = vb_step
         ),
@@ -886,9 +893,9 @@ pub fn build_decnum(
              while {i}>=0X1 do {v_mant}={v_mant}*0X100+{vb}[{i}]; {i}={i}-0X1 end; \
              local {v_sign}=(-1)^(({vb}[0X8]-{vb}[0X8]%0X80)/0X80); \
              local {v_exp}=({vb}[0X8]%0X80)*0X10+({vb}[0X7]-{vb}[0X7]%0X10)/0X10; \
-             if {v_exp}==0X7FF then if {v_mant}==0X0 then return {v_sign}*(1/0) end return 0/0 end; \
-             if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
-             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
+             if {v_exp}==0X7FF then if {v_mant}==0X0 then return {v_sign}*(1/0), {vb} end return 0/0, {vb} end; \
+             if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074), {vb} end; \
+             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075), {vb} end; ",
             i = v_num_i, vb = vb, plv = plv, pre = mask_pre, masked = mask_bytes,
             unmask = unmask, path = path, count = count, vbs = vb_step
         ),
@@ -903,9 +910,9 @@ pub fn build_decnum(
              for {i}=0X6,0X1,-0X1 do {v_mant}={v_mant}+{vb}[{i}]*{w}[0X7-{i}] end; \
              local {v_sign}=1-2*(({vb}[0X8]-{vb}[0X8]%0X80)/0X80); \
              local {v_exp}=({vb}[0X8]%0X80)*0X10+({vb}[0X7]-{vb}[0X7]%0X10)/0X10; \
-             if {v_exp}==0X7FF then return {v_mant}==0 and {v_sign}*(1/0) or (0/0) end; \
-             if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074) end; \
-             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
+             if {v_exp}==0X7FF then return {v_mant}==0 and {v_sign}*(1/0) or (0/0), {vb} end; \
+             if {v_exp}==0X0 then return {v_sign}*{v_mant}*2^(-1074), {vb} end; \
+             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075), {vb} end; ",
             i = v_num_i, vb = vb, plv = plv, w = w, pre = mask_pre, masked = mask_bytes,
             unmask = unmask, path = path, count = count, vbs = vb_step
             )
@@ -921,8 +928,8 @@ pub fn build_decnum(
              local {v_sign}=1-2*(({vb}[8]-{vb}[8]%0X80)/0X80); \
              local {v_exp}=({vb}[8]%0X80)*0X8; {v_exp}={v_exp}*0X2+({vb}[7]-{vb}[7]%0X10)/0X10; \
              local {sp}={{[0X7FF]=function() return ({v_mant}==0X0) and {v_sign}*(1/0) or (0/0) end,[0X0]=function() return {v_sign}*{v_mant}*2^(-1074) end}}; \
-             local {fx}={sp}[{v_exp}]; if {fx} then return {fx}() end; \
-             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075) end; ",
+             local {fx}={sp}[{v_exp}]; if {fx} then return {fx}(), {vb} end; \
+             return {v_sign}*({v_mant}+2^52)*2^({v_exp}-1075), {vb} end; ",
             i = v_num_i, vb = vb, plv = plv, sp = sp, fx = fx, pre = mask_pre, masked = mask_bytes,
             unmask = unmask, path = path, count = count, vbs = vb_step
             )

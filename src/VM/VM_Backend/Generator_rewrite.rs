@@ -426,12 +426,19 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let mut fused_dead: HashSet<usize> = HashSet::new();
     // #3 折叠扫描状态：pc18=已写出指令数（1-based，与 Lua 数组下标一致）；
     // fold_map[li] = Σ f(pc)（对判定为引用本常量槽的指令求和）
+    // 按单元（proto）派生独立的常量折叠参数，打破全文件共享同一套 fc18 的杠杆。
     let mut fold_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let mut pc18: u32 = 0;
-    let fc_f = |pc: u32| -> u32 { pc.wrapping_mul(fc18.f1) ^ fc18.f2 };
+    let f1_p: u32 = fc18.f1 ^ (((hn18 & 0xFFFF) * 2) + 1);
+    let f2_p: u32 = fc18.f2 ^ kp18 ^ pb18.rotate_left(9);
+    let p1b_p: u32 = fc18.p1b ^ hn18.rotate_left(3);
+    let p1c_p: u32 = fc18.p1c ^ kp18.rotate_left(5);
+    let fk1_p: u32 = ((fc18.fk1 + (hn18 % 15) * 2) % 30) + 1;
+    let fc_f = |pc: u32| -> u32 { pc.wrapping_mul(f1_p) ^ f2_p };
     // 谓词用 xor（32 位域同构，避免 Rust wrapping mod 2^32 与 Lua 直接 %100 不同余）
-    let fc_pb = |v: u32| -> bool { (v.rotate_left(fc18.r6b) ^ fc18.p1b) % 100 < fc18.p3b };
-    let fc_pc = |v: u32| -> bool { (v.rotate_left(fc18.r6c) ^ fc18.p1c) % 100 < fc18.p3c };
+    let fc_pb = |v: u32| -> bool { (v.rotate_left(fc18.r6b) ^ p1b_p) % 100 < fc18.p3b };
+    let fc_pc = |v: u32| -> bool { (v.rotate_left(fc18.r6c) ^ p1c_p) % 100 < fc18.p3c };
+    let fold_slot_key = |v: u32| -> u32 { if v > 127 { v - 128 } else { v } };
     // ㉓-A R 链（指令流滚动状态）：roll 初值=0x2545F491^盐；逐记录
     // r7=rotl7(roll)、roll=(r7^文件魔数)+文件A+(预掩码预交换 b/c 异或和) (mod 2^32)。
     // 读侧 body_consts 扫描同式重算（数组 b/c 经 dcb 已是明文=fb0/fc0，含死槽/builtin）。
@@ -560,11 +567,11 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         let r718 = roll18.rotate_left(7);
                         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
                         chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                        if fb0 > 127 && fc_pb(mag) {
-                            fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
+                        if fc_pb(mag) {
+                            fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p);
                         }
-                        if fc0 > 127 && fc_pc(mag) {
-                            fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
+                        if fc_pc(mag) {
+                            fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p);
                         }
                         fused_dead.extend(i + 1..=i + 3);
                         i += 1;
@@ -631,8 +638,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         let r718 = roll18.rotate_left(7);
                         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
                         chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                        if fb0 > 127 && fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
-                        if fc0 > 127 && fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
+                        if fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
+                        if fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
                         fused_dead.insert(i + 1);
                         i += 1; // 被融合的那条 CALL 照常写出，成为永不执行的死槽
                         continue;
@@ -700,8 +707,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                                     let r718 = roll18.rotate_left(7);
                                     roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
                                     chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                                    if fb0 > 127 && fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
-                                    if fc0 > 127 && fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
+                                    if fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
+                                    if fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
                                     // 冻结到比较 JMP 之后；比较记录本体作为死槽照常写出
                                     freeze_until = (j + 2).max(freeze_until);
                                     fused_dead.insert(j);
@@ -773,8 +780,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let r718 = roll18.rotate_left(7);
         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
         chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-        if fb0 > 127 && fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
-        if fc0 > 127 && fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1); }
+        if fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
+        if fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
         i += 1;
     }
 
@@ -828,11 +835,11 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             let r718 = roll18.rotate_left(7);
             roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
             chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-            if fb0 > 127 && fc_pb(mag) {
-                fold_step(&mut fold_map, &mut roll_map, fb0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
+            if fc_pb(mag) {
+                fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p);
             }
-            if fc0 > 127 && fc_pc(mag) {
-                fold_step(&mut fold_map, &mut roll_map, fc0 - 128, pc18, fc_f(pc18), roll18, fc18.fk1);
+            if fc_pc(mag) {
+                fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p);
             }
         }
     }
@@ -846,9 +853,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let j = rng.random_range(0..=idx);
         emit_order.swap(idx, j);
     }
-    // ③ 链式静默耦合：agg18 从头部 (hn18 ^ kp18 ^ rotl7(pb18)) 起步，逐个常量加密逻辑槽号
-    // 并混入本槽 fold 解密键，以 const_mac18 推进，不回填校验和、不留二值比对 Oracle。
-    let mut agg18: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7);
+    // ③ 常量真链式（明文反馈入链 + 按单元派生独立常量密钥 p_ckey）：
+    // agg18 从头部与整原型指令流终态 roll18 起步，逐个常量加密逻辑槽号并混入本槽 (fold, rl18) 解密键，
+    // 且以解密还原后的**真实明文字节**（字符串明文字节或 IEEE-754 8 字节明文）计算 const_mac18 推进 agg18。
+    // 前序常量未跑完 ChaCha + S-Box 还原出明文，后续常量的槽号与 ChaCha/S-Box 密钥均无法求出。
+    let p_ckey: u32 = hn18 ^ kp18.rotate_left(11) ^ pb18.rotate_left(19) ^ roll18.rotate_left(5);
+    let mut agg18: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7) ^ roll18.rotate_left(13);
     for (phys_idx, &slot) in emit_order.iter().enumerate() {
         let pos18 = (phys_idx as u32) + 1;
         let slot_mask = agg18
@@ -874,10 +884,11 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 let raw_fold = fold_map.get(&slot).copied().unwrap_or(0u32);
                 let kf = ((slot.wrapping_mul(fc18.fk2).wrapping_add(hn18 % 29)) % 29) + 1;
                 let fold0 = raw_fold.rotate_left(kf);
-                let fold = fold0 ^ agg18;
                 let raw_roll = roll_map.get(&slot).copied().unwrap_or(roll18);
                 let kr = ((slot.wrapping_mul(fc18.fk3).wrapping_add(kp18 % 29)) % 29) + 1;
-                let rl18 = raw_roll.rotate_left(kr);
+                let rl0 = raw_roll.rotate_left(kr);
+                let fold = fold0 ^ agg18 ^ p_ckey.rotate_left((slot % 17) + 1);
+                let rl18 = rl0 ^ agg18.rotate_left(11) ^ p_ckey.rotate_left((slot % 19) + 1);
                 let r7l18 = rl18.rotate_left(7);
                 let sl_low = enc.salts[group] & 0xFFFF;
                 let kind = if c_type == 3 {
@@ -892,10 +903,11 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     enc.knum[group].wrapping_add(sl_low * 11 + 0x4D)
                 };
                 let s118 = enc.salts[group] ^ rl18 ^ fold;
-                let s218 = r7l18 ^ slot.wrapping_mul(6).wrapping_add(kind);
-                let s318 = enc.salts[group] ^ r7l18.rotate_left(7);
-                let raw_plain: Vec<u8> = if c_type == 3 {
-                    bytes.to_vec()
+                let s218 = r7l18 ^ slot.wrapping_mul(6).wrapping_add(kind) ^ fold.rotate_left(13);
+                let s318 = enc.salts[group] ^ r7l18.rotate_left(7) ^ fold.rotate_left(5);
+                let (plain_for_mac, raw_plain): (Vec<u8>, Vec<u8>) = if c_type == 3 {
+                    let v = bytes.to_vec();
+                    (v.clone(), v)
                 } else {
                     let f64_bytes: [u8; 8] = if c_type == 1 {
                         // 消除 1.0/0.0 全零尾数特征：按正负号编码 true/false，8 字节全部非零
@@ -910,14 +922,15 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     } else {
                         bytes[0..8].try_into().unwrap()
                     };
-                    let bboff = (enc.salts[group] ^ slot) & 0xFF;
-                    (0..8)
+                    let bboff = (enc.salts[group] ^ slot ^ fold ^ rl18) & 0xFF;
+                    let rp: Vec<u8> = (0..8)
                         .map(|j| {
                             let b0 = f64_bytes[enc.num_bperm[group][j]] as u32;
                             let i = (j as u32) + 1;
                             ((b0 + bboff + i * enc.num_bbstep[group]) & 0xFF) as u8
                         })
-                        .collect()
+                        .collect();
+                    (f64_bytes.to_vec(), rp)
                 };
                 // 消灭可打印性锚点：进入 ChaCha 之前先过每簇 KDF 驱动的逆 S-Box 与级联反馈白化，
                 // 使 ChaCha 密文对应的中间字节流均匀分布在 0..255 全域，无 ASCII/UTF-8 可打印偏置。
@@ -947,7 +960,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 w.push(tag_map[c_type as usize]);
                 w.extend_from_slice(&enc_slot.to_le_bytes());
                 if c_type == 3 { write_string(w, &blob); } else { w.extend_from_slice(&blob); }
-                let mac18 = const_mac18(&blob, slot, fold0, rl18, fc18);
+                let mac18 = const_mac18(&plain_for_mac, slot, fold, rl18, fc18);
                 agg18 = agg18.wrapping_mul(31).wrapping_add(mac18).wrapping_add(1);
             }
             _ => panic!(),
@@ -1268,6 +1281,35 @@ mod sbox_anchor_tests {
         }
         assert_eq!(decoded_slots, emit_order);
         assert_eq!(agg_r, agg_w);
+
+        // 4. 验证明文反馈入链与按单元 (proto) 独立参数派生：
+        // 改动前序常量 1 bit 明文即导致后续所有常量的 enc_slot、fd、rl 及 ChaCha nonce 全盘雪崩；
+        // 不同原型的 (hn18, kp18, pb18, roll_final) 派生出完全不同的折叠参数与 p_ckey。
+        let rf_a: u32 = 0x7F3A_91C5;
+        let rf_b: u32 = 0x4E2B_80D3;
+        let pck_a = hn18 ^ kp18.rotate_left(11) ^ pb18.rotate_left(19) ^ rf_a.rotate_left(5);
+        let pck_b = (hn18 ^ 0x101) ^ kp18.rotate_left(11) ^ pb18.rotate_left(19) ^ rf_b.rotate_left(5);
+        assert_ne!(pck_a, pck_b);
+
+        let f1_pa = fc.f1 ^ (((hn18 & 0xFFFF) * 2) + 1);
+        let f1_pb = fc.f1 ^ ((((hn18 ^ 0x100) & 0xFFFF) * 2) + 1);
+        assert_ne!(f1_pa, f1_pb);
+
+        let mut agg1 = hn18 ^ kp18 ^ pb18.rotate_left(7) ^ rf_a.rotate_left(13);
+        let mut agg2 = agg1;
+        let fd_0 = 0x1357_2468 ^ agg1 ^ pck_a.rotate_left((5 % 17) + 1);
+        let rl_0 = 0x2468_1357 ^ agg1.rotate_left(11) ^ pck_a.rotate_left((5 % 19) + 1);
+        let mac_ok = const_mac18(b"hello_world", 5, fd_0, rl_0, &fc);
+        let mac_flip = const_mac18(b"hello_worle", 5, fd_0, rl_0, &fc);
+        agg1 = agg1.wrapping_mul(31).wrapping_add(mac_ok).wrapping_add(1);
+        agg2 = agg2.wrapping_mul(31).wrapping_add(mac_flip).wrapping_add(1);
+        assert_ne!(agg1, agg2, "前序常量 1 bit 明文差异必须使 agg18 雪崩");
+        let next_fd1 = 0xAAAA_5555 ^ agg1 ^ pck_a.rotate_left((2 % 17) + 1);
+        let next_fd2 = 0xAAAA_5555 ^ agg2 ^ pck_a.rotate_left((2 % 17) + 1);
+        let next_rl1 = 0x5555_AAAA ^ agg1.rotate_left(11) ^ pck_a.rotate_left((2 % 19) + 1);
+        let next_rl2 = 0x5555_AAAA ^ agg2.rotate_left(11) ^ pck_a.rotate_left((2 % 19) + 1);
+        assert_ne!(next_fd1, next_fd2);
+        assert_ne!(next_rl1, next_rl2);
     }
 }
 

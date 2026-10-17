@@ -650,7 +650,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             let mk_nonce = |rng: &mut GenRng, sl: &str, bx: &str, rot: &str, m32: &str| -> (String, String, String, String) {
                 let (e1, r7v, e2, e3) = (rng.name(), rng.name(), rng.name(), rng.name());
                 let t = format!(
-                    "local {e1}={bx}({bx}({sl},rl or 0X0),fold or 0X0); local {r7v}={rot}(rl or 0X0,0X7); local {e2}={bx}({r7v},(pool_idx*0X6+kind)%{m32}); local {e3}={bx}({sl},{rot}({r7v},0X7)); ",
+                    "local {e1}={bx}({bx}({sl},rl or 0X0),fold or 0X0); local {r7v}={rot}(rl or 0X0,0X7); local {e2}={bx}({bx}({r7v},(pool_idx*0X6+kind)%{m32}),{rot}(fold or 0X0,0XD)); local {e3}={bx}({bx}({sl},{rot}({r7v},0X7)),{rot}(fold or 0X0,0X5)); ",
                     e1 = e1, r7v = r7v, e2 = e2, e3 = e3, sl = sl, bx = bx, rot = rot, m32 = m32);
                 (t, e1, e2, e3)
             };
