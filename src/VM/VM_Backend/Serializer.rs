@@ -974,8 +974,9 @@ fn reorder_basic_blocks(
     if block_starts.len() < 3 {
         return None;
     }
-    // 基本块裂解（Block Fission）：对已具备 >= 3 个原始基本块的函数，将含多个原子 Unit 的
-    // 非热环基本块切分为 1..=2 Unit 的微基本块，打碎原始基本块边界。
+    // 基本块裂解（Block Fission，方案 4）：对已具备 >= 3 个原始基本块的函数，将含 >= 4 个原子 Unit 的
+    // 非热环基本块按 3..=5 Unit 粒度切分为子基本块（单函数上限 36 块），既打碎原始基本块边界，
+    // 又保留块内算术/表操作 4 指令融合快路径与运行速度。
     let mut in_loop = vec![false; len];
     for (pc, inst) in instructions.iter().enumerate() {
         if is_relative_jump(inst.opcode) {
@@ -995,10 +996,10 @@ fn reorder_basic_blocks(
         fissioned_starts.push(first_unit);
         let unit_span = last_unit.saturating_sub(first_unit) + 1;
         let blk_in_loop = in_loop[units[first_unit].start];
-        if unit_span >= 2 && !blk_in_loop && fissioned_starts.len() < 56 {
+        if unit_span >= 4 && !blk_in_loop && fissioned_starts.len() < 36 {
             let mut cur = first_unit;
-            while cur < last_unit && fissioned_starts.len() < 56 {
-                let step = fission_rng.random_range(1..=2);
+            while cur < last_unit && fissioned_starts.len() < 36 {
+                let step = fission_rng.random_range(3..=5);
                 if cur + step <= last_unit {
                     cur += step;
                     fissioned_starts.push(cur);
@@ -1202,7 +1203,7 @@ mod cfg_tests {
 
     #[test]
     fn block_fission_and_cfg_hubs_flatten_clean_cfg() {
-        // 构造一个具备 >= 3 个原始基本块且含多 Unit 块的函数，验证方案 1+2 下 Block Fission + 4 路 Dispatcher Hub
+        // 构造一个具备 >= 3 个原始基本块且含 >= 6 Unit 块的函数，验证方案 1+2+4 下 Block Fission + 4 路 Dispatcher Hub
         let orig = vec![
             inst(Opcode::LoadK, 0, -1),
             inst(Opcode::LoadK, 1, -1),
@@ -1211,6 +1212,8 @@ mod cfg_tests {
             inst(Opcode::Move, 2, 0),
             inst(Opcode::LoadK, 0, -1),
             inst(Opcode::Sub, 2, 0),
+            inst(Opcode::Add, 2, 1),
+            inst(Opcode::Move, 1, 2),
             inst(Opcode::Jmp, 1, -1),
             inst(Opcode::Move, 3, 2),
             inst(Opcode::Return, 2, 0),
