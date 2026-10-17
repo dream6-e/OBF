@@ -119,7 +119,7 @@ impl Serializer {
                 &mut extra_consts,
                 seed ^ 0x9E37_79B9_7F4A_7C15,
             )
-        } else {
+        } else if reordered.is_some() && chunk.instructions.len() >= 18 {
             weave_custom_cfg_hubs(
                 lowered,
                 &chunk.instructions,
@@ -128,6 +128,8 @@ impl Serializer {
                 &mut extra_consts,
                 seed ^ 0x9E37_79B9_7F4A_7C15,
             )
+        } else {
+            lowered
         };
         let mut bytes = Vec::new();
 
@@ -969,8 +971,11 @@ fn reorder_basic_blocks(
     }
     block_starts.sort_unstable();
     block_starts.dedup();
-    // 基本块裂解（Block Fission）：将含多个原子 Unit 的非热环基本块切分为 1..=2 Unit 的微基本块，
-    // 打碎原始基本块边界（如 u10 的 23 块被裂解为 45+ 个微块并彻底打乱穿插）。
+    if block_starts.len() < 3 {
+        return None;
+    }
+    // 基本块裂解（Block Fission）：对已具备 >= 3 个原始基本块的函数，将含多个原子 Unit 的
+    // 非热环基本块切分为 1..=2 Unit 的微基本块，打碎原始基本块边界。
     let mut in_loop = vec![false; len];
     for (pc, inst) in instructions.iter().enumerate() {
         if is_relative_jump(inst.opcode) {
@@ -985,20 +990,15 @@ fn reorder_basic_blocks(
     }
     let mut fission_rng = StdRng::seed_from_u64(seed ^ 0x517C_C1B7_2722_0A95);
     let mut fissioned_starts = Vec::with_capacity(block_starts.len() * 2);
-    let orig_block_count = block_starts.len();
     for (index, &first_unit) in block_starts.iter().enumerate() {
         let last_unit = block_starts.get(index + 1).copied().unwrap_or(units.len()) - 1;
         fissioned_starts.push(first_unit);
         let unit_span = last_unit.saturating_sub(first_unit) + 1;
         let blk_in_loop = in_loop[units[first_unit].start];
-        if unit_span >= 2 && (!blk_in_loop || orig_block_count < 3) && fissioned_starts.len() < 56 {
+        if unit_span >= 2 && !blk_in_loop && fissioned_starts.len() < 56 {
             let mut cur = first_unit;
             while cur < last_unit && fissioned_starts.len() < 56 {
-                let step = if orig_block_count < 3 {
-                    1
-                } else {
-                    fission_rng.random_range(1..=2)
-                };
+                let step = fission_rng.random_range(1..=2);
                 if cur + step <= last_unit {
                     cur += step;
                     fissioned_starts.push(cur);
@@ -1011,9 +1011,6 @@ fn reorder_basic_blocks(
     fissioned_starts.sort_unstable();
     fissioned_starts.dedup();
     let block_starts = fissioned_starts;
-    if block_starts.len() < 3 {
-        return None;
-    }
 
     let mut blocks = Vec::with_capacity(block_starts.len());
     for (index, &first_unit) in block_starts.iter().enumerate() {
@@ -1069,34 +1066,20 @@ fn reorder_basic_blocks(
         }
     }
 
-    // 在不可达区追加由运行态 TEST 守卫分流的克隆死块。两条路径均是自环 NOP，
-    // 不参与业务控制流；所有合法出口显式越过整个诱饵区。
+    // 方案 2：消除不可达旧死块与 weave_custom_cfg_hubs 静态可达 Decoy 诱饵块的双重叠加：
+    // 对 >= 18 条指令（由 weave_custom_cfg_hubs 织入可达 Decoy 块）的函数不再重复追加不可达死块；
+    // 对 < 18 条指令的函数仅保留 1 个精简不可达自环尾块。
     let mut fake_jumps = Vec::new();
-    let fake_count = rng.random_range(1..=3);
-    for _ in 0..fake_count {
-        let start = output.len();
+    if len < 18 {
         let reg_limit = usize::from(max_stack).max(1);
         let reg = rng.random_range(0..reg_limit) as u8;
-        let cond = rng.random_range(0..=1) as i32;
-        output.push(make_instruction(Opcode::Test, reg, 0, cond, 0));
-        source_pc.push(0);
-        output.push(make_instruction(Opcode::Jmp, 0, 0, -1, 0));
-        source_pc.push(0);
-        output.push(make_instruction(Opcode::Jmp, 0, 0, -1, 0));
-        source_pc.push(0);
         let path1 = output.len();
         output.push(make_instruction(Opcode::Move, reg, i32::from(reg), 0, 0));
         source_pc.push(0);
         let loop1 = output.len();
         output.push(make_instruction(Opcode::Jmp, 0, 0, -1, 0));
         source_pc.push(0);
-        let path2 = output.len();
-        output.push(make_instruction(Opcode::Move, reg, i32::from(reg), 0, 0));
-        source_pc.push(0);
-        let loop2 = output.len();
-        output.push(make_instruction(Opcode::Jmp, 0, 0, -1, 0));
-        source_pc.push(0);
-        fake_jumps.extend([(start + 1, path1), (start + 2, path2), (loop1, path1), (loop2, path2)]);
+        fake_jumps.push((loop1, path1));
     }
 
     let exit_pc = output.len();
@@ -1219,19 +1202,21 @@ mod cfg_tests {
 
     #[test]
     fn block_fission_and_cfg_hubs_flatten_clean_cfg() {
-        // 构造一个原仅含 1 个线性基本块、8 条顺序指令的函数，验证 Block Fission + 4 路 Dispatcher Hub
+        // 构造一个具备 >= 3 个原始基本块且含多 Unit 块的函数，验证方案 1+2 下 Block Fission + 4 路 Dispatcher Hub
         let orig = vec![
             inst(Opcode::LoadK, 0, -1),
             inst(Opcode::LoadK, 1, -1),
+            inst(Opcode::Jmp, 2, -1),
             inst(Opcode::Add, 0, 1),
             inst(Opcode::Move, 2, 0),
             inst(Opcode::LoadK, 0, -1),
             inst(Opcode::Sub, 2, 0),
+            inst(Opcode::Jmp, 1, -1),
             inst(Opcode::Move, 3, 2),
             inst(Opcode::Return, 2, 0),
         ];
         let reordered = reorder_basic_blocks(&orig, &[], 4, 0xCAFE_BABE)
-            .expect("Block Fission 应将单块 8 指令函数裂解为 >= 4 个微基本块并重排");
+            .expect("Block Fission 应将 >= 3 块函数裂解为更多微基本块并重排");
         let lowered = lower_to_custom_with_splits(
             &reordered.instructions,
             &[],
