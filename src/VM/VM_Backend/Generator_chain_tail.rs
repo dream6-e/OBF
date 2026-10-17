@@ -158,7 +158,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         );
         // ⑨ 真分支状态扰动：按运行期 (st+i)%2 走两条不同算术更新支（取代原先空 then/else）
         let it9 = |_rng: &mut GenRng, st: &str| format!(
-            "if (({st}+{i})%0X2)==0X0 then {g}=({g}*0X3)%0X2 else {g}=({g}*0X5)%0X2 end; ",
+            "if (({st}+{i})%0X2)==0X0 then {g}=({g}*0X3)%0X7F else {g}=({g}*0X5)%0X7F end; ",
             st = st, i = v_ch_i, g = v_ch_g);
         let (kb_x, kc_x, ki1_x, ki2_x) = (
             crate::VM::VM_Backend::Generator_flow::deep10(&mut rng, fn_bxor.as_str(), bc_kb as i64),

@@ -262,8 +262,8 @@ pub(super) fn build_relay_dispatch(
         ));
         front_names.push(fname);
     }
-    // Dead-code decoys stay: plausible fake maps to poison naive dumpers.
-    setup.push_str(&decoy_block(&mut rng, &tag, &format!("{}_d", tag)));
+    // Dead-code decoys stay: plausible fake maps guarded by runtime handler-table invariants.
+    setup.push_str(&decoy_block(&mut rng, &tag, &format!("{}_d", tag), &handlers_name, &fallback));
 
     // ---- dispatch expression (several equivalent templates) ------------------
     let mut order_f: Vec<usize> = (0..front_count).collect();
@@ -335,9 +335,9 @@ fn wrap_case_body(rng: &mut TinyRng, body: &str) -> String {
         (1, _) => format!("do {} end;", body),
         (2, false) => {
             let once = rng.name("o");
-            format!("local {once}=true;while {once} do {once}=false;{body} end;", once = once, body = body)
+            format!("local {once}=op;while {once}==op do {once}=nil;{body} end;", once = once, body = body)
         }
-        (3, false) => format!("repeat {} until true;", body),
+        (3, false) => format!("repeat {} until op~=nil;", body),
         _ => body.to_string(),
     }
 }
@@ -378,8 +378,8 @@ fn trimmed_flags(body: &str, flags: &[&str; 3]) -> Vec<String> {
     flags.iter().take(keep).map(|s| s.to_string()).collect()
 }
 
-/// Dead-code decoys: tables shaped like case/route maps, referenced nowhere live.
-fn decoy_block(rng: &mut TinyRng, tag: &str, dtag: &str) -> String {
+/// Dead-code decoys: tables shaped like case/route maps, guarded by runtime table length / closure state.
+fn decoy_block(rng: &mut TinyRng, tag: &str, dtag: &str, handlers_name: &str, fallback_name: &str) -> String {
     let df = rng.name(dtag);
     let dt = rng.name(dtag);
     let dr = rng.name(dtag);
@@ -392,9 +392,9 @@ fn decoy_block(rng: &mut TinyRng, tag: &str, dtag: &str) -> String {
         df = df, dt = dt, dr = dr, d1 = d1, d2 = d2,
     );
     if rng.coin() {
-        format!("if false then {} end;", inner)
+        format!("if #{h}==0X0 or {fb}==nil then {inner} end;", h = handlers_name, fb = fallback_name, inner = inner)
     } else {
-        format!("for {}=1,0 do {} end;", rng.name(tag), inner)
+        format!("for {}=0X1,(#{h}>0X0 and 0X0 or 0X1) do {inner} end;", rng.name(tag), h = handlers_name, inner = inner)
     }
 }
 
@@ -499,11 +499,17 @@ pub(super) fn wrap_dispatcher(
     // Keep setup in its original position; the nested step closure captures its locals.
     let loop_body = if !has_handlers {
         // Preserve the previous empty-tree behavior: enter once, break, and return no values.
-        "while true do break end".to_string()
+        format!("while {step}~=nil do break end", step = step_name)
     } else {
         let (open, close) = match loop_form {
-            LoopForm::While => ("while not ((true or false)==false) do ", " end;"),
-            LoopForm::Repeat => ("repeat ", " until (false and not true) or false;"),
+            LoopForm::While => (
+                format!("while {step}~={core} do ", step = step_name, core = core_name),
+                " end;".to_string(),
+            ),
+            LoopForm::Repeat => (
+                "repeat ".to_string(),
+                format!(" until {step}=={core};", step = step_name, core = core_name),
+            ),
         };
         format!("{}{}{}", open, body, close)
     };
@@ -532,8 +538,8 @@ pub(super) fn wrap_dispatcher(
     let route_step = format!("{state}={pick_relay}({gate},...);", state = state_name, pick_relay = pick_relay, gate = gate_name);
     let route_loop = match route_form {
         LoopForm::While => format!(
-            "while not ((true or false)==false) and {st}~={s6} and {st}~={s7} do {step} end;",
-            st = state_name, s6 = s6, s7 = s7, step = route_step,
+            "while {ra}~={rb} and {st}~={s6} and {st}~={s7} do {step} end;",
+            ra = relay_a, rb = relay_b, st = state_name, s6 = s6, s7 = s7, step = route_step,
         ),
         LoopForm::Repeat => format!(
             "repeat {step} until {st}=={s6} or {st}=={s7};",
@@ -543,14 +549,14 @@ pub(super) fn wrap_dispatcher(
 
     // Randomly shard the eight state handlers across the two relay tables.
     let state_bodies: Vec<String> = vec![
-        format!("function({gate},...) if {gate} and not (false or false) then return {s2} end return {s3} end", gate = gate_name, s2 = s2, s3 = s3),
-        format!("function({gate},...) if not {gate} or (false and {gate}) then return {s5} end return {s4} end", gate = gate_name, s5 = s5, s4 = s4),
-        format!("function({gate},...) local {index}; repeat {index}={s6} until (false and not {gate}) or true; return {index} end", gate = gate_name, index = index_name, s6 = s6),
+        format!("function({gate},...) if {gate} and {ra}~={rb} then return {s2} end return {s3} end", gate = gate_name, ra = relay_a, rb = relay_b, s2 = s2, s3 = s3),
+        format!("function({gate},...) if not {gate} or {ra}=={rb} then return {s5} end return {s4} end", gate = gate_name, ra = relay_a, rb = relay_b, s5 = s5, s4 = s4),
+        format!("function({gate},...) local {index}; repeat {index}={s6} until {index}~=nil and {ra}~={rb}; return {index} end", gate = gate_name, index = index_name, s6 = s6, ra = relay_a, rb = relay_b),
         format!("function(...) return {} end", s7),
         format!("function(...) return {} end", s6),
         format!(
-            "function({gate},...) local {index},{next_state}; for {index}=0X1,0X1 do if not {gate} or (false and {gate}) then {next_state}={s7} end; if {gate} and (true or false) then {next_state}={s6} end; break end; return {next_state} or {s7} end",
-            gate = gate_name, index = index_name, next_state = format!("{}_next", state_name), s7 = s7, s6 = s6,
+            "function({gate},...) local {index},{next_state}; for {index}=0X1,0X1 do if not {gate} or {ra}=={rb} then {next_state}={s7} end; if {gate} and {ra}~={rb} then {next_state}={s6} end; break end; return {next_state} or {s7} end",
+            gate = gate_name, index = index_name, next_state = format!("{}_next", state_name), ra = relay_a, rb = relay_b, s7 = s7, s6 = s6,
         ),
         format!("function({gate},...) return {exit_a}(...) end", gate = gate_name, exit_a = exit_a),
         format!("function({gate},...) return {exit_b}(...) end", gate = gate_name, exit_b = exit_b),
@@ -576,7 +582,7 @@ local function {exit_b}(...) return {core}(...) end;
 local {relay_a},{relay_b}={{}},{{}};
 {relay_defs}
 local function {route}(...)
-  local {gate}=({chunk}~=nil and true) or false;
+  local {gate}=({chunk}~=nil and {ra}~={rb}) or {ra}=={rb};
   local {state}={start} and {s0} or {s1};
   {route_loop}
   return ({ra}[{state}] or {rb}[{state}])({gate},...)
@@ -712,6 +718,9 @@ mod tests {
             assert!(!wrapped.contains("if op=="), "opcode dispatch must not be a comparison tree");
             for fixed in ["_relay_cases", "_relay_routes", "_relay_fallback"] {
                 assert!(!wrapped.contains(fixed), "fixed relay suffix leaked: {fixed}");
+            }
+            for fold_lit in ["if false", "true or false", "false or false", "not true"] {
+                assert!(!wrapped.contains(fold_lit), "constant-foldable boolean literal leaked: {fold_lit}");
             }
             assert!(wrapped.contains("setmetatable"), "front tables must hide behind __index");
             assert!(wrapped.contains("__index"), "resolver must live in the metatable");

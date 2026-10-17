@@ -368,11 +368,10 @@ fn inflate_small_custom_proto(
         let part2: Vec<CustomInstruction> = prefix[mid..].iter().flatten().copied().collect();
         let term: Vec<CustomInstruction> = units.last().unwrap().clone();
 
-        // Block 0: Entry (always at index 0) -> branches to Block 1 (truthy: v0 + v1 < v2)
+        // Block 0: Entry (always at index 0) -> branches to Block 1 (truthy: Noop(v0) < v2)
         let blk0 = vec![
             ci(VmOp::PushConst, 0, k0, 0),
-            ci(VmOp::PushConst, 0, k1, 0),
-            ci(VmOp::Add, 0, 0, 0),
+            ci(VmOp::Noop, 0, 0, 0),
             ci(VmOp::PushConst, 0, k2, 0),
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, 1, 0, 0),
@@ -386,10 +385,11 @@ fn inflate_small_custom_proto(
             ci(VmOp::Drop, 0, 0, 0),
             ci(VmOp::Jump, 0, 0, 0),
         ]);
-        // Block 2: Part 2 + second runtime constant branch -> branches to Block 4 (falsy: v2 < v0)
+        // Block 2: Part 2 + second runtime state-modulated branch -> branches to Block 4 (falsy: Noop(v2) < v0)
         let mut blk2 = part2;
         blk2.extend([
             ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::Noop, 0, 0, 0),
             ci(VmOp::PushConst, 0, k0, 0),
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, 0, 0, 0),
@@ -437,8 +437,7 @@ fn inflate_small_custom_proto(
         // 入口块前向跳至尾部块，尾部块再后向跳回中部核心块。
         let blk_entry = vec![
             ci(VmOp::PushConst, 0, k0, 0),
-            ci(VmOp::PushConst, 0, k1, 0),
-            ci(VmOp::Add, 0, 0, 0),
+            ci(VmOp::Noop, 0, 0, 0),
             ci(VmOp::PushConst, 0, k2, 0),
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, 1, 0, 0),
@@ -641,6 +640,7 @@ fn weave_custom_cfg_hubs(
             pads[m] = add_block(vec![
                 ci(VmOp::PushConst, 0, k_arr[m], 0),
                 ci(VmOp::PushConst, 0, k_arr[m], 0),
+                ci(VmOp::Noop, 0, 0, 0),
                 ci(VmOp::Jump, 0, 0, 0),
             ]);
         }
@@ -661,6 +661,7 @@ fn weave_custom_cfg_hubs(
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, 1, 0, 0),
             ci(VmOp::PushConst, 0, k3, 0),
+            ci(VmOp::Noop, 0, 0, 0),
             ci(VmOp::PushConst, 0, k0, 0),
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, 0, 0, 0),
@@ -668,8 +669,7 @@ fn weave_custom_cfg_hubs(
         ]);
         let decoy = add_block(vec![
             ci(VmOp::PushConst, 0, k2, 0),
-            ci(VmOp::PushConst, 0, k1, 0),
-            ci(VmOp::Sub, 0, 0, 0),
+            ci(VmOp::Noop, 0, 0, 0),
             ci(VmOp::PushConst, 0, k0, 0),
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, 1, 0, 0),
@@ -755,8 +755,7 @@ fn weave_custom_cfg_hubs(
 
     let blk_entry = vec![
         ci(VmOp::PushConst, 0, k0, 0),
-        ci(VmOp::PushConst, 0, k1, 0),
-        ci(VmOp::Add, 0, 0, 0),
+        ci(VmOp::Noop, 0, 0, 0),
         ci(VmOp::PushConst, 0, k2, 0),
         ci(VmOp::Less, 0, 0, 0),
         ci(VmOp::Branch, 1, 0, 0),
@@ -810,11 +809,11 @@ fn weave_custom_cfg_hubs(
         out[left_start + 3].b = rel(left_start + 3, t1);
 
         out[right_start + 2].b = rel(right_start + 2, t2);
-        out[right_start + 6].b = rel(right_start + 6, t3);
-        out[right_start + 7].b = rel(right_start + 7, decoy_start);
+        out[right_start + 7].b = rel(right_start + 7, t3);
+        out[right_start + 8].b = rel(right_start + 8, decoy_start);
 
-        out[decoy_start + 5].b = rel(decoy_start + 5, t0);
-        out[decoy_start + 6].b = rel(decoy_start + 6, t2);
+        out[decoy_start + 4].b = rel(decoy_start + 4, t0);
+        out[decoy_start + 5].b = rel(decoy_start + 5, t2);
     }
 
     if hub_patches.is_empty() {
@@ -1199,6 +1198,10 @@ mod cfg_tests {
             }
         }
         assert!(has_forward && has_backward, "膨胀后的最小闭包必须同时含前向与后向跳转边");
+        assert!(
+            inflated.iter().any(|i| i.op == VmOp::Noop),
+            "最小闭包不透明谓词必须织入 VmOp::Noop 运行期状态调制指令"
+        );
     }
 
     #[test]
@@ -1258,5 +1261,9 @@ mod cfg_tests {
             }
         }
         assert!(cond_branches >= 5, "4 路 Dispatcher Hub + Entry + Decoy 至少引入 5 条条件分支");
+        assert!(
+            woven.iter().any(|i| i.op == VmOp::Noop),
+            "4 路 Dispatcher Hub 与入口谓词必须织入 VmOp::Noop 运行期状态调制指令"
+        );
     }
 }

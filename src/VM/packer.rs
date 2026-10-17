@@ -444,8 +444,8 @@ impl Packer {
                 ControlFlowBuilder::obf_num((pcs[n] + 1) as i64, rng)));
         }
         rng.shuffle(&mut pc_fills);
-        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=w%0X2 return u+(z-z) end;",
-            pct, pc_fills.join(""), pcdv);
+        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=(w+#{})%0X2 return u+z-(w%0X2) end;",
+            pct, pc_fills.join(""), pcdv, pct);
         // pc 值引用形态：②状态表引用 / ④委托调用（数值本身永不直出）
         let pc_ref = |rng: &mut GenRng, n: usize| -> String {
             let idx = ControlFlowBuilder::obf_num((n + 1) as i64, rng);
@@ -489,7 +489,7 @@ impl Packer {
         // 运行期等差数列填表，比较/转移/初值经状态表/惰性槽/委托三形态流动
         let kseed_i = format!("(#s.data)+(s.k[{}])", ControlFlowBuilder::obf_num(1, rng));
         let (insts_decl, init_insts_loop_body) =
-            ControlFlowBuilder::build_router_machine(&insts_init, "while not(false or false) do ", "st", &kseed_i, rng);
+            ControlFlowBuilder::build_router_machine(&insts_init, "while st~=nil do ", "st", &kseed_i, rng);
         let init_insts_loop = format!("{}{}", insts_decl, init_insts_loop_body);
 
         let mut handlers_init = Vec::new();

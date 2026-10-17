@@ -96,16 +96,15 @@ impl ControlFlowBuilder {
             bias
         );
         let junk = Self::format_num(rng.range(0x10, 0xFFFF) as i64, rng);
-        let ka = rng.range(0x10, 0x7FFF) as i64;
-        let kb = ka + rng.range(1, 0x7FF) as i64;
-        let (ka_s, kb_s) = (Self::format_num(ka, rng), Self::format_num(kb, rng));
+        // 绑定运行期可变状态（var_name = op + bias, bias = acc % mask，满足 var_name > bias >= 0），
+        // 彻底清退可被静态常量折叠消解的 a ~= b / a < b 常量比较式。
         let x = match rng.range(0, 6) {
             0 => var_name.to_string(),
-            1 => format!("({v} and {v} or {j})", v = var_name, j = junk),
-            2 => format!("({a}~={b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = junk),
-            3 => format!("({v}>=0X0 and {v} or {j})", v = var_name, j = junk),
-            4 => format!("(not(not {v}) and {v} or {j})", v = var_name, j = junk),
-            _ => format!("({a}<{b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = junk),
+            1 => format!("({v}>{b} and {v} or {j})", v = var_name, b = bias, j = junk),
+            2 => format!("(({v}-{b})>0X0 and {v} or {j})", v = var_name, b = bias, j = junk),
+            3 => format!("(({v}+{b})>={v} and {v} or {j})", v = var_name, b = bias, j = junk),
+            4 => format!("({v}<={b} and {j} or {v})", v = var_name, b = bias, j = junk),
+            _ => format!("(({b}%0X2)<0X2 and {v} or {j})", b = bias, v = var_name, j = junk),
         };
         let (lhs, rhs, mut op) = match rng.range(0, 6) {
             0 => {

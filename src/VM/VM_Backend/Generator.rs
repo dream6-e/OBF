@@ -838,11 +838,10 @@ impl Generator {
         // 静态蜜罐注册（永不路由）：形似真 handler 的假块，逆向分析陷阱
         for &dop in decoy_ops.iter() {
             let (dg, skv) = (rng.name(), rng.name());
-            // 签名随机化与真块一致（诱饵永不路由，只需语法自洽）
+            // 签名随机化与真块一致（诱饵永不路由，以运行期状态槽与栈表长度构造谓词）
             let (d_self, d_p0, d_p1, d_p2, d_p3) =
                 (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
-            let (ha_, hb_) = (rng.range(0x1_0000, 0xFFFF_FFFF) as i64, rng.range(0x1_0000, 0xFFFF_FFFF) as i64);
-            let htaut = format!("(0X{:X}-0X{:X}==0X{:X})", ha_, hb_, ha_ - hb_);
+            let htaut = format!("(({dg}+#{skv})>=0X0 and {ds}[{kt}]~=nil)", dg = dg, skv = skv, ds = d_self, kt = k_top);
             let d_shard = rng.range(0, method_shard_count);
             defs.push(format!(
                 "{mv}.{nm}=function({ds},{dp0},{dp1},{dp2},{dp3}) local {dg}={bx2}({dp0},0X{dop:X})%{m32v}; local {skv}={ds}[{ks}]; {skv}[{ds}[{kt}]+0X1]={dg}; {ds}[{kt}]={ds}[{kt}]+0X1; {psn}={psn} or {taut} end;",
@@ -1158,7 +1157,7 @@ impl Generator {
             block_execute_def = format!("{}{}", rkey_hdr, block_execute_def);
             dispatch_body.push_str(&format!(
                 "if {flg} and {pc}>{tw} then {tw}={pc}+0X{sx:X}; {m1},{m2},{m3}={rkey}(chunk,{pc},{kon},{m1},{m2},{m3},{vm},{ds},{aa},{bb},{cc}) end; ",
-                flg = format!("({}) and true", var_state_flag), pc = var_pc, tw = tw21, sx = step21,
+                flg = var_state_flag, pc = var_pc, tw = tw21, sx = step21,
                 m1 = n_mk1, m2 = n_mk2, m3 = n_mk3, rkey = fn_rkey, kon = n_kon,
                 vm = var_vm, ds = dc_ds, aa = var_a_arr, bb = var_b_arr, cc = var_c_arr));
             dispatch_body.push_str(&format!("{}={};", var_state_flag, "false"));

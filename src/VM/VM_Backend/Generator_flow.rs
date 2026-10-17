@@ -687,7 +687,7 @@ pub fn build_consts(
                     em = fc.emul, ea = fc.eadd, c = fn_c, pld = pf_ld_key,
                     fake = fake_stmt.as_str()));
                 let (dc_t, dc_s, dc_d) = (rng.name(), rng.name(), rng.name());
-                let dc_infra = format!("local {t},{sl}={{}},{{}}; local {d}=function(w,u) local z=w%0X2 return u+(z-z) end; ",
+                let dc_infra = format!("local {t},{sl}={{}},{{}}; local {d}=function(w,u) local z=(w+#{t})%0X2 return u+z-((w+#{sl})%0X2) end; ",
                     t = dc_t, sl = dc_s, d = dc_d);
                 let dc_init = if rng.range(0, 2) == 0 {
                     format!("{}({}, {})", dc_d, format!("0X{:X}", rng.range(0x1000, 0xFFFFF)), x_ka)

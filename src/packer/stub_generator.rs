@@ -124,8 +124,8 @@ impl StubGenerator {
             let j = pool.rng_mut().next_range(0, i + 1);
             pc_fills.swap(i, j);
         }
-        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=w%0X2 return u+(z-z) end;",
-            pct, pc_fills.join(""), pcdv);
+        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=(w+#{})%0X2 return u+z-(w%0X2) end;",
+            pct, pc_fills.join(""), pcdv, pct);
         // 每个 pc 值两枚引用形态：a=表引用（给 insts 键/初值），b=表引用或委托（给句柄体）
         let mut pc_refs_a: Vec<String> = Vec::new();
         let mut pc_refs_b: Vec<String> = Vec::new();

@@ -113,7 +113,7 @@ impl ControlFlowBuilder {
                 _ => format!("{}({},{}[{}])", dv, Self::obf_num(rng.range64(0x100, 0xFFFF), rng), ct, idx_of(k, rng)),
             }
         };
-        let mut decl = format!("local {}={{}};local {}={{}};local {}=function(w,u) local z=w%0X2 return u+(z-z) end;", ct, sl, dv);
+        let mut decl = format!("local {}={{}};local {}={{}};local {}=function(w,u) local z=(w+u+#{})%0X2 return u+z-((u+w)%0X2) end;", ct, sl, dv, sl);
         // 状态表模数直接写为 0X10000，不用可静态折叠的乘积表达式。
         decl.push_str(&format!("local {}=({});local {}=(({})%0X10000)*{}+{};local {}=((({}))%{})*2+{};for {}={},{} do {}[{}]={};{}={}+{} end;",
             sd, seed_src,
@@ -170,20 +170,15 @@ impl ControlFlowBuilder {
 
     fn generate_opaque_predicate(val: i64, var_name: &str, comp_op: &str, keys: &CipherKeys, rng: &mut GenRng) -> String {
         // 改进项二：与 Generator_util::ControlFlowBuilder::generate_opaque_predicate 同步，
-        // 彻底消除「R<=R and R or J」单一锚点，混用 8 种变量恒等包装 + 6 族异构代数变换 + 严格/非严格/换边。
+        // 绑定运行期路由状态变量 var_name 的动态余数/序关系不变量，消除 a~=b / a==b / a<b 常量比较。
         let jn = Self::format_num(rng.range(0x10, 0xFFFF) as i64, rng);
-        let ka = rng.range(0x10, 0x7FFF) as i64;
-        let kb = ka + rng.range(0x1, 0x7FF) as i64;
-        let (ka_s, kb_s) = (Self::format_num(ka, rng), Self::format_num(kb, rng));
-        let x_expr = match rng.range(0, 8) {
+        let x_expr = match rng.range(0, 6) {
             0 => var_name.to_string(),
-            1 => format!("({v} and {v} or {j})", v = var_name, j = jn),
-            2 => format!("({a}~={b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
-            3 => format!("({a}=={b} and {j} or {v})", a = ka_s, b = kb_s, j = jn, v = var_name),
+            1 => format!("(({v}%0X2)<0X2 and {v} or {j})", v = var_name, j = jn),
+            2 => format!("(({v}+0X1)>{v} and {v} or {j})", v = var_name, j = jn),
+            3 => format!("(({v}%0X2)==0X3 and {j} or {v})", v = var_name, j = jn),
             4 => format!("({v}>=0X0 and {v} or {j})", v = var_name, j = jn),
-            5 => format!("({v}~={v} and {j} or {v})", v = var_name, j = jn),
-            6 => format!("(not(not {v}) and {v} or {j})", v = var_name, j = jn),
-            _ => format!("({a}<{b} and {v} or {j})", a = ka_s, b = kb_s, v = var_name, j = jn),
+            _ => format!("(({v}*0X2)>={v} and {v} or {j})", v = var_name, j = jn),
         };
         let is_le = comp_op == "<=";
         let use_strict = rng.range(0, 2) == 0;
@@ -380,8 +375,8 @@ impl ControlFlowBuilder {
         out.push_str(&tbl_def);
 
         out.push_str(&format!("local {},{},{},{},{},{};", s_state, t_shadow, d_junk, q_route, f_tmp, var_t));
-        // ㉔ 四形态转移基建：状态表（写读对）/惰性槽（首访填充）/委托（恒等扰动后返回）
-        out.push_str(&format!("local {st},{sl}={{}},{{}}; local {da}=function({w},{u}) local {z}={w}%0X2 return {u}+({z}-{z}) end; local {db}=function({w},{u}) local {z}=({w}-{w})%0X3 return {u}*0X1+{z} end; ",
+        // ㉔ 四形态转移基建：状态表（写读对）/惰性槽（首访填充）/委托（基于运行期稀疏表长度跨表余数不变量返回）
+        out.push_str(&format!("local {st},{sl}={{}},{{}}; local {da}=function({w},{u}) local {z}=({w}+#{st})%0X2 return {u}+{z}-( ({w}+#{sl})%0X2 ) end; local {db}=function({w},{u}) local {z}=({w}+#{sl})%0X3 return {u}+{z}-( ({w}+#{st})%0X3 ) end; ",
             st = keys.st_tbl, sl = keys.sl_tbl, da = keys.dv_a, db = keys.dv_b,
             w = rng.name(), u = rng.name(), z = rng.name()));
         
@@ -422,15 +417,12 @@ impl ControlFlowBuilder {
         ));
         out.push_str(&Self::transition_assign_expr(&var_t, &Self::sv_ref(&keys, 1, rng), &keys, rng));
 
-        // ── 骨架多样化 ①：恒真壳池（解析器无法用单一「while 恒真」指纹定位主循环）──
-        // 三族壳运行语义相同（无限循环），形态不同：
-        //   A while not(nil and false)（原版保留）；B repeat...until (nil and false)；
-        //   C while {} do ... if (nil and false) then break end end（体首 break 哨兵）
+        // ── 骨架多样化 ①：运行期状态守卫壳池（消除 nil and false 常量布尔字面量）──
         let loop_kind = rng.range(0, 3);
         match loop_kind {
-            0 => { out.push_str("while not(nil and false) do "); }
+            0 => { out.push_str(&format!("while {}~=nil do ", var_t)); }
             1 => { out.push_str("repeat "); }
-            _ => { out.push_str("while {} do "); }
+            _ => { out.push_str(&format!("while {} do ", var_insts)); }
         }
 
         // ── 骨架多样化 ②：骨架 2~4 态（原版线性二态是其中一种）──
@@ -538,9 +530,9 @@ impl ControlFlowBuilder {
         out.push_str("end "); // 闭合骨架态图 if
         // 壳闭合（与开头三族壳一一对应；repeat 由 until 自闭，勿多发 end）
         match loop_kind {
-            0 => { out.push_str("end "); } // while not(...) 壳
-            1 => { out.push_str("until (nil and false) "); } // repeat 壳
-            _ => { out.push_str("if (nil and false) then break end end "); } // 哨兵 if + while {} 壳
+            0 => { out.push_str("end "); } // while var_t~=nil 壳
+            1 => { out.push_str(&format!("until {}==nil ", var_t)); } // repeat 壳
+            _ => { out.push_str(&format!("if {}==nil then break end end ", var_t)); } // 哨兵 if + while 壳
         }
         out
     }

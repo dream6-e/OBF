@@ -489,10 +489,29 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     // 捕获描述只由 MakeClosure 消费。独立执行时按空操作处理，避免损坏字节码将
     // 描述字当成寄存器指令后改变 VM 状态。
-    for op in [VmOp::CaptureLocal, VmOp::CaptureUpvalue, VmOp::Noop] {
+    for op in [VmOp::CaptureLocal, VmOp::CaptureUpvalue] {
         let mut no_op = handler(m, op, cfg, rng);
         out.push_str(&no_op.build(""));
     }
+
+    // VmOp::Noop 作为运行期动态状态不变量调制指令：读取当前运行期 PC、求值栈深度 #vstack、
+    // 变参个数 varargs_len、活动寄存器表 stk 及原型密钥 ld_key，在真不变量分支下对栈顶值
+    // 叠加恒等零偏置（使静态常量传播/折叠无法穿透 Noop），伪分支下混入运行期 PC 与密钥扰动。
+    let mut noop = handler(m, VmOp::Noop, cfg, rng);
+    let s = noop.cfg.vstack.clone();
+    let pc_v = noop.cfg.pc.clone();
+    let vlen = noop.cfg.varargs_len.clone();
+    let stk_t = noop.cfg.stk.clone();
+    let ntype = noop.cfg.native_type.clone();
+    let ttbl = noop.cfg.type_tbl.clone();
+    let ld = noop.cfg.ld_key.clone();
+    let n_v = noop.rng.name();
+    let val_v = noop.rng.name();
+    let d_v = noop.rng.name();
+    out.push_str(&noop.build(&format!(
+        "local {n}=#{s}; if {n}>0 then local {v}={s}[{n}][1]; local {d}=(({pc}+{n}+{vlen})%2); if {nt}({stk})=={tt} and ({pc}+{n})>0 then {s}[{n}][1]={v}+{d}-(({pc}+#{s}+{vlen})%2) else {s}[{n}][1]={v}-{pc}-{ld} end end",
+        n = n_v, s = s, v = val_v, d = d_v, pc = pc_v, vlen = vlen, nt = ntype, stk = stk_t, tt = ttbl, ld = ld
+    )));
 
     let mut varargs = handler(m, VmOp::Varargs, cfg, rng);
     let a = varargs.raw_inst(2);

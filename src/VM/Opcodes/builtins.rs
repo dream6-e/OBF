@@ -179,12 +179,14 @@ pub fn generate_fused(
         let k1 = h.rng.name();
         let ld = cfg.ld_key.clone();
         let bx = cfg.builtin_bxor.clone();
+        let ntype = cfg.native_type.clone();
+        let stk_t = cfg.stk.clone();
+        let ttbl = cfg.type_tbl.clone();
         out.push_str(&h.build(&format!(
-            // 键 = (运行期 PC ^ 本原型 pf_ld) ^ 记录盐：两个候选目标共用同一把键
-            // （不取模——纯异或，热路径零额外算术开销；两候选仍同样不可静态分辨）。
+            // 键 = (运行期 PC ^ 本原型 pf_ld) ^ 记录盐；结合运行期活动调用帧类型与动态余数不变量选路
             "local {k1}={bx}({bx}({{PC}},{ld}),{sa}); \
-             if {bx}({k1},{k1})==0X0 then {{PC}}={bx}({e1},{k1}) else {{PC}}={bx}({e2},{k1}) end",
-            k1 = k1, e1 = e1, e2 = e2, sa = sa, ld = ld, bx = bx)));
+             if {nt}({stk})=={tt} and ({k1}%0X2)<0X2 then {{PC}}={bx}({e1},{k1}) else {{PC}}={bx}({e2},{k1}) end",
+            k1 = k1, e1 = e1, e2 = e2, sa = sa, ld = ld, bx = bx, nt = ntype, stk = stk_t, tt = ttbl)));
     }
 
     // 性能型超级指令：custom ISA 的 PushRk, PushRk, arithmetic, PopReg
