@@ -431,7 +431,14 @@ pub(super) fn build_inst_decoder_lua(
     let dc_fill = rng.name();
     let dl_e = crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, chain_delta as i64);
     let chm_e = crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, chain_m as i64);
-    let chk0_e = crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, chain_k0 as i64);
+    let chk0_e = if chain_k0 == 0 {
+        crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, 0)
+    } else {
+        format!("{bx}({k0},chunk.{lld})",
+            bx = fn_bxor2,
+            k0 = crate::VM::VM_Backend::Generator_flow::deep10(rng, fn_bxor2, chain_k0 as i64),
+            lld = pf_lld)
+    };
     let dc_family = rng.range(0, 4);
 
     // 外层 IIFE 常量局部名（全部经 deep10/kdf_pow2 一次求值，内层零字面量）

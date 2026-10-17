@@ -274,7 +274,10 @@ impl Generator {
         // 目标二③（第二部分）：全文件共用指令空间基址游标——根原型从一个小随机基址
         // 起步，每个原型（先序遍历）分到一段互不重叠的记录区间，段间留随机死槽。
         let mut alloc18: u32 = rng.range(4, 64) as u32;
-        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18);
+        let mut u_ctx18: u32 = crate::VM::VM_Backend::Generator_chacha::derive_word(
+            enc.root[6], WHITEN_GROUP as u32, WHITEN_WORD + 5,
+        );
+        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18, &mut u_ctx18);
 
         // ⑰ 载荷前 4 字节滚动初态经运行期 KDF(root[5]) 掩码后落盘，且混入白化种子与后续 keystream。
         let mut combined_payload = Vec::new();

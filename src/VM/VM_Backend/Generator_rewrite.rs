@@ -137,7 +137,7 @@ impl EncCtx {
             inv_sbox.push(isb);
             sbox_smul.push((rng.range(1, 128) as u32) * 2 + 1);
             sbox_pmul.push((rng.range(1, 128) as u32) * 2 + 1);
-            sbox_cmul.push((rng.range(1, 128) as u32) * 2 + 1);
+            sbox_cmul.push((rng.range(1, 64) as u32) * 4 + 2);
             sbox_cadd.push((rng.range(1, 256) as u32) | 1);
             let mut bp = [0usize, 1, 2, 3, 4, 5, 6, 7];
             for j in (1..8).rev() {
@@ -236,31 +236,59 @@ pub(super) fn scan_max_stack(r: &mut PayloadReader, out: &mut u8) {
     for _ in 0..upv_count { let s_len = r.read_u32(); r.read_bytes(s_len as usize); }
 }
 
-// 反混淆判据②修复：每条线上指令尾部挂 0..3 个随机垃圾字节，数量编码在线上魔数
-// 高 2 位（mag 取值 0x0100_0000..0x7FFF_0000，kp18 ≤ 0x02FF_FFFF 不碰高位，
-// 所以 (mag^kp18)>>29 与 mag>>29 一致，读写两侧同式）。「每条恰好 16B、
-// N 条 ×16 精确对齐」的游标特征消失；垃圾字节随滚动密钥流一起加密。
-fn inst_junk(w: &mut Vec<u8>, mag_file: u32, rng: &mut StdRng) {
+// 反混淆判据②修复 + 跨单元指令流滚钥加密：
+// 每条线上指令的 4 个字段 (mag_file, a_wire, fb, fc) 均受本单元派生的 (kb_p, kc_p, ki1_p, ki2_p)
+// 与逐指令滚动的 w_roll 掩码保护；尾部 0..3 个随机字节不再是被丢弃的填充，而是直接混入 w_roll 推进后续指令密钥。
+#[allow(clippy::too_many_arguments)]
+fn emit_inst_wire(
+    w: &mut Vec<u8>,
+    w_roll: &mut u32,
+    rng: &mut StdRng,
+    g18: u32,
+    a_dec: u32,
+    fb0: u32,
+    cb18: u32,
+    fc0: u32,
+    cc18: u32,
+    hn18: u32,
+    kp18: u32,
+    kb_p: u32,
+    kc_p: u32,
+    ki1_p: u32,
+    ki2_p: u32,
+) {
+    let wr = *w_roll;
+    let km_i = kp18 ^ (wr & 0x0FFF_FFFF);
+    let ka_i = wr.rotate_left(5) ^ hn18;
+    let kb_i = kb_p ^ wr.rotate_left(11);
+    let kc_i = kc_p ^ wr.rotate_left(17);
+    let mag_file = g18 ^ km_i;
+    let a_wire = a_dec ^ ka_i;
+    let fb = (fb0 ^ cb18) ^ (g18 ^ ki1_p) ^ kb_i;
+    let fc = (fc0 ^ cc18) ^ (g18 ^ ki2_p) ^ kc_i;
+    w.extend_from_slice(&mag_file.to_le_bytes());
+    w.extend_from_slice(&a_wire.to_le_bytes());
+    w.extend_from_slice(&fb.to_le_bytes());
+    w.extend_from_slice(&fc.to_le_bytes());
+    let mut wr_next = wr.rotate_left(7).wrapping_add(g18) ^ a_dec;
     let jn = (mag_file >> 29) & 3;
-    for _ in 0..jn { w.push(rng.random_range(0..256u32) as u8); }
+    for _ in 0..jn {
+        let jb = rng.random_range(0..256u32) as u8;
+        w.push(jb);
+        wr_next = wr_next.rotate_left(3).wrapping_add(jb as u32).wrapping_add(0x3D);
+    }
+    *w_roll = wr_next;
 }
 
-pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; VM_OPCODE_COUNT], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, inverse_opcode_map: &[u8; VM_OPCODE_COUNT], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32) {
-    // ② 元数据剥离：chunk 名/lines/locals/upvalue 名在 VM 端零消费者
-    // （错误消息=宿主真 Lua 原生报错，行守卫针式=恒 :2: 物理行）——读流保同步；
-    // name 槽改承载 4B 原型汇总校验，行号/局部名/upvalue 名不写入载荷。
-    // ⑱.3 每原型随机参数：kp18=本原型线上 op 异或键（二级重映射，跨原型同全局码
-    // 线上值不同）、pb18=pc↔槽仿射偏移（槽=pc+pb，随机死槽；所有 pc 运算皆相对=零模板改动）。
-    // 目标二③（第二部分，共享指令空间）：pb18 不再是本原型自取的小偏移，而是调用方
-    // 游标分配的**全文件共用指令空间基址**——整棵原型树的记录落在同一段下标区间里、
-    // 段间留随机死槽，读侧所有原型共用同一批数组、入口只切换 pc 基址（跳转全相对）。
-    // 两值写入 ② 剥离后的 linedefined/numparams 两空槽（随机数，无源信息）。
+pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcodes: &[Vec<u32>; VM_OPCODE_COUNT], fused_map: &[Vec<u32>; crate::VM::Opcodes::builtins::FUSED_OP_COUNT], fused_used: &mut HashSet<usize>, inverse_opcode_map: &[u8; VM_OPCODE_COUNT], op_magic: &std::collections::HashMap<u32, u32>, enc: &EncCtx, group: usize, rng: &mut StdRng, kb: u32, kc: u32, ki1: u32, ki2: u32, fc18: &FoldCtx, tag_map: &[u8; 4], delta: u32, ch_m: u64, ch_k0: u64, alloc18: &mut u32, u_ctx: &mut u32) {
+    let u_in: u32 = *u_ctx;
     let kp18: u32 = rng.random_range(1..0x2000000u32) | 0x0100_0000;
     let pb18: u32 = *alloc18;
-    // ㉚ 链式编码状态：种子=(kp18^pb18)*ch_m+ch_k0（与 Lua 扫描/解码器同式）；
+    // ㉚ 链式编码状态：种子=(kp18^pb18)*ch_m+(ch_k0^pb18)（与 Lua 扫描/解码器同式）；
     // 每条指令发射前取 (EO,CA,CB,CC)，发射后用本条逻辑值推进——单条公式全解作废
     let nochain18 = std::env::var("OBF_NOCHAIN").is_ok();
-    let mut chain18: u64 = (((kp18 ^ pb18) as u64).wrapping_mul(ch_m).wrapping_add(ch_k0)) % 0x1_0000_0000;
+    let ch_k0_p: u64 = if nochain18 { 0 } else { ch_k0 ^ (pb18 as u64) };
+    let mut chain18: u64 = (((kp18 ^ pb18) as u64).wrapping_mul(ch_m).wrapping_add(ch_k0_p)) % 0x1_0000_0000;
     #[allow(clippy::type_complexity)]
     let ch_split = |ch: u64| -> (u32, u32, u32, u32) {
         if std::env::var("OBF_NOCHAIN").is_ok() { return (0, 0, 0, 0); }
@@ -277,13 +305,14 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             + fb0 as u64 + (fc0 as u64) * 0x11) % 0x1_0000_0000
     };
     let _ = nochain18;
-    // 源 chunk 名是调试元数据，不落入最终载荷。原 name 槽改为每原型随机 32 位盐 hn18
-    //（无固定 [4,0,0,0] 长度前缀），并掩码紧随其后的 kp18/pb18，消除头部已知明文不动点。
+    // 跨单元头部耦合：hn18/kp18/pb18 均由前序单元终态 u_in 加密落盘，
+    // 未完整解码父单元/前序兄弟单元的指令流与常量明文链则无法解出当前单元头部。
     let _ = r.read_string();
     let hn18: u32 = rng.random_range(0x0101_0101u32..=0xFFFF_FFFEu32);
-    let kp_wire: u32 = kp18 ^ hn18.rotate_left(5);
-    let pb_wire: u32 = pb18 ^ hn18.rotate_left(13);
-    w.extend_from_slice(&hn18.to_le_bytes());
+    let hn_wire: u32 = hn18 ^ u_in;
+    let kp_wire: u32 = kp18 ^ hn18.rotate_left(5) ^ u_in.rotate_left(11);
+    let pb_wire: u32 = pb18 ^ hn18.rotate_left(13) ^ u_in.rotate_left(19);
+    w.extend_from_slice(&hn_wire.to_le_bytes());
     let _ = r.read_u32(); let _ = r.read_u32();
     w.extend_from_slice(&kp_wire.to_le_bytes()); w.extend_from_slice(&pb_wire.to_le_bytes());
     w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
@@ -414,7 +443,14 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         .wrapping_add(inst_count)
         .wrapping_add(dead_count as u32)
         .wrapping_add(rng.random_range(1..=64u32));
-    w.extend_from_slice(&(inst_count + dead_count as u32).to_le_bytes());
+    let inst_total = inst_count + dead_count as u32;
+    let inst_cnt_wire = inst_total ^ hn18.rotate_left(11) ^ u_in.rotate_left(7);
+    w.extend_from_slice(&inst_cnt_wire.to_le_bytes());
+    let kb_p: u32 = kb ^ hn18.rotate_left(3) ^ u_in.rotate_left(7);
+    let kc_p: u32 = kc ^ kp18.rotate_left(9) ^ u_in.rotate_left(13);
+    let ki1_p: u32 = ki1 ^ pb18.rotate_left(15) ^ hn18.rotate_left(21);
+    let ki2_p: u32 = ki2 ^ u_in.rotate_left(17) ^ kp18.rotate_left(25);
+    let mut w_roll: u32 = hn18 ^ kp18.rotate_left(7) ^ pb18.rotate_left(13) ^ u_in.rotate_left(19);
     let n_insts = raw_insts.len();
     let mut i = 0usize;
     let mut fused_count = 0usize;
@@ -551,16 +587,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         };
                         let (eo18, ca18, cb18, cc18) = ch_split(chain18);
                         let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                        let (fb, fc) = (
-                            (fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb,
-                            (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc,
+                        emit_inst_wire(
+                            w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
+                            fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
                         );
-                        let mag_file = g18 ^ kp18;
-                        w.extend_from_slice(&mag_file.to_le_bytes());
-                        w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                        w.extend_from_slice(&fb.to_le_bytes());
-                        w.extend_from_slice(&fc.to_le_bytes());
-                        inst_junk(w, mag_file, rng);
                         fused_used.insert(family);
                         fused_count += 1;
                         pc18 += 1;
@@ -625,13 +655,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         let (fb0, fc0) = if mag % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
                         let (eo18, ca18, cb18, cc18) = ch_split(chain18);
                         let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                        let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-                        let mag_file = g18 ^ kp18;
-                        w.extend_from_slice(&mag_file.to_le_bytes());
-                        w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                        w.extend_from_slice(&fb.to_le_bytes());
-                        w.extend_from_slice(&fc.to_le_bytes());
-                        inst_junk(w, mag_file, rng);
+                        emit_inst_wire(
+                            w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
+                            fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
+                        );
                         fused_used.insert(fidx);
                         fused_count += 1;
                         pc18 += 1;
@@ -694,13 +721,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                                     let (fb0, fc0) = if mag % 2 == 1 { (ce18, b) } else { (b, ce18) };
                                     let (eo18, ca18, cb18, cc18) = ch_split(chain18);
                                     let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-                                    let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-                                    let mag_file = g18 ^ kp18;
-                                    w.extend_from_slice(&mag_file.to_le_bytes());
-                                    w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-                                    w.extend_from_slice(&fb.to_le_bytes());
-                                    w.extend_from_slice(&fc.to_le_bytes());
-                                    inst_junk(w, mag_file, rng);
+                                    emit_inst_wire(
+                                        w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
+                                        fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
+                                    );
                                     fused_used.insert(crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 2);
                                     fused_count += 1;
                                     pc18 += 1;
@@ -772,10 +796,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let (fb0, fc0) = if mag % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
         let (eo18, ca18, cb18, cc18) = ch_split(chain18);
         let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-        let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-        let mag_file = g18 ^ kp18;
-        w.extend_from_slice(&mag_file.to_le_bytes()); w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes()); w.extend_from_slice(&fb.to_le_bytes()); w.extend_from_slice(&fc.to_le_bytes());
-        inst_junk(w, mag_file, rng);
+        emit_inst_wire(
+            w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
+            fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
+        );
         pc18 += 1;
         let r718 = roll18.rotate_left(7);
         roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
@@ -824,13 +848,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             let (fb0, fc0) = if mag % 2 == 1 { (c_dead, b_dead) } else { (b_dead, c_dead) };
             let (eo18, ca18, cb18, cc18) = ch_split(chain18);
             let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
-            let (fb, fc) = ((fb0 ^ cb18) ^ (g18 ^ ki1) ^ kb, (fc0 ^ cc18) ^ (g18 ^ ki2) ^ kc);
-            let mag_file = g18 ^ kp18;
-            w.extend_from_slice(&mag_file.to_le_bytes());
-            w.extend_from_slice(&a_enc.wrapping_add(ca18).to_le_bytes());
-            w.extend_from_slice(&fb.to_le_bytes());
-            w.extend_from_slice(&fc.to_le_bytes());
-            inst_junk(w, mag_file, rng);
+            emit_inst_wire(
+                w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
+                fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
+            );
             pc18 += 1;
             let r718 = roll18.rotate_left(7);
             roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
@@ -846,19 +867,20 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     // ⑰ 组字节先行（组=本原型的参数组下标），然后逐条内联密文：
     // 字符串=tag+加密槽号+长度前缀密文；数字=tag+加密槽号+8B 密文。
     // 物理排放顺序 emit_order 与逻辑槽位 slot 经 Fisher-Yates 独立置换解耦（slot ≠ 排放序号）。
+    let u_after_insts: u32 = u_in ^ w_roll.rotate_left(9);
     w.push(group as u8);
-    w.extend_from_slice(&total_const_count.to_le_bytes());
+    let const_cnt_wire: u32 = total_const_count ^ hn18.rotate_left(9) ^ u_after_insts.rotate_left(15);
+    w.extend_from_slice(&const_cnt_wire.to_le_bytes());
     let mut emit_order: Vec<u32> = (0..total_const_count).collect();
     for idx in (1..emit_order.len()).rev() {
         let j = rng.random_range(0..=idx);
         emit_order.swap(idx, j);
     }
-    // ③ 常量真链式（明文反馈入链 + 按单元派生独立常量密钥 p_ckey）：
-    // agg18 从头部与整原型指令流终态 roll18 起步，逐个常量加密逻辑槽号并混入本槽 (fold, rl18) 解密键，
-    // 且以解密还原后的**真实明文字节**（字符串明文字节或 IEEE-754 8 字节明文）计算 const_mac18 推进 agg18。
-    // 前序常量未跑完 ChaCha + S-Box 还原出明文，后续常量的槽号与 ChaCha/S-Box 密钥均无法求出。
-    let p_ckey: u32 = hn18 ^ kp18.rotate_left(11) ^ pb18.rotate_left(19) ^ roll18.rotate_left(5);
-    let mut agg18: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7) ^ roll18.rotate_left(13);
+    // ③ 常量真链式 + 跨单元指令流终态耦合：
+    // p_ckey 与 agg18 同时混入本单元指令线上滚动终态 u_after_insts 与指令逻辑终态 roll18，
+    // 未完整解码前序单元及本单元全部指令（含每条指令尾部 0..3 个随机滚钥字节）则无法启动常量链。
+    let p_ckey: u32 = hn18 ^ kp18.rotate_left(11) ^ pb18.rotate_left(19) ^ roll18.rotate_left(5) ^ u_after_insts.rotate_left(23);
+    let mut agg18: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7) ^ roll18.rotate_left(13) ^ u_after_insts.rotate_left(17);
     for (phys_idx, &slot) in emit_order.iter().enumerate() {
         let pos18 = (phys_idx as u32) + 1;
         let slot_mask = agg18
@@ -967,13 +989,17 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         }
     }
 
+    // 跨单元状态推进：当前单元的指令流终态 (u_after_insts, roll18) 与常量明文链终态 agg18
+    // 共同折叠更新 u_ctx，直接加密子单元数量 p_count 及后续子单元/兄弟单元的全部头部、指令与常量。
+    *u_ctx = u_after_insts.rotate_left(7) ^ roll18.rotate_left(13) ^ agg18 ^ hn18;
     let p_count = r.read_u32();
-    w.extend_from_slice(&p_count.to_le_bytes());
+    let p_cnt_wire: u32 = p_count ^ hn18.rotate_left(15) ^ (*u_ctx).rotate_left(5);
+    w.extend_from_slice(&p_cnt_wire.to_le_bytes());
     // 子 proto 直接按序递归写入：线上不带长度、边界标记或可跳过填充。
     // 读侧必须完整解析当前 proto（含其子树）才能抵达下一个兄弟 proto。
     for _ in 0..p_count {
         let g2 = rng.random_range(0..CONST_GROUPS);
-        rewrite_chunk(r, w, mapped_opcodes, fused_map, fused_used, inverse_opcode_map, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0, alloc18);
+        rewrite_chunk(r, w, mapped_opcodes, fused_map, fused_used, inverse_opcode_map, op_magic, enc, g2, rng, kb, kc, ki1, ki2, fc18, tag_map, delta, ch_m, ch_k0, alloc18, u_ctx);
     }
 
     // 目标五②：末尾行号、局部变量及 upvalue 调试区全部消费后丢弃。
@@ -1310,6 +1336,91 @@ mod sbox_anchor_tests {
         let next_rl2 = 0x5555_AAAA ^ agg2.rotate_left(11) ^ pck_a.rotate_left((2 % 19) + 1);
         assert_ne!(next_fd1, next_fd2);
         assert_ne!(next_rl1, next_rl2);
+    }
+
+    #[test]
+    fn cross_unit_coupling_and_rolling_wire_inst_encryption() {
+        use rand::SeedableRng;
+        let mut rng1 = StdRng::seed_from_u64(0xC0FFEE_1234);
+        let mut rng2 = StdRng::seed_from_u64(0xC0FFEE_1234);
+        let hn18: u32 = 0x5A3C_96E1;
+        let kp18: u32 = 0x01A5_1E69;
+        let pb18: u32 = 24;
+        let (kb, kc, ki1, ki2) = (0x1122_3344u32, 0x5566_7788u32, 0x99AA_BBCCu32, 0xDDEE_FF00u32);
+
+        // 1. 不同前序单元终态 u_in 派生出完全不同的本单元指令键 (kb_p, kc_p, ki1_p, ki2_p) 与 w_roll，
+        // 且同一单元内连续两条相同逻辑指令的线上 4 字 (mag_file, a_wire, fb, fc) 全部不同。
+        let u_in_a: u32 = 0x7391_B2C4;
+        let u_in_b: u32 = u_in_a ^ 1; // 仅差 1 bit
+        let kb_pa = kb ^ hn18.rotate_left(3) ^ u_in_a.rotate_left(7);
+        let kb_pb = kb ^ hn18.rotate_left(3) ^ u_in_b.rotate_left(7);
+        let kc_pa = kc ^ kp18.rotate_left(9) ^ u_in_a.rotate_left(13);
+        let ki1_pa = ki1 ^ pb18.rotate_left(15) ^ hn18.rotate_left(21);
+        let ki2_pa = ki2 ^ u_in_a.rotate_left(17) ^ kp18.rotate_left(25);
+        assert_ne!(kb_pa, kb_pb);
+
+        let mut wr_a: u32 = hn18 ^ kp18.rotate_left(7) ^ pb18.rotate_left(13) ^ u_in_a.rotate_left(19);
+        let wr_init = wr_a;
+        let mut w1 = Vec::new();
+        let g18: u32 = 0x4567_89AB;
+        let a_dec: u32 = 0x0000_0012;
+        emit_inst_wire(
+            &mut w1, &mut wr_a, &mut rng1, g18, a_dec, 3, 0x1111, 4, 0x2222,
+            hn18, kp18, kb_pa, kc_pa, ki1_pa, ki2_pa,
+        );
+        let len1 = w1.len();
+        assert!((16..=19).contains(&len1));
+        assert_ne!(wr_a, wr_init, "单条指令发射后 w_roll 必须滚动推进");
+        // 高 3 位垃圾字节计数必须与 (g18 ^ kp18) >> 29 一致
+        let mag_file_1 = u32::from_le_bytes(w1[0..4].try_into().unwrap());
+        assert_eq!((mag_file_1 >> 29) & 3, ((g18 ^ kp18) >> 29) & 3);
+
+        // 紧接着发射完全相同的第二条指令，线上密文四字必须与第一条全部不同（打破 2000:1 同式杠杆）
+        emit_inst_wire(
+            &mut w1, &mut wr_a, &mut rng1, g18, a_dec, 3, 0x1111, 4, 0x2222,
+            hn18, kp18, kb_pa, kc_pa, ki1_pa, ki2_pa,
+        );
+        assert_ne!(&w1[0..4], &w1[len1..len1 + 4]);
+        assert_ne!(&w1[4..8], &w1[len1 + 4..len1 + 8]);
+        assert_ne!(&w1[8..12], &w1[len1 + 8..len1 + 12]);
+        assert_ne!(&w1[12..16], &w1[len1 + 12..len1 + 16]);
+
+        // 2. 验证父单元 1 bit 差异经 u_after_insts -> agg18 -> u_ctx 传导后，
+        // 子单元的头部 (hn_wire, kp_wire, pb_wire) 若用错误父态解掩码则全部失真。
+        let mut wr_b: u32 = hn18 ^ kp18.rotate_left(7) ^ pb18.rotate_left(13) ^ u_in_b.rotate_left(19);
+        let mut w2 = Vec::new();
+        emit_inst_wire(
+            &mut w2, &mut wr_b, &mut rng2, g18, a_dec, 3, 0x1111, 4, 0x2222,
+            hn18, kp18, kb_pb, kc_pa ^ 8, ki1_pa, ki2_pa ^ 16,
+        );
+        let u_after_a = u_in_a ^ wr_a.rotate_left(9);
+        let u_after_b = u_in_b ^ wr_b.rotate_left(9);
+        assert_ne!(u_after_a, u_after_b);
+
+        let roll_fin: u32 = 0x89AB_CDEF;
+        let agg_a: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7) ^ roll_fin.rotate_left(13) ^ u_after_a.rotate_left(17);
+        let agg_b: u32 = hn18 ^ kp18 ^ pb18.rotate_left(7) ^ roll_fin.rotate_left(13) ^ u_after_b.rotate_left(17);
+        let u_out_a = u_after_a.rotate_left(7) ^ roll_fin.rotate_left(13) ^ agg_a ^ hn18;
+        let u_out_b = u_after_b.rotate_left(7) ^ roll_fin.rotate_left(13) ^ agg_b ^ hn18;
+        assert_ne!(u_out_a, u_out_b);
+
+        // 子单元真实头部
+        let (child_hn, child_kp, child_pb) = (0x3141_5926u32, 0x0171_8281u32, 128u32);
+        let hn_wire = child_hn ^ u_out_a;
+        let kp_wire = child_kp ^ child_hn.rotate_left(5) ^ u_out_a.rotate_left(11);
+        let pb_wire = child_pb ^ child_hn.rotate_left(13) ^ u_out_a.rotate_left(19);
+        // 正确父态还原
+        let dec_hn = hn_wire ^ u_out_a;
+        let dec_kp = kp_wire ^ dec_hn.rotate_left(5) ^ u_out_a.rotate_left(11);
+        let dec_pb = pb_wire ^ dec_hn.rotate_left(13) ^ u_out_a.rotate_left(19);
+        assert_eq!((dec_hn, dec_kp, dec_pb), (child_hn, child_kp, child_pb));
+        // 错误父态还原全部失真
+        let bad_hn = hn_wire ^ u_out_b;
+        let bad_kp = kp_wire ^ bad_hn.rotate_left(5) ^ u_out_b.rotate_left(11);
+        let bad_pb = pb_wire ^ bad_hn.rotate_left(13) ^ u_out_b.rotate_left(19);
+        assert_ne!(bad_hn, child_hn);
+        assert_ne!(bad_kp, child_kp);
+        assert_ne!(bad_pb, child_pb);
     }
 }
 

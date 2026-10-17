@@ -411,7 +411,7 @@ pub fn build_consts(
     salt_names: &[String; 4],
     pf_n_key: &str, pf_ld_key: &str, pf_lld_key: &str, pf_cnt_key: &str,
     chain_delta: u32, chain_m: u64, chain_k0: u64,
-    psn: &str, poison_delay: &str,
+    psn: &str, poison_delay: &str, var_uctx: &str,
 ) -> String {
     let v_setmeta = vault.global("setmetatable");
     let v_newproxy = vault.global("newproxy");
@@ -732,6 +732,11 @@ pub fn build_consts(
                 let cscan_params: [&str; 6] = [
                     kreg_n, fn_c, gname.as_str(), m32.as_str(), fn_bxor, fn_rotl,
                 ];
+                let chk0_e = if chain_k0 == 0 {
+                    deep10(rng, fn_bxor, 0)
+                } else {
+                    format!("{bx}({k0},{c}.{plld})", bx = fn_bxor, k0 = deep10(rng, fn_bxor, chain_k0 as i64), c = fn_c, plld = pf_lld_key)
+                };
                 let cscan_body = format!(
                     "local {ft},{rt}={{}},{{}}; local {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {f1p}={bx}(0X{f1:X},(({c}.{pn}%0X10000)*0X2)+0X1); local {f2p}={bx}(0X{f2:X},{bx}({c}.{pld},{rot}({c}.{plld},0X9))); local {pb1p}={bx}(0X{pb1:X},{rot}({c}.{pn},0X3)); local {pc1p}={bx}(0X{pc1:X},{rot}({c}.{pld},0X5)); local {fk1p}=((0X{fk1:X}+({c}.{pn}%0XF)*0X2)%0X1E)+0X1; local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*{f1p})%{m32},{f2p})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if (({bx}({rot}({ob},0X{rb:X}),{pb1p}))%0X64)<0X{pb3:X} then local {sk}={bv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end; if (({bx}({rot}({ob},0X{rc:X}),{pc1p}))%0X64)<0X{pc3:X} then local {sk}={cv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; {rf}={rr}; return {ft},{rt},{rf}",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
@@ -756,7 +761,7 @@ pub fn build_consts(
                     ch = rng.name(), cbv = rng.name(),
                     dl = deep10(rng, fn_bxor, chain_delta as i64),
                     chm = deep10(rng, fn_bxor, chain_m as i64),
-                    chk0 = deep10(rng, fn_bxor, chain_k0 as i64));
+                    chk0 = chk0_e);
                 let m_cscan = shell.add(rng, &cscan_params, cscan_body);
                 lua.push_str(&format!("{ft},{rt},{rf}={cscan_call}; ",
                     ft = ftds, rt = rtds, rf = rfds, cscan_call = shell.call(&m_cscan, &cscan_params)));
@@ -769,17 +774,19 @@ pub fn build_consts(
                         ld = ld_name, t = t, psl = psl)
                 };
                 lua.push_str(&format!(
-                    "{pck}={bx}({bx}({c}.{pn},{rot}({c}.{pld},0XB)),{bx}({rot}({c}.{plld},0X13),{rot}({rf},0X5))); \
-                     {agg}={bx}({bx}({c}.{pn},{c}.{pld}),{bx}({rot}({c}.{plld},0X7),{rot}({rf},0XD))); \
-                     local {i}=0; local {n}={a5}(); \
+                    "{pck}={bx}({bx}({bx}({c}.{pn},{rot}({c}.{pld},0XB)),{bx}({rot}({c}.{plld},0X13),{rot}({rf},0X5))),{rot}({uctx},0X17)); \
+                     {agg}={bx}({bx}({bx}({c}.{pn},{c}.{pld}),{bx}({rot}({c}.{plld},0X7),{rot}({rf},0XD))),{rot}({uctx},0X11)); \
+                     local {i}=0; local {n}={bx}({a5}(),{bx}({rot}({c}.{pn},0X9),{rot}({uctx},0XF))); \
                      while {i}<{n} do {i}={i}+1; local {t}={rd}(); local {psl}; \
                      if ({i}%0X2)==0X0 then {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+0X1+({i}%0X2) \
                      else {psl}={bx}({a5}(),{bx}({agg},{bx}({rot}({c}.{pld},({i}%0XD)+0X1),({i}*0X{em:X})%{m32})))+({i}%0X2) end; \
                      {rdl}",
-                    pck = pck_name, agg = agg_name, bx = fn_bxor, c = fn_c, pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, rf = rfds, rot = fn_rotl,
+                    pck = pck_name, agg = agg_name, uctx = var_uctx, bx = fn_bxor, c = fn_c, pn = pf_n_key, pld = pf_ld_key, plld = pf_lld_key, rf = rfds, rot = fn_rotl,
                     i = v_ch_i, n = v_ch_n, a5 = fn_a5,
                     t = t, rd = fn_read_dec, psl = psl, em = fc.emul, m32 = m32, rdl = rdl));
-                lua.push_str(&format!("{agg}=0X0; {pck}=0X0; ", agg = agg_name, pck = pck_name));
+                lua.push_str(&format!(
+                    "{uctx}={bx}({bx}({rot}({uctx},0X7),{rot}({rf},0XD)),{bx}({agg},{c}.{pn})); {agg}=0X0; {pck}=0X0; ",
+                    uctx = var_uctx, bx = fn_bxor, rot = fn_rotl, rf = rfds, agg = agg_name, c = fn_c, pn = pf_n_key, pck = pck_name));
                 lua
 }
 

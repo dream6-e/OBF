@@ -126,6 +126,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
 
         let var_state = rng.name();
         let var_scan_only = rng.name();
+        let var_uctx = rng.name();
+        let wg_u = rng.obfuscate_num(crate::VM::VM_Backend::Generator::WHITEN_GROUP as i64, 1, &keys);
+        let ww_u = rng.obfuscate_num((crate::VM::VM_Backend::Generator::WHITEN_WORD + 5) as i64, 1, &keys);
+        let u_ctx_init = format!("{kdf}({root},{g},{w})", kdf = kdf_name, root = root_fetch[6], g = wg_u, w = ww_u);
         let s_init = rng.range(0x100, 0xFFF) as i64;
         let s_insts = rng.range(0x1000, 0x1FFF) as i64;
         let s_consts = rng.range(0x2000, 0x2FFF) as i64;
@@ -144,10 +148,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let cpp = rng.name();
         let cpq = rng.name();
         let body_init = format!(
-            "local function {cpp}({cpq},{cpq}) {cpq}=0X1; return {cpq} end; {st}={nxt}; {c}.{pf_n}={a5}(); {c}.{pf_ld}={bx}({a5}(),{rot}({c}.{pf_n},0X5)); {c}.{pf_lld}={bx}({a5}(),{rot}({c}.{pf_n},0XD)); {c}.{pf_nups}={rd}(); \
+            "local function {cpp}({cpq},{cpq}) {cpq}=0X1; return {cpq} end; {st}={nxt}; {c}.{pf_n}={bx}({a5}(),{uctx}); {c}.{pf_ld}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0X5),{rot}({uctx},0XB))); {c}.{pf_lld}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0XD),{rot}({uctx},0X13))); {c}.{pf_nups}={rd}(); \
              {c}.{pf_numparams}={rd}(); {c}.{pf_is_vararg}={rd}(); {c}.{pf_maxstack}={rd}(); if {i} > {cpp}({cpq},{cpq}) then {i} = {i} - {cpp}({cpq},{cpq}) end; ",
             st = var_state, nxt = obf_s_insts, c = fn_c, a5 = fn_a5, rd = fn_read_dec,
-            bx = fn_bxor, rot = fn_rotl32,
+            bx = fn_bxor, rot = fn_rotl32, uctx = var_uctx,
             pf_n = pf_n, pf_ld = pf_ld, pf_lld = pf_lld, pf_nups = pf_nups,
             pf_numparams = pf_numparams, pf_is_vararg = pf_is_vararg, pf_maxstack = pf_maxstack, i = v_ch_i,
             cpp = cpp, cpq = cpq
@@ -178,15 +182,26 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             scan_only = var_scan_only, c = fn_c, op = pf_opcodes, a = pf_a_arr,
             b = pf_b_arr, cc = pf_c_arr, sh_get = sh_get, sh_assign = sh_assign
         );
-        let insts_params: [&str; 8] = [
-            &fn_c, &var_scan_only, &kreg_n, &keys.tbl_p, &fn_bxor, &fn_a5, &fn_a10, &fn_read_dec,
+        let insts_params: [&str; 10] = [
+            &fn_c, &var_scan_only, &kreg_n, &keys.tbl_p, &fn_bxor, &fn_rotl32, &fn_a5, &fn_a10, &fn_read_dec, &var_uctx,
         ];
+        let m32_ins = rng.name();
         let insts_body = format!(
-            "{arr_init} \
-             local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+{m32v} end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>={m31v} then {w}={w}-{m32v} end return {w} end; \
-             local {i}=0; local {n}={a5}(); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}) \
+            "{arr_init} local {m32}={m32v}; \
+             local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+{m32} end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>={m31v} then {w}={w}-{m32} end return {w} end; \
+             local {i}=0; local {n}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0XB),{rot}({uctx},0X7))); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}); \
+             local {kbp}={bx}({kbx},{bx}({rot}({c}.{pf_n},0X3),{rot}({uctx},0X7))); local {kcp}={bx}({kcx},{bx}({rot}({kp},0X9),{rot}({uctx},0XD))); \
+             local {k1p}={bx}({k1x},{bx}({rot}({pb},0XF),{rot}({c}.{pf_n},0X15))); local {k2p}={bx}({k2x},{bx}({rot}({uctx},0X11),{rot}({kp},0X19))); \
+             local {wr}={bx}({bx}({c}.{pf_n},{rot}({kp},0X7)),{bx}({rot}({pb},0XD),{rot}({uctx},0X13))); \
              while {i} < {n} do {i} = {i} + 1; \
-             local {mv}={a5}() if {mv}<0 then {mv}={mv}+{m32v} end local {g18}={bx}({mv},{kp}) {c}.{pf_opcodes}[{i}+{pb}]={g18} {c}.{pf_a_arr}[{i}+{pb}]={bx}({a10}()%{m32v},{ka}) {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbx},{k1x})%{m32v},{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kcx},{k2x})%{m32v},{kc18}) local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {rd}() end end; ",
+             local {mv}={a5}() if {mv}<0 then {mv}={mv}+{m32} end local {g18}={bx}({mv},{bx}({kp},{wr}%0X10000000)) {c}.{pf_opcodes}[{i}+{pb}]={g18} \
+             local {ad}={bx}({a10}()%{m32},{bx}({rot}({wr},0X5),{c}.{pf_n})) {c}.{pf_a_arr}[{i}+{pb}]={bx}({ad},{ka}) \
+             local {kbi}={bx}({kbp},{rot}({wr},0XB)) local {kci}={bx}({kcp},{rot}({wr},0X11)) \
+             {c}.{pf_b_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kbi},{k1p})%{m32},{kb18}) {c}.{pf_c_arr}[{i}+{pb}]={bx}({dcb}({a10}(),{g18},{kci},{k2p})%{m32},{kc18}) \
+             {wr}={bx}(({rot}({wr},0X7)+{g18})%{m32},{ad}) \
+             local {jv}=(({mv}-({mv}%0X20000000))/0X20000000)%4; for _=1,{jv} do {wr}=({rot}({wr},0X3)+{rd}()+0X3D)%{m32} end end; \
+             return {bx}({uctx},{rot}({wr},0X9))",
+            m32 = m32_ins,
             m32v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 32),
             m31v = crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 31),
             c = fn_c, a5 = fn_a5, a10 = fn_a10,
@@ -194,15 +209,18 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             arr_init = arr_init,
             i = rng.name(), n = rng.name(), cnt18 = pf_cnt18, kp = rng.name(), g18 = rng.name(),
             pb = rng.name(), ka = rng.name(), kb18 = rng.name(), kc18 = rng.name(),
-            pf_ld = pf_ld, pf_lld = pf_lld,
+            kbp = rng.name(), kcp = rng.name(), k1p = rng.name(), k2p = rng.name(),
+            wr = rng.name(), ad = rng.name(), kbi = rng.name(), kci = rng.name(),
+            pf_n = pf_n, pf_ld = pf_ld, pf_lld = pf_lld,
             dcb = rng.name(), w = rng.name(), m = rng.name(), k = rng.name(), q = rng.name(),
-            bx = fn_bxor.as_str(), mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x,
+            bx = fn_bxor.as_str(), rot = fn_rotl32.as_str(), uctx = var_uctx.as_str(),
+            mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x,
             jv = rng.name(), rd = fn_read_dec.as_str()
         );
         let m_insts = shell.add(&mut rng, &insts_params, insts_body);
         let body_insts = format!(
-            "{st}={nxt}; {tree9} {call}; ",
-            st = var_state, nxt = obf_s_consts,
+            "{st}={nxt}; {tree9} {uctx}={call}; ",
+            st = var_state, nxt = obf_s_consts, uctx = var_uctx,
             tree9 = it9(&mut rng, var_state.as_str()),
             call = shell.call(&m_insts, &insts_params)
         );
@@ -225,7 +243,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
                 &tag_map18, &salt_names, pf_n.as_str(), pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
                 chain_delta, chain_m, chain_k0, {psn_pick},
-                poison_delay_expr.as_str());
+                poison_delay_expr.as_str(), var_uctx.as_str());
         let body_consts = format!(
             "{st}={nxt}; {ci_stmt}{gk_stmt} local {vi},{vk}={sci},{sck}; {bc_scatter} ",
             st = var_state, nxt = obf_s_protos,
@@ -233,23 +251,24 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             vi = v_sc_idx, vk = v_sc_kobf, sci = sc_index2, sck = sc_kobf,
             bc_scatter = bc_scatter
         );
-        let (p18, s1a, b1a, sv18, svf18, rr18, scan18, scan_flag18, scan_mode_snapshot, thk18) =
-            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
+        let (p18, u0_18, ub_18, s1a, b1a, sv18, svf18, rr18, scan18, scan_flag18, scan_mode_snapshot, thk18) =
+            (rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let body_protos = format!(
-            "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={a5}(); {md18}={c}.{pf_protos}; {np18}={n}; \
+            "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0XF),{rot}({uctx},0X5))); {md18}={c}.{pf_protos}; {np18}={n}; \
              while {i} < {n} do {i} = {i} + 1; \
-               local {p0}={a2}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan_mode_snapshot}={scan_mode}; {scan_mode}=true; local {scan}={dc}(); {scan_mode}={scan_mode_snapshot}; {flg}={scan_flag}; {scan}=nil; \
-               local {thk}=function() local {sv}={a2}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
-                 {a2}={p0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
-                 {a2}={sv}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end; \
+               local {p0},{u0}={a2},{uctx}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan_mode_snapshot}={scan_mode}; {scan_mode}=true; local {scan}={dc}(); {scan_mode}={scan_mode_snapshot}; {flg}={scan_flag}; {scan}=nil; \
+               local {thk}=function() local {sv},{ub}={a2},{uctx}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
+                 {a2}={p0}; {uctx}={u0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
+                 {a2}={sv}; {uctx}={ub}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end; \
                if ({i}%0X2)==0X0 then {c}.{pf_protos}[{i}+({i}%0X2)]={thk} else {c}.{pf_protos}[{i}+(({i}%0X2)-0X1)]={thk} end; \
                {md18}={c}.{pf_protos}; {np18}={n}; \
              end; ",
-            st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, a5 = fn_a5,
+            st = var_state, nxt = obf_s_debug, c = fn_c, pf_protos = pf_protos, pf_n = pf_n, a5 = fn_a5,
+            bx = fn_bxor, rot = fn_rotl32, uctx = var_uctx,
             dc = fn_decode_chunk, i = v_ch_i, n = v_ch_n, thk = thk18,
             md18 = md21, np18 = np21, a2 = var_a2, flg = var_state_flag,
             scan_mode = var_scan_only, scan_mode_snapshot = scan_mode_snapshot,
-            p0 = p18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18,
+            p0 = p18, u0 = u0_18, ub = ub_18, s1 = s1a, b1 = b1a, sv = sv18, svf = svf18,
             rr = rr18, scan = scan18, scan_flag = scan_flag18,
             tree9 = it9(&mut rng, var_state.as_str())
         );
@@ -424,16 +443,16 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         }
         chain.push_str(&format!("else {} = {} + 1; end; ", v_ch_g, v_ch_g));
 
-        let block_dec_chunk = format!(
-            "local {scan_mode}=false; local function {fn_dec_chunk}() local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
-             local {g}, {out}, {i}, {n} = 0, nil, 0, 0; \
-             while {g} < 1 do {chain} end; \
-             return {out} end; ",
-            fn_dec_chunk = fn_decode_chunk, fn_c = fn_c, t = t, var_state = var_state,
-            scan_mode = var_scan_only, obf_s_init = obf_s_init,
-            g = v_ch_g, out = v_ch_out, i = v_ch_i, n = v_ch_n,
-            chain = chain
-        );
+    let block_dec_chunk = format!(
+        "local {scan_mode}=false; local {uctx}={uinit}; local function {fn_dec_chunk}() local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
+         local {g}, {out}, {i}, {n} = 0, nil, 0, 0; \
+         while {g} < 1 do {chain} end; \
+         return {out} end; ",
+        fn_dec_chunk = fn_decode_chunk, fn_c = fn_c, t = t, var_state = var_state,
+        scan_mode = var_scan_only, uctx = var_uctx, uinit = u_ctx_init, obf_s_init = obf_s_init,
+        g = v_ch_g, out = v_ch_out, i = v_ch_i, n = v_ch_n,
+        chain = chain
+    );
 
         let (pdef_body, pdef_exports) = block_p_def
             .split_once(" @PDEF@")
