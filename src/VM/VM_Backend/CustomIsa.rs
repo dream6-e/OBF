@@ -197,6 +197,54 @@ impl VmOp {
             Self::TailInvoke | Self::ReturnNone | Self::ReturnOne | Self::ReturnRange
         )
     }
+
+    #[must_use]
+    pub const fn uses_field_a(self) -> bool {
+        self.has_register_a() || matches!(self, Self::PushBool | Self::Concat | Self::Branch)
+    }
+
+    #[must_use]
+    pub const fn uses_field_b(self) -> bool {
+        matches!(
+            self,
+            Self::PushConst
+                | Self::PushRk
+                | Self::PushRange
+                | Self::ClearRegs
+                | Self::GetUpvalue
+                | Self::SetUpvalue
+                | Self::GetGlobal
+                | Self::SetGlobal
+                | Self::Branch
+                | Self::BranchSetTrue
+                | Self::BranchSetFalse
+                | Self::Jump
+                | Self::ForInit
+                | Self::ForNext
+                | Self::IteratorNext
+                | Self::CallPack
+                | Self::ReturnRange
+                | Self::SetList
+                | Self::MakeClosure
+                | Self::CaptureLocal
+                | Self::CaptureUpvalue
+                | Self::Varargs
+        )
+    }
+
+    #[must_use]
+    pub const fn uses_field_c(self) -> bool {
+        matches!(
+            self,
+            Self::PushRange
+                | Self::BranchSetTrue
+                | Self::BranchSetFalse
+                | Self::IteratorNext
+                | Self::CallPack
+                | Self::SetList
+                | Self::MakeClosure
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,7 @@ use crate::BytecodeCompiler::ir::chunk::{Chunk, Constant};
 use crate::BytecodeCompiler::ir::instruction::Instruction;
 use crate::BytecodeCompiler::ir::opcode::Opcode;
 use crate::VM::VM_Backend::Context::VmContext;
-use crate::VM::VM_Backend::CustomIsa::{VmOp, lower_to_custom_with_splits};
+use crate::VM::VM_Backend::CustomIsa::{CustomInstruction, VmOp, lower_to_custom_with_splits};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{HashMap, HashSet};
@@ -111,6 +111,13 @@ impl Serializer {
         }
         let lowered = lower_to_custom_with_splits(instructions, &chunk.protos, &zero_one_splits)
             .unwrap_or_else(|err| panic!("{err}"));
+        let mut extra_consts: Vec<u64> = Vec::new();
+        let lowered = inflate_small_custom_proto(
+            lowered,
+            chunk.constants.len(),
+            &mut extra_consts,
+            seed ^ 0x9E37_79B9_7F4A_7C15,
+        );
         let mut bytes = Vec::new();
 
         Self::write_string(&mut bytes, chunk.name.as_bytes());
@@ -134,7 +141,7 @@ impl Serializer {
             bytes.extend_from_slice(&inst.c.to_le_bytes());
         }
 
-        let const_count = chunk.constants.len() as u32;
+        let const_count = (chunk.constants.len() + extra_consts.len()) as u32;
         bytes.extend_from_slice(&const_count.to_le_bytes());
 
         for (k_idx, constant) in chunk.constants.iter().enumerate() {
@@ -154,6 +161,10 @@ impl Serializer {
                     Self::write_string(&mut bytes, s);
                 }
             }
+        }
+        for &bits in &extra_consts {
+            bytes.push(2);
+            bytes.extend_from_slice(&bits.to_le_bytes());
         }
 
         let p_count = chunk.protos.len() as u32;
@@ -264,6 +275,190 @@ fn make_instruction(opcode: Opcode, a: u8, b: i32, c: i32, line: i32) -> Instruc
         line,
         v_opcode: None,
         is_junk: false,
+    }
+}
+
+fn full_entropy_f64_bits(rng: &mut StdRng, exp: u64) -> u64 {
+    let mut mant: u64 = 0;
+    for sh in (0..48).step_by(8) {
+        mant |= rng.random_range(1u64..=254u64) << sh;
+    }
+    mant |= rng.random_range(1u64..=15u64) << 48;
+    (exp << 52) | mant
+}
+
+fn ci(op: VmOp, a: u8, b: i32, c: i32) -> CustomInstruction {
+    CustomInstruction { op, a, b, c, source_pc: 0 }
+}
+
+/// 消灭最小闭包已知结构探针（Crib）：
+/// 对短小原型（`lowered.len() < 24`，如空闭包 `function() end`、单常量返回闭包及短回调）
+/// 注入 3 个全非零尾数有限浮点常量，并将真实指令切分/包裹进乱序的 4~5 基本块控制流图中：
+/// 1. 真实 `ReturnNone`/`ReturnOne`/`ReturnRange` 被置于函数体中部（不再位于末尾）；
+/// 2. 入口块与中继块通过运行期解密常量池中的 `k0, k1, k2` 执行算术与比较分支（前向 + 后向跳转）；
+/// 3. 所有注入计算仅在 `vstack` 上平衡压弹，零触碰 `stk` 局部寄存器或 `top`/`upvals`。
+fn inflate_small_custom_proto(
+    lowered: Vec<CustomInstruction>,
+    base_const_count: usize,
+    extra_consts: &mut Vec<u64>,
+    seed: u64,
+) -> Vec<CustomInstruction> {
+    if lowered.is_empty() || lowered.len() >= 24 {
+        return lowered;
+    }
+    let mut rng = StdRng::seed_from_u64(seed);
+    let e0 = rng.random_range(0x400u64..=0x402u64);
+    let e1 = rng.random_range(0x404u64..=0x405u64);
+    let e2 = rng.random_range(0x408u64..=0x40Au64);
+    let b0 = full_entropy_f64_bits(&mut rng, e0); // [2.0, 32.0)
+    let b1 = full_entropy_f64_bits(&mut rng, e1); // [32.0, 128.0)
+    let b2 = full_entropy_f64_bits(&mut rng, e2); // [512.0, 4096.0)
+    let mut c_perm = [0usize, 1, 2];
+    c_perm.shuffle(&mut rng);
+    let raw_vals = [b0, b1, b2];
+    let mut k_slots = [0i32; 3];
+    for (slot_offset, &logical_idx) in c_perm.iter().enumerate() {
+        extra_consts.push(raw_vals[logical_idx]);
+        k_slots[logical_idx] = (base_const_count + slot_offset) as i32;
+    }
+    let (k0, k1, k2) = (k_slots[0], k_slots[1], k_slots[2]);
+
+    let has_branches = lowered
+        .iter()
+        .any(|inst| inst.op.branch_offset(inst.b as u32, inst.c as u32).is_some());
+
+    // 按不可拆分的原子单元切分（MakeClosure 及其紧随的 c 条捕获描述符保持同单元）
+    let mut units: Vec<Vec<CustomInstruction>> = Vec::new();
+    let mut idx = 0usize;
+    while idx < lowered.len() {
+        let inst = lowered[idx];
+        let extra = if inst.op == VmOp::MakeClosure && inst.c > 0 {
+            (inst.c as usize).min(lowered.len() - 1 - idx)
+        } else {
+            0
+        };
+        units.push(lowered[idx..=idx + extra].to_vec());
+        idx += 1 + extra;
+    }
+
+    let single_terminal_at_end = !has_branches
+        && !units.is_empty()
+        && units.last().unwrap().last().unwrap().op.is_terminator()
+        && units[..units.len() - 1]
+            .iter()
+            .all(|u| !u.iter().any(|i| i.op.is_terminator()));
+
+    if single_terminal_at_end {
+        let prefix = &units[..units.len() - 1];
+        let mid = prefix.len() / 2;
+        let part1: Vec<CustomInstruction> = prefix[..mid].iter().flatten().copied().collect();
+        let part2: Vec<CustomInstruction> = prefix[mid..].iter().flatten().copied().collect();
+        let term: Vec<CustomInstruction> = units.last().unwrap().clone();
+
+        // Block 0: Entry (always at index 0) -> branches to Block 1 (truthy: v0 + v1 < v2)
+        let blk0 = vec![
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::Add, 0, 0, 0),
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 1, 0, 0),
+        ];
+        // Block 1: Part 1 + stack op -> jumps to Block 2
+        let mut blk1 = part1;
+        blk1.extend([
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::Sub, 0, 0, 0),
+            ci(VmOp::Drop, 0, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ]);
+        // Block 2: Part 2 + second runtime constant branch -> branches to Block 4 (falsy: v2 < v0)
+        let mut blk2 = part2;
+        blk2.extend([
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 0, 0, 0),
+        ]);
+        // Block 3: Decoy alternate block -> jumps to Block 1
+        let blk3 = vec![
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::Mul, 0, 0, 0),
+            ci(VmOp::Drop, 0, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ];
+        // Block 4: Real Terminator block (placed in the middle of the function, never at the end)
+        let mut blk4 = vec![
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::Neg, 0, 0, 0),
+            ci(VmOp::Drop, 0, 0, 0),
+        ];
+        blk4.extend(term);
+
+        let all_blocks = [blk0, blk1, blk2, blk3, blk4];
+        const ORDERS: [[usize; 5]; 4] = [
+            [0, 3, 4, 1, 2],
+            [0, 1, 4, 3, 2],
+            [0, 2, 4, 3, 1],
+            [0, 4, 3, 1, 2],
+        ];
+        let order = ORDERS[rng.random_range(0..ORDERS.len())];
+        let mut out = Vec::new();
+        let mut starts = [0usize; 5];
+        let mut ends = [0usize; 5];
+        for &b_id in &order {
+            starts[b_id] = out.len();
+            out.extend_from_slice(&all_blocks[b_id]);
+            ends[b_id] = out.len() - 1;
+        }
+        let rel = |from: usize, to: usize| -> i32 { (to as i64 - (from as i64 + 1)) as i32 };
+        out[ends[0]].b = rel(ends[0], starts[1]);
+        out[ends[1]].b = rel(ends[1], starts[2]);
+        out[ends[2]].b = rel(ends[2], starts[4]);
+        out[ends[3]].b = rel(ends[3], starts[1]);
+        out
+    } else {
+        // 含内部跳转的短小闭包：将原指令流整体置于中部（内部相对偏移天然保持不变），
+        // 入口块前向跳至尾部块，尾部块再后向跳回中部核心块。
+        let blk_entry = vec![
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::Add, 0, 0, 0),
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::Less, 0, 0, 0),
+            ci(VmOp::Branch, 1, 0, 0),
+        ];
+        let blk_decoy = vec![
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::PushConst, 0, k0, 0),
+            ci(VmOp::Mul, 0, 0, 0),
+            ci(VmOp::Drop, 0, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ];
+        let blk_tail = vec![
+            ci(VmOp::PushConst, 0, k2, 0),
+            ci(VmOp::PushConst, 0, k1, 0),
+            ci(VmOp::Sub, 0, 0, 0),
+            ci(VmOp::Drop, 0, 0, 0),
+            ci(VmOp::Jump, 0, 0, 0),
+        ];
+        let mut out = Vec::with_capacity(blk_entry.len() + blk_decoy.len() + lowered.len() + blk_tail.len());
+        out.extend_from_slice(&blk_entry);
+        let end_entry = out.len() - 1;
+        out.extend_from_slice(&blk_decoy);
+        let end_decoy = out.len() - 1;
+        let start_core = out.len();
+        out.extend_from_slice(&lowered);
+        let start_tail = out.len();
+        out.extend_from_slice(&blk_tail);
+        let end_tail = out.len() - 1;
+        let rel = |from: usize, to: usize| -> i32 { (to as i64 - (from as i64 + 1)) as i32 };
+        out[end_entry].b = rel(end_entry, start_tail);
+        out[end_decoy].b = rel(end_decoy, start_core);
+        out[end_tail].b = rel(end_tail, start_core);
+        out
     }
 }
 
@@ -571,5 +766,35 @@ mod cfg_tests {
             code.instructions.iter().map(|inst| (inst.opcode as u8, inst.a, inst.b, inst.c)).collect::<Vec<_>>(),
             again.instructions.iter().map(|inst| (inst.opcode as u8, inst.a, inst.b, inst.c)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn minimal_closures_are_inflated_and_eliminate_terminal_return_crib() {
+        // 1. 空闭包 `function() end`（原仅 1 条 ReturnNone，0 常量）
+        let empty_closure = vec![ci(VmOp::ReturnNone, 0, 0, 0)];
+        let mut extra_consts = Vec::new();
+        let inflated = inflate_small_custom_proto(empty_closure, 0, &mut extra_consts, 0x1357_2468);
+        assert!(inflated.len() >= 20, "空闭包必须膨胀为多基本块指令流");
+        assert_eq!(extra_consts.len(), 3, "必须注入 3 个全非零尾数有限浮点常量");
+        for &bits in &extra_consts {
+            assert!(bits.to_le_bytes().iter().all(|&b| b != 0), "注入常量不得含全零尾数字节");
+        }
+        // 末尾不得再是固定 ReturnNone/ReturnOne
+        assert!(
+            !inflated.last().unwrap().op.is_terminator(),
+            "膨胀后最后一条指令不得再是固定 Return 终结符"
+        );
+        // 所有 Branch/Jump 偏移必须落在合法指令边界内，且同时存在前向与后向边
+        let mut has_forward = false;
+        let mut has_backward = false;
+        for (pc, inst) in inflated.iter().enumerate() {
+            if let Some(off) = inst.op.branch_offset(inst.b as u32, inst.c as u32) {
+                let target = pc as i64 + 1 + off as i64;
+                assert!(target >= 0 && (target as usize) < inflated.len());
+                if off > 0 { has_forward = true; }
+                if off < 0 { has_backward = true; }
+            }
+        }
+        assert!(has_forward && has_backward, "膨胀后的最小闭包必须同时含前向与后向跳转边");
     }
 }

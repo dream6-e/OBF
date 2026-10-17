@@ -342,9 +342,11 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             _ => panic!(),
         }
     }
-    // 每原型始终加入少量有效数字诱饵。它们稍后会被随机插入真实槽之间，
-    // 并由尾部不可达 ADD 指令引用；密文、槽位与聚合 MAC 都走正式管线。
-    let decoy_count18 = rng.random_range(1..=(const_count as usize + 1).min(8).max(1));
+    // 每原型始终加入有效数字诱饵：短小或零常量原型至少补充 3..=6 个诱饵，
+    // 抹平「空闭包常量数为 0/1」的统计探针特征；由尾部不可达指令引用并完整参与常量链与 MAC。
+    let decoy_min = if const_count < 4 { 3 } else { 1 };
+    let decoy_max = (const_count as usize + 3).clamp(decoy_min, 8);
+    let decoy_count18 = rng.random_range(decoy_min..=decoy_max);
     let decoy_consts: Vec<Vec<u8>> = (0..decoy_count18).map(|_| {
         let whole = rng.random_range(10_000u64..=9_999_999u64) as f64;
         let frac = rng.random_range(0u64..=99_999u64) as f64 / 100_000.0;
@@ -781,6 +783,28 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                 ce18 = salt;
                 cj_sel = Some(fv[rng.random_range(0..fv.len())]);
                 fused_used.insert(fam6);
+            }
+        }
+        if cj_sel.is_none() {
+            // 消除未使用操作数恒为 0 的已知明文锚点（如 ReturnNone/Add/Sub/Drop/PopReg 的 0 字段）：
+            // 对当前 VmOp 不读取的 (A, B, C) 字段填入伪装寄存器号或常量/RK 槽位，
+            // 使其同时混入指令滚动链、w_roll 及 Ftbl/Rtbl 常量引用折叠。
+            if !real_op18.uses_field_a() {
+                a_log = rng.random_range(1..=126u32);
+            }
+            if !real_op18.uses_field_b() {
+                be18 = if rng.random_range(0..2u32) == 0 {
+                    BITRK + rng.random_range(0..total_const_count.max(1))
+                } else {
+                    rng.random_range(1..=127u32)
+                };
+            }
+            if !real_op18.uses_field_c() {
+                ce18 = if rng.random_range(0..2u32) == 0 {
+                    BITRK + rng.random_range(0..total_const_count.max(1))
+                } else {
+                    rng.random_range(1..=127u32)
+                };
             }
         }
         let mapped_vals = mapped_opcodes.get(op as usize).map(|v| v.as_slice()).unwrap_or(&[]);
