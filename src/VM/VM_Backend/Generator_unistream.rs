@@ -233,7 +233,7 @@ impl UniStream {
         let (um, v_la, v_ea) = (rng.name(), rng.name(), rng.name());
         let mt_base = rng.range64(0x10_0000, 0x01FF_FFFF);
         let um_raw = crate::VM::VM_Backend::Generator_util::emit_mt_state_decl(rng, &um, mt_base)
-            .replace("setmetatable(", &format!("(_ENV or _G)[{}](", sbox_str(rng, "setmetatable")))
+            .replace("setmetatable(", &format!("((getfenv and getfenv()) or _ENV or _G)[{}](", sbox_str(rng, "setmetatable")))
             .replace("__add=", &format!("[{}]=", sbox_str(rng, "__add")))
             .replace("__sub=", &format!("[{}]=", sbox_str(rng, "__sub")))
             .replace("__mul=", &format!("[{}]=", sbox_str(rng, "__mul")));

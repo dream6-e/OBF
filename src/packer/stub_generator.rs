@@ -121,7 +121,7 @@ impl StubGenerator {
         let pmt = pool.get();
         let pmt_base = srng.range64(0x10_0000, 0x01FF_FFFF);
         let pmt_raw = crate::VM::VM_Backend::Generator_util::emit_mt_state_decl(&mut srng, &pmt, pmt_base)
-            .replace("setmetatable(", &format!("(_ENV or _G)[{}](", ex_sm))
+            .replace("setmetatable(", &format!("((getfenv and getfenv()) or _ENV or _G)[{}](", ex_sm))
             .replace("__add=", &format!("[{}]=", ex_ma))
             .replace("__sub=", &format!("[{}]=", ex_ms))
             .replace("__mul=", &format!("[{}]=", ex_mm));

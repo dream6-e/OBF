@@ -161,7 +161,7 @@ impl NameVault {
         let (v_e0, v_gf, v_e, v_sm, v_t) =
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         let mut body = format!(
-            "local {e0}=_ENV or _G; {stg}local {gf}={e0}[{exg}]; local {e}=({gf} and {gf}()) or {e0}; {sts}local {sm}={e}[{exs}]; local {t}={{}}; ",
+            "local {e0}=(getfenv and getfenv()) or _ENV or _G; {stg}local {gf}={e0}[{exg}]; local {e}=({gf} and {gf}()) or {e0}; {sts}local {sm}={e}[{exs}]; local {t}={{}}; ",
             e0 = v_e0, stg = st_gf, gf = v_gf, exg = ex_gf,
             e = v_e, sts = st_sm, sm = v_sm, exs = ex_sm, t = v_t);
 
@@ -938,8 +938,8 @@ mod tests {
             let kl = e.split('[').nth(1).unwrap().trim_end_matches(']');
             assert!(src.contains(kl), "槽 {} 必须被装配", kl);
         }
-        // 产物侧不得出现任何明文 API 名或类型串字面量
-        for bad in ["pcall", "string", "byte", "bxor", "unpack", "bit32", "getfenv", "setmetatable", "__mode", "\"k\"", "'k'", "\"function\"", "'function'"] {
+        // 产物侧不得出现任何明文 API 名或类型串字面量（引导根 getfenv/_ENV/_G 除外）
+        for bad in ["pcall", "string", "byte", "bxor", "unpack", "bit32", "setmetatable", "__mode", "\"k\"", "'k'", "\"function\"", "'function'"] {
             assert!(!src.contains(bad), "NB 建表泄漏明文: {}", bad);
         }
     }
