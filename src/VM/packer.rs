@@ -503,11 +503,31 @@ impl Packer {
             ControlFlowBuilder::build_router_machine(&insts_init, "while st~=nil do ", "st", &kseed_i, rng);
         let init_insts_loop = format!("{}{}", insts_decl, init_insts_loop_body);
 
+        let mut pc_slot_decls = String::new();
+        let mut pc_slot = |rng: &mut GenRng, n: usize| -> String {
+            let v = rng.name();
+            let expr = pc_ref(rng, n);
+            pc_slot_decls.push_str(&format!("local {}={};", v, expr));
+            v
+        };
+        let obf_fast = |val: i64, rng: &mut GenRng| -> String {
+            let r = rng.range64(10, 500);
+            match rng.range(0, 3) {
+                0 => format!("({}-{})", rng.format_num(val + r), rng.format_num(r)),
+                1 => format!("({}+{})", rng.format_num(val - r), rng.format_num(r)),
+                _ => {
+                    let m = rng.range64(501, 2000);
+                    let k = rng.range64(1, 5);
+                    format!("(({}%{})+{})", rng.format_num(k * m + r), rng.format_num(m), rng.format_num(val - r))
+                }
+            }
+        };
+
         let mut handlers_init = Vec::new();
         // ㉙③ 句柄体去平坦：每个句柄改成「加载期语句闭包表 + 运行期游走」——
         // 语句组变闭包（定义洗牌发射），真实执行序编进由元表动态生成的键序列 S；组返回
-        // false 立即停走（早退语义与原 return end 一致）。闭包表在建句柄时一次
-        // 建成，热路径每步只多一次表查+微调用。
+        // false 立即停走（早退语义与原 return end 一致）。闭包表与元表步进边界在建句柄时一次
+        // 建成并由内层闭包捕获，热路径保持零明文状态码且不在每字节循环内重复触发元方法。
         let scramble_handler = |groups: Vec<String>, rng: &mut GenRng| -> String {
             let tn = rng.name();
             let sn = rng.name();
@@ -523,11 +543,16 @@ impl Packer {
             rng.shuffle(&mut defs);
             let jn = rng.name();
             let gj = rng.name();
-            format!("(function() local {}={{}};{}local {}={{{}}};return function(inst) local {}={};while {}<={} do local {}={}[{}[{}]];if not {}() then break end;{}={}+{} end end end)()",
+            let c1_init = rng.name();
+            let clen = rng.name();
+            let c1_step = rng.name();
+            format!("(function() local {}={{}};{}local {}={{{}}};local {},{},{}={},{},{};return function(inst) local {}={};while {}<={} do local {}={}[{}[{}]];if not {}() then break end;{}={}+{} end end end)()",
                 tn, defs.join(""), sn, def_keys.join(","),
-                jn, crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, 1),
-                jn, crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, groups.len() as i64),
-                gj, tn, sn, jn, gj, jn, jn, crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, 1))
+                c1_init, clen, c1_step,
+                crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, 1),
+                crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, groups.len() as i64),
+                crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, 1),
+                jn, c1_init, jn, clen, gj, tn, sn, jn, gj, jn, jn, c1_step)
         };
         // ㉙② 注册键运行时化：键 = 键基 + (指令码+篡改常量)*步长；键基/步长在
         // m_main 里由密钥字节运行时推导（见模板），静态求值拿不到键集合
@@ -536,76 +561,94 @@ impl Packer {
             crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, tamper_val as i64));
         let fail_g = |fld: &str, rng: &mut GenRng| format!(
             "if not s.{} then s.r_flg=true;s.r_vals={{s.concat(s.res)}};s.r_len={};return false end;",
-            fld, ControlFlowBuilder::obf_num(1, rng));
+            fld, obf_fast(1, rng));
 
         // H0：复位位计数/结果表 → 落 pc1
+        let pc_s1_h0 = pc_slot(rng, 1);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state0, rng),
             scramble_handler(vec![
-                format!("s.bc={};s.res={{}};return true", ControlFlowBuilder::obf_num(8, rng)),
-                format!("s.pc={};return true", pc_ref(rng, 1)),
+                format!("s.bc={};s.res={{}};return true", obf_fast(8, rng)),
+                format!("s.pc={};return true", pc_s1_h0),
             ], rng)));
         // H1：位计数分流（and/or 选择式替代显式 if）
+        let pc_s2_h1 = pc_slot(rng, 2);
+        let pc_s3_h1 = pc_slot(rng, 3);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state1, rng),
             scramble_handler(vec![
-                format!("s.bc=s.bc+{};return true", ControlFlowBuilder::obf_num(0, rng)),
+                format!("s.bc=s.bc+{};return true", obf_fast(0, rng)),
                 format!("s.pc=(s.bc>{} and ({}) or ({}));return true",
-                    ControlFlowBuilder::obf_num(7, rng), pc_ref(rng, 2), pc_ref(rng, 3)),
+                    obf_fast(7, rng), pc_s2_h1, pc_s3_h1),
             ], rng)));
         // H2：读标志字节（失败早退）→ 位计数清零 → 落 pc3
+        let pc_s3_h2 = pc_slot(rng, 3);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state2, rng),
             scramble_handler(vec![
-                format!("s.f=q:{}(s);{}s.bc={};return true", m_next, fail_g("f", rng), ControlFlowBuilder::obf_num(0, rng)),
-                format!("s.pc={};return true", pc_ref(rng, 3)),
+                format!("s.f=q:{}(s);{}s.bc={};return true", m_next, fail_g("f", rng), obf_fast(0, rng)),
+                format!("s.pc={};return true", pc_s3_h2),
             ], rng)));
         // H3：标志位分流（模二选择式）
+        let pc_s4_h3 = pc_slot(rng, 4);
+        let pc_s5_h3 = pc_slot(rng, 5);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state3, rng),
             scramble_handler(vec![
-                format!("s.bc=s.bc+{};return true", ControlFlowBuilder::obf_num(0, rng)),
+                format!("s.bc=s.bc+{};return true", obf_fast(0, rng)),
                 format!("s.pc=((s.f%{})=={} and ({}) or ({}));return true",
-                    ControlFlowBuilder::obf_num(2, rng), ControlFlowBuilder::obf_num(1, rng), pc_ref(rng, 4), pc_ref(rng, 5)),
+                    obf_fast(2, rng), obf_fast(1, rng), pc_s4_h3, pc_s5_h3),
             ], rng)));
-        // H4：读一字节入结果表（失败早退）→ 落 pc9
+        // H4：读一字节入结果表（失败早退）→ 同组连续字面量位紧凑滑行 → 落 pc9
+        let pc_s9_h4 = pc_slot(rng, 9);
+        let (v_ch4, v_rs4, v_nr4, v_u4, v_nf4) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state4, rng),
             scramble_handler(vec![
-                format!("s.u=q:{}(s);{}s.res[#s.res+{}]=s.char(s.u);return true",
-                    m_next, fail_g("u", rng), ControlFlowBuilder::obf_num(1, rng)),
-                format!("s.pc={};return true", pc_ref(rng, 9)),
+                format!(
+                    "local {ch},{rs}=s.char,s.res;local {nr}=#{rs};while true do local {u}=q:{mn}(s);s.u={u};{} {nr}={nr}+1;{rs}[{nr}]={ch}({u});if s.bc>={c7} then if not s.raw or ({nr}%{c64})==0 then break end;s.bc={c0};s.f={c255} else local {nf}=s.floor(s.f/{c2});if ({nf}%{c2})~={c1} then break end;s.f={nf};s.bc=s.bc+{c1} end end;return true",
+                     fail_g("u", rng),
+                    ch = v_ch4, rs = v_rs4, nr = v_nr4, u = v_u4, nf = v_nf4, mn = m_next,
+                    c0 = obf_fast(0, rng), c1 = obf_fast(1, rng), c2 = obf_fast(2, rng),
+                    c7 = obf_fast(7, rng), c64 = obf_fast(64, rng), c255 = raw_flag_num
+                ),
+                format!("s.pc={};return true", pc_s9_h4),
             ], rng)));
         // H5/H6/H7：读参数（失败早退）→ 落各自下一态
+        let pc_s6_h5 = pc_slot(rng, 6);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state5, rng),
             scramble_handler(vec![
                 format!("s.p1=q:{}(s);{}return true", m_next, fail_g("p1", rng)),
-                format!("s.pc={};return true", pc_ref(rng, 6)),
+                format!("s.pc={};return true", pc_s6_h5),
             ], rng)));
+        let pc_s7_h6 = pc_slot(rng, 7);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state6, rng),
             scramble_handler(vec![
                 format!("s.p2=q:{}(s);{}return true", m_next, fail_g("p2", rng)),
-                format!("s.pc={};return true", pc_ref(rng, 7)),
+                format!("s.pc={};return true", pc_s7_h6),
             ], rng)));
+        let pc_s8_h7 = pc_slot(rng, 8);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state7, rng),
             scramble_handler(vec![
                 format!("s.w=q:{}(s);{}return true", m_next, fail_g("w", rng)),
-                format!("s.pc={};return true", pc_ref(rng, 8)),
+                format!("s.pc={};return true", pc_s8_h7),
             ], rng)));
         // 字节拼装权重直接使用 0X100，不再包成加减乘除恒等式。
         let w256 = "s.p1*0X100+s.p2".to_string();
         // H8：回引复制（循环体整组装进一个组，局部迭代器替代原形参）→ 落 pc9
+        let pc_s9_h8 = pc_slot(rng, 9);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state8, rng),
             scramble_handler(vec![
                 {
                     let it = rng.name();
                     format!("s.ptr=#s.res-({})+{};local {}={};while true do if {}>=s.w+{} then break end;s.res[#s.res+{}]=s.res[s.ptr+{}];{}={}+{} end;return true",
-                        w256, ControlFlowBuilder::obf_num(1, rng), it, ControlFlowBuilder::obf_num(0, rng),
-                        it, ControlFlowBuilder::obf_num(3, rng), ControlFlowBuilder::obf_num(1, rng), it, it, it, ControlFlowBuilder::obf_num(1, rng))
+                        w256, obf_fast(1, rng), it, obf_fast(0, rng),
+                        it, obf_fast(3, rng), obf_fast(1, rng), it, it, it, obf_fast(1, rng))
                 },
-                format!("s.pc={};return true", pc_ref(rng, 9)),
+                format!("s.pc={};return true", pc_s9_h8),
             ], rng)));
         // H9：位计数推进（三组语句三闭包）→ 落 pc1
+        let pc_s1_h9 = pc_slot(rng, 1);
         handlers_init.push(format!("s.handlers[{}] = {};", reg_key(op_state9, rng),
             scramble_handler(vec![
-                format!("s.f=s.floor(s.f/{});return true", ControlFlowBuilder::obf_num(2, rng)),
-                format!("s.bc=s.bc+{};return true", ControlFlowBuilder::obf_num(1, rng)),
-                format!("s.pc={};return true", pc_ref(rng, 1)),
+                format!("s.f=s.floor(s.f/{});return true", obf_fast(2, rng)),
+                format!("s.bc=s.bc+{};return true", obf_fast(1, rng)),
+                format!("s.pc={};return true", pc_s1_h9),
             ], rng)));
         // ㉙② 诱饵句柄：键域远离真实键系数带（指令码+篡改 ≤ 1150），永不命中；
         // 键集枚举/计数看到的不再是「恰好 10 个连续可推键」
@@ -850,46 +893,50 @@ local function {f_entry}({v_data})
     {probe}
     {pc_infra}
     {kern_decl}
+    local {p2}={p2v}; local {p3}={p3v}; local {w1}=86; local {w2}={w1}*86; local {w3}={w2}*86; local {w4}={w3}*86;
     return ({{
         {m_next} = function(q, s, r, c, e, v, x, y, z, i, d, m, b, k, B, F)
-    B, F = s.byte, s.floor;
     if s.raw and s.bc > 7 then return {raw_flag_num} end;
-    local {p2}={p2v}; local {p3}={p3v}; local {w1}=86; local {w2}={w1}*86; local {w3}={w2}*86; local {w4}={w3}*86;
-    i, d, m, b, k = s.idx, s.data, s.map, s.buf, s.kidx;
-    if #b > 0 then
-        r = s.remove(b, 1);
-        c = {kern_step}(r);
-        return c;
+    b = s.buf;
+    k = #b;
+    if k > 0 then
+        r = b[k];
+        b[k] = nil;
+        return {kern_step}(r);
     end;
+    i = s.idx;
     if i > s.len then return nil end;
+    B, F, d, m = s.byte, s.floor, s.data, s.map;
     e = s.len - i + 1;
     if e >= 5 then
         v = m[B(d, i)] * {w4} + m[B(d, i+1)] * {w3} + m[B(d, i+2)] * {w2} + m[B(d, i+3)] * {w1} + m[B(d, i+4)];
         z, y, x = v % 256, F(v / 256) % 256, F(v / {p2}) % 256;
         v = F(v / {p3});
-        b[1], b[2], b[3], b[4] = v, x, y, z;
-        i = i + 5;
+        b[1], b[2], b[3] = z, y, x;
+        s.idx = i + 5;
+        return {kern_step}(v);
     elseif e >= 4 then
         v = m[B(d, i)] * {w3} + m[B(d, i+1)] * {w2} + m[B(d, i+2)] * {w1} + m[B(d, i+3)];
         y, x = v % 256, F(v / 256) % 256;
         v = F(v / {p2});
-        b[1], b[2], b[3] = v, x, y;
-        i = i + 4;
+        b[1], b[2] = y, x;
+        s.idx = i + 4;
+        return {kern_step}(v);
     elseif e >= 3 then
         v = m[B(d, i)] * {w2} + m[B(d, i+1)] * {w1} + m[B(d, i+2)];
         x = v % 256;
         v = F(v / 256);
-        b[1], b[2] = v, x;
-        i = i + 3;
+        b[1] = x;
+        s.idx = i + 3;
+        return {kern_step}(v);
     elseif e >= 2 then
         v = m[B(d, i)] * 86 + m[B(d, i+1)];
-        b[1] = v;
-        i = i + 2;
+        s.idx = i + 2;
+        return {kern_step}(v);
     else
-        i = i + 1;
+        s.idx = i + 1;
+        return nil;
     end;
-    s.idx = i;
-    return q:{m_next}(s);
 end,
         {m_init_map} = function(q, s, parts, alpha, i, kparts, kstr, dparts, digs)
             {map_fetch_stmts}
@@ -915,6 +962,7 @@ end,
             {init_insts_loop}
         end,
         {m_init_handlers} = function(q, s, st)
+            {pc_slot_decls}
             {init_handlers_loop}
         end,
         {m_run} = function(q, s)
