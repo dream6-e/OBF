@@ -391,6 +391,14 @@ impl ShellMethods {
         format!("{}:{}({})", self.self_var, m, args.join(","))
     }
 
+    /// 批量重写所有已登记兄弟方法的方法体（例如把元表状态生成器的明文 API / 元方法名统一替换为 NB 槽引用）。
+    pub fn map_bodies<F: FnMut(String) -> String>(&mut self, mut f: F) {
+        for (_, _, _, body) in self.entries.iter_mut() {
+            let old = std::mem::take(body);
+            *body = f(old);
+        }
+    }
+
     /// 导出外层表壳的 `xx=function(s,a,b,...) ... end` 字段列表。
     pub fn into_fields(&self) -> Vec<String> {
         self.entries

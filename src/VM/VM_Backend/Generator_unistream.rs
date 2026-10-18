@@ -219,15 +219,43 @@ impl UniStream {
             prog.push(method_keys[idx]);
         }
         let end_at = prog.len() + rng.range(5, 60);
+        // 通过运行期 S-box `sb` 还原 "setmetatable"/"__add"/"__sub"/"__mul"，构造元表状态生成器
+        let sbox_str = |rng: &mut GenRng, target: &str| -> String {
+            let parts: Vec<String> = target.bytes().map(|b| {
+                let q = rng.range(1, 257);
+                let sq = self.sbox[q - 1] as usize;
+                let diff = ((b as usize) + 256 - sq) % 256;
+                let r_idx = self.sbox.iter().position(|&x| x as usize == diff).unwrap() + 1;
+                format!("({}[{}]+{}[{}])%{}", sb, bnum(rng, q as u32), sb, bnum(rng, r_idx as u32), self.k_b)
+            }).collect();
+            format!("string.char({})", parts.join(","))
+        };
+        let (um, v_la, v_ea) = (rng.name(), rng.name(), rng.name());
+        let mt_base = rng.range64(0x10_0000, 0x01FF_FFFF);
+        let um_decl = format!(
+            "local {um}=(_ENV or _G)[{sm}]({{0X{mb:X}}},{{[{ka}]=function(a,b)return a[1]+b end,[{ks}]=function(a,b)return a[1]-b end,[{km}]=function(a,b)return a[1]*b end}});local {la},{ea}={ela},{eea}; ",
+            um = um,
+            sm = sbox_str(rng, "setmetatable"),
+            mb = mt_base,
+            ka = sbox_str(rng, "__add"),
+            ks = sbox_str(rng, "__sub"),
+            km = sbox_str(rng, "__mul"),
+            la = v_la,
+            ea = v_ea,
+            ela = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &um, mt_base, (loop_at - 1) as i64),
+            eea = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &um, mt_base, end_at as i64),
+        );
         defs[10] = format!("{d}.{m}=function(_,{t}) if {t}.{pos}<#{t}.{d2} then {t}.{pc}={loop_at} else {t}.{pc}={end_at} end end; ",
             d=drv,m=method_names[10],t=sv,pos=f_pos,d2=f_d2,pc=pc,
-            loop_at=self.mask_num(rng,(loop_at-1) as u64),end_at=self.mask_num(rng,end_at as u64));
+            loop_at=v_la,end_at=v_ea);
         rng.shuffle(&mut defs);
         let mut disp: Vec<String> = (0..11)
-            .map(|j| format!("[{}]={}.{}", bnum(rng,method_keys[j]),drv,method_names[j]))
+            .map(|j| format!("[{}]={}.{}", crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &um, mt_base, method_keys[j] as i64), drv, method_names[j]))
             .collect();
         rng.shuffle(&mut disp);
-        let prog_lit = prog.iter().map(|k| bnum(rng,*k)).collect::<Vec<_>>().join(",");
+        let prog_lit = prog.iter()
+            .map(|k| crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &um, mt_base, *k as i64))
+            .collect::<Vec<_>>().join(",");
 
         let mut flds = vec![
             format!("{}={}",f_s1,fold1), format!("{}={}",f_s2,fold2),
@@ -235,12 +263,13 @@ impl UniStream {
             format!("{}=0X0",f_ix), format!("{}=0X0",f_k),
             format!("{}=0X0",f_pos), format!("{}=0X0",f_prev),
             format!("{}={}",f_d2,tb), format!("{}=string.char()",o),
-            format!("{}=0X0",f_z), format!("{}=0X0",f_w), format!("{}=0X1",pc),
+            format!("{}=0X0",f_z), format!("{}=0X0",f_w),
+            format!("{}={}", pc, crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &um, mt_base, 1)),
         ];
         rng.shuffle(&mut flds);
         format!(
-            "{kbd}local {dec}; do {kdecl}{stbl}{tt}={{}}; local {d}={{}}; {defs}local {pl}={{{prog}}}; local {dp}={{{disp}}}; {dec}=function({tb},{of}) local {s}={{{flds}}}; while true do local {fv}={dp}[{pl}[{s}.{pc}]]; if {fv} then {fv}({d},{s}); {s}.{pc}={s}.{pc}+0X1 else break end end; if {s}.{z}>{bb} then {d}.{noop}({d},{s}) end; return {s}.{o} end; end; ",
-            kbd=kb_decl,kdecl=kern.decl,stbl=stbl_src,tt=tt,d=drv,defs=defs.join(""),
+            "{kbd}local {dec}; do {kdecl}{stbl}{umd}{tt}={{}}; local {d}={{}}; {defs}local {pl}={{{prog}}}; local {dp}={{{disp}}}; {dec}=function({tb},{of}) local {s}={{{flds}}}; while true do local {fv}={dp}[{pl}[{s}.{pc}]]; if {fv} then {fv}({d},{s}); {s}.{pc}={s}.{pc}+0X1 else break end end; if {s}.{z}>{bb} then {d}.{noop}({d},{s}) end; return {s}.{o} end; end; ",
+            kbd=kb_decl,kdecl=kern.decl,stbl=stbl_src,umd=um_decl,tt=tt,d=drv,defs=defs.join(""),
             pl=pl,prog=prog_lit,dp=dp,disp=disp.join(","),dec=self.dec,tb=tb,of=of,
             s=sv,flds=flds.join(","),fv=fv,pc=pc,z=f_z,bb=self.k_b,noop=method_names[9],o=o)
     }

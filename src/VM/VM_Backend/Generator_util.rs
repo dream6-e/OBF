@@ -938,16 +938,60 @@ pub fn mix_key(plain: &str, rng: &mut GenRng) -> u32 {
     }
 }
 
-/// 将 `(状态码, 分支体)` 列表按状态码排序后递归编译为二分判定树 `if st<=pivot then ... else ... end`。
-pub fn build_bst_dispatch(items: &[(u32, String)], st_var: &str) -> String {
+/// 元表状态生成器声明：构造携带单元素基值与 `__add`/`__sub`/`__mul` 算术元方法的元表对象。
+/// 在产物路径中，`setmetatable`/`__add`/`__sub`/`__mul` 由 `NameVault` 统一重写为加密池槽引用。
+pub fn emit_mt_state_decl(_rng: &mut GenRng, mt_var: &str, base: i64) -> String {
+    format!(
+        "local {m}=setmetatable({{0X{b:X}}},{{__add=function(a,b)return a[1]+b end,__sub=function(a,b)return a[1]-b end,__mul=function(a,b)return a[1]*b end}});",
+        m = mt_var, b = base
+    )
+}
+
+/// 生成通过元表算术元方法（`__add`、`__sub`、`__mul`）在运行期动态还原为 `target` 的表达式。
+/// 每次调用均随机选用不同元方法与不同随机掩码，同一状态号在不同引用处呈现互异的代数形态。
+pub fn emit_mt_state_expr(rng: &mut GenRng, mt_var: &str, base: i64, target: i64) -> String {
+    let d1 = rng.range64(0x1_0000, 0x01FF_FFFF);
+    match rng.range(0, 3) {
+        0 => {
+            let d2 = base + d1 - target;
+            if d2 >= 0 {
+                format!("(({m}+0X{d1:X})-0X{d2:X})", m = mt_var)
+            } else {
+                format!("(({m}+0X{d1:X})+0X{d2:X})", m = mt_var, d2 = -d2)
+            }
+        }
+        1 => {
+            let d2 = target - (base - d1);
+            if d2 >= 0 {
+                format!("(({m}-0X{d1:X})+0X{d2:X})", m = mt_var)
+            } else {
+                format!("(({m}-0X{d1:X})-0X{d2:X})", m = mt_var, d2 = -d2)
+            }
+        }
+        _ => {
+            let k = rng.range64(2, 50);
+            let d2 = base * k - target;
+            if d2 >= 0 {
+                format!("(({m}*0X{k:X})-0X{d2:X})", m = mt_var)
+            } else {
+                format!("(({m}*0X{k:X})+0X{d2:X})", m = mt_var, d2 = -d2)
+            }
+        }
+    }
+}
+
+/// 将 `(状态码, 分支体)` 列表按状态码排序后递归编译为二分判定树 `if st<=pivot_mt then ... else ... end`。
+pub fn build_bst_dispatch(items: &[(u32, String)], st_var: &str, mt_var: &str, mt_base: i64) -> String {
     if items.len() == 1 {
         return items[0].1.clone();
     }
     let mid = items.len() / 2;
-    let pivot = items[mid - 1].0;
-    let left = build_bst_dispatch(&items[..mid], st_var);
-    let right = build_bst_dispatch(&items[mid..], st_var);
-    format!("if {}<={} then {} else {} end;", st_var, pivot, left, right)
+    let pivot = items[mid - 1].0 as i64;
+    let mut rng = GenRng::new(0);
+    let pivot_expr = emit_mt_state_expr(&mut rng, mt_var, mt_base, pivot);
+    let left = build_bst_dispatch(&items[..mid], st_var, mt_var, mt_base);
+    let right = build_bst_dispatch(&items[mid..], st_var, mt_var, mt_base);
+    format!("if {}<={} then {} else {} end;", st_var, pivot_expr, left, right)
 }
 
 /// 生成打乱控制流与数据流的自定义流/池解密函数：
@@ -1030,9 +1074,17 @@ pub fn emit_scrambled_mix_dec(
         let j = r.gen_range(0..=i);
         phys.swap(i, j);
     }
-    let mut table_elems = vec![0u64; TOTAL_SLOTS];
+    let mut grng = GenRng::new(0);
+    let mt_var = grng.name();
+    let mt_base = grng.range64(0x10_0000, 0x01FF_FFFF);
+    let mt_decl = emit_mt_state_decl(&mut grng, &mt_var, mt_base);
+    let mut table_elems = vec![String::new(); TOTAL_SLOTS];
     for (logic_idx, &p_slot) in phys.iter().enumerate() {
-        table_elems[p_slot - 1] = all_init[logic_idx];
+        table_elems[p_slot - 1] = if logic_idx >= 64 {
+            emit_mt_state_expr(&mut grng, &mt_var, mt_base, all_init[logic_idx] as i64)
+        } else {
+            all_init[logic_idx].to_string()
+        };
     }
 
     // 逻辑槽位读取辅助闭包
@@ -1168,16 +1220,12 @@ pub fn emit_scrambled_mix_dec(
         (st_ids[9], b9),
     ];
     branches.sort_by_key(|&(k, _)| k);
-    let tree = build_bst_dispatch(&branches, "st");
-    let tbl_str = table_elems
-        .iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
+    let tree = build_bst_dispatch(&branches, "st", &mt_var, mt_base);
+    let tbl_str = table_elems.join(",");
     let sig = if pool_mode.is_some() { "function(h)" } else { "function(s,k)" };
     format!(
-        "{sig} local S={{{tbl}}};local st=S[{nx0}];while st~=S[{nxe}] do {tree} end;return S[{ro}] end",
-        sig = sig, tbl = tbl_str, nx0 = nx_0, nxe = nx_exit, tree = tree, ro = r_o
+        "{sig} {mt}local S={{{tbl}}};local st=S[{nx0}];while st~=S[{nxe}] do {tree} end;return S[{ro}] end",
+        sig = sig, mt = mt_decl, tbl = tbl_str, nx0 = nx_0, nxe = nx_exit, tree = tree, ro = r_o
     )
 }
 
@@ -1354,7 +1402,17 @@ pub(super) fn cursor_walk_static(
     let n = (hi - lo + 1).max(1) as usize;
     let states = states.min(n).max(1);
     let per = (n + states - 1) / states;
-    let mut out = format!("local {}={}; while true do ", g, match keys { Some(kk) => rng.obfuscate_num(ks[0], 1, kk), None => rng.format_num(ks[0]) });
+    let (mt_var, mt_base, mt_pre) = if keys.is_none() {
+        let mv = rng.name();
+        let mb = rng.range64(0x10_0000, 0x01FF_FFFF);
+        let md = emit_mt_state_decl(rng, &mv, mb);
+        (mv, mb, md)
+    } else {
+        (String::new(), 0, String::new())
+    };
+    let mut out = format!("{mt}local {g}={k0}; while true do ",
+        mt = mt_pre, g = g,
+        k0 = match keys { Some(kk) => rng.obfuscate_num(ks[0], 1, kk), None => emit_mt_state_expr(rng, &mt_var, mt_base, ks[0]) });
     let mut done = 0usize; let mut sidx = 0usize; let mut cur = lo;
     while done < n {
         let take = per.min(n - done);
@@ -1362,8 +1420,8 @@ pub(super) fn cursor_walk_static(
         let iv = fix_iv.map(|f| f.to_string()).unwrap_or_else(|| sn.next());
         let batch = format!("local {}={}; while {}<={} do {} {}={}+1 end; ",
             iv, cur, iv, seg_hi, unit(&iv), iv, iv);
-        let cond = match keys { Some(kk) => rng.obfuscate_num(ks[sidx], 1, kk), None => rng.format_num(ks[sidx]) };
-        let nxt = match keys { Some(kk) => rng.obfuscate_num(ks[sidx + 1], 1, kk), None => rng.format_num(ks[sidx + 1]) };
+        let cond = match keys { Some(kk) => rng.obfuscate_num(ks[sidx], 1, kk), None => emit_mt_state_expr(rng, &mt_var, mt_base, ks[sidx]) };
+        let nxt = match keys { Some(kk) => rng.obfuscate_num(ks[sidx + 1], 1, kk), None => emit_mt_state_expr(rng, &mt_var, mt_base, ks[sidx + 1]) };
         let body = if rng.range(0, 10) < 4 {
             format!("repeat {}{}={}; break until false; ", batch, g, nxt)
         } else {
@@ -1392,10 +1450,18 @@ pub(super) fn cursor_walk_dyn(
         let v = rng.range64(0x0200_0000, 0x7FFF_FFFF);
         if !ks.contains(&v) { ks.push(v); }
     }
-    let obf = |rr: &mut GenRng, v: i64| -> String {
-        match keys { Some(kk) => rr.obfuscate_num(v, 1, kk), None => rr.format_num(v) }
+    let (mt_var, mt_base, mt_pre) = if keys.is_none() {
+        let mv = rng.name();
+        let mb = rng.range64(0x10_0000, 0x01FF_FFFF);
+        let md = emit_mt_state_decl(rng, &mv, mb);
+        (mv, mb, md)
+    } else {
+        (String::new(), 0, String::new())
     };
-    let mut out = format!("local {}={}; local {}=1; while true do ", g, obf(rng, ks[0]), idx);
+    let obf = |rr: &mut GenRng, v: i64| -> String {
+        match keys { Some(kk) => rr.obfuscate_num(v, 1, kk), None => emit_mt_state_expr(rr, &mt_var, mt_base, v) }
+    };
+    let mut out = format!("{}local {}={}; local {}=1; while true do ", mt_pre, g, obf(rng, ks[0]), idx);
     for s in 0..states {
         let cond = obf(rng, ks[s]);
         let nxt = obf(rng, ks[(s + 1) % states]);

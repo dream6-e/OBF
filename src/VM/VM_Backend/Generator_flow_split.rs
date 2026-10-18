@@ -976,20 +976,60 @@ pub(super) fn wrap_dispatcher(
     let (relay_setup, body) = extract_relay_setup(body);
     let base = (flow_seed as u32) & 0x3FFF_FF00;
 
-    // Eight distinct randomized state codes.
+    // Eight distinct randomized state codes generated at runtime via metatable (__add/__sub/__mul).
     let mut offsets: Vec<u32> = (0..256).step_by(1).collect::<Vec<u32>>();
     rng.shuffle(&mut offsets);
-    let states: Vec<String> = offsets[..8].iter().map(|o| format!("0X{:X}", base + o * 0x100 + 0x11)).collect();
-    let (s0, s1, s2, s3, s4, s5, s6, s7) = (
-        states[0].clone(),
-        states[1].clone(),
-        states[2].clone(),
-        states[3].clone(),
-        states[4].clone(),
-        states[5].clone(),
-        states[6].clone(),
-        states[7].clone(),
+    let state_nums: Vec<i64> = offsets[..8].iter().map(|o| (base + o * 0x100 + 0x11) as i64).collect();
+    let mt_var = format!("{}_{}", route_name, rng.name("mt"));
+    let mt_base = (((rng.next() as u32) & 0x00FF_FFFF) + 0x10_0000) as i64;
+    let mt_decl = format!(
+        "{m}=setmetatable({{0X{b:X}}},{{__add=function(a,b)return a[1]+b end,__sub=function(a,b)return a[1]-b end,__mul=function(a,b)return a[1]*b end}});",
+        m = mt_var, b = mt_base
     );
+    let mut mt_expr = |rng: &mut TinyRng, target: i64| -> String {
+        let d1 = (((rng.next() as u32) & 0x01FF_FFFF) + 0x1_0000) as i64;
+        match rng.next() % 3 {
+            0 => {
+                let d2 = mt_base + d1 - target;
+                if d2 >= 0 {
+                    format!("(({m}+0X{d1:X})-0X{d2:X})", m = mt_var)
+                } else {
+                    format!("(({m}+0X{d1:X})+0X{d2:X})", m = mt_var, d2 = -d2)
+                }
+            }
+            1 => {
+                let d2 = target - (mt_base - d1);
+                if d2 >= 0 {
+                    format!("(({m}-0X{d1:X})+0X{d2:X})", m = mt_var)
+                } else {
+                    format!("(({m}-0X{d1:X})-0X{d2:X})", m = mt_var, d2 = -d2)
+                }
+            }
+            _ => {
+                let k = (((rng.next() as u32) % 45) + 2) as i64;
+                let d2 = mt_base * k - target;
+                if d2 >= 0 {
+                    format!("(({m}*0X{k:X})-0X{d2:X})", m = mt_var)
+                } else {
+                    format!("(({m}*0X{k:X})+0X{d2:X})", m = mt_var, d2 = -d2)
+                }
+            }
+        }
+    };
+    let s0 = mt_expr(&mut rng, state_nums[0]);
+    let s1 = mt_expr(&mut rng, state_nums[1]);
+    let s2 = mt_expr(&mut rng, state_nums[2]);
+    let s3 = mt_expr(&mut rng, state_nums[3]);
+    let s4 = mt_expr(&mut rng, state_nums[4]);
+    let s5 = mt_expr(&mut rng, state_nums[5]);
+    let s6 = mt_expr(&mut rng, state_nums[6]);
+    let s7 = mt_expr(&mut rng, state_nums[7]);
+    let s6_b = mt_expr(&mut rng, state_nums[6]);
+    let s7_b = mt_expr(&mut rng, state_nums[7]);
+    let s6_c = mt_expr(&mut rng, state_nums[6]);
+    let s7_c = mt_expr(&mut rng, state_nums[7]);
+    let s7_d = mt_expr(&mut rng, state_nums[7]);
+    let states: Vec<String> = (0..8).map(|i| mt_expr(&mut rng, state_nums[i])).collect();
 
     // Keep setup in its original position; the nested step closure captures its locals.
     let loop_body = if !has_handlers {
@@ -1033,28 +1073,28 @@ pub(super) fn wrap_dispatcher(
     let route_step = format!("{state}={pick_relay}({gate},...);", state = state_name, pick_relay = pick_relay, gate = gate_name);
     let route_loop = match route_form {
         LoopForm::While => format!(
-            "while {ra}~={rb} and {st}~={s6} and {st}~={s7} do {step} end;",
-            ra = relay_a, rb = relay_b, st = state_name, s6 = s6, s7 = s7, step = route_step,
+            "while {ra}~={rb} and {st}~={rb}[0X1] and {st}~={rb}[0X2] do {step} end;",
+            ra = relay_a, rb = relay_b, st = state_name, step = route_step,
         ),
         LoopForm::Repeat => format!(
-            "repeat {step} until {st}=={s6} or {st}=={s7};",
-            step = route_step, st = state_name, s6 = s6, s7 = s7,
+            "repeat {step} until {st}=={rb}[0X1] or {st}=={rb}[0X2];",
+            step = route_step, st = state_name, rb = relay_b,
         ),
     };
 
     // Randomly shard the eight state handlers across the two relay tables.
     let state_bodies: Vec<String> = vec![
-        format!("function({gate},...) if {gate} and {ra}~={rb} then return {s2} end return {s3} end", gate = gate_name, ra = relay_a, rb = relay_b, s2 = s2, s3 = s3),
+        format!("function({gate},...) if {gate} and {ra}~={rb} then return {ra}[0X3] end return {ra}[0X4] end", gate = gate_name, ra = relay_a, rb = relay_b),
         format!("function({gate},...) if not {gate} or {ra}=={rb} then return {s5} end return {s4} end", gate = gate_name, ra = relay_a, rb = relay_b, s5 = s5, s4 = s4),
-        format!("function({gate},...) local {index}; repeat {index}={s6} until {index}~=nil and {ra}~={rb}; return {index} end", gate = gate_name, index = index_name, s6 = s6, ra = relay_a, rb = relay_b),
-        format!("function(...) return {} end", s7),
-        format!("function(...) return {} end", s6),
+        format!("function({gate},...) local {index}; repeat {index}={rb}[0X3] until {index}~=nil and {ra}~={rb}; return {index} end", gate = gate_name, index = index_name, ra = relay_a, rb = relay_b),
+        format!("function(...) return {} end", s7_b),
+        format!("function(...) return {} end", s6_c),
         format!(
-            "function({gate},...) local {index},{next_state}; for {index}=0X1,0X1 do if not {gate} or {ra}=={rb} then {next_state}={s7} end; if {gate} and {ra}~={rb} then {next_state}={s6} end; break end; return {next_state} or {s7} end",
-            gate = gate_name, index = index_name, next_state = format!("{}_next", state_name), ra = relay_a, rb = relay_b, s7 = s7, s6 = s6,
+            "function({gate},...) local {index},{next_state}; for {index}=0X1,0X1 do if not {gate} or {ra}=={rb} then {next_state}={s7} end; if {gate} and {ra}~={rb} then {next_state}={s6} end; break end; return {next_state} or {s7_d} end",
+            gate = gate_name, index = index_name, next_state = format!("{}_next", state_name), ra = relay_a, rb = relay_b, s7 = s7_c, s6 = s6, s7_d = s7_d,
         ),
-        format!("function({gate},...) return {exit_a}(...) end", gate = gate_name, exit_a = exit_a),
-        format!("function({gate},...) return {exit_b}(...) end", gate = gate_name, exit_b = exit_b),
+        format!("function({gate},a,b,...) return a(...) end", gate = gate_name),
+        format!("function({gate},a,b,...) return b(...) end", gate = gate_name),
     ];
     let mut relay_defs = String::new();
     for (i, sb) in state_bodies.iter().enumerate() {
@@ -1069,24 +1109,33 @@ pub(super) fn wrap_dispatcher(
         };
         relay_defs.push_str(&format!("{table}[{state}]={body};", table = table, state = states[i], body = sb));
     }
+    let ck1 = ((rng.next() as u32) & 0x3FFF_FFFF) | 0x1000_0000;
+    let ck2 = ck1 ^ 0x05A5_A5A5;
+    let ck3 = ck1 ^ 0x0A5A_5A5A;
 
     format!(
         r#"local function {core}(...) {core_body} end;
 local function {exit_a}(...) return {core}(...) end;
 local function {exit_b}(...) return {core}(...) end;
-local {relay_a},{relay_b}={{}},{{}};
-{relay_defs}
+local {mt_var},{relay_a},{relay_b};
+if {chunk} then {mt_var},{relay_a},{relay_b}={chunk}[0X{ck1:X}],{chunk}[0X{ck2:X}],{chunk}[0X{ck3:X}] end;
+if not {mt_var} then {mt_decl}{relay_a},{relay_b}={{{s0},{s1},{s2},{s3}}},{{{s6},{s7},{s6_b}}};{relay_defs}if {chunk} then {chunk}[0X{ck1:X}],{chunk}[0X{ck2:X}],{chunk}[0X{ck3:X}]={mt_var},{relay_a},{relay_b} end end;
 local function {route}(...)
   local {gate}=({chunk}~=nil and {ra}~={rb}) or {ra}=={rb};
-  local {state}={start} and {s0} or {s1};
+  local {state}={start} and {ra}[0X1] or {ra}[0X2];
   {route_loop}
-  return ({ra}[{state}] or {rb}[{state}])({gate},...)
+  return ({ra}[{state}] or {rb}[{state}])({gate},{exit_a},{exit_b},...)
 end;
 return {route}(...);"#,
         core = core_name,
         core_body = core_body,
         exit_a = exit_a,
         exit_b = exit_b,
+        mt_var = mt_var,
+        mt_decl = mt_decl,
+        ck1 = ck1,
+        ck2 = ck2,
+        ck3 = ck3,
         relay_a = relay_a,
         relay_b = relay_b,
         relay_defs = relay_defs,
@@ -1097,6 +1146,11 @@ return {route}(...);"#,
         start = start_test,
         s0 = s0,
         s1 = s1,
+        s2 = s2,
+        s3 = s3,
+        s6 = s6,
+        s7 = s7,
+        s6_b = s6_b,
         route_loop = route_loop,
         ra = relay_a,
         rb = relay_b,

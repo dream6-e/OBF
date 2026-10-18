@@ -433,22 +433,32 @@ impl Packer {
         }
 
         let tamper_val = rng.range(10, 50);
+        let v_smeta = vault.global("setmetatable");
+        let v_mm_add = vault.lit("__add");
+        let v_mm_sub = vault.lit("__sub");
+        let v_mm_mul = vault.lit("__mul");
+        let pmt = rng.name();
+        let pmt_base = rng.range64(0x10_0000, 0x01FF_FFFF);
+        let pmt_decl = format!(
+            "local {m}={sm}({{0X{b:X}}},{{[{ka}]=function(a,b)return a[1]+b end,[{ks}]=function(a,b)return a[1]-b end,[{km}]=function(a,b)return a[1]*b end}});",
+            m = pmt, sm = v_smeta, b = pmt_base, ka = v_mm_add, ks = v_mm_sub, km = v_mm_mul
+        );
 
         // ㉕ pc 状态表基建：在解码脚本所有方法之前声明，被各闭包按 upvalue 捕获。
-        // 槽位与值直接用数值字面量写入；状态仍经表访问，稠密 1..10 保持 #s.insts 语义。
+        // 槽位与值改由元表算术元方法（__add/__sub/__mul）运行期动态生成；稠密 1..10 保持 #s.insts 语义。
         let (pct, pcdv) = (rng.name(), rng.name());
         let mut pc_fills: Vec<String> = Vec::new();
         for n in 0..10 {
             pc_fills.push(format!("{}[{}]={};", pct,
-                ControlFlowBuilder::obf_num((n + 1) as i64, rng),
-                ControlFlowBuilder::obf_num((pcs[n] + 1) as i64, rng)));
+                crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, (n + 1) as i64),
+                crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, (pcs[n] + 1) as i64)));
         }
         rng.shuffle(&mut pc_fills);
-        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=(w+#{})%0X2 return u+z-(w%0X2) end;",
-            pct, pc_fills.join(""), pcdv, pct);
+        let pc_infra = format!("{}local {}={{}};{}local {}=function(w,u) local z=(w+#{})%0X2 return u+z-(w%0X2) end;",
+            pmt_decl, pct, pc_fills.join(""), pcdv, pct);
         // pc 值引用形态：②状态表引用 / ④委托调用（数值本身永不直出）
         let pc_ref = |rng: &mut GenRng, n: usize| -> String {
-            let idx = ControlFlowBuilder::obf_num((n + 1) as i64, rng);
+            let idx = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, (n + 1) as i64);
             if rng.range(0, 3) == 0 {
                 format!("{}({},{}[{}])", pcdv, ControlFlowBuilder::obf_num(rng.range64(0x100, 0xFFFF), rng), pct, idx)
             } else {
@@ -473,17 +483,17 @@ impl Packer {
         let p_hk = rng.name(); let p_hs = rng.name();
 
         let mut insts_init = Vec::new();
-        // ㉕ pc 键走状态表引用；op 值直接写为数值字面量，运行期仍与句柄注册键 op+tamper 对齐。
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 0), ControlFlowBuilder::obf_num(op_state0 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 1), ControlFlowBuilder::obf_num(op_state1 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 2), ControlFlowBuilder::obf_num(op_state2 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 3), ControlFlowBuilder::obf_num(op_state3 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 4), ControlFlowBuilder::obf_num(op_state4 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 5), ControlFlowBuilder::obf_num(op_state5 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 6), ControlFlowBuilder::obf_num(op_state6 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 7), ControlFlowBuilder::obf_num(op_state7 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 8), ControlFlowBuilder::obf_num(op_state8 as i64, rng)));
-        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 9), ControlFlowBuilder::obf_num(op_state9 as i64, rng)));
+        // ㉕ pc 键走状态表引用；op 值经元表算术元方法动态生成，运行期仍与句柄注册键对齐。
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 0), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state0 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 1), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state1 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 2), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state2 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 3), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state3 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 4), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state4 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 5), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state5 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 6), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state6 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 7), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state7 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 8), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state8 as i64)));
+        insts_init.push(format!("s.insts[{}]={{{}}};", pc_ref(rng, 9), crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op_state9 as i64)));
 
         // ㉕ 初始化状态机运行时耦合化：状态号（原 1..N 洗牌裸字面量）改为
         // 运行期等差数列填表，比较/转移/初值经状态表/惰性槽/委托三形态流动
@@ -494,7 +504,7 @@ impl Packer {
 
         let mut handlers_init = Vec::new();
         // ㉙③ 句柄体去平坦：每个句柄改成「加载期语句闭包表 + 运行期游走」——
-        // 语句组变闭包（定义洗牌发射），真实执行序编进混淆键序列 S；组返回
+        // 语句组变闭包（定义洗牌发射），真实执行序编进由元表动态生成的键序列 S；组返回
         // false 立即停走（早退语义与原 return end 一致）。闭包表在建句柄时一次
         // 建成，热路径每步只多一次表查+微调用。
         let scramble_handler = |groups: Vec<String>, rng: &mut GenRng| -> String {
@@ -503,23 +513,26 @@ impl Packer {
             let mut def_keys: Vec<String> = Vec::new();
             let mut defs: Vec<String> = Vec::new();
             for g in &groups {
-                let k = ControlFlowBuilder::obf_num(rng.range64(0x100, 0xFFFFF), rng);
-                def_keys.push(k.clone());
-                defs.push(format!("{}[{}]=function() {} end;", tn, k, g));
+                let kv = rng.range64(0x100, 0xFFFFF);
+                let k_def = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, kv);
+                let k_seq = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, kv);
+                def_keys.push(k_seq);
+                defs.push(format!("{}[{}]=function() {} end;", tn, k_def, g));
             }
             rng.shuffle(&mut defs);
             let jn = rng.name();
             let gj = rng.name();
             format!("(function() local {}={{}};{}local {}={{{}}};return function(inst) local {}={};while {}<={} do local {}={}[{}[{}]];if not {}() then break end;{}={}+{} end end end)()",
                 tn, defs.join(""), sn, def_keys.join(","),
-                jn, ControlFlowBuilder::obf_num(1, rng),
-                jn, ControlFlowBuilder::obf_num(groups.len() as i64, rng),
-                gj, tn, sn, jn, gj, jn, jn, ControlFlowBuilder::obf_num(1, rng))
+                jn, crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, 1),
+                jn, crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, groups.len() as i64),
+                gj, tn, sn, jn, gj, jn, jn, crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, 1))
         };
         // ㉙② 注册键运行时化：键 = 键基 + (指令码+篡改常量)*步长；键基/步长在
         // m_main 里由密钥字节运行时推导（见模板），静态求值拿不到键集合
         let reg_key = |op: usize, rng: &mut GenRng| format!("s.hk+(({})+({}))*s.hs",
-            ControlFlowBuilder::obf_num(op as i64, rng), ControlFlowBuilder::obf_num(tamper_val as i64, rng));
+            crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, op as i64),
+            crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(rng, &pmt, pmt_base, tamper_val as i64));
         let fail_g = |fld: &str, rng: &mut GenRng| format!(
             "if not s.{} then s.r_flg=true;s.r_vals={{s.concat(s.res)}};s.r_len={};return false end;",
             fld, ControlFlowBuilder::obf_num(1, rng));

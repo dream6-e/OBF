@@ -108,6 +108,23 @@ impl StubGenerator {
         // （路由器按 #insts/pc+1 语义）；状态表直接写入数值字面量，
         // 引用走状态表/恒等委托两形态。
         let mut srng = GenRng::new(seed as u64);
+        let mut uni_rng = GenRng::new(seed as u64);
+        let mut uni = UniStream::new(&mut uni_rng);
+        let id_sm = uni.register("setmetatable");
+        let (st_sm, ex_sm) = uni.fetch(&mut uni_rng, id_sm);
+        let id_ma = uni.register("__add");
+        let (st_ma, ex_ma) = uni.fetch(&mut uni_rng, id_ma);
+        let id_ms = uni.register("__sub");
+        let (st_ms, ex_ms) = uni.fetch(&mut uni_rng, id_ms);
+        let id_mm = uni.register("__mul");
+        let (st_mm, ex_mm) = uni.fetch(&mut uni_rng, id_mm);
+        let pmt = pool.get();
+        let pmt_base = srng.range64(0x10_0000, 0x01FF_FFFF);
+        let pmt_decl = format!(
+            "{st_sm}{st_ma}{st_ms}{st_mm}local {m}=(_ENV or _G)[{sm}]({{0X{b:X}}},{{[{ka}]=function(a,b)return a[1]+b end,[{ks}]=function(a,b)return a[1]-b end,[{km}]=function(a,b)return a[1]*b end}});",
+            st_sm = st_sm, st_ma = st_ma, st_ms = st_ms, st_mm = st_mm,
+            m = pmt, sm = ex_sm, b = pmt_base, ka = ex_ma, ks = ex_ms, km = ex_mm
+        );
         let mut pcs: Vec<usize> = (0..10).collect();
         for i in (1..10).rev() {
             let j = pool.rng_mut().next_range(0, i + 1);
@@ -117,22 +134,22 @@ impl StubGenerator {
         let mut pc_fills: Vec<String> = Vec::new();
         for n in 0..10 {
             pc_fills.push(format!("{}[{}]={};", pct,
-                ControlFlowBuilder::obf_num((n + 1) as i64, &mut srng),
-                ControlFlowBuilder::obf_num((pcs[n] + 1) as i64, &mut srng)));
+                crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut srng, &pmt, pmt_base, (n + 1) as i64),
+                crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut srng, &pmt, pmt_base, (pcs[n] + 1) as i64)));
         }
         for i in (1..pc_fills.len()).rev() {
             let j = pool.rng_mut().next_range(0, i + 1);
             pc_fills.swap(i, j);
         }
-        let pc_infra = format!("local {}={{}};{}local {}=function(w,u) local z=(w+#{})%0X2 return u+z-(w%0X2) end;",
-            pct, pc_fills.join(""), pcdv, pct);
+        let pc_infra = format!("{}local {}={{}};{}local {}=function(w,u) local z=(w+#{})%0X2 return u+z-(w%0X2) end;",
+            pmt_decl, pct, pc_fills.join(""), pcdv, pct);
         // 每个 pc 值两枚引用形态：a=表引用（给 insts 键/初值），b=表引用或委托（给句柄体）
         let mut pc_refs_a: Vec<String> = Vec::new();
         let mut pc_refs_b: Vec<String> = Vec::new();
         for n in 0..10 {
-            let idx_a = ControlFlowBuilder::obf_num((n + 1) as i64, &mut srng);
+            let idx_a = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut srng, &pmt, pmt_base, (n + 1) as i64);
             pc_refs_a.push(format!("{}[{}]", pct, idx_a));
-            let idx_b = ControlFlowBuilder::obf_num((n + 1) as i64, &mut srng);
+            let idx_b = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut srng, &pmt, pmt_base, (n + 1) as i64);
             if srng.range(0, 3) == 0 {
                 let junk = ControlFlowBuilder::obf_num(srng.range64(0x100, 0xFFFF), &mut srng);
                 pc_refs_b.push(format!("{}({},{}[{}])", pcdv, junk, pct, idx_b));
@@ -140,8 +157,8 @@ impl StubGenerator {
                 pc_refs_b.push(format!("{}[{}]", pct, idx_b));
             }
         }
-        // ㉕ op/tamper 数值统一以数值字面量下发
-        let obf_op = |v: usize, r: &mut GenRng| ControlFlowBuilder::obf_num(v as i64, r);
+        // ㉕ op/tamper 数值统一经元表动态生成
+        let obf_op = |v: usize, r: &mut GenRng| crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(r, &pmt, pmt_base, v as i64);
 
         let tamper_val = pool.rng_mut().next_range(10, 50);
 
@@ -287,8 +304,6 @@ impl StubGenerator {
         k_str.push('}');
 
         // ㉓ 统一流：壳脚本自带一只（惰性解密+数字密文），与主产物同一机制。
-        let mut uni_rng = GenRng::new(seed as u64);
-        let mut uni = UniStream::new(&mut uni_rng);
         let probe = loadstring_probe_lua(&f_isnat, &f_getls, &v_pload, &mut uni, &mut uni_rng, None);
         // ④E：加载器不以标识符落盘——探测结果优先，取不到再从环境表按
         // 运行期还原的名字取；产物里没有 `loadstring` / `load` 两个词。

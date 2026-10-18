@@ -122,9 +122,8 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         // sethook 的调用掩码：原先以 string.char(99) 字面量出现，改走池取用
         "c".into(),
         ":(%d+)[:\r\n ]".into(),
-        // ③ 陷阱门用：setmetatable(__index 元表陷阱)。凡 poly_hash 查池的串必须在此
-        // 登记过，否则查表得 nil → 构造器 [nil]=… 直接「table index is nil」。
-        "setmetatable".into(), "__index".into(),
+        // ③ 陷阱门与元表状态机用：setmetatable 及 __index/__add/__sub/__mul。
+        "setmetatable".into(), "__index".into(), "__add".into(), "__sub".into(), "__mul".into(),
     ];
     // 池级四字节密钥逐产物随机；所有条目共用一组，解码器只需要带一个常量。
     let pool_key = loop {
@@ -294,15 +293,20 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         (top_ids[5], tb5),
     ];
     top_branches.sort_by_key(|&(k, _)| k);
-    let top_tree = crate::VM::VM_Backend::Generator_util::build_bst_dispatch(&top_branches, &top_st_var);
+    let mut top_grng = crate::VM::VM_Backend::Generator_util::GenRng::new(0);
+    let top_mt_var = rand_var();
+    let top_mt_base = top_grng.range64(0x10_0000, 0x01FF_FFFF);
+    let top_mt_decl = crate::VM::VM_Backend::Generator_util::emit_mt_state_decl(&mut top_grng, &top_mt_var, top_mt_base);
+    let top_tree = crate::VM::VM_Backend::Generator_util::build_bst_dispatch(&top_branches, &top_st_var, &top_mt_var, top_mt_base);
     let top_tbl_str = top_tbl_elems
         .iter()
-        .map(|v| v.to_string())
+        .map(|&v| crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut top_grng, &top_mt_var, top_mt_base, v as i64))
         .collect::<Vec<_>>()
         .join(",");
     let setup = format!(
-        "local {decls};local {tbl}={{{tbl_str}}};local {st}={tbl}[{nx0}];while {st}~={tbl}[{nxe}] do {tree} end;",
+        "local {decls};{mt}local {tbl}={{{tbl_str}}};local {st}={tbl}[{nx0}];while {st}~={tbl}[{nxe}] do {tree} end;",
         decls = decl_names.join(","),
+        mt = top_mt_decl,
         tbl = top_tbl_var,
         tbl_str = top_tbl_str,
         st = top_st_var,

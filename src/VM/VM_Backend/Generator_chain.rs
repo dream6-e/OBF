@@ -335,10 +335,10 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             xor32 = fn_xor32, p2 = x16, p3 = x24, p2v = x16v, p3v = x24v,
             rotl32 = fn_rotl32, m1 = m_rot1, m2 = m_rot2
         );
-        let m_xt = shell.add(&mut rng, &["math_floor"], xt_body);
+        let m_xt = shell.add(&mut rng, &["math_floor", &kreg_n], xt_body);
         block_chacha_setup.push_str(&format!(
             "local {},{},{}={}; ",
-            xor_tbl_var, fn_xor32, fn_rotl32, shell.call(&m_xt, &["math_floor"])
+            xor_tbl_var, fn_xor32, fn_rotl32, shell.call(&m_xt, &["math_floor", &kreg_n])
         ));
         let r_lit = |rng: &mut GenRng, v: u32| -> String { rng.format_num(v as i64) };
         let (qS, qA, qB, qC, qD) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
@@ -499,13 +499,13 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         );
         let m_qr = shell.add(
             &mut rng,
-            &[&h_var, &fn_xor32, &fn_rotl32, &w_t0, &w_t1, &w_t2],
+            &[&h_var, &fn_xor32, &fn_rotl32, &w_t0, &w_t1, &w_t2, &kreg_n],
             format!("{}{}{} return {}", qd0, qd1, qsel, fn_qr),
         );
         block_chacha_setup.push_str(&format!(
             "local {}={}; ",
             fn_qr,
-            shell.call(&m_qr, &[&h_var, &fn_xor32, &fn_rotl32, &w_t0, &w_t1, &w_t2])
+            shell.call(&m_qr, &[&h_var, &fn_xor32, &fn_rotl32, &w_t0, &w_t1, &w_t2, &kreg_n])
         ));
         // ㉔ 调用矩阵去指纹：列组/对角组内洗牌（4 列互不相交、4 对角互不相交，
         // 组内换序恒等；组间顺序固定保 ChaCha 语义），8 元组改数据表驱动，

@@ -137,12 +137,15 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let s_debug = rng.range(0x4000, 0x4FFF) as i64;
         let s_ret = rng.range(0x5000, 0x5FFF) as i64;
 
-        let obf_s_init = rng.format_num(s_init);
-        let obf_s_insts = rng.format_num(s_insts);
-        let obf_s_consts = rng.format_num(s_consts);
-        let obf_s_protos = rng.format_num(s_protos);
-        let obf_s_debug = rng.format_num(s_debug);
-        let obf_s_ret = rng.format_num(s_ret);
+        let mt_dc = rng.name();
+        let mt_dc_base = rng.range64(0x10_0000, 0x01FF_FFFF);
+        let mt_dc_decl = crate::VM::VM_Backend::Generator_util::emit_mt_state_decl(&mut rng, &mt_dc, mt_dc_base);
+        let obf_s_init = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_init);
+        let obf_s_insts = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_insts);
+        let obf_s_consts = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_consts);
+        let obf_s_protos = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_protos);
+        let obf_s_debug = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_debug);
+        let obf_s_ret = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_ret);
         let (v_ch_g, v_ch_out, v_ch_i, v_ch_n) = (rng.name(), rng.name(), rng.name(), rng.name());
 
         let cpp = rng.name();
@@ -428,12 +431,12 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let lg_call0 = format!("{}; ", shell.call(&m_lg0, &lg_params));
         let lg_call1 = format!("{}; ", shell.call(&m_lg1, &lg_params));
         let mut ch_pairs: Vec<(String, String)> = vec![
-            (obf_s_init.clone(), body_init),
-            (obf_s_insts.clone(), body_insts),
-            (obf_s_consts.clone(), body_consts),
-            (obf_s_protos.clone(), body_protos),
-            (obf_s_debug.clone(), body_debug),
-            (obf_s_ret.clone(), body_ret),
+            (crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_init), body_init),
+            (crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_insts), body_insts),
+            (crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_consts), body_consts),
+            (crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_protos), body_protos),
+            (crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_debug), body_debug),
+            (crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut rng, &mt_dc, mt_dc_base, s_ret), body_ret),
         ];
         rng.shuffle(&mut ch_pairs);
         let mut chain = String::new();
@@ -444,12 +447,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         chain.push_str(&format!("else {} = {} + 1; end; ", v_ch_g, v_ch_g));
 
     let block_dec_chunk = format!(
-        "local {scan_mode}=false; local {uctx}={uinit}; local function {fn_dec_chunk}() local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
+        "local {scan_mode}=false; local {uctx}={uinit}; {mt_dc_decl} local function {fn_dec_chunk}() local {fn_c}, {t}, {var_state} = {{}}, nil, {obf_s_init}; \
          local {g}, {out}, {i}, {n} = 0, nil, 0, 0; \
          while {g} < 1 do {chain} end; \
          return {out} end; ",
         fn_dec_chunk = fn_decode_chunk, fn_c = fn_c, t = t, var_state = var_state,
-        scan_mode = var_scan_only, uctx = var_uctx, uinit = u_ctx_init, obf_s_init = obf_s_init,
+        scan_mode = var_scan_only, uctx = var_uctx, uinit = u_ctx_init,
+        mt_dc_decl = mt_dc_decl, obf_s_init = obf_s_init,
         g = v_ch_g, out = v_ch_out, i = v_ch_i, n = v_ch_n,
         chain = chain
     );
@@ -672,6 +676,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let v_schar = vault.member("string", "char");
         let v_ssub = vault.member("string", "sub");
         let v_tconcat = vault.member("table", "concat");
+        let v_smeta = vault.global("setmetatable");
+        let v_mm_add = vault.lit("__add");
+        let v_mm_sub = vault.lit("__sub");
+        let v_mm_mul = vault.lit("__mul");
         {
             // ㉜ NB 建表 + header_captures + 毒化延迟写拆入外层兄弟方法 m_vault。
             let nb_build = vault.build(&mut rng, &mut uni, Some(&kreg_n));
@@ -714,14 +722,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 .unwrap();
             let m_sk = shell.add(
                 &mut rng,
-                &[],
+                &[&kreg_n],
                 format!("{} return {}", sk_walk_part, sk_arr_name),
             );
             wai_body.push_str(&format!(
                 "local {}; do local {}={}; {}={} end; ",
                 sk_names_str,
                 sk_arr_name,
-                shell.call(&m_sk, &[]),
+                shell.call(&m_sk, &[&kreg_n]),
                 sk_names_str,
                 sk_picks_str
             ));
@@ -811,6 +819,15 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             "return {}(main_chunk, {}, {{}}, nil, nil, {})",
             fn_execute, var_boot_env, var_l
         ));
+
+        let rewrite_mt = |s: String| -> String {
+            s.replace("setmetatable(", &format!("{}(", v_smeta))
+                .replace("{__add=", &format!("{{[{}]=", v_mm_add))
+                .replace(",__sub=", &format!(",[{}]=", v_mm_sub))
+                .replace(",__mul=", &format!(",[{}]=", v_mm_mul))
+        };
+        shell.map_bodies(rewrite_mt);
+        let wai_body = rewrite_mt(wai_body);
 
         let (wai_p0, wai_p1) = (rng.name(), rng.name());
         let wai_field = format!(
