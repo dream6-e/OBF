@@ -412,6 +412,7 @@ pub fn build_consts(
     pf_n_key: &str, pf_ld_key: &str, pf_lld_key: &str, pf_cnt_key: &str,
     chain_delta: u32, chain_m: u64, chain_k0: u64,
     psn: &str, poison_delay: &str, var_uctx: &str,
+    ros: &crate::VM::VM_Backend::Rosetta::RosettaParams, rkb_expr: &str,
 ) -> String {
     let v_setmeta = vault.global("setmetatable");
     let v_newproxy = vault.global("newproxy");
@@ -494,42 +495,58 @@ pub fn build_consts(
                 // 并对解密还原后的**真实明文**（字符串明文或 IEEE-754 8 字节明文）算 vmac 推进下一槽。
                 let agg_name = rng.name();
                 let pck_name = rng.name();
-                let (sl3, tk3, fd3, rl3) = (rng.name(), rng.name(), rng.name(), rng.name());
-                let (sl2, tk2, fd2, rl2) = (rng.name(), rng.name(), rng.name(), rng.name());
-                let (sl1, tk1, fd1, rl1) = (rng.name(), rng.name(), rng.name(), rng.name());
-                let mac_pre = |sln_: &str, tkn_: &str, fdn_: &str, rln_: &str| -> String {
-                    format!("local {sl}=(ev[(0X3)]-{c}.{pld})%{m32}; local {tk}=({sl}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; local {fd}=({ft} and {ft}[{tk}] or 0X0)%{m32}; local {rl}=({rt} and {rt}[{tk}] or {rf}); ",
-                        sl = sln_, tk = tkn_, fd = fdn_, rl = rln_, c = fn_c, pld = pf_ld_key,
-                        em = fc.emul, ea = fc.eadd, ft = ftds, rt = rtds, rf = rfds, m32 = m32)
+                let (rcab_n, rkb_n) = (rng.name(), rng.name());
+                let (cmk, rkbk) = (rng.range(0x10000, 0x7FFF_FFFF), rng.range(0x10000, 0x7FFF_FFFF));
+                let (sl3, fd3, rl3) = (rng.name(), rng.name(), rng.name());
+                let (sl2, fd2, rl2, vn2, vq2, vr2, vs2, ve2) = (
+                    rng.name(), rng.name(), rng.name(), rng.name(),
+                    rng.name(), rng.name(), rng.name(), rng.name());
+                let (sl1, fd1, rl1) = (rng.name(), rng.name(), rng.name());
+                let mac_pre = |sln_: &str, fdn_: &str, rln_: &str| -> String {
+                    format!("local {sl}=ev[(0X3)]; local {fd}=ev[(0X6)]; local {rl}=ev[(0X7)]; ",
+                        sl = sln_, fd = fdn_, rl = rln_)
                 };
-                let dsp_expr3 = format!("{pre}return {fds}(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&sl3, &tk3, &fd3, &rl3), fds = fds, sl = sl3, fd = fd3, rl = rl3);
-                let dsp_expr2 = format!("{pre}return {fdn}(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)])", pre = mac_pre(&sl2, &tk2, &fd2, &rl2), fdn = fdn, sl = sl2, fd = fd2, rl = rl2);
-                let dsp_expr1 = format!("{pre}return {fdn}(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)])>{zero}", pre = mac_pre(&sl1, &tk1, &fd1, &rl1), fdn = fdn, sl = sl1, fd = fd1, rl = rl1, zero = zero);
-                let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%{m32})", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s, m32 = m32);
+                let dsp_expr3 = format!("{pre}return (ev[(0X8)])(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)]) ", pre = mac_pre(&sl3, &fd3, &rl3), sl = sl3, fd = fd3, rl = rl3);
+                let dsp_expr2 = format!(
+                    "{pre}local {vn}=ev[(0X9)] or (ev[(0X8)])(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)]); \
+                     if (({sl}*0X{pm:X}+0X{pa:X})%0X2)==0X1 then ev[(0X9)]={vn}; \
+                       local {vq}=({bx})({vn},({bx})({rkb},({sl}*0X{rsm:X})%{m32})); \
+                       local {vr}=(((({vq}%0X{rp:X})+0X{rp:X}-0X{rka:X})*0X{rki:X})%0X{rp:X})+0X{ro:X}; \
+                       local {vs}={rcab}[{vr}]; \
+                       if {vs}==nil then local {ve}={ec}[({vr}*0X{em:X}+0X{ea:X})%{m32}]; \
+                         if {nt}({ve})=={ttbl} then {vs}=({ve}[(0X8)])({ve}[(0X2)],{vr},{ve}[(0X6)],{ve}[(0X7)],ev[(0X4)],ev[(0X5)]); {rcab}[{vr}]={vs} end \
+                       end; return {vs} end; return {vn} ",
+                    pre = mac_pre(&sl2, &fd2, &rl2), sl = sl2, fd = fd2, rl = rl2,
+                    vn = vn2, vq = vq2, vr = vr2, vs = vs2, ve = ve2,
+                    pm = ros.p_mul, pa = ros.p_add, rsm = ros.r_smul, rp = ros.r_prime,
+                    rka = ros.r_kadd, rki = ros.r_kinv, ro = ros.ros_offset,
+                    bx = fn_bxor, rkb = rkb_n, m32 = m32, rcab = rcab_n, ec = var_enc_c,
+                    em = fc.emul, ea = fc.eadd, nt = native_type, ttbl = v_t_tbl);
+                let dsp_expr1 = format!("{pre}return (ev[(0X8)])(ev[(0X2)],{sl},{fd},{rl},ev[(0X4)],ev[(0X5)])>{zero} ", pre = mac_pre(&sl1, &fd1, &rl1), sl = sl1, fd = fd1, rl = rl1, zero = zero);
+                let dsp_exprdd = format!("return {kobf}..((({dd}*{kdsp}))%{m32}) ", kobf = sc_kobf, dd = decoy_dsp, kdsp = kdsp_s, m32 = m32);
                 let (bn2, bj2) = (rng.name(), rng.name());
                 let (bn1, bj1) = (rng.name(), rng.name());
                 // ③ 逐常量异构旋转 A=rotl(Ftbl[slot],kf)、R=rotl(Rtbl[slot],kr)，混入 agg 与 pck 后现场还原明文并推进 agg
-                let (tk3a, fd3a, rl3a, ps3a) = (rng.name(), rng.name(), rng.name(), rng.name());
+                let (tk3a, fd3a, rl3a) = (rng.name(), rng.name(), rng.name());
                 let (tk2a, fd2a, rl2a, pb2a) = (rng.name(), rng.name(), rng.name(), rng.name());
                 let (tk1a, fd1a, rl1a, pb1a) = (rng.name(), rng.name(), rng.name(), rng.name());
                 let mac_acc = |dec_stmt: &str, plain: &str, tkn: &str, fdn: &str, rln: &str| -> String {
-                    format!("local {tk}=((pos-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; local {fd}={rot}(({ft} and {ft}[{tk}] or 0X0)%{m32},(((pos-0X1)*0X{fk2:X}+({c}.{pn}%0X1D))%0X1D)+0X1); local {rl}={rot}(({rt} and {rt}[{tk}] or {rf}),(((pos-0X1)*0X{fk3:X}+({c}.{pld}%0X1D))%0X1D)+0X1); {fd}={bx}({fd},{bx}({agg},{rot}({pck},(((pos-0X1)%0X11)+0X1)))); {rl}={bx}({rl},{bx}({rot}({agg},0XB),{rot}({pck},(((pos-0X1)%0X13)+0X1)))); if {ft} then {ft}[{tk}]={fd} end; if {rt} then {rt}[{tk}]={rl} end; {dec} {agg}=({agg}*0X1F+{vm}({plain},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
+                    format!("local {tk}=((pos-0X1)*0X{em:X}+0X{ea:X})%{m32}; local {fd}={rot}(({ft} and {ft}[{tk}] or 0X0)%{m32},(((pos-0X1)*0X{fk2:X}+({c}.{pn}%0X1D))%0X1D)+0X1); local {rl}={rot}(({rt} and {rt}[{tk}] or {rf}),(((pos-0X1)*0X{fk3:X}+({c}.{pld}%0X1D))%0X1D)+0X1); {fd}={bx}({fd},{bx}({agg},{rot}({pck},(((pos-0X1)%0X11)+0X1)))); {rl}={bx}({rl},{bx}({rot}({agg},0XB),{rot}({pck},(((pos-0X1)%0X13)+0X1)))); if {ft} then {ft}[{tk}]={fd} end; if {rt} then {rt}[{tk}]={rl} end; {dec} {agg}=({agg}*0X1F+{vm}({plain},(pos-0X1),{fd},{rl})+0X1)%{m32}; ",
                         tk = tkn, fd = fdn, rl = rln, ft = ftds, rt = rtds, rf = rfds, vm = vm,
                         agg = agg_name, pck = pck_name, m32 = m32, dec = dec_stmt, plain = plain, bx = fn_bxor, rot = fn_rotl,
                         c = fn_c, pn = pf_n_key, pld = pf_ld_key, em = fc.emul, ea = fc.eadd, fk2 = fc.fk2, fk3 = fc.fk3)
                 };
-                let dec3 = format!("local {ps}={fds}(bl,(pos-0X1),{fd},{rl},0X0,0X0);", ps = ps3a, fds = fds, fd = fd3a, rl = rl3a);
                 let dec2 = format!("local _,{pb}={fdn}({bn},(pos-0X1),{fd},{rl},0X0,0X0);", pb = pb2a, fdn = fdn, bn = bn2, fd = fd2a, rl = rl2a);
                 let dec1 = format!("local _,{pb}={fdn}({bn},(pos-0X1),{fd},{rl},0X0,0X0);", pb = pb1a, fdn = fdn, bn = bn1, fd = fd1a, rl = rl1a);
-                let ld_body3 = format!("local bl={rs}() {acc} {ec}[{tk}]={{{tvm3},bl,(pos-0X1+{c}.{pld})%{m32}}}",
-                    rs = fn_read_string, acc = mac_acc(&dec3, ps3a.as_str(), &tk3a, &fd3a, &rl3a), ec = var_enc_c, tk = tk3a, tvm3 = tag_map[3] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
-                let ld_body2 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm2},{bn},(pos-0X1+{c}.{pld})%{m32}}}",
-                    bn = bn2, bj = bj2, rd = fn_read_dec, acc = mac_acc(&dec2, pb2a.as_str(), &tk2a, &fd2a, &rl2a), ec = var_enc_c, tk = tk2a, tvm2 = tag_map[2] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
-                let ld_body1 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm1},{bn},(pos-0X1+{c}.{pld})%{m32}}}",
-                    bn = bn1, bj = bj1, rd = fn_read_dec, acc = mac_acc(&dec1, pb1a.as_str(), &tk1a, &fd1a, &rl1a), ec = var_enc_c, tk = tk1a, tvm1 = tag_map[1] as i64, c = fn_c, pld = pf_ld_key, m32 = m32);
+                let ld_body3 = format!("local bl={rs}() {acc} {ec}[{tk}]={{{tvm3},bl,(pos-0X1)%{m32},0X0,0X0,{fd},{rl},{fds}}} ",
+                    rs = fn_read_string, acc = mac_acc("", "bl", &tk3a, &fd3a, &rl3a), ec = var_enc_c, tk = tk3a, tvm3 = tag_map[3] as i64, m32 = m32, fd = fd3a, rl = rl3a, fds = fds);
+                let ld_body2 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm2},{bn},(pos-0X1)%{m32},0X0,0X0,{fd},{rl},{fdn}}} ",
+                    bn = bn2, bj = bj2, rd = fn_read_dec, acc = mac_acc(&dec2, pb2a.as_str(), &tk2a, &fd2a, &rl2a), ec = var_enc_c, tk = tk2a, tvm2 = tag_map[2] as i64, m32 = m32, fd = fd2a, rl = rl2a, fdn = fdn);
+                let ld_body1 = format!("local {bn}={{}} for {bj}=1,8 do {bn}[{bj}]={rd}() end {acc} {ec}[{tk}]={{{tvm1},{bn},(pos-0X1)%{m32},0X0,0X0,{fd},{rl},{fdn}}} ",
+                    bn = bn1, bj = bj1, rd = fn_read_dec, acc = mac_acc(&dec1, pb1a.as_str(), &tk1a, &fd1a, &rl1a), ec = var_enc_c, tk = tk1a, tvm1 = tag_map[1] as i64, m32 = m32, fd = fd1a, rl = rl1a, fdn = fdn);
                 let ld_body0 = format!("{agg}=({agg}*0X1F+((pos-0X1)*0X{em:X})%{m32}+0X7)%{m32}; ",
                     agg = agg_name, em = fc.emul, m32 = m32);
-                let ld_bodydd = format!("{ec}[(pos)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}}",
+                let ld_bodydd = format!("{ec}[(pos)]={{{tvm2},{{0X2,0X3,0X5,0X7,0XB,0XD,0X11,0X13}},0X0}} ",
                     ec = var_enc_c, tvm2 = tag_map[2] as i64);
                 let t0 = rng.obfuscate_num(tag_map[0] as i64, 1, &keys);
                 let ld_tags: Vec<(String, String)> = vec![
@@ -624,12 +641,15 @@ pub fn build_consts(
                     &keys.tbl_p, kreg_n, m32.as_str(), native_type, sc_index2, sc_kobf, fn_bxor, fn_rotl, fn_s_byte,
                 ];
                 let cmac_body = format!(
-                    "local {ecb},{cab}={{}},{{}}; local {ec}={np} and {np}(true) or {ecb}; local {ca}={np} and {np}(true) or {cab}; \
+                    "local {cmt}={kr}[0X{cmk:X}]; if not {cmt} then \
+                     local {ecb},{cab},{rcab}={{}},{{}},{{}}; local {ec}={np} and {np}(true) or {ecb}; local {ca}={np} and {np}(true) or {cab}; \
                      do local {m1}={gm}({ec}) if {m1} then {m1}[{idx}]={ecb} {m1}[{nidx}]={ecb} end; local {m2}={gm}({ca}) if {m2} then {m2}[{idx}]={cab} {m2}[{nidx}]={cab} end end; \
                      local {w2_}={w20}; local {w3_}={w30}; local {w4_}={w40}; \
                      local {pfn}=function(q) local tq={nt}(q) if tq=={tnum} then return (q*{kmul}+{kadd})%{m32} elseif tq=={tstr} then local {ps}={ts}({{}});local {ph}=0;for {pi}=1,#{ps} do {ph}=({ph}*0X21+{sb}({ps},{pi}))%0X7FFFFF01 end;if {ph}%0X80==0X0 then return {kobf}..((#q*{ksmul})%{m32}) end;return q elseif tq=={tbool} then return not q end return q end; \
                      local {vm}=function({vb},{vl},{vf},{vr}) if {vl}==nil then {vl}=0X0 end; if {vf}==nil then {vf}=0X0 end; if {vr}==nil then {vr}=0X0 end; if {nt}({vb})~={tstr} and {nt}({vb})~={ttbl} then {vb}={kobf}..({vb} or 0X0) end; local {vs}=({mc1}); {vs}=({bx})({vs},(({mc2})*{vl})%{m32}); {vs}=({bx})({vs},({vf})%{m32}); {vs}=({bx})({vs},{rot}(({vr}),{mc3})); local {vn}=#{vb}; if {nt}({vb})=={tstr} then for {vj}=1,{vn} do {vs}=(({vs}+{sb}({vb},{vj})*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end else for {vj}=1,{vn} do {vs}=(({vs}+{vb}[{vj}]*{mc4})%{m32}); {vs}=({bx})({vs},{rot}({vs},{mc5})) end end; return {vs} end; \
-                     return {ecb},{cab},{ec},{ca},{pfn},{vm},{w2_},{w3_},{w4_}",
+                     {cmt}={{{ecb},{cab},{ec},{ca},{pfn},{vm},{w2_},{w3_},{w4_},{rcab}}}; {kr}[0X{cmk:X}]={cmt} end; \
+                     return {cmt}[0X1],{cmt}[0X2],{cmt}[0X3],{cmt}[0X4],{cmt}[0X5],{cmt}[0X6],{cmt}[0X7],{cmt}[0X8],{cmt}[0X9],{cmt}[0XA]",
+                    cmt = rng.name(), kr = kreg_n, cmk = cmk, rcab = rcab_n,
                     ec = var_enc_c, ecb = ecb_n, ca = var_cache, cab = cab_n,
                     pfn = pfn_n, nt = native_type, kobf = sc_kobf, kmul = kmul_s, kadd = kadd_s, ksmul = ksmul_s,
                     np = v_newproxy, gm = v_getmeta, ts = v_tostring, sb = v_sbyte,
@@ -644,20 +664,22 @@ pub fn build_consts(
                 let m_cmac = shell.add(rng, &cmac_params, cmac_body);
                 let mut lua = format!(
                     "local {m32}={m32v}; local {agg},{pck}=0X0,0X0; local {ft},{rt},{rf}; local {wctr}=0X0; \
-                     local {ecb},{cab},{ec},{ca},{pfn},{vm},{w2_},{w3_},{w4_}={cmac_call}; \
+                     local {ecb},{cab},{ec},{ca},{pfn},{vm},{w2_},{w3_},{w4_},{rcab}={cmac_call}; \
+                     {kr}[0X{rkbk:X}]={kr}[0X{rkbk:X}] or {rkbe}; local {rkb}={kr}[0X{rkbk:X}]; \
                      local {g}={rd}(); local {fds},{fdn}={ss},{sn}; ",
                     m32 = m32, m32v = m32v, agg = agg_name, pck = pck_name,
                     ft = ftds, rt = rtds, rf = rfds, wctr = wctr,
                     ecb = ecb_n, cab = cab_n, ec = var_enc_c, ca = var_cache, pfn = pfn_n, vm = vm,
-                    w2_ = w2v, w3_ = w3v, w4_ = w4v, cmac_call = shell.call(&m_cmac, &cmac_params),
+                    w2_ = w2v, w3_ = w3v, w4_ = w4v, rcab = rcab_n, cmac_call = shell.call(&m_cmac, &cmac_params),
+                    kr = kreg_n, rkbk = rkbk, rkbe = rkb_expr, rkb = rkb_n,
                     g = gname, rd = fn_read_dec, fds = fds, fdn = fdn, ss = sel_s, sn = sel_n);
                 lua.push_str(&ct_init);
                 for x in &dsp_defs { lua.push_str(x); }
                 lua.push_str(&format!(
-                    "local {memo}=function({ddm},{ix}) local {tk}=((({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}); local ev={ec}[{tk}]; if {nt}(ev)=={ttbl} and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[{tk}] if cd~=nil then return cd end end; ",
+                    "local {memo}=function({ddm},{ix}) local {tk}=((({ix}-0X1)*0X{em:X}+0X{ea:X})%{m32}); local ev={ec}[{tk}]; if {nt}(ev)=={ttbl} and ev[(0X1)]==({strtag}) then return nil end; local cd={ca}[{tk}] if cd~=nil then return cd end end; ",
                     memo = memo_name, nt = native_type, ix = var_idx_chunk, ca = var_cache, ddm = ddm,
                     ec = var_enc_c, strtag = three, ttbl = v_t_tbl, tk = rng.name(),
-                    em = fc.emul, ea = fc.eadd, m32 = m32, c = fn_c, pld = pf_ld_key));
+                    em = fc.emul, ea = fc.eadd, m32 = m32));
                 lua.push_str(&format!("local {mt}={{}}; ", mt = mt_name));
                 let kbh = if table_regime {
                     format!("local {h}={dsp}[({ev}[(0X1)])] if not {h} then {fake} return {x_ret1},{fv} end local {vv}={h}(0X1,{ev}) return {x_val1},{vv} end; ",
@@ -670,13 +692,13 @@ pub fn build_consts(
                 };
                 lua.push_str(&format!(
                     "local {hh}={{}}; \
-                     {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in {np}({cab}) do {cab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
+                     {hh}[{e_ka}]=function({ix},{ix}) {wctr}={wctr}+0X1; if {wctr}>={wlim} then {wctr}=0X0; for {wk} in {np}({cab}) do {cab}[{wk}]=nil end; for {wk} in {np}({rcab}) do {rcab}[{wk}]=nil end end; {psn}={psn} or not {flg}; \
                        local g={memo}(0X1,{ix}) if g~=nil then if ({ix}%0X2)==0X0 then if {psn} and {delay}<=0 then return {x_ret1},{pfn}(g) end; return {x_ret1},g else if not({psn} and {delay}<=0) then return {x_ret1},g end; return {x_ret1},{pfn}(g) end end while {w2v} do return {x_next1} end end; \
-                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[(({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}] if {nt}({ev})~={ttbl} then {fake} return {x_nil1} end; \
+                     {hh}[{e_kb}]=function({ix},{ix},{tba}) local {ev}={ec}[(({ix}-0X1)*0X{em:X}+0X{ea:X})%{m32}] if {nt}({ev})~={ttbl} then {fake} return {x_nil1} end; \
                        {ev}[(0X4)]={tba}[{pathkey}] or 0X0; {ev}[(0X5)]=(({ev}[(0X5)] or 0X0)+0X1)%{m32}; {kbh}\
-                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~={tstr} then {ca}[(({ix}-0X1)*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
+                     {hh}[{e_kc}]=function({ix},{aux}) local {pv}={aux}; if {psn} and {delay}<=0 then {pv}={pfn}({aux}) end; if {nt}({pv})~={tstr} then {ca}[(({ix}-0X1)*0X{em:X}+0X{ea:X})%{m32}]={pv} end; while {w3v} do return {x_ret1},{pv} end end; ",
                     hh = hh_name, e_ka = e_ka, e_kb = e_kb, e_kc = e_kc,
-                    wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, np = native_pairs, nt = native_type, pv = rng.name(),
+                    wctr = wctr, wlim = rng.format_num(wlim as i64), wk = rng.name(), cab = cab_n, rcab = rcab_n, np = native_pairs, nt = native_type, pv = rng.name(),
                     pfn = pfn_n, psn = psn, delay = poison_delay,
                     ix = var_idx_chunk, aux = hh_aux, flg = var_state_flag,
                     memo = memo_name,
@@ -684,7 +706,7 @@ pub fn build_consts(
                     ev = var_e, kbh = kbh, tba = hh_tb_arg, pathkey = const_path_key, m32 = m32,
                     ca = var_cache, w2v = w2v, w3v = w3v,
                     ttbl = v_t_tbl, tstr = v_t_str,
-                    em = fc.emul, ea = fc.eadd, c = fn_c, pld = pf_ld_key,
+                    em = fc.emul, ea = fc.eadd,
                     fake = fake_stmt.as_str()));
                 let (dc_t, dc_s, dc_d) = (rng.name(), rng.name(), rng.name());
                 let dc_infra = format!("local {t},{sl}={{}},{{}}; local {d}=function(w,u) local z=(w+#{t})%0X2 return u+z-((w+#{sl})%0X2) end; ",
@@ -738,7 +760,7 @@ pub fn build_consts(
                     format!("{bx}({k0},{c}.{plld})", bx = fn_bxor, k0 = deep10(rng, fn_bxor, chain_k0 as i64), c = fn_c, plld = pf_lld_key)
                 };
                 let cscan_body = format!(
-                    "local {ft},{rt}={{}},{{}}; local {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {f1p}={bx}(0X{f1:X},(({c}.{pn}%0X10000)*0X2)+0X1); local {f2p}={bx}(0X{f2:X},{bx}({c}.{pld},{rot}({c}.{plld},0X9))); local {pb1p}={bx}(0X{pb1:X},{rot}({c}.{pn},0X3)); local {pc1p}={bx}(0X{pc1:X},{rot}({c}.{pld},0X5)); local {fk1p}=((0X{fk1:X}+({c}.{pn}%0XF)*0X2)%0X1E)+0X1; local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*{f1p})%{m32},{f2p})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if (({bx}({rot}({ob},0X{rb:X}),{pb1p}))%0X64)<0X{pb3:X} then local {sk}={bv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end; if (({bx}({rot}({ob},0X{rc:X}),{pc1p}))%0X64)<0X{pc3:X} then local {sk}={cv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X}+{c}.{pld})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; {rf}={rr}; return {ft},{rt},{rf}",
+                    "local {ft},{rt}={{}},{{}}; local {rf}=0X0; local {pb}={c}.{plld}; local {ma}={bx}({c}.{pld},{c}.{plld}); local {ch}=({ma}*{chm}+{chk0})%{kmz}; local {mb}={bx}({c}.{pld},{bx}({c}.{pld},{c}.{plld})); local {mc}={bx}({c}.{plld},{bx}({c}.{pld},{c}.{plld})); local {f1p}={bx}(0X{f1:X},(({c}.{pn}%0X10000)*0X2)+0X1); local {f2p}={bx}(0X{f2:X},{bx}({c}.{pld},{rot}({c}.{plld},0X9))); local {pb1p}={bx}(0X{pb1:X},{rot}({c}.{pn},0X3)); local {pc1p}={bx}(0X{pc1:X},{rot}({c}.{pld},0X5)); local {fk1p}=((0X{fk1:X}+({c}.{pn}%0XF)*0X2)%0X1E)+0X1; local {q1}={pb}; local {q2}={pb}+{c}.{pcnt}; local {rr}={bx}({bx}({rs},{sal}),{c}.{pn}); while {q1}<{q2} do {q1}={q1}+0X1; local {ob}={c}.{pfo}[{q1}]; local {av}={bx}({c}.{pfa}[{q1}],{ma}); local {bv}={bx}({c}.{pfb}[{q1}],{mb}); if {bv}>={k80a} then {bv}={bv}-{ks32a} end; local {cv}={bx}({c}.{pfc}[{q1}],{mc}); if {cv}>={k80b} then {cv}={cv}-{ks32b} end; {ob}=({ob}-({ch}%{k100a})*{k2a}-{dl})%{kma}; {av}=({av}-(({ch}-({ch}%{k100b}))/{k100c})%{k100d})%{kmb}; local {cbv}=({ch}*{k10001})%{kmc}; {bv}={bx}({bv}%{kmd},{cbv}); if {bv}>={k80a} then {bv}={bv}-{kme} end; {cv}={bx}({cv}%{kmf},({cbv}*{k45d9}+{ch})%{kmf}); if {cv}>={k80b} then {cv}={cv}-{kmg} end; {ch}=({ch}*{k3}+{ob}*{k101}+{av}*{k1001}+{bv}%{kmh}+({cv}%{kmi})*{k11})%{kmj}; local {fp}=({bx}((({q1}-{pb})*{f1p})%{m32},{f2p})); local {r7}={rot}({rr},0X7); {rr}=({bx}({r7},{ob})+{av}%{m32}+{bx}({bv}%{m32},{cv}%{m32})%{m32})%{m32}; if (({bx}({rot}({ob},0X{rb:X}),{pb1p}))%0X64)<0X{pb3:X} then local {sk}={bv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end; if (({bx}({rot}({ob},0X{rc:X}),{pc1p}))%0X64)<0X{pc3:X} then local {sk}={cv}; if {sk}>0X7F then {sk}={sk}-0X80 end; local {tk}=({sk}*0X{em:X}+0X{ea:X})%{m32}; {ft}[{tk}]=({rot}({ft}[{tk}] or 0X0,(({sk}*{fk1p}+({q1}-{pb}))%0XF)+0X1)+{fp})%{m32}; {rt}[{tk}]={rr} end end; {rf}={rr}; return {ft},{rt},{rf}",
                     q1 = rng.name(), q2 = rng.name(), rr = rng.name(), r7 = rng.name(),
                     av = rng.name(), ob = rng.name(), bv = rng.name(),
                     cv = rng.name(), fp = rng.name(), sk = rng.name(), tk = tk_scan,

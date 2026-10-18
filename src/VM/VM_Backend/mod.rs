@@ -16,5 +16,6 @@ pub mod CustomIsa;
 pub mod Lua_core;
 pub mod Serializer;
 pub mod GlobalHandles;
+pub mod Rosetta;
 pub mod AntiTamper;
 pub mod Sandbox;

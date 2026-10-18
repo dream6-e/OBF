@@ -57,7 +57,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let b = push_const.raw_inst(3);
     let vstack = push_const.cfg.vstack.clone();
     let consts = push_const.cfg.consts.clone();
-    out.push_str(&push_const.build(&format!("{vstack}[#{vstack}+1]={{{consts}[{b}+1]}}", vstack = vstack, consts = consts, b = b)));
+    out.push_str(&push_const.build(&format!("{vstack}[#{vstack}+1]={{{consts}[{b}-127]}}", vstack = vstack, consts = consts, b = b)));
 
     let mut push_rk = handler(m, VmOp::PushRk, cfg, rng);
     let value = push_rk.rk(3);
@@ -127,7 +127,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let consts = set_global.cfg.consts.clone();
     let env = set_global.cfg.env.clone();
     out.push_str(&set_global.build(&format!(
-        "local k={{GN}}({consts}[{b}+1]); local e={env}; e[k]={stk}[{a}]",
+        "local k={{GN}}({consts}[{b}-127]); local e={env}; e[k]={stk}[{a}]",
         consts = consts, b = b, env = env, stk = stk, a = a
     )));
 

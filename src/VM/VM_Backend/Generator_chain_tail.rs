@@ -115,6 +115,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         uni: mut uni,
         vault: mut vault,
         header_captures,
+        ros_params,
         ..
     } = x;
     let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
@@ -234,6 +235,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let (v_sc_idx, v_sc_kobf) = (rng.name(), rng.name());
         let psn_pick = psn_pool[rng.range(0, psn_pool.len())].as_str().to_string();
         let psn_pick = psn_pick.as_str();
+        let rkb_expr = format!(
+            "{kdf}({root},0X{gr:X},0X{rw:X})",
+            kdf = kdf_name,
+            root = root_fetch[ros_params.r_rk],
+            gr = ros_params.r_gr,
+            rw = ros_params.r_w
+        );
         let bc_scatter = crate::VM::VM_Backend::Generator_flow::build_consts(
                 &mut shell, kreg_n.as_str(),
                 &mut vault, &mut rng, &keys, &kc, pj_name.as_str(), fn_bxor.as_str(),
@@ -246,7 +254,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
                 pf_opcodes.as_str(), pf_a_arr.as_str(), pf_b_arr.as_str(), pf_c_arr.as_str(), fn_rotl32.as_str(), &fc18,
                 &tag_map18, &salt_names, pf_n.as_str(), pf_ld.as_str(), pf_lld.as_str(), pf_cnt18.as_str(),
                 chain_delta, chain_m, chain_k0, {psn_pick},
-                poison_delay_expr.as_str(), var_uctx.as_str());
+                poison_delay_expr.as_str(), var_uctx.as_str(),
+                &ros_params, rkb_expr.as_str());
         let body_consts = format!(
             "{st}={nxt}; {ci_stmt}{gk_stmt} local {vi},{vk}={sci},{sck}; {bc_scatter} ",
             st = var_state, nxt = obf_s_protos,

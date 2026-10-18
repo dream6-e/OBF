@@ -117,6 +117,7 @@ pub(super) struct ChainIn {
     pub vault: crate::VM::VM_Backend::Generator_names::NameVault,
     /// 头部 select 捕获（推迟到 NB 建表之后发射）。
     pub header_captures: String,
+    pub ros_params: crate::VM::VM_Backend::Rosetta::RosettaParams,
 }
 
 pub(super) const CG_GROUPS: usize = crate::VM::VM_Backend::Generator_util::CONST_GROUPS;
@@ -235,6 +236,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         uni: mut uni,
         vault: mut vault,
         header_captures,
+        ros_params,
     } = x;
     let mut shell = crate::VM::VM_Backend::Generator_names::ShellMethods::new(&mut rng);
     let poison_delay_expr = format!("{}[0X{:X}]", kreg_n, poison_delay_key);
@@ -999,6 +1001,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             uni,
             vault,
             header_captures,
+            ros_params,
         };
         let mid = ChainMid {
             x: x_repacked,

@@ -6,7 +6,7 @@ use super::{OpcodeBuilder, OpcodeConfig, OpcodesRng};
 // 外部 API 名 handle 映射：常量槽里只有数字 handle，环境名经 {GN} 解码器现解。
 pub(super) fn global_lookup_body(const_slot: &str, dst: &str) -> String {
     format!(
-        "local k = {{GN}}({{CONSTS}}[{const_slot}+1]); local e = {{ENV}}; {{STK}}[{dst}] = e[k]",
+        "local k = {{GN}}({{CONSTS}}[{const_slot}-127]); local e = {{ENV}}; {{STK}}[{dst}] = e[k]",
         const_slot = const_slot,
         dst = dst,
     )

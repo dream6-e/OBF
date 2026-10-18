@@ -277,7 +277,10 @@ impl Generator {
         let mut u_ctx18: u32 = crate::VM::VM_Backend::Generator_chacha::derive_word(
             enc.root[6], WHITEN_GROUP as u32, WHITEN_WORD + 5,
         );
-        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18, &mut u_ctx18);
+        let ros18 = crate::VM::VM_Backend::Rosetta::RosettaPlan::build(payload, &inverse_opcode_map, &enc, &mut rewrite_rng);
+        let ros_params = ros18.params;
+        let mut proto_cur18 = 0usize;
+        rewrite_chunk(&mut reader, &mut rewritten_chunks, &transpile_map, &fused_opcodes, &mut fused_used, &inverse_opcode_map, &op_magic, &enc, root_group, &mut rewrite_rng, bc_kb, bc_kc, bc_ki1, bc_ki2, &fc18, &tag_map18, chain_delta, chain_m, chain_k0, &mut alloc18, &mut u_ctx18, &ros18, &mut proto_cur18);
 
         // ⑰ 载荷前 4 字节滚动初态经运行期 KDF(root[5]) 掩码后落盘，且混入白化种子与后续 keystream。
         let mut combined_payload = Vec::new();
@@ -1201,6 +1204,7 @@ impl Generator {
             uni,
             vault,
             header_captures,
+            ros_params,
         })
     }
 }
