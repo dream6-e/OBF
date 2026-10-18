@@ -259,8 +259,8 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let body_protos = format!(
             "{st}={nxt}; {tree9} {c}.{pf_protos}={{}}; local {i}=0; local {n}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0XF),{rot}({uctx},0X5))); {md18}={c}.{pf_protos}; {np18}={n}; \
              while {i} < {n} do {i} = {i} + 1; \
-               local {p0},{u0}={a2},{uctx}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan_mode_snapshot}={scan_mode}; {scan_mode}=true; local {scan}={dc}(); {scan_mode}={scan_mode_snapshot}; {flg}={scan_flag}; {scan}=nil; \
-               local {thk}=function() local {sv},{ub}={a2},{uctx}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
+               local {p0},{u0}={a2},{uctx}; local {s1},k2s,k3s,k4s=k1,k2,k3,k4; local {scan_flag}={flg}; {flg}=true; local {scan_mode_snapshot}={scan_mode}; {scan_mode}={scan_mode_snapshot}; local {scan}={dc}(); {scan_mode}={scan_mode_snapshot}; {flg}={scan_flag}; \
+               local {thk}=function() if {scan} then local {rr}={scan}; {scan}=nil; return {rr} end; local {sv},{ub}={a2},{uctx}; local {svf}={flg}; local {b1},k2b,k3b,k4b=k1,k2,k3,k4; \
                  {a2}={p0}; {uctx}={u0}; k1,k2,k3,k4={s1},k2s,k3s,k4s; {flg}=true; local {rr}={dc}(); \
                  {a2}={sv}; {uctx}={ub}; k1,k2,k3,k4={b1},k2b,k3b,k4b; {flg}={svf}; return {rr} end; \
                if ({i}%0X2)==0X0 then {c}.{pf_protos}[{i}+({i}%0X2)]={thk} else {c}.{pf_protos}[{i}+(({i}%0X2)-0X1)]={thk} end; \

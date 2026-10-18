@@ -352,7 +352,7 @@ impl ControlFlowBuilder {
                 "(unpack or table.unpack)".to_string(),
             ),
         };
-        out.push_str(&format!("local qT4a={{}};for i=0,15 do qT4a[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4a[i][j]=r end end;local qT8a={{}};for i=0,255 do qT8a[i]={{}};end;for i=0,255 do local qIa=qT8a[i];local qHa=(i-i%16)/16;for j=0,255 do qIa[j]=qT4a[i%16][j%16]+qT4a[qHa][(j-j%16)/16]*16 end end; local {}={} or function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8a[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end;", fn_bx, r_bx));
+        out.push_str(&format!("local {0}={1};if not {0} then local qT4a={{}};for i=0,15 do qT4a[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4a[i][j]=r end end;local qT8a={{}};for i=0,255 do qT8a[i]={{}};end;for i=0,255 do local qIa=qT8a[i];local qHa=(i-i%16)/16;for j=0,255 do qIa[j]=qT4a[i%16][j%16]+qT4a[qHa][(j-j%16)/16]*16 end end;{0}=function(a,b) local r,p=0,1;for k=1,4 do local x,y=a%256,b%256;r=r+qT8a[x][y]*p;a=(a-x)/256;b=(b-y)/256;p=p*256 end;return r end end;", fn_bx, r_bx));
         out.push_str(&format!("local {}={} or function(a,b)local r,p=0,1;while a>0 and b>0 do local ra,rb=a%2,b%2;if ra==1 and rb==1 then r=r+p end;a,b,p=(a-ra)*0.5,(b-rb)*0.5,p+p end;return r end;", fn_ba, r_ba));
         out.push_str(&format!("local {}={} or function(a,n)local d=2^n return (a-a%d)/d end;", fn_bs, r_bs));
         

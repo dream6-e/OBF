@@ -326,12 +326,13 @@ pub(super) fn build_chain(x: ChainIn) -> String {
         let (x16v, x24v) = (crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 16), crate::VM::VM_Backend::Generator_kdf::kdf_pow2(&mut rng, 24));
         let mk_m = |_rng: &mut GenRng| -> String { "4294967296".to_string() };
         let (m_rot1, m_rot2) = (mk_m(&mut rng), mk_m(&mut rng));
+        let slot_bxor = vault.bitop("bxor");
         let xt_body = format!(
-            "local {xt}={{}}; {walk} \
-             local function {xor32}(a,b) local {p2}={p2v}; local {p3}={p3v}; local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/{p2})%256,math_floor(a/{p3})%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/{p2})%256,math_floor(b/{p3})%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*{p2}+{xt}[a4][b4]*{p3} end; \
+            "local {xt}={{}}; local {xor32}={slot_bxor}; if not {xor32} then {walk} \
+             {xor32}=function(a,b) local {p2}={p2v}; local {p3}={p3v}; local a1,a2,a3,a4=a%256,math_floor(a/256)%256,math_floor(a/{p2})%256,math_floor(a/{p3})%256; local b1,b2,b3,b4=b%256,math_floor(b/256)%256,math_floor(b/{p2})%256,math_floor(b/{p3})%256; return {xt}[a1][b1]+{xt}[a2][b2]*256+{xt}[a3][b3]*{p2}+{xt}[a4][b4]*{p3} end end; \
              local function {rotl32}(x,n) local m=2^n; return ((x*m)%{m1})+math_floor(x/({m2}/m)) end; \
              return {xt},{xor32},{rotl32}",
-            xt = xor_tbl_var, walk = xor_walk,
+            xt = xor_tbl_var, walk = xor_walk, slot_bxor = slot_bxor,
             xor32 = fn_xor32, p2 = x16, p3 = x24, p2v = x16v, p3v = x24v,
             rotl32 = fn_rotl32, m1 = m_rot1, m2 = m_rot2
         );
@@ -658,9 +659,9 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 let (nd, e1, e2, e3) = mk_nonce(&mut rng, salt_v18.as_str(), fn_bxor.as_str(), fn_rotl32.as_str(), sm32.as_str());
                 let i = rng.name();
                 cl.push_str(&format!(
-                    "local function {smp}(v,pool_idx,kind,fold,rl) {nd}local blk={cb}({e1},{e2},{e3},{c0}); {pz} local out={{}}; for {i}=0X1,0X8 do out[{i}]={xt}[v[{i}]][blk[{i}]] end; return out end; ",
+                    "local function {smp}(v,pool_idx,kind,fold,rl) {nd}local blk={cb}({e1},{e2},{e3},{c0}); {pz} local out={{}}; for {i}=0X1,0X8 do out[{i}]={x32}(v[{i}],blk[{i}]) end; return out end; ",
                     smp = sm_p, nd = nd, e1 = e1, e2 = e2, e3 = e3, cb = cbname, c0 = ctr0e,
-                    pz = pz_p, i = i, xt = xor_tbl_var));
+                    pz = pz_p, i = i, x32 = fn_xor32));
             }
             {
                 let (nd, e1, e2, e3) = mk_nonce(&mut rng, salt_v18.as_str(), fn_bxor.as_str(), fn_rotl32.as_str(), sm32.as_str());
@@ -671,19 +672,19 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                         "local {n}=#e; local out={{}}; local {pos}=0X1; local {ctr}={c0}; \
                          while {pos}<={n} do local blk={cb}({e1},{e2},{e3},{ctr}); {pz} local {lim}={pos}+0X3F; if {lim}>{n} then {lim}={n} end \
                            local {q}=0X0; local {fw}=0X0; local {ww}=0X1; \
-                           while {pos}<={lim} do {q}={q}+0X1; local p={xt}[{sb}(e,{pos})][blk[{q}]]; out[{pos}]=p; if {q}<=0X8 then {fw}=({fw}+p*{ww})%{m32} {ww}=({ww}*0X100)%{m32} end {pos}={pos}+0X1 end \
+                           while {pos}<={lim} do {q}={q}+0X1; local p={x32}({sb}(e,{pos}),blk[{q}]); out[{pos}]=p; if {q}<=0X8 then {fw}=({fw}+p*{ww})%{m32} {ww}=({ww}*0X100)%{m32} end {pos}={pos}+0X1 end \
                            {ctr}=({ctr}+{st}+{fw})%{m32} end; return out end; ",
                         n = n, pos = pos, ctr = ctr, q = q, fw = fw, ww = ww, lim = lim,
                         cb = cbname, e1 = e1, e2 = e2, e3 = e3, c0 = ctr0e, pz = pz_s,
-                        xt = xor_tbl_var, sb = fn_s_byte, m32 = sm32, st = stepe),
+                        x32 = fn_xor32, sb = fn_s_byte, m32 = sm32, st = stepe),
                     _ => format!(
                         "local {n}=#e; local out={{}}; local {pos}=0X1; local {ctr}={c0}; \
                          repeat local blk={cb}({e1},{e2},{e3},{ctr}); {pz} local {q}=0X0; local {fw}=0X0; local {ww}=0X1; local {lim}={pos}+0X3F; if {lim}>{n} then {lim}={n} end \
-                           if {pos}<={lim} then repeat {q}={q}+0X1; local p={xt}[{sb}(e,{pos})][blk[{q}]]; out[{pos}]=p; if {q}<=0X8 then {fw}=({fw}+p*{ww})%{m32} {ww}=({ww}*0X100)%{m32} end {pos}={pos}+0X1 \
+                           if {pos}<={lim} then repeat {q}={q}+0X1; local p={x32}({sb}(e,{pos}),blk[{q}]); out[{pos}]=p; if {q}<=0X8 then {fw}=({fw}+p*{ww})%{m32} {ww}=({ww}*0X100)%{m32} end {pos}={pos}+0X1 \
                            until {pos}>{lim} or {q}>=0X40 end; {ctr}=({ctr}+{st}+{fw})%{m32} until {pos}>{n}; return out end; ",
                         n = n, pos = pos, ctr = ctr, q = q, fw = fw, ww = ww, lim = lim,
                         cb = cbname, e1 = e1, e2 = e2, e3 = e3, c0 = ctr0e, pz = pz_s,
-                        xt = xor_tbl_var, sb = fn_s_byte, m32 = sm32, st = stepe),
+                        x32 = fn_xor32, sb = fn_s_byte, m32 = sm32, st = stepe),
                 };
                 cl.push_str(&format!("local function {sms}(e,pool_idx,kind,fold,rl) {nd}{core}", sms = sm_s, nd = nd, core = core));
             }
@@ -697,13 +698,13 @@ pub(super) fn build_chain(x: ChainIn) -> String {
                 .collect();
             let (kna_var, knb_var, ksa_var, ksb_var) = (rng.name(), rng.name(), rng.name(), rng.name());
             cl.push_str(&format!(
-                "local {sbt}={{}}; local {nbm}={{{nbm_lits}}}; do local {c1},{c2},{c3}={sl}%0X100,{ks}%0X100,{kn}%0X100; for {xv}=0X0,0XFF do local {u1}=({xv}*0X{a1:X}+{c1})%0X100; local {u2}={xt}[{u1}][({u1}-{u1}%0X10)/0X10]; local {u3}=({u2}*0X{a2:X}+{c2})%0X100; local {u4}={xt}[{u3}][({u3}-{u3}%0X10)/0X10]; {sbt}[{xv}]=({u4}*0X{a3:X}+{c3})%0X100 end end; \
+                "local {sbt}={{}}; local {nbm}={{{nbm_lits}}}; do local {c1},{c2},{c3}={sl}%0X100,{ks}%0X100,{kn}%0X100; for {xv}=0X0,0XFF do local {u1}=({xv}*0X{a1:X}+{c1})%0X100; local {u2}={x32}({u1},({u1}-{u1}%0X10)/0X10); local {u3}=({u2}*0X{a2:X}+{c2})%0X100; local {u4}={x32}({u3},({u3}-{u3}%0X10)/0X10); {sbt}[{xv}]=({u4}*0X{a3:X}+{c3})%0X100 end end; \
                  local {kna}=({kn}+({sl}%0X10000)*0X7+0X37)%{m32}; local {knb}=({kn}+({sl}%0X10000)*0XB+0X4D)%{m32}; \
                  local {ksa}=({ks}+({sl}%0X10000)*0X3+0X11)%{m32}; local {ksb}=({ks}+({sl}%0X10000)*0X5+0X23)%{m32}; ",
                 sbt = sbt, nbm = nbm, nbm_lits = nbm_lits.join(","),
                 c1 = c1v, c2 = c2v, c3 = c3v, sl = slname, ks = kstr_var, kn = knum_var,
                 xv = xv, u1 = u1v, u2 = u2v, u3 = u3v, u4 = u4v,
-                a1 = sa1, a2 = sa2, a3 = sa3, xt = xor_tbl_var,
+                a1 = sa1, a2 = sa2, a3 = sa3, x32 = fn_xor32,
                 kna = kna_var, knb = knb_var, ksa = ksa_var, ksb = ksb_var, m32 = sm32
             ));
             let sbox_params = (
@@ -841,7 +842,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
 
         let dh_body = format!(
-            "local function {bx}({a},{b}) local {r},{w},{g},{s}=0,1,0,0; \
+            "local {bx}={slot_bxor} or function({a},{b}) local {r},{w},{g},{s}=0,1,0,0; \
              while {g}<({r}*0X2-{r})-({r}-0X1) do \
              if {a}<=0 and {b}<=0 then {g}={g}+1 else \
              {s}=(({a}%2)+({b}%2))%2; {r}={r}+{s}*{w}; \
@@ -852,10 +853,11 @@ pub(super) fn build_chain(x: ChainIn) -> String {
              {t}=(({x}*(256/{d}))%256)+(({x}-({x}%{d}))/{d}); {g}={g}+1; end; \
              return {t} end; \
              return {bx},{rt}",
-            bx = fn_bxor, a = v_bx_a, b = v_bx_b, r = v_bx_r, w = v_bx_w, g = v_bx_g, s = v_bx_s,
+            bx = fn_bxor, slot_bxor = slot_bxor,
+            a = v_bx_a, b = v_bx_b, r = v_bx_r, w = v_bx_w, g = v_bx_g, s = v_bx_s,
             rt = fn_b_rotr, x = v_rt_x, n = v_rt_n, d = v_rt_d, t = v_rt_t
         );
-        let m_dh = shell.add(&mut rng, &[], dh_body);
+        let m_dh = shell.add(&mut rng, &[&kreg_n], dh_body);
         let rd_scatter = crate::VM::VM_Backend::Generator_flow::build_scatter(
             &mut rng, fn_bxor.as_str(), fn_b_rotr.as_str(), fn_read_dec.as_str(), fn_a3.as_str(),
             &v_bx_a, &v_bx_b, &v_bx_r, &v_bx_w, &v_bx_g, &v_bx_s,
@@ -868,7 +870,7 @@ pub(super) fn build_chain(x: ChainIn) -> String {
             bx = fn_bxor,
             rd = fn_read_dec,
             rt = fn_b_rotr,
-            call = shell.call(&m_dh, &[]),
+            call = shell.call(&m_dh, &[&kreg_n]),
             scatter = rd_scatter
                 .strip_prefix(&format!("local {}; do ", fn_read_dec))
                 .unwrap_or(&rd_scatter)

@@ -359,8 +359,9 @@ impl Generator {
         // execute 前置 bxor 别名：execute 定义在解码器之前，直引 fn_bxor 会捕成全局 nil
         let fn_bxor2 = rng.name();
         let mut block_p_def = String::new();
-        // qT4c/qT8c 两段建表折进一个函数边界（双表以返回值出界）；位库局部洗牌后发射
-        block_p_def.push_str("local qT4c,qT8c=(function() local qT4c={};for i=0,15 do qT4c[i]={};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4c[i][j]=r end end;local qT8c={};for i=0,255 do qT8c[i]={};end;for i=0,255 do local qIc=qT8c[i];local qHc=(i-i%16)/16;for j=0,255 do qIc[j]=qT4c[i%16][j%16]+qT4c[qHc][(j-j%16)/16]*16 end end; return qT4c,qT8c end)(); ");
+        let slot_bx_c = vault.bitop("bxor");
+        // qT4c/qT8c 两段建表折进一个函数边界（双表以返回值出界）；命中原生位库时跳过建表
+        block_p_def.push_str(&format!("local qT4c,qT8c;if not {} then qT4c,qT8c=(function() local qT4c={{}};for i=0,15 do qT4c[i]={{}};for j=0,15 do local r,p=0,1;local x,y=i,j;for k=1,4 do local rx,ry=x%2,y%2;if rx~=ry then r=r+p end;x=(x-rx)/2;y=(y-ry)/2;p=p+p end;qT4c[i][j]=r end end;local qT8c={{}};for i=0,255 do qT8c[i]={{}};end;for i=0,255 do local qIc=qT8c[i];local qHc=(i-i%16)/16;for j=0,255 do qIc[j]=qT4c[i%16][j%16]+qT4c[qHc][(j-j%16)/16]*16 end end; return qT4c,qT8c end)() end; ", slot_bx_c));
         // ㉜ 位库双回退链收进 NB（发射体在 Generator_names.rs）
         let mut bit_locals = crate::VM::VM_Backend::Generator_names::emit_bit_locals(
             &mut vault, &fn_bx, &fn_ba, &fn_bs, &fn_bxor2);
