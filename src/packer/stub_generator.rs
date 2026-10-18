@@ -313,7 +313,10 @@ impl StubGenerator {
             &mut uni, &mut uni_rng, Some(&v_pload), true);
         let sc_def = uni.emit_prelude(&mut uni_rng);
         format!("
-return (function(...)
+local x={{}}
+return setmetatable({{
+    u=function(...)
+        return select(2,\"KRYVEX\",function(...)
     {sc_def}{probe}{lds}
     local {f_load}=function(c) local f;if not(f) then return ({ld})(c) else return {{}} end;end
     local {f_pcall}=function(r) local c,v=3,type;if v(c)==\"string\" then return error(r) else return pcall(r) end;end
@@ -383,7 +386,9 @@ return (function(...)
         return {v_q}.{m_main}({v_q}, {v_data}, ...)
     end
     return {v_entry}([=[{payload}]=], ...)
-end)(...)
+        end)(...)
+    end
+}},x):u()
 ",
         f_load=f_load, f_pcall=f_pcall, lds=ld_setup, ld=ld_var, f_char=f_char, f_byte=f_byte, f_floor=f_floor, f_concat=f_concat, f_gsub=f_gsub, f_remove=f_remove,
         v_entry=v_entry, v_data=v_data, v_q=v_q, m_bxor=m_bxor, v_s=v_s, v_a=v_a, v_b=v_b, m_bxor_body=m_bxor_body, m_next=m_next,

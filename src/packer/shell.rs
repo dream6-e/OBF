@@ -450,7 +450,11 @@ pub fn wrap(source: &str, seed: u64) -> Option<Shell> {
     }
 
     let mut rng = Rng::seeded(seed ^ 0x9E37_79B9_7F4A_7C15);
-    let script = finalize(&emit_shell(&payload, &alphabet), &mut rng);
+    let inner = finalize(&emit_shell(&payload, &alphabet), &mut rng);
+    let script = format!(
+        "local x={{}}return setmetatable({{u=function(...)return select(2,\"KRYVEX\",function(...){}end)(...)end}},x):u()",
+        inner
+    );
     Some(Shell {
         script,
         source_bytes: data.len(),
@@ -681,6 +685,8 @@ fn finalize(dev: &str, rng: &mut Rng) -> String {
         .filter(|t| t.0 == Kind::Ident)
         .map(|t| t.1.clone())
         .collect();
+    used.insert("x".to_string());
+    used.insert("u".to_string());
     let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for name in locals {
         if map.contains_key(&name) {
@@ -744,8 +750,7 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
         out.push('\n');
     };
     // VM 的固定环境捕获（finalizer 会把它连同其它显式绑定一起改成随机短名）。
-    line(0, "local G=(getfenv and getfenv(1))or _G;", &mut out);
-    out.push_str("return (function(...)\n");
+    line(1, "local G=(getfenv and getfenv(1))or _G;", &mut out);
     line(1, "local Q, Z, Y, u, k, W = G.string.byte, G.string.char, G.unpack or G.table.unpack, G.assert, G.tostring, G.type;", &mut out);
     // loader 名必须**运行期**拼出来：`is_rename_barrier` 里有 `load`/`loadstring`，而
     // `static_string` 连字面量拼接都会解析（`G["load".."string"]` 一样被当成反射名）。
@@ -921,6 +926,5 @@ fn emit_shell(payload: &str, alphabet: &[u8; 85]) -> String {
     );
     line(1, "u(ok and f and W(f) == W(function() end));", &mut out);
     line(1, "return f(...);", &mut out);
-    out.push_str("end)(...);\n");
     out
 }
