@@ -212,8 +212,8 @@ pub fn generate_fused(
         let a = h.raw_inst(2);
         let table_reg = h.raw_inst(3);
         out.push_str(&h.build(&format!(
-            "if inst_C<128 then rk2={{STK}}[inst_C] else rk2={{CONSTS}}[inst_C-127] end; {{PC}}={{PC}}+3/*MICRO_SEP*/{{STK}}[{a}]={{STK}}[{table_reg}][rk2]",
-            a = a, table_reg = table_reg
+            "{prep}/*MICRO_SEP*/{{STK}}[{a}]={{STK}}[{table_reg}][rk2]",
+            prep = fused_rk2_prep, a = a, table_reg = table_reg
         )));
     }
 

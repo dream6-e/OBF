@@ -140,6 +140,205 @@ fn split_micro_steps(
     vec![body]
 }
 
+struct IntervalHash {
+    p: u64,
+    m: u64,
+    a: u64,
+    style: u64,
+    p1: u64,
+    order: Vec<usize>,
+    thresholds: Vec<u64>,
+}
+
+/// Find a collision-free modular affine hash `(op * M + A) % P` that maps each branch's
+/// `base_op` set into a strictly disjoint contiguous interval on `[0, P - 1]`.
+fn find_interval_hash(
+    rng: &mut TinyRng,
+    branch_ops: &[Vec<u32>],
+    max_iters: usize,
+) -> Option<IntervalHash> {
+    let k = branch_ops.len();
+    if k < 2 {
+        return None;
+    }
+    let total_ops: usize = branch_ops.iter().map(|v| v.len()).sum();
+    let mut pts: Vec<(u64, usize)> = Vec::with_capacity(total_ops);
+    let mut trans: Vec<usize> = Vec::with_capacity(k + 1);
+    for _ in 0..max_iters {
+        let style = rng.range(3);
+        let p1 = 0x8001 + rng.range(0x7FE0);
+        let p = 251 + rng.range(3800);
+        let m = (0x101 + rng.range(0x7FE00)) | 1;
+        pts.clear();
+        for (b_idx, ops) in branch_ops.iter().enumerate() {
+            for &op in ops {
+                let x = if style == 2 { (op as u64) % p1 } else { op as u64 };
+                let z = (x * m) % p;
+                pts.push((z, b_idx));
+            }
+        }
+        pts.sort_unstable_by_key(|&(z, _)| z);
+        if pts.windows(2).any(|w| w[0].0 == w[1].0) {
+            continue;
+        }
+        trans.clear();
+        for i in 0..pts.len() {
+            let next = (i + 1) % pts.len();
+            if pts[i].1 != pts[next].1 {
+                trans.push(i);
+            }
+        }
+        if trans.len() != k {
+            continue;
+        }
+        let cut_idx = trans[rng.range(trans.len() as u64) as usize];
+        let start_idx = (cut_idx + 1) % pts.len();
+        let z_end = pts[cut_idx].0;
+        let z_start = pts[start_idx].0;
+        let gap = (z_start + p - z_end) % p;
+        if gap == 0 {
+            continue;
+        }
+        let delta = rng.range(gap);
+        let a_mod = (p - z_start + delta) % p;
+        let a_full = a_mod + (1 + rng.range(0x3FFF)) * p;
+        let eval = |op: u32| -> u64 {
+            let x = if style == 2 { (op as u64) % p1 } else { op as u64 };
+            (x * m + a_full) % p
+        };
+        let mut bounds: Vec<(usize, u64, u64)> = Vec::with_capacity(k);
+        for (b_idx, ops) in branch_ops.iter().enumerate() {
+            let mut lo = u64::MAX;
+            let mut hi = 0u64;
+            for &op in ops {
+                let h = eval(op);
+                if h < lo {
+                    lo = h;
+                }
+                if h > hi {
+                    hi = h;
+                }
+            }
+            bounds.push((b_idx, lo, hi));
+        }
+        bounds.sort_unstable_by_key(|&(_, lo, _)| lo);
+        if bounds.windows(2).any(|w| w[0].2 >= w[1].1) {
+            continue;
+        }
+        let mut order = Vec::with_capacity(k);
+        let mut thresholds = Vec::with_capacity(k - 1);
+        for j in 0..k {
+            order.push(bounds[j].0);
+            if j + 1 < k {
+                let hi = bounds[j].2;
+                let next_lo = bounds[j + 1].1;
+                thresholds.push(hi + rng.range(next_lo - hi));
+            }
+        }
+        return Some(IntervalHash {
+            p,
+            m,
+            a: a_full,
+            style,
+            p1,
+            order,
+            thresholds,
+        });
+    }
+    None
+}
+
+fn build_fused_body(
+    rng: &mut TinyRng,
+    tag: &str,
+    pc: &str,
+    ih: &IntervalHash,
+    branch_bodies: &[String],
+) -> String {
+    let dv = rng.name(tag);
+    let hash_expr = match ih.style {
+        0 => format!("(op*0X{m:X}+0X{a:X})%0X{p:X}", m = ih.m, a = ih.a, p = ih.p),
+        1 => format!("(0X{a:X}+op*0X{m:X})%0X{p:X}", a = ih.a, m = ih.m, p = ih.p),
+        _ => format!(
+            "((op%0X{p1:X})*0X{m:X}+0X{a:X})%0X{p:X}",
+            p1 = ih.p1,
+            m = ih.m,
+            a = ih.a,
+            p = ih.p
+        ),
+    };
+    let clean = |idx: usize| -> String {
+        let raw = &branch_bodies[ih.order[idx]];
+        let t = raw.trim().trim_end_matches(';').trim();
+        if t.is_empty() {
+            format!("{pc}={pc}", pc = pc)
+        } else {
+            t.to_string()
+        }
+    };
+    let k = ih.order.len();
+    let t = &ih.thresholds;
+    match k {
+        2 => {
+            let (b0, b1) = (clean(0), clean(1));
+            if rng.coin() {
+                format!(
+                    "local {dv}={h};if {dv}<=0X{t0:X} then {b0} else {b1} end;",
+                    dv = dv,
+                    h = hash_expr,
+                    t0 = t[0],
+                    b0 = b0,
+                    b1 = b1
+                )
+            } else {
+                format!(
+                    "local {dv}={h};if {dv}>0X{t0:X} then {b1} else {b0} end;",
+                    dv = dv,
+                    h = hash_expr,
+                    t0 = t[0],
+                    b0 = b0,
+                    b1 = b1
+                )
+            }
+        }
+        3 => {
+            let (b0, b1, b2) = (clean(0), clean(1), clean(2));
+            match rng.range(3) {
+                0 => format!(
+                    "local {dv}={h};if {dv}<=0X{t0:X} then {b0} elseif {dv}<=0X{t1:X} then {b1} else {b2} end;",
+                    dv = dv, h = hash_expr, t0 = t[0], t1 = t[1], b0 = b0, b1 = b1, b2 = b2
+                ),
+                1 => format!(
+                    "local {dv}={h};if {dv}>0X{t1:X} then {b2} elseif {dv}>0X{t0:X} then {b1} else {b0} end;",
+                    dv = dv, h = hash_expr, t0 = t[0], t1 = t[1], b0 = b0, b1 = b1, b2 = b2
+                ),
+                _ => format!(
+                    "local {dv}={h};if {dv}<=0X{t1:X} then if {dv}<=0X{t0:X} then {b0} else {b1} end else {b2} end;",
+                    dv = dv, h = hash_expr, t0 = t[0], t1 = t[1], b0 = b0, b1 = b1, b2 = b2
+                ),
+            }
+        }
+        4 => {
+            let (b0, b1, b2, b3) = (clean(0), clean(1), clean(2), clean(3));
+            match rng.range(3) {
+                0 => format!(
+                    "local {dv}={h};if {dv}<=0X{t1:X} then if {dv}<=0X{t0:X} then {b0} else {b1} end else if {dv}<=0X{t2:X} then {b2} else {b3} end end;",
+                    dv = dv, h = hash_expr, t0 = t[0], t1 = t[1], t2 = t[2], b0 = b0, b1 = b1, b2 = b2, b3 = b3
+                ),
+                1 => format!(
+                    "local {dv}={h};if {dv}<=0X{t0:X} then {b0} elseif {dv}<=0X{t1:X} then {b1} elseif {dv}<=0X{t2:X} then {b2} else {b3} end;",
+                    dv = dv, h = hash_expr, t0 = t[0], t1 = t[1], t2 = t[2], b0 = b0, b1 = b1, b2 = b2, b3 = b3
+                ),
+                _ => format!(
+                    "local {dv}={h};if {dv}>0X{t2:X} then {b3} elseif {dv}>0X{t1:X} then {b2} elseif {dv}>0X{t0:X} then {b1} else {b0} end;",
+                    dv = dv, h = hash_expr, t0 = t[0], t1 = t[1], t2 = t[2], b0 = b0, b1 = b1, b2 = b2, b3 = b3
+                ),
+            }
+        }
+        _ => clean(0),
+    }
+}
+
 /// Build the hidden opcode→handler wiring (flat wire blobs resolved through
 /// `__index` fronts) and one independent function per distinct case. The setup
 /// block is hoisted by `wrap_dispatcher` before the iterative driver is emitted.
@@ -198,39 +397,213 @@ pub(super) fn build_relay_dispatch(
 
     // Expand multi-stage handlers into micro-step entries (Scheme 2: sub_op micro-step ring
     // + cross-instruction shared pre-step / post-step deduplication).
+    let mut origin_bodies: Vec<&str> = Vec::new();
     let mut expanded_entries: Vec<(u32, String)> = Vec::with_capacity(entries.len() * 2);
+    let mut expanded_meta: Vec<(u32, usize)> = Vec::with_capacity(entries.len() * 2);
     for (opcode, raw_body) in entries.iter() {
+        let origin_id = if let Some(pos) = origin_bodies.iter().position(|&b| b == raw_body.as_str()) {
+            pos
+        } else {
+            origin_bodies.push(raw_body.as_str());
+            origin_bodies.len() - 1
+        };
         let steps = split_micro_steps(raw_body, &u0, &u1, &u2, pc, top);
         if steps.len() <= 1 {
             let b = steps.into_iter().next().unwrap_or_default();
             expanded_entries.push((*opcode, b));
+            expanded_meta.push((*opcode, origin_id));
         } else if steps.len() == 2 {
             let s0 = steps[0].trim().trim_end_matches(';');
             let b0 = format!("{s0};{sub}=op+0X{d1:X};", s0 = s0, sub = sub_op, d1 = delta_1);
             expanded_entries.push((*opcode, b0));
+            expanded_meta.push((*opcode, origin_id));
             expanded_entries.push((opcode.wrapping_add(delta_1), steps[1].clone()));
+            expanded_meta.push((*opcode, origin_id));
         } else {
             let s0 = steps[0].trim().trim_end_matches(';');
             let b0 = format!("{s0};{sub}=op+0X{d1:X};", s0 = s0, sub = sub_op, d1 = delta_1);
             let s1 = steps[1].trim().trim_end_matches(';');
             let b1 = format!("{s1};{sub}=op+0X{d2:X};", s1 = s1, sub = sub_op, d2 = delta_2);
             expanded_entries.push((*opcode, b0));
+            expanded_meta.push((*opcode, origin_id));
             expanded_entries.push((opcode.wrapping_add(delta_1), b1));
+            expanded_meta.push((*opcode, origin_id));
             expanded_entries.push((opcode.wrapping_add(delta_2), steps[2].clone()));
+            expanded_meta.push((*opcode, origin_id));
         }
     }
 
-    // Deduplicate identical handler bodies; each opcode/sub_op points at a handler index.
-    let mut unique: Vec<String> = Vec::new();
-    let mut handler_of: Vec<usize> = Vec::with_capacity(expanded_entries.len());
-    for (_opcode, body) in expanded_entries.iter() {
-        let idx = if let Some(pos) = unique.iter().position(|old| old == body) {
+    // Deduplicate identical handler bodies first.
+    let mut raw_unique: Vec<String> = Vec::new();
+    let mut raw_e_indices: Vec<Vec<usize>> = Vec::new();
+    let mut raw_origins: Vec<Vec<usize>> = Vec::new();
+    for (e_i, (_opcode, body)) in expanded_entries.iter().enumerate() {
+        let (_, origin_id) = expanded_meta[e_i];
+        let idx = if let Some(pos) = raw_unique.iter().position(|old| old == body) {
             pos
         } else {
-            unique.push(body.clone());
-            unique.len() - 1
+            raw_unique.push(body.clone());
+            raw_e_indices.push(Vec::new());
+            raw_origins.push(Vec::new());
+            raw_unique.len() - 1
         };
-        handler_of.push(idx);
+        raw_e_indices[idx].push(e_i);
+        if !raw_origins[idx].contains(&origin_id) {
+            raw_origins[idx].push(origin_id);
+        }
+    }
+
+    // Scheme 1: Fuse unshared leaf / terminal micro-handlers into 3~4 way heterogeneous
+    // parameterized handlers dispatched by a modular affine hash `(op * M + A) % P`,
+    // eliminating 1-line single-operator (`+`, `-`, `*`, `<`, `[]`, etc.) handler fingerprints.
+    struct FuseSlice {
+        u_idx: usize,
+        e_indices: Vec<usize>,
+        base_ops: Vec<u32>,
+    }
+    let mut unique: Vec<String> = Vec::new();
+    let mut handler_of: Vec<usize> = vec![0usize; expanded_entries.len()];
+    let mut pool: Vec<FuseSlice> = Vec::new();
+    for u_idx in 0..raw_unique.len() {
+        let body = &raw_unique[u_idx];
+        let is_fusable = raw_origins[u_idx].len() <= 2
+            && !ends_with_return_statement(body)
+            && trimmed_flags(body, &[r1, r2, r3]).is_empty();
+        if !is_fusable {
+            let new_idx = unique.len();
+            unique.push(body.clone());
+            for &e_i in &raw_e_indices[u_idx] {
+                handler_of[e_i] = new_idx;
+            }
+            continue;
+        }
+        let e_list = &raw_e_indices[u_idx];
+        let max_slice = if body.len() <= 110 {
+            2
+        } else if e_list.len() <= 4 {
+            4
+        } else {
+            3
+        };
+        for chunk in e_list.chunks(max_slice) {
+            let mut b_ops: Vec<u32> = chunk.iter().map(|&e_i| expanded_meta[e_i].0).collect();
+            b_ops.sort_unstable();
+            b_ops.dedup();
+            pool.push(FuseSlice {
+                u_idx,
+                e_indices: chunk.to_vec(),
+                base_ops: b_ops,
+            });
+        }
+    }
+    rng.shuffle(&mut pool);
+
+    let mut fused_groups: Vec<(IntervalHash, Vec<FuseSlice>)> = Vec::new();
+    while !pool.is_empty() {
+        if pool.len() == 1 {
+            let mut rem_opt = Some(pool.pop().unwrap());
+            for (ih_slot, grp) in fused_groups.iter_mut() {
+                let rem = rem_opt.as_ref().unwrap();
+                if grp.len() < 4
+                    && grp.iter().all(|g| g.u_idx != rem.u_idx)
+                    && grp
+                        .iter()
+                        .all(|g| g.base_ops.iter().all(|op| !rem.base_ops.contains(op)))
+                {
+                    let mut test_ops: Vec<Vec<u32>> =
+                        grp.iter().map(|g| g.base_ops.clone()).collect();
+                    test_ops.push(rem.base_ops.clone());
+                    if let Some(new_ih) = find_interval_hash(&mut rng, &test_ops, 1500) {
+                        grp.push(rem_opt.take().unwrap());
+                        *ih_slot = new_ih;
+                        break;
+                    }
+                }
+            }
+            if let Some(rem) = rem_opt {
+                let new_idx = unique.len();
+                unique.push(raw_unique[rem.u_idx].clone());
+                for e_i in rem.e_indices {
+                    handler_of[e_i] = new_idx;
+                }
+            }
+            break;
+        }
+        let target_k = match pool.len() {
+            2 => 2,
+            3 => 3,
+            4 => 4,
+            5 => 3,
+            _ => {
+                if rng.coin() {
+                    4
+                } else {
+                    3
+                }
+            }
+        };
+        // Pick first slice from the u_idx with the highest remaining slice count in pool.
+        let mut best_pos = 0usize;
+        let mut best_cnt = 0usize;
+        for (i, s) in pool.iter().enumerate() {
+            let cnt = pool.iter().filter(|x| x.u_idx == s.u_idx).count();
+            if cnt > best_cnt {
+                best_cnt = cnt;
+                best_pos = i;
+            }
+        }
+        let mut grp = vec![pool.remove(best_pos)];
+        while grp.len() < target_k {
+            let cur_ops: usize = grp.iter().map(|g| g.base_ops.len()).sum();
+            let mut found = None;
+            for (i, cand) in pool.iter().enumerate() {
+                if grp.iter().all(|g| g.u_idx != cand.u_idx)
+                    && grp
+                        .iter()
+                        .all(|g| g.base_ops.iter().all(|op| !cand.base_ops.contains(op)))
+                    && (cur_ops + cand.base_ops.len() <= 9 || grp.len() == 1)
+                {
+                    found = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = found {
+                grp.push(pool.remove(i));
+            } else {
+                break;
+            }
+        }
+        loop {
+            if grp.len() < 2 {
+                let only = grp.pop().unwrap();
+                let new_idx = unique.len();
+                unique.push(raw_unique[only.u_idx].clone());
+                for e_i in only.e_indices {
+                    handler_of[e_i] = new_idx;
+                }
+                break;
+            }
+            let branch_ops: Vec<Vec<u32>> = grp.iter().map(|g| g.base_ops.clone()).collect();
+            if let Some(ih) = find_interval_hash(&mut rng, &branch_ops, 1500) {
+                fused_groups.push((ih, grp));
+                break;
+            }
+            let popped = grp.pop().unwrap();
+            pool.push(popped);
+        }
+    }
+
+    for (ih, grp) in fused_groups {
+        let branch_bodies: Vec<String> =
+            grp.iter().map(|g| raw_unique[g.u_idx].clone()).collect();
+        let fused_body = build_fused_body(&mut rng, &tag, pc, &ih, &branch_bodies);
+        let new_idx = unique.len();
+        unique.push(fused_body);
+        for slice in grp {
+            for e_i in slice.e_indices {
+                handler_of[e_i] = new_idx;
+            }
+        }
     }
 
     // Handler registry order is shuffled; slot_of maps original index -> slot.
