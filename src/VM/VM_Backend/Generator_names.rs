@@ -136,6 +136,18 @@ impl NameVault {
         let slot = Slot::Lit(s.to_string());
         self.request(&key, slot)
     }
+    /// 独立去重标签的全局槽：同一全局名在 `UniStream` 中分配独立偏移密文与独立 `kreg_n` 键，防跨处同槽关联。
+    pub fn global_fresh(&mut self, tag: usize, name: &str) -> String {
+        let key = format!("@glob#{}:{}", tag, name);
+        let slot = Slot::Global(name.to_string());
+        self.request(&key, slot)
+    }
+    /// 独立去重标签的字符串常量槽：同一字面量在 `UniStream` 中分配独立偏移密文与独立 `kreg_n` 键。
+    pub fn lit_fresh(&mut self, tag: usize, s: &str) -> String {
+        let key = format!("@lit#{}:{}", tag, s);
+        let slot = Slot::Lit(s.to_string());
+        self.request(&key, slot)
+    }
 
     /// 发射 NB 建表 IIFE（一次 boot 开销；热路径零改动）。
     /// `kreg` 给定时顺带补 `__mode='k'` 弱键元表（kreg 声明侧已改普通 `{}`）。
@@ -670,6 +682,232 @@ pub fn emit_methods_wire(
     out
 }
 
+/// 抗静态代换折叠的多槽非同构元表状态机参数。
+/// 由 `(mt_var, base)` 经 SplitMix64 确定性派生，使声明端 `emit_mt_state_decl`
+/// 与任意引用端 `emit_mt_state_expr` 共享同一套逐实例唯一的槽排列与非标准元方法公式。
+struct MtStateParams {
+    slots: [i64; 4],
+    init_slots: [i64; 4],
+    c_init: i64,
+    p1: usize,
+    p2: usize,
+    p3: usize,
+    var_add: u8,
+    var_sub: u8,
+    var_mul: u8,
+    c_add: i64,
+    w_add: i64,
+    c_sub: i64,
+    w_sub: i64,
+    c_mul: i64,
+    m_mul: i64,
+}
+
+impl MtStateParams {
+    fn from_seed(mt_var: &str, base: i64) -> Self {
+        let mut z = (base as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+        for &b in mt_var.as_bytes() {
+            z = (z ^ (b as u64)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z ^= z >> 29;
+        }
+        let mut next = || -> u64 {
+            z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut x = z;
+            x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            x ^ (x >> 31)
+        };
+        let mut perm = [1usize, 2, 3, 4];
+        for i in (1..4).rev() {
+            let j = (next() as usize) % (i + 1);
+            perm.swap(i, j);
+        }
+        let (p1, p2, p3) = (perm[0], perm[1], perm[2]);
+        let init_slots = [
+            ((next() % 0x3_F000) + 0x1000) as i64,
+            ((next() % 0x3_F000) + 0x1000) as i64,
+            ((next() % 0x3_F000) + 0x1000) as i64,
+            ((next() % 0x3_F000) + 0x1000) as i64,
+        ];
+        let c_init = ((next() % 0x7E00) + 0x100) as i64;
+        let mut slots = init_slots;
+        // 运行期经 `M[p3] = M[p1] * #M + M[p2] - c_init` 动态覆写（#M == 4）
+        slots[p3 - 1] = slots[p1 - 1] * 4 + slots[p2 - 1] - c_init;
+        Self {
+            slots,
+            init_slots,
+            c_init,
+            p1,
+            p2,
+            p3,
+            var_add: (next() % 3) as u8,
+            var_sub: (next() % 3) as u8,
+            var_mul: (next() % 3) as u8,
+            c_add: ((next() % 17) + 3) as i64,
+            w_add: ((next() % 13) + 2) as i64,
+            c_sub: ((next() % 17) + 3) as i64,
+            w_sub: ((next() % 13) + 2) as i64,
+            c_mul: ((next() % 17) + 3) as i64,
+            m_mul: ((next() % 79) + 17) as i64,
+        }
+    }
+
+    fn eval_add(&self, b: i64) -> i64 {
+        let (v1, v2, v3) = (self.slots[self.p1 - 1], self.slots[self.p2 - 1], self.slots[self.p3 - 1]);
+        match self.var_add {
+            0 => (v1 - b) * self.c_add + v2 - v3,
+            1 => v3 * self.c_add - (b * self.w_add) + v1,
+            _ => (v2 + b * self.w_add) * self.c_add - v1 + v3,
+        }
+    }
+
+    fn eval_sub(&self, b: i64) -> i64 {
+        let (v1, v2, v3) = (self.slots[self.p1 - 1], self.slots[self.p2 - 1], self.slots[self.p3 - 1]);
+        match self.var_sub {
+            0 => v2 + (b * self.c_sub) - v1 * self.w_sub + v3,
+            1 => (v3 + b) * self.c_sub + v2 - v1,
+            _ => v1 * self.c_sub + (b * self.w_sub) - v3,
+        }
+    }
+
+    fn eval_mul(&self, b: i64) -> i64 {
+        let (v1, v2, v3) = (self.slots[self.p1 - 1], self.slots[self.p2 - 1], self.slots[self.p3 - 1]);
+        let rem = b.rem_euclid(self.m_mul);
+        match self.var_mul {
+            0 => (v1 + v3) * rem + v2 * self.c_mul - b,
+            1 => v2 * rem - v3 + b * self.c_mul + v1,
+            _ => (v3 - v1) * rem + v2 - b * self.c_mul,
+        }
+    }
+}
+
+/// 元表状态生成器声明：
+/// 1. 载体表含 4 个打乱槽位，初值经算术拆和构造，并在建表后利用运行期表长 `#M` 动态变异 `M[p3]`；
+/// 2. `__add`、`__sub`、`__mul` 各自采用非同构、符号反置的跨槽线性/取模公式（`M+b` 不等于加、`M-b` 不等于减、`M*b` 不等于乘），彻底阻断将 `M` 当成常数代入 `eval()` 的静态折叠；
+/// 3. 三个元方法条目在元表构造器中随机洗牌发射，静态分析无法凭位置或函数体运算符区分哪个槽对应哪个元方法。
+pub fn emit_mt_state_decl(rng: &mut GenRng, mt_var: &str, base: i64) -> String {
+    let p = MtStateParams::from_seed(mt_var, base);
+    let slot_exprs: Vec<String> = p.init_slots.iter().map(|&sv| {
+        let mask = rng.range64(0x200, 0x9FFF);
+        if rng.range(0, 2) == 0 {
+            format!("(0X{:X}-0X{:X})", sv + mask, mask)
+        } else {
+            let d = sv - mask;
+            if d >= 0 { format!("(0X{:X}+0X{:X})", mask, d) } else { format!("(0X{:X}-0X{:X})", mask, -d) }
+        }
+    }).collect();
+    let fn_add = match p.var_add {
+        0 => format!("__add=function(a,b)return(a[{}]-b)*0X{:X}+a[{}]-a[{}] end", p.p1, p.c_add, p.p2, p.p3),
+        1 => format!("__add=function(a,b)return a[{}]*0X{:X}-(b*0X{:X})+a[{}] end", p.p3, p.c_add, p.w_add, p.p1),
+        _ => format!("__add=function(a,b)return(a[{}]+b*0X{:X})*0X{:X}-a[{}]+a[{}] end", p.p2, p.w_add, p.c_add, p.p1, p.p3),
+    };
+    let fn_sub = match p.var_sub {
+        0 => format!("__sub=function(a,b)return a[{}]+(b*0X{:X})-a[{}]*0X{:X}+a[{}] end", p.p2, p.c_sub, p.p1, p.w_sub, p.p3),
+        1 => format!("__sub=function(a,b)return(a[{}]+b)*0X{:X}+a[{}]-a[{}] end", p.p3, p.c_sub, p.p2, p.p1),
+        _ => format!("__sub=function(a,b)return a[{}]*0X{:X}+(b*0X{:X})-a[{}] end", p.p1, p.c_sub, p.w_sub, p.p3),
+    };
+    let fn_mul = match p.var_mul {
+        0 => format!("__mul=function(a,b)return(a[{}]+a[{}])*(b%0X{:X})+a[{}]*0X{:X}-b end", p.p1, p.p3, p.m_mul, p.p2, p.c_mul),
+        1 => format!("__mul=function(a,b)return a[{}]*(b%0X{:X})-a[{}]+b*0X{:X}+a[{}] end", p.p2, p.m_mul, p.p3, p.c_mul, p.p1),
+        _ => format!("__mul=function(a,b)return(a[{}]-a[{}])*(b%0X{:X})+a[{}]-b*0X{:X} end", p.p3, p.p1, p.m_mul, p.p2, p.c_mul),
+    };
+    let mut mms = vec![fn_add, fn_sub, fn_mul];
+    rng.shuffle(&mut mms);
+    format!(
+        "local {m}=setmetatable({{{s}}},{{{mm}}});{m}[{p3}]={m}[{p1}]*#{m}+{m}[{p2}]-0X{ci:X};",
+        m = mt_var,
+        s = slot_exprs.join(","),
+        mm = mms.join(","),
+        p1 = p.p1,
+        p2 = p.p2,
+        p3 = p.p3,
+        ci = p.c_init,
+    )
+}
+
+/// 生成通过非同构元表元方法在运行期动态还原为 `target` 的多态代数式（8 种异构 AST 拓扑随机切换）。
+pub fn emit_mt_state_expr(rng: &mut GenRng, mt_var: &str, base: i64, target: i64) -> String {
+    let p = MtStateParams::from_seed(mt_var, base);
+    let with_offset = |inner: String, val: i64, target: i64| -> String {
+        let d = target - val;
+        if d >= 0 {
+            format!("({}+0X{:X})", inner, d)
+        } else {
+            format!("({}-0X{:X})", inner, -d)
+        }
+    };
+    match rng.range(0, 8) {
+        0 => {
+            // 形态 0：外层常数反减 + 内层复合加法实参 `d - (M + (x1 + x2))`
+            let x1 = rng.range64(0x100, 0x1_FFFF);
+            let x2 = rng.range64(0x100, 0x1_FFFF);
+            let v = p.eval_add(x1 + x2);
+            let d = target + v;
+            if d >= 0 {
+                format!("(0X{d:X}-({m}+(0X{x1:X}+0X{x2:X})))", m = mt_var)
+            } else {
+                format!("(-0X{nd:X}-({m}+(0X{x1:X}+0X{x2:X})))", nd = -d, m = mt_var)
+            }
+        }
+        1 => {
+            // 形态 1：外层交换律前置常数 + 内层复合减法实参 `d + (M - (x1 - x2))`
+            let x2 = rng.range64(0x100, 0x0FFF);
+            let b = rng.range64(0x100, 0x2_FFFF);
+            let x1 = b + x2;
+            let v = p.eval_sub(b);
+            let d = target - v;
+            if d >= 0 {
+                format!("(0X{d:X}+({m}-(0X{x1:X}-0X{x2:X})))", m = mt_var)
+            } else {
+                format!("(({m}-(0X{x1:X}-0X{x2:X}))-0X{nd:X})", m = mt_var, nd = -d)
+            }
+        }
+        2 => {
+            // 形态 2：双元方法级联 `((M + b1) - (M - b2)) ± d`（单表达式同时触发 __add 与 __sub）
+            let b1 = rng.range64(0x100, 0x2_FFFF);
+            let b2 = rng.range64(0x100, 0x2_FFFF);
+            let v = p.eval_add(b1) - p.eval_sub(b2);
+            with_offset(format!("(({m}+0X{b1:X})-({m}-0X{b2:X}))", m = mt_var), v, target)
+        }
+        3 => {
+            // 形态 3：双元方法级联 `((M * b1) + (M + b2)) ± d`（单表达式同时触发 __mul 与 __add）
+            let b1 = rng.range64(0x100, 0x2_FFFF);
+            let b2 = rng.range64(0x100, 0x2_FFFF);
+            let v = p.eval_mul(b1) + p.eval_add(b2);
+            with_offset(format!("(({m}*0X{b1:X})+({m}+0X{b2:X}))", m = mt_var), v, target)
+        }
+        4 => {
+            // 形态 4：双元方法级联 `((M * b1) - (M - b2)) ± d`（单表达式同时触发 __mul 与 __sub）
+            let b1 = rng.range64(0x100, 0x2_FFFF);
+            let b2 = rng.range64(0x100, 0x2_FFFF);
+            let v = p.eval_mul(b1) - p.eval_sub(b2);
+            with_offset(format!("(({m}*0X{b1:X})-({m}-0X{b2:X}))", m = mt_var), v, target)
+        }
+        5 => {
+            // 形态 5：外层倍率缩放 `(w * (M - b)) ± d`
+            let w = rng.range64(2, 9);
+            let b = rng.range64(0x100, 0x2_FFFF);
+            let v = w * p.eval_sub(b);
+            with_offset(format!("(0X{w:X}*({m}-0X{b:X}))", m = mt_var), v, target)
+        }
+        6 => {
+            // 形态 6：外层非线性取模包裹 `(((M * b) + bias) % md) ± d`
+            let b = rng.range64(0x100, 0x2_FFFF);
+            let bias: i64 = 0x4000_0000;
+            let md = rng.range64(0x4000, 0x0FFF_FFFF);
+            let v = (p.eval_mul(b) + bias).rem_euclid(md);
+            with_offset(format!("((({m}*0X{b:X})+0X{bias:X})%0X{md:X})", m = mt_var), v, target)
+        }
+        _ => {
+            // 形态 7：外层右乘缩放 `((M + b) * w) ± d`
+            let w = rng.range64(2, 9);
+            let b = rng.range64(0x100, 0x2_FFFF);
+            let v = p.eval_add(b) * w;
+            with_offset(format!("(({m}+0X{b:X})*0X{w:X})", m = mt_var), v, target)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,5 +1047,36 @@ mod tests {
             lower_est,
             ratio
         );
+    }
+
+    #[test]
+    fn non_isomorphic_mt_state_decl_and_all_expr_shapes_roundtrip_in_lua51() {
+        let lua = std::path::Path::new("toolchains/bin/lua5.1");
+        if !lua.exists() {
+            return;
+        }
+        let mut rng = GenRng::new(0x5EED_91A3);
+        let mut script = String::new();
+        for idx in 0..24 {
+            let mt_var = format!("m_{}", idx);
+            let base = rng.range64(0x10_0000, 0x01FF_FFFF);
+            script.push_str(&emit_mt_state_decl(&mut rng, &mt_var, base));
+            for _ in 0..16 {
+                let target = rng.range64(0, 0x0FFF_FFFF);
+                let expr = emit_mt_state_expr(&mut rng, &mt_var, base, target);
+                script.push_str(&format!("assert({}==0X{:X});", expr, target));
+                // 验证将 mt_var 替换为标量 base 时无法静态代换还原 target
+                let naive_fold = expr.replace(&mt_var, &format!("0X{:X}", base));
+                script.push_str(&format!("assert(({})~=0X{:X});", naive_fold, target));
+            }
+        }
+        script.push_str("print('MT_NON_ISO_OK')");
+        let out = std::process::Command::new(lua)
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("run lua5.1");
+        assert!(out.status.success(), "Lua failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("MT_NON_ISO_OK"));
     }
 }

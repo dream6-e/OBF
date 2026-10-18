@@ -676,10 +676,10 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let v_schar = vault.member("string", "char");
         let v_ssub = vault.member("string", "sub");
         let v_tconcat = vault.member("table", "concat");
-        let v_smeta = vault.global("setmetatable");
-        let v_mm_add = vault.lit("__add");
-        let v_mm_sub = vault.lit("__sub");
-        let v_mm_mul = vault.lit("__mul");
+        let v_smetas: [String; 4] = std::array::from_fn(|t| vault.global_fresh(t, "setmetatable"));
+        let v_mm_adds: [String; 4] = std::array::from_fn(|t| vault.lit_fresh(t, "__add"));
+        let v_mm_subs: [String; 4] = std::array::from_fn(|t| vault.lit_fresh(t, "__sub"));
+        let v_mm_muls: [String; 4] = std::array::from_fn(|t| vault.lit_fresh(t, "__mul"));
         {
             // ㉜ NB 建表 + header_captures + 毒化延迟写拆入外层兄弟方法 m_vault。
             let nb_build = vault.build(&mut rng, &mut uni, Some(&kreg_n));
@@ -820,13 +820,28 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             fn_execute, var_boot_env, var_l
         ));
 
-        let rewrite_mt = |s: String| -> String {
-            s.replace("setmetatable(", &format!("{}(", v_smeta))
-                .replace("{__add=", &format!("{{[{}]=", v_mm_add))
-                .replace(",__sub=", &format!(",[{}]=", v_mm_sub))
-                .replace(",__mul=", &format!(",[{}]=", v_mm_mul))
+        let mut mt_ctr = 0usize;
+        let mut rewrite_mt = |mut s: String| -> String {
+            for (pat, slots, is_call) in [
+                ("setmetatable(", &v_smetas, true),
+                ("__add=", &v_mm_adds, false),
+                ("__sub=", &v_mm_subs, false),
+                ("__mul=", &v_mm_muls, false),
+            ] {
+                while let Some(pos) = s.find(pat) {
+                    let slot = &slots[mt_ctr % slots.len()];
+                    mt_ctr = mt_ctr.wrapping_add(1);
+                    let rep = if is_call {
+                        format!("{}(", slot)
+                    } else {
+                        format!("[{}]=", slot)
+                    };
+                    s.replace_range(pos..pos + pat.len(), &rep);
+                }
+            }
+            s
         };
-        shell.map_bodies(rewrite_mt);
+        shell.map_bodies(&mut rewrite_mt);
         let wai_body = rewrite_mt(wai_body);
 
         let (wai_p0, wai_p1) = (rng.name(), rng.name());

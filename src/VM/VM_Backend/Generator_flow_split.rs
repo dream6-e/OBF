@@ -982,54 +982,25 @@ pub(super) fn wrap_dispatcher(
     let state_nums: Vec<i64> = offsets[..8].iter().map(|o| (base + o * 0x100 + 0x11) as i64).collect();
     let mt_var = format!("{}_{}", route_name, rng.name("mt"));
     let mt_base = (((rng.next() as u32) & 0x00FF_FFFF) + 0x10_0000) as i64;
-    let mt_decl = format!(
-        "{m}=setmetatable({{0X{b:X}}},{{__add=function(a,b)return a[1]+b end,__sub=function(a,b)return a[1]-b end,__mul=function(a,b)return a[1]*b end}});",
-        m = mt_var, b = mt_base
-    );
-    let mut mt_expr = |rng: &mut TinyRng, target: i64| -> String {
-        let d1 = (((rng.next() as u32) & 0x01FF_FFFF) + 0x1_0000) as i64;
-        match rng.next() % 3 {
-            0 => {
-                let d2 = mt_base + d1 - target;
-                if d2 >= 0 {
-                    format!("(({m}+0X{d1:X})-0X{d2:X})", m = mt_var)
-                } else {
-                    format!("(({m}+0X{d1:X})+0X{d2:X})", m = mt_var, d2 = -d2)
-                }
-            }
-            1 => {
-                let d2 = target - (mt_base - d1);
-                if d2 >= 0 {
-                    format!("(({m}-0X{d1:X})+0X{d2:X})", m = mt_var)
-                } else {
-                    format!("(({m}-0X{d1:X})-0X{d2:X})", m = mt_var, d2 = -d2)
-                }
-            }
-            _ => {
-                let k = (((rng.next() as u32) % 45) + 2) as i64;
-                let d2 = mt_base * k - target;
-                if d2 >= 0 {
-                    format!("(({m}*0X{k:X})-0X{d2:X})", m = mt_var)
-                } else {
-                    format!("(({m}*0X{k:X})+0X{d2:X})", m = mt_var, d2 = -d2)
-                }
-            }
-        }
-    };
-    let s0 = mt_expr(&mut rng, state_nums[0]);
-    let s1 = mt_expr(&mut rng, state_nums[1]);
-    let s2 = mt_expr(&mut rng, state_nums[2]);
-    let s3 = mt_expr(&mut rng, state_nums[3]);
-    let s4 = mt_expr(&mut rng, state_nums[4]);
-    let s5 = mt_expr(&mut rng, state_nums[5]);
-    let s6 = mt_expr(&mut rng, state_nums[6]);
-    let s7 = mt_expr(&mut rng, state_nums[7]);
-    let s6_b = mt_expr(&mut rng, state_nums[6]);
-    let s7_b = mt_expr(&mut rng, state_nums[7]);
-    let s6_c = mt_expr(&mut rng, state_nums[6]);
-    let s7_c = mt_expr(&mut rng, state_nums[7]);
-    let s7_d = mt_expr(&mut rng, state_nums[7]);
-    let states: Vec<String> = (0..8).map(|i| mt_expr(&mut rng, state_nums[i])).collect();
+    let mut grng = crate::VM::VM_Backend::Generator_util::GenRng::new(flow_seed);
+    let mt_decl = crate::VM::VM_Backend::Generator_util::emit_mt_state_decl(&mut grng, &mt_var, mt_base);
+    let mt_decl = mt_decl.strip_prefix("local ").unwrap_or(&mt_decl).to_string();
+    let s0 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[0]);
+    let s1 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[1]);
+    let s2 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[2]);
+    let s3 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[3]);
+    let s4 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[4]);
+    let s5 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[5]);
+    let s6 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[6]);
+    let s7 = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[7]);
+    let s6_b = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[6]);
+    let s7_b = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[7]);
+    let s6_c = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[6]);
+    let s7_c = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[7]);
+    let s7_d = crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[7]);
+    let states: Vec<String> = (0..8)
+        .map(|i| crate::VM::VM_Backend::Generator_util::emit_mt_state_expr(&mut grng, &mt_var, mt_base, state_nums[i]))
+        .collect();
 
     // Keep setup in its original position; the nested step closure captures its locals.
     let loop_body = if !has_handlers {

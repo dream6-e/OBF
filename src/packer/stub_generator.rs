@@ -120,11 +120,13 @@ impl StubGenerator {
         let (st_mm, ex_mm) = uni.fetch(&mut uni_rng, id_mm);
         let pmt = pool.get();
         let pmt_base = srng.range64(0x10_0000, 0x01FF_FFFF);
-        let pmt_decl = format!(
-            "{st_sm}{st_ma}{st_ms}{st_mm}local {m}=(_ENV or _G)[{sm}]({{0X{b:X}}},{{[{ka}]=function(a,b)return a[1]+b end,[{ks}]=function(a,b)return a[1]-b end,[{km}]=function(a,b)return a[1]*b end}});",
-            st_sm = st_sm, st_ma = st_ma, st_ms = st_ms, st_mm = st_mm,
-            m = pmt, sm = ex_sm, b = pmt_base, ka = ex_ma, ks = ex_ms, km = ex_mm
-        );
+        let pmt_raw = crate::VM::VM_Backend::Generator_util::emit_mt_state_decl(&mut srng, &pmt, pmt_base)
+            .replace("setmetatable(", &format!("(_ENV or _G)[{}](", ex_sm))
+            .replace("__add=", &format!("[{}]=", ex_ma))
+            .replace("__sub=", &format!("[{}]=", ex_ms))
+            .replace("__mul=", &format!("[{}]=", ex_mm));
+        let pmt_decl = format!("{st_sm}{st_ma}{st_ms}{st_mm}{pmt_raw}",
+            st_sm = st_sm, st_ma = st_ma, st_ms = st_ms, st_mm = st_mm, pmt_raw = pmt_raw);
         let mut pcs: Vec<usize> = (0..10).collect();
         for i in (1..10).rev() {
             let j = pool.rng_mut().next_range(0, i + 1);

@@ -439,10 +439,11 @@ impl Packer {
         let v_mm_mul = vault.lit("__mul");
         let pmt = rng.name();
         let pmt_base = rng.range64(0x10_0000, 0x01FF_FFFF);
-        let pmt_decl = format!(
-            "local {m}={sm}({{0X{b:X}}},{{[{ka}]=function(a,b)return a[1]+b end,[{ks}]=function(a,b)return a[1]-b end,[{km}]=function(a,b)return a[1]*b end}});",
-            m = pmt, sm = v_smeta, b = pmt_base, ka = v_mm_add, ks = v_mm_sub, km = v_mm_mul
-        );
+        let pmt_decl = crate::VM::VM_Backend::Generator_util::emit_mt_state_decl(rng, &pmt, pmt_base)
+            .replace("setmetatable(", &format!("{}(", v_smeta))
+            .replace("__add=", &format!("[{}]=", v_mm_add))
+            .replace("__sub=", &format!("[{}]=", v_mm_sub))
+            .replace("__mul=", &format!("[{}]=", v_mm_mul));
 
         // ㉕ pc 状态表基建：在解码脚本所有方法之前声明，被各闭包按 upvalue 捕获。
         // 槽位与值改由元表算术元方法（__add/__sub/__mul）运行期动态生成；稠密 1..10 保持 #s.insts 语义。

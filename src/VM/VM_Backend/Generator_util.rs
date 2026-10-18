@@ -938,47 +938,7 @@ pub fn mix_key(plain: &str, rng: &mut GenRng) -> u32 {
     }
 }
 
-/// 元表状态生成器声明：构造携带单元素基值与 `__add`/`__sub`/`__mul` 算术元方法的元表对象。
-/// 在产物路径中，`setmetatable`/`__add`/`__sub`/`__mul` 由 `NameVault` 统一重写为加密池槽引用。
-pub fn emit_mt_state_decl(_rng: &mut GenRng, mt_var: &str, base: i64) -> String {
-    format!(
-        "local {m}=setmetatable({{0X{b:X}}},{{__add=function(a,b)return a[1]+b end,__sub=function(a,b)return a[1]-b end,__mul=function(a,b)return a[1]*b end}});",
-        m = mt_var, b = base
-    )
-}
-
-/// 生成通过元表算术元方法（`__add`、`__sub`、`__mul`）在运行期动态还原为 `target` 的表达式。
-/// 每次调用均随机选用不同元方法与不同随机掩码，同一状态号在不同引用处呈现互异的代数形态。
-pub fn emit_mt_state_expr(rng: &mut GenRng, mt_var: &str, base: i64, target: i64) -> String {
-    let d1 = rng.range64(0x1_0000, 0x01FF_FFFF);
-    match rng.range(0, 3) {
-        0 => {
-            let d2 = base + d1 - target;
-            if d2 >= 0 {
-                format!("(({m}+0X{d1:X})-0X{d2:X})", m = mt_var)
-            } else {
-                format!("(({m}+0X{d1:X})+0X{d2:X})", m = mt_var, d2 = -d2)
-            }
-        }
-        1 => {
-            let d2 = target - (base - d1);
-            if d2 >= 0 {
-                format!("(({m}-0X{d1:X})+0X{d2:X})", m = mt_var)
-            } else {
-                format!("(({m}-0X{d1:X})-0X{d2:X})", m = mt_var, d2 = -d2)
-            }
-        }
-        _ => {
-            let k = rng.range64(2, 50);
-            let d2 = base * k - target;
-            if d2 >= 0 {
-                format!("(({m}*0X{k:X})-0X{d2:X})", m = mt_var)
-            } else {
-                format!("(({m}*0X{k:X})+0X{d2:X})", m = mt_var, d2 = -d2)
-            }
-        }
-    }
-}
+pub use crate::VM::VM_Backend::Generator_names::{emit_mt_state_decl, emit_mt_state_expr};
 
 /// 将 `(状态码, 分支体)` 列表按状态码排序后递归编译为二分判定树 `if st<=pivot_mt then ... else ... end`。
 pub fn build_bst_dispatch(items: &[(u32, String)], st_var: &str, mt_var: &str, mt_base: i64) -> String {
