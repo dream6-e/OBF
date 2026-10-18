@@ -196,6 +196,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
              local {i}=0; local {n}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0XB),{rot}({uctx},0X7))); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}); \
              local {kbp}={bx}({kbx},{bx}({rot}({c}.{pf_n},0X3),{rot}({uctx},0X7))); local {kcp}={bx}({kcx},{bx}({rot}({kp},0X9),{rot}({uctx},0XD))); \
              local {k1p}={bx}({k1x},{bx}({rot}({pb},0XF),{rot}({c}.{pf_n},0X15))); local {k2p}={bx}({k2x},{bx}({rot}({uctx},0X11),{rot}({kp},0X19))); \
+             {kr}[0X{jtk:X}]={kr}[0X{jtk:X}] or {{}}; {kr}[0X{jtk:X}][{pb}]={bx}({kbp},{k1p})%0X100000; \
              local {wr}={bx}({bx}({c}.{pf_n},{rot}({kp},0X7)),{bx}({rot}({pb},0XD),{rot}({uctx},0X13))); \
              while {i} < {n} do {i} = {i} + 1; \
              local {mv}={a5}() if {mv}<0 then {mv}={mv}+{m32} end local {g18}={bx}({mv},{bx}({kp},{wr}%0X10000000)) {c}.{pf_opcodes}[{i}+{pb}]={g18} \
@@ -219,7 +220,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             dcb = rng.name(), w = rng.name(), m = rng.name(), k = rng.name(), q = rng.name(),
             bx = fn_bxor.as_str(), rot = fn_rotl32.as_str(), uctx = var_uctx.as_str(),
             mv = rng.name(), kbx = kb_x, kcx = kc_x, k1x = ki1_x, k2x = ki2_x,
-            jv = rng.name(), rd = fn_read_dec.as_str()
+            jv = rng.name(), rd = fn_read_dec.as_str(), kr = kreg_n, jtk = fc18.jtbl_key
         );
         let m_insts = shell.add(&mut rng, &insts_params, insts_body);
         let body_insts = format!(

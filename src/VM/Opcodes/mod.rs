@@ -159,8 +159,12 @@ pub struct OpcodeConfig {
     pub builtin_mask: String,
     pub builtin_bxor: String,
     /// 目标三② 计算式跳转（族六）的密钥源：执行期局部名（本原型 pf_ld 的运行期值，
-    /// 由 execute 入口从 KREG 取出）——handler 用它 + 运行期 PC 现算落点密钥。
+    /// 由 execute 入口从 KREG 取出）——handler 用它 + 运行期跳转累加器现算落点密钥。
     pub ld_key: String,
+    /// 混淆改进方案第 2 项：派发循环步进的运行期跳转状态累加器（热块直接读取）。
+    pub jmp_state: String,
+    /// 冷块（如 IteratorNext）读取的运行期跳转密钥槽占位符（冷块调用前同步 bxor(jmp_state, ld_key)）。
+    pub jmp_key_cold: String,
     /// 方法化后的返回协议：`{RET0}`（无返回值）/`{RET1}`（单值）/
     /// `{RET2}`（表+区间）三个返回钩子的调用点。
     pub ret0: String,

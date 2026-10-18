@@ -22,6 +22,8 @@ pub(super) struct FoldCtx {
     pub fk3: u32,  // Rtbl[slot] 逐槽异构左旋乘数（奇数 3..=31）
     pub emul: u32, // 常量槽散列键奇数乘数（0x1001..=0xFFFF 内奇数）
     pub eadd: u32, // 常量槽散列键加数（0x1000..=0xFF_FFFF）
+    pub jmul: u32, // 运行时跳转状态递推乘数（0x1001..=0x7FFF 内奇数）
+    pub jtbl_key: u32, // kreg 中存放逐原型运行时跳转种子 jseed_p 的表键
 }
 
 fn fold_step(
@@ -732,11 +734,15 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         } else {
             (b, c)
         };
-        // ---- 目标三②③：普通 JMP → 族六「计算式跳转」----
-        // 随机挑一部分 JMP 改成：真实后继与诱饵后继都以密文落盘（密钥 = 运行期
-        // PC 与本原型 pf_ld 现算），静态读不出下一条是谁；诱饵后继指向本原型尾部
-        // 的死指令段——那段垃圾因此在静态 CFG 上多出一条「只有运行期才知道真假」
-        // 的入边（实际永不执行）。
+        // ---- 混淆改进方案第 2 项：全四类跳转目标掺入运行时状态量 ----
+        // 运行时种子 jseed_p = (kb_p ^ ki1_p) % 0X100000 在 m_insts 解码期间（c.pf_n 抹除前）
+        // 写入 kreg[jtbl_key][pb18]；execute 派发环每步按上一条指令实际 PC 转移量
+        // (pc - prev_pc) * jmul 推进运行时累加器 jstate。
+        let jseed_p: u32 = (kb_p ^ ki1_p) & 0x000F_FFFF;
+        let prev_pc: u32 = pb18.wrapping_add(pc18 as u32).wrapping_add(1);
+        let jst: u32 = jseed_p.wrapping_add(prev_pc.wrapping_mul(fc18.jmul)) & 0x000F_FFFF;
+        let jkey: u32 = jst ^ kp18;
+
         let mut a_log: u32 = a as u32;
         let mut cj_sel: Option<u32> = None;
         if real_op18 == VmOp::Jump && dead_count > 0 && rng.random_range(0..10) < 7 {
@@ -746,19 +752,34 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             let t1 = pb18 as i64 + pc18 as i64 + 2 + (b as i32 as i64);
             if !fv.is_empty() && t1 >= pb18 as i64 + 1 && t1 <= pb18 as i64 + inst_count as i64 {
                 let t2 = pb18 as i64 + inst_count as i64 + 1 + rng.random_range(0..dead_count) as i64;
-                let salt = rng.random_range(0x1000..0xFF_FFFFu32);
-                // 密钥与 handler 同式：k=( (PC ^ ld) ^ salt )——纯异或（不取模）。
-                // 注意 handler 看到的 PC 是「取指后已自增」的值 = 记录下标 + 1。
-                let pcr = pb18.wrapping_add(pc18 as u32).wrapping_add(2);
-                let k1 = (pcr ^ kp18) ^ salt;
-                a_log = (t1 as u32) ^ k1;
-                be18 = (t2 as u32) ^ k1;
+                let branch_swap = rng.random_range(0..2u32);
+                let salt_raw = rng.random_range(0x1000..0x0F_FFFFu32);
+                let salt = (salt_raw & !1u32) | ((jst & 1) ^ branch_swap);
+                let k1 = jkey ^ salt;
+                let (plain_a, plain_b) = if branch_swap == 0 {
+                    (t1 as u32, t2 as u32)
+                } else {
+                    (t2 as u32, t1 as u32)
+                };
+                a_log = plain_a ^ k1;
+                be18 = plain_b ^ k1;
                 ce18 = salt;
                 cj_sel = Some(fv[rng.random_range(0..fv.len())]);
                 fused_used.insert(fam6);
             }
         }
         if cj_sel.is_none() {
+            match real_op18 {
+                VmOp::Jump | VmOp::Branch | VmOp::ForInit | VmOp::ForNext => {
+                    let t_abs = (pb18 as i64 + pc18 as i64 + 2 + (b as i32 as i64)) as u32;
+                    be18 = t_abs ^ jkey;
+                }
+                VmOp::BranchSetTrue | VmOp::BranchSetFalse | VmOp::IteratorNext => {
+                    let t_abs = (pb18 as i64 + pc18 as i64 + 2 + (c as i32 as i64)) as u32;
+                    ce18 = t_abs ^ jkey;
+                }
+                _ => {}
+            }
             // 消除未使用操作数恒为 0 的已知明文锚点（如 ReturnNone/Add/Sub/Drop/PopReg 的 0 字段）：
             // 对当前 VmOp 不读取的 (A, B, C) 字段填入伪装寄存器号或常量/RK 槽位，
             // 使其同时混入指令滚动链、w_roll 及 Ftbl/Rtbl 常量引用折叠。
@@ -1246,6 +1267,7 @@ mod sbox_anchor_tests {
             rs18: 0x8765_4321,
             fk1: 13, fk2: 19, fk3: 23,
             emul: 0x6B43, eadd: 0x3141_5926,
+            jmul: 0x3579, jtbl_key: 0x123456,
         };
         let hn18: u32 = 0x5A3C_96E1;
         let kp18: u32 = 0xC3A5_1E69;
@@ -1421,6 +1443,38 @@ mod sbox_anchor_tests {
         assert_ne!(bad_kp, child_kp);
         assert_ne!(bad_pb, child_pb);
     }
+
+    #[test]
+    fn runtime_jump_state_breaks_static_cfg_on_all_four_jump_categories() {
+        let jmul: u32 = 0x3579;
+        let kp18: u32 = 0x01C3_A569; // in [0x0100_0000, 0x0300_0000)
+        let pb18: u32 = 40;
+        let jseed_a: u32 = 0x0A53C;
+        let jseed_b: u32 = 0x0A53D; // 1-bit difference in u_in / hn18 changes jseed_p
+
+        // 模拟正向跳转 + 负向回跳汇合到同一 PC (pc = 58)
+        let entry_pc: i64 = pb18 as i64 + 1;
+        let mut jstate_lua: i64 = (jseed_a as i64 + entry_pc * jmul as i64).rem_euclid(0x100000);
+        // 路径 1：41 -> 65 -> 58（含负向回跳 delta = -7）
+        for &(from, to) in &[(41i64, 65i64), (65, 58)] {
+            jstate_lua = (jstate_lua + (to - from) * jmul as i64).rem_euclid(0x100000);
+        }
+        let jst_rust: u32 = jseed_a.wrapping_add((58u32).wrapping_mul(jmul)) & 0x000F_FFFF;
+        assert_eq!(jstate_lua as u32, jst_rust);
+
+        let jkey_a = jst_rust ^ kp18;
+        let jkey_b = (jseed_b.wrapping_add((58u32).wrapping_mul(jmul)) & 0x000F_FFFF) ^ kp18;
+        assert_ne!(jkey_a, jkey_b);
+
+        // 验证加密后跳转目标落在 [0x0100_0000, 0x03FF_FFFF]（不触发符号扩展且不碰撞常量槽）
+        for &t_abs in &[42u32, 77u32, 105u32] {
+            let enc = t_abs ^ jkey_a;
+            assert!((0x0100_0000..=0x03FF_FFFF).contains(&enc));
+            assert_eq!(enc ^ jkey_a, t_abs);
+            assert_ne!(enc ^ jkey_b, t_abs);
+        }
+    }
 }
+
 
 

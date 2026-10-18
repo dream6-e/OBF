@@ -182,14 +182,19 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
         s = s, a = a, j = j, j2 = j2
     )));
 
+    let jst = cfg.jmp_state.clone();
+    let jld = cfg.ld_key.clone();
+    let jbx = cfg.builtin_bxor.clone();
+    let jkc = cfg.jmp_key_cold.clone();
+
     let mut branch = handler(m, VmOp::Branch, cfg, rng);
     let a = branch.raw_inst(2);
     let b = branch.raw_inst(3);
     let s = branch.cfg.vstack.clone();
     let pc = branch.cfg.pc.clone();
     out.push_str(&branch.build(&format!(
-        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/if (({{U1}}~=nil and {{U1}}~=false)==({a}~=0)) then {pc}={pc}+{b} end",
-        s = s, a = a, pc = pc, b = b
+        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/if (({{U1}}~=nil and {{U1}}~=false)==({a}~=0)) then {pc}={bx}({b},{bx}({jst},{ld})) end",
+        s = s, a = a, pc = pc, b = b, bx = jbx, jst = jst, ld = jld
     )));
 
     for (op, polarity) in [(VmOp::BranchSetTrue, true), (VmOp::BranchSetFalse, false)] {
@@ -201,15 +206,15 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
         let pc = branch_set.cfg.pc.clone();
         let cond_check = if polarity { "{U0}" } else { "not {U0}" };
         out.push_str(&branch_set.build(&format!(
-            "{{U0}}=({stk}[{b}]~=nil and {stk}[{b}]~=false)/*MICRO_SEP*/if {cond_check} then {stk}[{a}]={stk}[{b}]; {pc}={pc}+{c} end",
-            cond_check = cond_check, stk = stk, a = a, b = b, pc = pc, c = c
+            "{{U0}}=({stk}[{b}]~=nil and {stk}[{b}]~=false)/*MICRO_SEP*/if {cond_check} then {stk}[{a}]={stk}[{b}]; {pc}={bx}({c},{bx}({jst},{ld})) end",
+            cond_check = cond_check, stk = stk, a = a, b = b, pc = pc, c = c, bx = jbx, jst = jst, ld = jld
         )));
     }
 
     let mut jump = handler(m, VmOp::Jump, cfg, rng);
     let b = jump.raw_inst(3);
     let pc = jump.cfg.pc.clone();
-    out.push_str(&jump.build(&format!("{pc}={pc}+{b}", pc = pc, b = b)));
+    out.push_str(&jump.build(&format!("{pc}={bx}({b},{bx}({jst},{ld}))", pc = pc, b = b, bx = jbx, jst = jst, ld = jld)));
 
     let mut for_init = handler(m, VmOp::ForInit, cfg, rng);
     let a = for_init.raw_inst(2);
@@ -225,9 +230,10 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let limit_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[1].0, errors[1].1);
     let step_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[2].0, errors[2].1);
     out.push_str(&for_init.build(&format!(
-        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {init_error} end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {limit_error} end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {step_error} end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}/*MICRO_SEP*/{pc}={pc}+{b}",
+        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {init_error} end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {limit_error} end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {step_error} end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}/*MICRO_SEP*/{pc}={bx}({b},{bx}({jst},{ld}))",
         stk = stk, a = a, step = step, init = init, limit = limit, q = q, pc = pc, b = b,
-        init_error = init_error, limit_error = limit_error, step_error = step_error
+        init_error = init_error, limit_error = limit_error, step_error = step_error,
+        bx = jbx, jst = jst, ld = jld
     )));
 
     let mut for_next = handler(m, VmOp::ForNext, cfg, rng);
@@ -240,8 +246,9 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let index = for_next.rng.name();
     let limit = for_next.rng.name();
     out.push_str(&for_next.build(&format!(
-        "local {q}={stk}[-{a}-1]; local {limit}={q}[1]; local {step}={q}[2]; local {index}={stk}[{a}]+{step}; {stk}[{a}]={index}; if ({step}>0 and {index}<={limit}) or ({step}<=0 and {index}>={limit}) then {stk}[{a}+3]={index}; {pc}={pc}+{b} end",
-        q = q, stk = stk, a = a, limit = limit, step = step, index = index, pc = pc, b = b
+        "local {q}={stk}[-{a}-1]; local {limit}={q}[1]; local {step}={q}[2]; local {index}={stk}[{a}]+{step}; {stk}[{a}]={index}; if ({step}>0 and {index}<={limit}) or ({step}<=0 and {index}>={limit}) then {stk}[{a}+3]={index}; {pc}={bx}({b},{bx}({jst},{ld})) end",
+        q = q, stk = stk, a = a, limit = limit, step = step, index = index, pc = pc, b = b,
+        bx = jbx, jst = jst, ld = jld
     )));
 
     let (cf_base, cf_want, cf_n, cf_fn, cf_args, cf_res) = (
@@ -265,11 +272,12 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let meta = iterator.rng.name();
     let j = iterator.rng.name();
     out.push_str(&iterator.build(&format!(
-        "local {iter_fn}={stk}[{a}]; local {meta}; if {native_type}({iter_fn})=={tfn} then {meta}={registry}[{iter_fn}] end; local {res}; if {meta} then {res}=zm({execute}({meta}.{cm_proto},{meta}.{cm_fenv},{meta}.{cm_upv},{iter_fn},{frame},{stk}[{a}+1],{stk}[{a}+2])) else {res}=zm({iter_fn}({stk}[{a}+1],{stk}[{a}+2])) end; for {j}=1,{b} do {stk}[{a}+2+{j}]={res}[{j}] end; if {stk}[{a}+3]~=nil then {stk}[{a}+2]={stk}[{a}+3]; {pc}={pc}+{c} end",
+        "local {iter_fn}={stk}[{a}]; local {meta}; if {native_type}({iter_fn})=={tfn} then {meta}={registry}[{iter_fn}] end; local {res}; if {meta} then {res}=zm({execute}({meta}.{cm_proto},{meta}.{cm_fenv},{meta}.{cm_upv},{iter_fn},{frame},{stk}[{a}+1],{stk}[{a}+2])) else {res}=zm({iter_fn}({stk}[{a}+1],{stk}[{a}+2])) end; for {j}=1,{b} do {stk}[{a}+2+{j}]={res}[{j}] end; if {stk}[{a}+3]~=nil then {stk}[{a}+2]={stk}[{a}+3]; {pc}={bx}({c},{jkc}) end",
         res = res, stk = stk, a = a, j = j, b = b, pc = pc, c = c,
         iter_fn = iter_fn, registry = registry, meta = meta, execute = execute,
         native_type = native_type, frame = frame, tfn = t_fn,
-        cm_proto = cm_proto, cm_fenv = cm_fenv, cm_upv = cm_upv
+        cm_proto = cm_proto, cm_fenv = cm_fenv, cm_upv = cm_upv,
+        bx = jbx, jkc = jkc
     )));
 
     let mut call_pack = handler(m, VmOp::CallPack, cfg, rng);

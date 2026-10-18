@@ -258,6 +258,8 @@ impl Generator {
             fk3: (rng.range(1, 16) as u32) * 2 + 1,
             emul: (rng.range(0x800, 0x8000) as u32) * 2 + 1,
             eadd: rng.range(0x1000, 0xFF_FFFF) as u32,
+            jmul: (rng.range(0x800, 0x4000) as u32) * 2 + 1,
+            jtbl_key: rng.range(0x10000, 0xFFF_FFFF) as u32,
         };
         // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
         // 从 0..59∪251..255 取互不相同值（避开 60..250 诱饵键区）；写侧推送与
@@ -473,6 +475,9 @@ impl Generator {
         // 目标三②：计算式跳转的密钥源——n_kon 是 execute 入口从 KREG 取出的本原型
         // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
         let (n_kon, n_ka) = (rng.name(), rng.name());
+        let (var_jstate, var_jkey_cold) = (rng.name(), rng.name());
+        let k_jstate_raw = rng.range(900, 999) as i64;
+        let k_jstate = rng.obfuscate_num(k_jstate_raw, 1, &keys);
         let numeric_for_errors = uni.register_numeric_for_errors(&mut rng);
         // 外部 API 名解码器：kreg 注册表槽（取用点早于解码器声明，走运行期查表）
         let gn_key = rng.range(0x0100_0000, 0x6FFF_FFFF) as u32;
@@ -510,6 +515,8 @@ impl Generator {
             builtin_mask: format!("self[{}]", k_bmask),
             builtin_bxor: fn_bxor2.clone(),
             ld_key: n_kon.clone(),
+            jmp_state: var_jstate.clone(),
+            jmp_key_cold: var_jkey_cold.clone(),
             vararg_count: pf_vn.clone(),
             proto_nups: pf_nups.clone(),
             open_ups: pf_open_ups.clone(),
@@ -702,8 +709,7 @@ impl Generator {
                 // 标量状态：槽位表达式就地替换（pc/top 的读写直接落在 VM 对象上）
                 body = rename_ident(&body, &var_pc, &format!("{}[{}]", p_self, k_pc));
                 body = rename_ident(&body, &var_top, &format!("{}[{}]", p_self, k_top));
-                // CLOSURE 模板里有字面量 env（内层闭包用），方法表是共享的
-                // 必须走槽位拿当前调用的环境，不能捕获第一次调用的 env
+                body = rename_ident(&body, &var_jkey_cold, &format!("{}[{}]", p_self, k_jstate));
                 body = rename_ident(&body, "env", &format!("{}[{}]", p_self, k_env));
                 // 取指别名对（别名↔槽位绑定不变；抓取顺序与分组随机）
                 let mut alias_pairs: Vec<(String, String)> = Vec::new();
@@ -755,16 +761,18 @@ impl Generator {
                 // 成员名统一改名时字符串键不改，两边对不上变 nil。
                 defs.push(format!("{}.{}=function({},{},{},{},{}) {} end;", method_shards[*method_shard], name,
                     p_self, p_names[0], p_names[1], p_names[2], p_names[3], text));
-                // 冷路径才付同步代价：进出方法前后各存/取一次 pc 与 top
-                // 并把本块状态号写进槽位（方法入口自校验）。
-                // 同步语句：三连存乱序/分组 + 状态号常数去指纹（原两形态合流）。
-                // 初始状态值不留裸明文——它和冷块摘要校验共享同一状态语义。
                 let st_o = rng.obfuscate_num(*st as i64, 1, &keys);
                 let mut sync: Vec<(String, String)> = vec![
                     (format!("{}[{}]", var_vm, k_pc), var_pc.clone()),
                     (format!("{}[{}]", var_vm, k_top), var_top.clone()),
                     (format!("{}[{}]", var_vm, k_state), st_o),
                 ];
+                if uses_ident(code, &var_jkey_cold) {
+                    sync.push((
+                        format!("{}[{}]", var_vm, k_jstate),
+                        format!("{}({},{})", fn_bxor2, var_jstate, n_kon),
+                    ));
+                }
                 rng.shuffle(&mut sync);
                 let mut sync_stmts = String::new();
                 let mut si = 0usize;
@@ -775,11 +783,6 @@ impl Generator {
                     sync_stmts.push_str(&format!("{}={};", lhs.join(","), rhs.join(",")));
                     si += take;
                 }
-                // ── 调用形态池：此前 240+ 处清一色 `vm:方法(op,inst_A,inst_B,inst_C)`，
-                // 是产物里最好 grep 的结构。现在六形随机（0/1 保留冒号调用，约 1/3）：
-                // 2/3 走点调用（经原型 __index 同级解析）或先取方法再直调（省掉元表查找，
-                // 比冒号还快）。六形语义完全等价——都只是「把接收者与四个已置换的实参
-                // 交给同一个方法」，冷块入口的状态自校验与符号同步逻辑一概不变。
                 let (rn1, rn2, rn3) = (var_r1.clone(), var_r2.clone(), var_r3.clone());
                 let call = match rng.range(0, 6) {
                     0 => format!("{},{},{}={}:{}({});", rn1, rn2, rn3, var_vm, name, call_args),
@@ -1008,8 +1011,10 @@ impl Generator {
         // 目标二③（第二部分）：chunk.{cnt} 不再在读侧入口抹掉——DC 惰性填充用它
         // 与 pf_lld 一起算本原型记录段的上界（越界 pc 不再走进邻接原型的记录）。
         block_execute_def.push_str(&format!(
-            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; end; {deriv} ",
-            kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18, deriv = deriv));
+            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; end; local {jst}=(({kreg}[0X{jtk:X}] and {kreg}[0X{jtk:X}][{c}.{lld}] or 0)+{pc}*0X{jmul:X})%0X100000; {deriv} ",
+            kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18,
+            jst = var_jstate, jtk = fc18.jtbl_key, lld = pf_lld, pc = var_pc, jmul = fc18.jmul,
+            deriv = deriv));
         // 改进项一：解码器闭包内联，状态表字段名随机化，3 态+1 诱饵态平坦化分发。
         let (ds_n, ds_ch, ds_m1, ds_m2, ds_m3) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
         {
@@ -1081,8 +1086,9 @@ impl Generator {
             dispatch_body.push_str(&format!("local rk1,rk2;local {},{},{};", var_r1, var_r2, var_r3));
             dispatch_body.push_str(&crate::VM::VM_Backend::Generator_flow_split::build_relay_dispatch(&tree_entries, &var_pc, &var_top, &var_r1, &var_r2, &var_r3, &dispatch_state.route_op, &dispatch_state.bias, fn_execute, self.ctx.seed, &native_smeta, &native_rset));
             dispatch_body.push_str(&format!(
-                "{state}=({state}+({pc}-{prev})*0X{mul:X})%0X100000000;",
-                state = const_path_state, pc = var_pc, prev = const_path_prev_pc, mul = const_path_mul));
+                "{state}=({state}+({pc}-{prev})*0X{mul:X})%0X100000000;{jst}=({jst}+({pc}-{prev})*0X{jmul:X})%0X100000;",
+                state = const_path_state, pc = var_pc, prev = const_path_prev_pc, mul = const_path_mul,
+                jst = var_jstate, jmul = fc18.jmul));
             dispatch_body.push_str(&dispatch_state.update);
             dispatch_body.push_str(&format!("if {} then local {}={}[{}]; if {}=={} then return {}[{}] elseif {}=={} then return {}({}[{}],{}[{}],{}[{}]) end; return end;", var_r1, var_md, var_vm, k_mode, var_md, obf1, var_vm, k_retv, var_md, obf2, var_unpack, var_vm, k_retv, var_vm, k_retf, var_vm, k_rett));
             // ㉑ 周期性明文回收：pc 水位过阈值→全部原型槽写回 thunk（密文）；
