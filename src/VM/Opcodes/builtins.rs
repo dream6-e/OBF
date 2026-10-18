@@ -147,7 +147,7 @@ pub fn generate_fused(
         let key = h.rk(4);
         let pa = h.raw_inst(2);
         let a_names: Vec<String> = (0..6).map(|_| h.rng.name()).collect();
-        let (v, dr, rkv, cd, gp, ot) = (a_names[0].clone(), a_names[1].clone(), a_names[2].clone(), a_names[3].clone(), a_names[4].clone(), a_names[5].clone());
+        let (v, dr, rkv, cd, _gp, ot) = (a_names[0].clone(), a_names[1].clone(), a_names[2].clone(), a_names[3].clone(), a_names[4].clone(), a_names[5].clone());
         let (r1, r2) = (h.rng.name(), h.rng.name());
         let (c256, c512, c127) = (super::ident(h.rng, 0x100), super::ident(h.rng, 0x200), super::ident(h.rng, 0x7F));
         let (c2, c17, c18) = (super::ident(h.rng, 2), super::ident(h.rng, 0x20000), super::ident(h.rng, 0x40000));
@@ -155,11 +155,12 @@ pub fn generate_fused(
         out.push_str(&h.build(&format!(
             "local {v}={tab}[{key}]; local {dr}={pai}%{c256}; local {r1}={pai}-{dr}; \
              local {rkv}=({r1}/{c256})%{c512}; local {r2}={r1}-{rkv}*{c256}; \
-             local {cd}=({r2}/{c17})%{c2}; local {gp}=({r2}-{cd}*{c17})/{c18}; \
+             local {cd}=({r2}/{c17})%{c2}; {{U2}}=({r2}-{cd}*{c17})/{c18}; \
              local {ot}; if {rkv}>{c127} then {ot}={{CONSTS}}[{rkv}-{c127}] else {ot}={{STK}}[{rkv}] end; \
-             {{STK}}[{dr}]={v}; \
-             if (({v}=={ot})~=({cd}~=0X0)) then {{PC}}={{PC}}+{gp}+{one} else {{PC}}={{PC}}+{gp} end",
-            v = v, tab = tab, key = key, dr = dr, r1 = r1, rkv = rkv, r2 = r2, cd = cd, gp = gp, ot = ot,
+             {{U0}}={v}; {{U1}}={dr}; rk1=(({v}=={ot})~=({cd}~=0X0))/*MICRO_SEP*/\
+             {{STK}}[{{U1}}]={{U0}}; \
+             if rk1 then {{PC}}={{PC}}+{{U2}}+{one} else {{PC}}={{PC}}+{{U2}} end",
+            v = v, tab = tab, key = key, dr = dr, r1 = r1, rkv = rkv, r2 = r2, cd = cd, ot = ot,
             pai = pa, c256 = c256, c512 = c512, c127 = c127, c2 = c2, c17 = c17, c18 = c18, one = one)));
     }
     // 族六：计算式跳转（目标三第 2 条 + 第 3 条）——JMP 的落点不再以明文偏移落盘。
@@ -176,7 +177,6 @@ pub fn generate_fused(
         let e1 = h.raw_inst(2);
         let e2 = h.raw_inst(3);
         let sa = h.raw_inst(4);
-        let k1 = h.rng.name();
         let ld = cfg.ld_key.clone();
         let bx = cfg.builtin_bxor.clone();
         let ntype = cfg.native_type.clone();
@@ -184,14 +184,15 @@ pub fn generate_fused(
         let ttbl = cfg.type_tbl.clone();
         out.push_str(&h.build(&format!(
             // 键 = (运行期 PC ^ 本原型 pf_ld) ^ 记录盐；结合运行期活动调用帧类型与动态余数不变量选路
-            "local {k1}={bx}({bx}({{PC}},{ld}),{sa}); \
-             if {nt}({stk})=={tt} and ({k1}%0X2)<0X2 then {{PC}}={bx}({e1},{k1}) else {{PC}}={bx}({e2},{k1}) end",
-            k1 = k1, e1 = e1, e2 = e2, sa = sa, ld = ld, bx = bx, nt = ntype, stk = stk_t, tt = ttbl)));
+            "{{U0}}={bx}({bx}({{PC}},{ld}),{sa})/*MICRO_SEP*/\
+             if {nt}({stk})=={tt} and ({{U0}}%0X2)<0X2 then {{PC}}={bx}({e1},{{U0}}) else {{PC}}={bx}({e2},{{U0}}) end",
+            e1 = e1, e2 = e2, sa = sa, ld = ld, bx = bx, nt = ntype, stk = stk_t, tt = ttbl)));
     }
 
     // 性能型超级指令：custom ISA 的 PushRk, PushRk, arithmetic, PopReg
     // 序列合为一次 STK 写入，GetTable/SetTable 的 Push* + Index + Pop 序列同理。
     // rewrite 阶段仍保留被吞记录为死槽并原样推进 PC，控制流和记录偏移不变。
+    let fused_rk2_prep = "if inst_B<128 then rk1={STK}[inst_B] else rk1={CONSTS}[inst_B-127] end; if inst_C<128 then rk2={STK}[inst_C] else rk2={CONSTS}[inst_C-127] end; {PC}={PC}+3";
     const ARITHMETIC: [&str; FUSED_ARITH_COUNT] = ["+", "-", "*", "/", "%", "^"];
     for (offset, operator) in ARITHMETIC.iter().enumerate() {
         let family = FUSED_ARITH_BASE + offset;
@@ -200,12 +201,9 @@ pub fn generate_fused(
         }
         let mut h = OpcodeBuilder::new(m[family].clone(), cfg, rng);
         let a = h.raw_inst(2);
-        let left = h.rk(3);
-        let right = h.rk(4);
-        let skip = super::ident(h.rng, 3);
         out.push_str(&h.build(&format!(
-            "{{STK}}[{a}] = {left} {operator} {right}; {{PC}} = {{PC}} + {skip}",
-            a = a, left = left, operator = operator, right = right, skip = skip
+            "{prep}/*MICRO_SEP*/{{STK}}[{a}]=rk1{operator}rk2",
+            prep = fused_rk2_prep, a = a, operator = operator
         )));
     }
 
@@ -213,29 +211,18 @@ pub fn generate_fused(
         let mut h = OpcodeBuilder::new(m[FUSED_TABLE_GET].clone(), cfg, rng);
         let a = h.raw_inst(2);
         let table_reg = h.raw_inst(3);
-        let table = h.rng.name();
-        // 与原序列相同，先读取表寄存器，再解析 RK 键。
-        h.pre_statements.push_str(&format!("local {table}={{STK}}[{table_reg}]; "));
-        let key = h.rk(4);
-        let skip = super::ident(h.rng, 3);
         out.push_str(&h.build(&format!(
-            "{{STK}}[{a}] = {table}[{key}]; {{PC}} = {{PC}} + {skip}",
-            a = a, table = table, key = key, skip = skip
+            "if inst_C<128 then rk2={{STK}}[inst_C] else rk2={{CONSTS}}[inst_C-127] end; {{PC}}={{PC}}+3/*MICRO_SEP*/{{STK}}[{a}]={{STK}}[{table_reg}][rk2]",
+            a = a, table_reg = table_reg
         )));
     }
 
     if used.contains(&FUSED_TABLE_SET) && !m[FUSED_TABLE_SET].is_empty() {
         let mut h = OpcodeBuilder::new(m[FUSED_TABLE_SET].clone(), cfg, rng);
         let table_reg = h.raw_inst(2);
-        let table = h.rng.name();
-        // 保持原 SetTable 的求值次序：表、键、值，然后执行赋值。
-        h.pre_statements.push_str(&format!("local {table}={{STK}}[{table_reg}]; "));
-        let key = h.rk(3);
-        let value = h.rk(4);
-        let skip = super::ident(h.rng, 3);
         out.push_str(&h.build(&format!(
-            "{table}[{key}] = {value}; {{PC}} = {{PC}} + {skip}",
-            table = table, key = key, value = value, skip = skip
+            "{prep}/*MICRO_SEP*/{{STK}}[{table_reg}][rk1]=rk2",
+            prep = fused_rk2_prep, table_reg = table_reg
         )));
     }
     out

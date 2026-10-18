@@ -80,6 +80,66 @@ enum CaseShape {
     Boxed,
 }
 
+/// Split a handler body into micro-steps:
+/// 1) Explicit `/*MICRO_SEP*/` markers emitted by custom/builtin opcodes;
+/// 2) Cold-handler wrappers ending with the two `pc=vm[k_pc];top=vm[k_top];` slot restores,
+///    normalized so all cold handlers share a single post-sync micro-handler.
+fn split_micro_steps(
+    raw_body: &str,
+    u0: &str,
+    u1: &str,
+    u2: &str,
+    pc: &str,
+    top: &str,
+) -> Vec<String> {
+    let body = raw_body
+        .replace("{U0}", u0)
+        .replace("{U1}", u1)
+        .replace("{U2}", u2);
+    if body.contains("/*MICRO_SEP*/") {
+        let steps: Vec<String> = body
+            .split("/*MICRO_SEP*/")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !steps.is_empty() {
+            return steps;
+        }
+    }
+    if !body.contains(" end") && !body.contains("return ") {
+        let parts: Vec<&str> = body
+            .split(';')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() >= 3 {
+            let last1 = parts[parts.len() - 2];
+            let last2 = parts[parts.len() - 1];
+            let pc_prefix = format!("{}=", pc);
+            let top_prefix = format!("{}=", top);
+            let is_pc_top = last1.starts_with(&pc_prefix)
+                && last1.contains('[')
+                && last2.starts_with(&top_prefix)
+                && last2.contains('[');
+            let is_top_pc = last1.starts_with(&top_prefix)
+                && last1.contains('[')
+                && last2.starts_with(&pc_prefix)
+                && last2.contains('[');
+            if is_pc_top || is_top_pc {
+                let (pc_stmt, top_stmt) = if is_pc_top {
+                    (last1, last2)
+                } else {
+                    (last2, last1)
+                };
+                let step0 = format!("{};", parts[..parts.len() - 2].join(";"));
+                let step1 = format!("{};{};", pc_stmt, top_stmt);
+                return vec![step0, step1];
+            }
+        }
+    }
+    vec![body]
+}
+
 /// Build the hidden opcode→handler wiring (flat wire blobs resolved through
 /// `__index` fronts) and one independent function per distinct case. The setup
 /// block is hoisted by `wrap_dispatcher` before the iterative driver is emitted.
@@ -97,18 +157,73 @@ pub(super) fn build_relay_dispatch(
     setmetatable: &str,
     rawset: &str,
 ) -> String {
-    let _ = top;
     let mut rng = TinyRng::new(
         vm_seed
             ^ (entries.len() as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
             ^ (execute_name.len() as u64).wrapping_mul(0x94D0_49BB_1331_11EB),
     );
     let tag = rng.name(&format!("{}_dx", execute_name));
+    let (u0, u1, u2) = (rng.name(&tag), rng.name(&tag), rng.name(&tag));
+    let sub_op = rng.name(&tag);
 
-    // Deduplicate identical handler bodies; each opcode points at a handler index.
+    let mut base_ops: Vec<u32> = entries.iter().map(|(op, _)| *op).collect();
+    base_ops.sort_unstable();
+    base_ops.dedup();
+    let (delta_1, delta_2) = loop {
+        let d1 = 0x0001_0000 + (rng.range(0x0FFE_0000) as u32);
+        let d2 = 0x1000_0000 + (rng.range(0x0FFE_0000) as u32);
+        let mut seen = std::collections::HashSet::with_capacity(base_ops.len() * 3);
+        for &op in &base_ops {
+            seen.insert(op);
+        }
+        let mut ok = true;
+        for &op in &base_ops {
+            match (op.checked_add(d1), op.checked_add(d2)) {
+                (Some(k1), Some(k2)) => {
+                    if !seen.insert(k1) || !seen.insert(k2) {
+                        ok = false;
+                        break;
+                    }
+                }
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            break (d1, d2);
+        }
+    };
+
+    // Expand multi-stage handlers into micro-step entries (Scheme 2: sub_op micro-step ring
+    // + cross-instruction shared pre-step / post-step deduplication).
+    let mut expanded_entries: Vec<(u32, String)> = Vec::with_capacity(entries.len() * 2);
+    for (opcode, raw_body) in entries.iter() {
+        let steps = split_micro_steps(raw_body, &u0, &u1, &u2, pc, top);
+        if steps.len() <= 1 {
+            let b = steps.into_iter().next().unwrap_or_default();
+            expanded_entries.push((*opcode, b));
+        } else if steps.len() == 2 {
+            let s0 = steps[0].trim().trim_end_matches(';');
+            let b0 = format!("{s0};{sub}=op+0X{d1:X};", s0 = s0, sub = sub_op, d1 = delta_1);
+            expanded_entries.push((*opcode, b0));
+            expanded_entries.push((opcode.wrapping_add(delta_1), steps[1].clone()));
+        } else {
+            let s0 = steps[0].trim().trim_end_matches(';');
+            let b0 = format!("{s0};{sub}=op+0X{d1:X};", s0 = s0, sub = sub_op, d1 = delta_1);
+            let s1 = steps[1].trim().trim_end_matches(';');
+            let b1 = format!("{s1};{sub}=op+0X{d2:X};", s1 = s1, sub = sub_op, d2 = delta_2);
+            expanded_entries.push((*opcode, b0));
+            expanded_entries.push((opcode.wrapping_add(delta_1), b1));
+            expanded_entries.push((opcode.wrapping_add(delta_2), steps[2].clone()));
+        }
+    }
+
+    // Deduplicate identical handler bodies; each opcode/sub_op points at a handler index.
     let mut unique: Vec<String> = Vec::new();
-    let mut handler_of: Vec<usize> = Vec::with_capacity(entries.len());
-    for (_opcode, body) in entries.iter() {
+    let mut handler_of: Vec<usize> = Vec::with_capacity(expanded_entries.len());
+    for (_opcode, body) in expanded_entries.iter() {
         let idx = if let Some(pos) = unique.iter().position(|old| old == body) {
             pos
         } else {
@@ -131,7 +246,13 @@ pub(super) fn build_relay_dispatch(
     let mask = 1 + rng.range(0x00FF_FFFF) as u32;
 
     // ---- emit handlers (mix of named defs and inline closures) --------------
-    let mut setup = String::new();
+    let mut setup = format!(
+        "local rk1,rk2,{u0},{u1},{u2},{sub_op};",
+        u0 = u0,
+        u1 = u1,
+        u2 = u2,
+        sub_op = sub_op,
+    );
     let mut h_entries: Vec<String> = vec![String::new(); unique.len()];
     for (slot, orig) in order.iter().enumerate() {
         let body = &unique[*orig];
@@ -190,7 +311,7 @@ pub(super) fn build_relay_dispatch(
     // (schemes 4/11/14: metatable indirection, data-pool disguise, burn-after-use)
     let front_count = 1 + rng.range(2) as usize;
     let mut front_pairs: Vec<Vec<(u32, usize)>> = vec![Vec::new(); front_count];
-    for (e_i, (opcode, _body)) in entries.iter().enumerate() {
+    for (e_i, (opcode, _body)) in expanded_entries.iter().enumerate() {
         let slot = slot_of[handler_of[e_i]];
         let f = rng.range(front_count as u64) as usize;
         front_pairs[f].push((*opcode, slot));
@@ -208,10 +329,12 @@ pub(super) fn build_relay_dispatch(
     let mut front_names: Vec<String> = Vec::new();
     for f in 0..front_count {
         let wname = rng.name(&tag);
+        let wsname = rng.name(&tag);
         let fname = rng.name(&tag);
         let burn_fn = rng.name(&tag);
         let look_c = rng.name(&tag);
-        let burn_at = 2048 + rng.range(6144);
+        let ck_f = 0x1000_0000 + (rng.range(0x6FFF_0000) as u32);
+        let burn_at = 64 + rng.range(192);
         let mut pairs = front_pairs[f].clone();
         rng.shuffle(&mut pairs);
         let total = pairs.len();
@@ -226,37 +349,22 @@ pub(super) fn build_relay_dispatch(
             nums.push(format!("0X{:X}", rng.next() as u32));
         }
         let scan_end = total * 2;
+        // Resolver: scan wire pairs and cache slot indices on the prototype table `chunk`
+        // (with burn-after-use wiping `w` and dropping the metatable), while the frame-local
+        // front table caches the bound handler function directly for 1-hop hot-loop dispatch.
         setup.push_str(&format!(
-            "local {w}={{{nums}}};local {lc}=0;",
+            "local {ws}=chunk and chunk[0X{ck:X}];if not {ws} then local {w}={{{nums}}};local {lc}=0;local function {bf}(t) local j=1;while j<={end_i} do {rs}(t,{w}[j],{w}[j+1]-{mask});j=j+2 end;{w}=nil;{sm}(t,nil) end;{ws}={sm}({{}},{{__index=function(t,k) local i=1;while i<={end_i} do if {w}[i]==k then local s={w}[i+1]-{mask};{rs}(t,k,s);{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return s end;i=i+2 end;{rs}(t,k,false);{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return false end}});if chunk then chunk[0X{ck:X}]={ws} end end;local {f}={sm}({{}},{{__index=function(t,k) local s={ws}[k];local fn=s and {h}[s] or false;{rs}(t,k,fn);return fn end}});",
+            ws = wsname,
+            f = fname,
+            ck = ck_f,
             w = wname,
             nums = nums.join(","),
             lc = look_c,
-        ));
-        // Resolver: scan wire pairs and cache hits. Burn-after-use: once resolver
-        // traffic reaches a per-build threshold, refill the whole cache from the
-        // wires, nil the wire blob and drop the metatable. The refill makes burning
-        // safe at any moment (every real opcode is cached before the wires vanish),
-        // so late first-uses of an opcode never fall through to the fallback.
-        setup.push_str(&format!(
-            "local function {bf}(t) local j=1;while j<={end_i} do {rs}(t,{w}[j],{h}[{w}[j+1]-{mask}]);j=j+2 end;{w}=nil;{sm}(t,nil) end;",
             bf = burn_fn,
-            w = wname,
             h = handlers_name,
             mask = format!("0X{:X}", mask),
             end_i = scan_end,
-            sm = setmetatable,
-            rs = rawset,
-        ));
-        setup.push_str(&format!(
-            "local {f}={sm}({{}},{{__index=function(t,k) local i=1;while i<={end_i} do if {w}[i]==k then local h={h}[{w}[i+1]-{mask}];{rs}(t,k,h);{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return h end;i=i+2 end;{lc}={lc}+1;if {lc}>={burn} then {bf}(t) end;return nil end}});",
-            f = fname,
-            w = wname,
-            h = handlers_name,
-            mask = format!("0X{:X}", mask),
-            lc = look_c,
             burn = burn_at,
-            bf = burn_fn,
-            end_i = scan_end,
             sm = setmetatable,
             rs = rawset,
         ));
@@ -275,38 +383,52 @@ pub(super) fn build_relay_dispatch(
     let (ra, rb, rc) = (rng.name(&tag), rng.name(&tag), rng.name(&tag));
     let chain = order_f
         .iter()
-        .map(|i| format!("{}[{}]", front_names[*i], ov))
+        .map(|i| format!("{}[{}]", front_names[*i], sub_op))
         .collect::<Vec<_>>()
         .join(" or ");
-    let call = format!("{np},{ra},{rb},{rc}={f}(op,inst_A,inst_B,inst_C);", np = np, ra = ra, rb = rb, rc = rc, f = f);
-    let tail = format!(
-        "if {np}==true then {r1}=true else {pc}={np};{r1},{r2},{r3}={ra},{rb},{rc} end;",
-        np = np, pc = pc, r1 = r1, r2 = r2, r3 = r3, ra = ra, rb = rb, rc = rc,
+    let call = format!(
+        "{sub}=nil;{np},{ra},{rb},{rc}={f}(op,inst_A,inst_B,inst_C);",
+        sub = sub_op,
+        np = np,
+        ra = ra,
+        rb = rb,
+        rc = rc,
+        f = f,
     );
-    let dispatch = match rng.range(3) {
+    let tail = format!(
+        "if {np}==true then {r1}=true;{sub}=nil else {pc}={np};if {ra}~=nil then {r1},{r2},{r3}={ra},{rb},{rc};if {ra}==true then {sub}=nil end end end;",
+        np = np,
+        pc = pc,
+        r1 = r1,
+        r2 = r2,
+        r3 = r3,
+        ra = ra,
+        rb = rb,
+        rc = rc,
+        sub = sub_op,
+    );
+    let step_dispatch = match rng.range(3) {
         0 => format!("local {f}={chain} or {fallback};{call}{tail}", f = f, chain = chain, fallback = fallback, call = call, tail = tail),
         1 => format!(
             "local {f}={fallback};do local {g}={chain};if {g} then {f}={g} end end;{call}{tail}",
             f = f, fallback = fallback, g = g, chain = chain, call = call, tail = tail,
         ),
-        _ => {
-            let ts: Vec<String> = (0..front_count).map(|i| format!("{}_{}", g, i)).collect();
-            let vs: Vec<String> = order_f
-                .iter()
-                .map(|i| format!("{}[{}]", front_names[*i], ov))
-                .collect();
-            format!(
-                "local {ts}={vs};local {f}={chain_t} or {fallback};{call}{tail}",
-                ts = ts.join(","),
-                vs = vs.join(","),
-                f = f,
-                chain_t = ts.join(" or "),
-                fallback = fallback,
-                call = call,
-                tail = tail,
-            )
-        }
+        _ => format!(
+            "local {g}={chain};local {f}={g} or {fallback};{call}{tail}",
+            g = g,
+            chain = chain,
+            f = f,
+            fallback = fallback,
+            call = call,
+            tail = tail,
+        ),
     };
+    let dispatch = format!(
+        "{sub}={ov};repeat {step_dispatch} until not {sub};",
+        sub = sub_op,
+        ov = ov,
+        step_dispatch = step_dispatch,
+    );
 
     format!("{open}{setup}{close}{dispatch}", open = RELAY_SETUP_OPEN, setup = setup, close = RELAY_SETUP_CLOSE, dispatch = dispatch)
 }
@@ -701,6 +823,8 @@ mod tests {
             (0x303, "return true;".to_string()),
             (0x404, first),
             (0x505, "if inst_A>0 then r1=true;r2=value;r3=inst_A end".to_string()),
+            (0x606, "{U0}=inst_A;{U1}=inst_B/*MICRO_SEP*/value={U0}+{U1};pc=pc+2;".to_string()),
+            (0x707, "{U0}=inst_A;{U1}=inst_B/*MICRO_SEP*/value={U0}-{U1};pc=pc+2;".to_string()),
         ];
         for seed in [0x1234u64, 0xBEEF, 0x0F0F_0F0F, 0xDEAD_BEEF] {
             let dispatch = build_relay_dispatch(
@@ -734,7 +858,9 @@ mod tests {
                  local e,f,g,h=run(0x202,0,4,0);assert(e==15 and f==2 and g==4 and h==nil); \
                  local i,j,k,l=run(0x303,0,0,0);assert(i==11 and j==0 and k==0 and l==true); \
                  local m,n,o,p=run(0x999,0,0,0);assert(m==11 and n==0 and o==0 and p==nil); \
-                 local q,r,s,t,u,v=run(0x505,9,0,0);assert(q==11 and s==0 and t==true and u==0 and v==9);io.write('RELAY_OK')",
+                 local q,r,s,t,u,v=run(0x505,9,0,0);assert(q==11 and s==0 and t==true and u==0 and v==9); \
+                 local ma,mb,mc=run(0x606,8,3,0);assert(ma==13 and mb==0 and mc==11); \
+                 local md,me,mf=run(0x707,8,3,0);assert(md==13 and me==0 and mf==5);io.write('RELAY_OK')",
                 wrapped = wrapped,
             );
             let compressed = Compressor::compress(&source).expect("compress relay code");

@@ -22,12 +22,9 @@ fn emit_binary(
 ) {
     let mut h = handler(m, op, cfg, rng);
     let s = h.cfg.vstack.clone();
-    let n = h.rng.name();
-    let x = h.rng.name();
-    let y = h.rng.name();
     out.push_str(&h.build(&format!(
-        "local {n}=#{s}; local {x}={s}[{n}-1][1]; local {y}={s}[{n}][1]; {s}[{n}-1][1]={x}{operator}{y}; {s}[{n}]=nil",
-        n = n, s = s, x = x, y = y, operator = operator
+        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}-1][1]; {{U2}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/{s}[{{U0}}-1][1]={{U1}}{operator}{{U2}}",
+        s = s, operator = operator
     )));
 }
 
@@ -41,12 +38,9 @@ fn emit_unary(
 ) {
     let mut h = handler(m, op, cfg, rng);
     let s = h.cfg.vstack.clone();
-    let n = h.rng.name();
-    let v = h.rng.name();
-    let expression = format!("{operator}{v}", operator = operator, v = v);
     out.push_str(&h.build(&format!(
-        "local {n}=#{s}; local {v}={s}[{n}][1]; {s}[{n}][1]={expression}",
-        n = n, s = s, v = v, expression = expression
+        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}][1]/*MICRO_SEP*/{s}[{{U0}}][1]={operator}{{U1}}",
+        s = s, operator = operator
     )));
 }
 
@@ -68,7 +62,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut push_rk = handler(m, VmOp::PushRk, cfg, rng);
     let value = push_rk.rk(3);
     let vstack = push_rk.cfg.vstack.clone();
-    out.push_str(&push_rk.build(&format!("{vstack}[#{vstack}+1]={{{value}}}", vstack = vstack, value = value)));
+    out.push_str(&push_rk.build(&format!("{{U0}}={value}/*MICRO_SEP*/{vstack}[#{vstack}+1]={{{{U0}}}}", vstack = vstack, value = value)));
 
     let mut push_range = handler(m, VmOp::PushRange, cfg, rng);
     let b = push_range.raw_inst(3);
@@ -84,16 +78,15 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut push_bool = handler(m, VmOp::PushBool, cfg, rng);
     let a = push_bool.raw_inst(2);
     let vstack = push_bool.cfg.vstack.clone();
-    out.push_str(&push_bool.build(&format!("{vstack}[#{vstack}+1]={{{a}~=0}}", vstack = vstack, a = a)));
+    out.push_str(&push_bool.build(&format!("{{U0}}=({a}~=0)/*MICRO_SEP*/{vstack}[#{vstack}+1]={{{{U0}}}}", vstack = vstack, a = a)));
 
     let mut pop_reg = handler(m, VmOp::PopReg, cfg, rng);
     let a = pop_reg.raw_inst(2);
-    let n = pop_reg.rng.name();
     let vstack = pop_reg.cfg.vstack.clone();
     let stk = pop_reg.cfg.stk.clone();
     out.push_str(&pop_reg.build(&format!(
-        "local {n}=#{vstack}; {stk}[{a}]={vstack}[{n}][1]; {vstack}[{n}]=nil",
-        n = n, vstack = vstack, stk = stk, a = a
+        "{{U0}}=#{vstack}; {{U1}}={vstack}[{{U0}}][1]; {vstack}[{{U0}}]=nil/*MICRO_SEP*/{stk}[{a}]={{U1}}",
+        vstack = vstack, stk = stk, a = a
     )));
 
     let mut drop_value = handler(m, VmOp::Drop, cfg, rng);
@@ -140,29 +133,21 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut get_index = handler(m, VmOp::GetIndex, cfg, rng);
     let s = get_index.cfg.vstack.clone();
-    let n = get_index.rng.name();
-    let k = get_index.rng.name();
-    let t = get_index.rng.name();
-    let value = get_index.rng.name();
     out.push_str(&get_index.build(&format!(
-        "local {n}=#{s}; local {k}={s}[{n}][1]; local {t}={s}[{n}-1][1]; local {value}={t}[{k}]; {s}[{n}-1][1]={value}; {s}[{n}]=nil",
-        n = n, s = s, k = k, t = t, value = value
+        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}-1][1]; {{U2}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/{s}[{{U0}}-1][1]={{U1}}[{{U2}}]",
+        s = s
     )));
 
     let mut set_index = handler(m, VmOp::SetIndex, cfg, rng);
     let s = set_index.cfg.vstack.clone();
-    let n = set_index.rng.name();
-    let k = set_index.rng.name();
-    let t = set_index.rng.name();
-    let v = set_index.rng.name();
     out.push_str(&set_index.build(&format!(
-        "local {n}=#{s}; local {v}={s}[{n}][1]; local {k}={s}[{n}-1][1]; local {t}={s}[{n}-2][1]; {t}[{k}]={v}; {s}[{n}]=nil; {s}[{n}-1]=nil; {s}[{n}-2]=nil",
-        n = n, s = s, v = v, k = k, t = t
+        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}][1]; {{U2}}={s}[{{U0}}-1][1]; {s}[{{U0}}]=nil; {s}[{{U0}}-1]=nil/*MICRO_SEP*/{s}[{{U0}}-2][1][{{U2}}]={{U1}}; {s}[{{U0}}-2]=nil",
+        s = s
     )));
 
     let mut new_table = handler(m, VmOp::NewTable, cfg, rng);
     let vstack = new_table.cfg.vstack.clone();
-    out.push_str(&new_table.build(&format!("{vstack}[#{vstack}+1]={{{{}}}}", vstack = vstack)));
+    out.push_str(&new_table.build(&format!("{{U0}}={{}}/*MICRO_SEP*/{vstack}[#{vstack}+1]={{{{U0}}}}", vstack = vstack)));
 
     emit_binary(&mut out, m, cfg, rng, VmOp::Add, "+");
     emit_binary(&mut out, m, cfg, rng, VmOp::Sub, "-");
@@ -177,48 +162,34 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
 
     let mut equal = handler(m, VmOp::Equal, cfg, rng);
     let s = equal.cfg.vstack.clone();
-    let n = equal.rng.name();
-    let x = equal.rng.name();
-    let y = equal.rng.name();
-    out.push_str(&equal.build(&format!("local {n}=#{s}; local {x}={s}[{n}-1][1]; local {y}={s}[{n}][1]; {s}[{n}-1][1]=({x}=={y}); {s}[{n}]=nil", n = n, s = s, x = x, y = y)));
+    out.push_str(&equal.build(&format!("{{U0}}=#{s}; {{U1}}={s}[{{U0}}-1][1]; {{U2}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/{s}[{{U0}}-1][1]=({{U1}}=={{U2}})", s = s)));
 
     let mut less = handler(m, VmOp::Less, cfg, rng);
     let s = less.cfg.vstack.clone();
-    let n = less.rng.name();
-    let x = less.rng.name();
-    let y = less.rng.name();
-    out.push_str(&less.build(&format!("local {n}=#{s}; local {x}={s}[{n}-1][1]; local {y}={s}[{n}][1]; {s}[{n}-1][1]=({x}<{y}); {s}[{n}]=nil", n = n, s = s, x = x, y = y)));
+    out.push_str(&less.build(&format!("{{U0}}=#{s}; {{U1}}={s}[{{U0}}-1][1]; {{U2}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/{s}[{{U0}}-1][1]=({{U1}}<{{U2}})", s = s)));
 
     let mut less_equal = handler(m, VmOp::LessEqual, cfg, rng);
     let s = less_equal.cfg.vstack.clone();
-    let n = less_equal.rng.name();
-    let x = less_equal.rng.name();
-    let y = less_equal.rng.name();
-    out.push_str(&less_equal.build(&format!("local {n}=#{s}; local {x}={s}[{n}-1][1]; local {y}={s}[{n}][1]; {s}[{n}-1][1]=({x}<={y}); {s}[{n}]=nil", n = n, s = s, x = x, y = y)));
+    out.push_str(&less_equal.build(&format!("{{U0}}=#{s}; {{U1}}={s}[{{U0}}-1][1]; {{U2}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/{s}[{{U0}}-1][1]=({{U1}}<={{U2}})", s = s)));
 
     let mut concat = handler(m, VmOp::Concat, cfg, rng);
     let s = concat.cfg.vstack.clone();
     let a = concat.raw_inst(2);
-    let n = concat.rng.name();
-    let first = concat.rng.name();
-    let last = concat.rng.name();
     let j = concat.rng.name();
-    let value = concat.rng.name();
+    let j2 = concat.rng.name();
     out.push_str(&concat.build(&format!(
-        "local {n}=#{s}; local {first}={n}-{a}+1; local {last}={n}; local {value}={s}[{last}][1]; for {j}={last}-1,{first},-1 do {value}={s}[{j}][1]..{value} end; {s}[{first}][1]={value}; for {j}={first}+1,{last} do {s}[{j}]=nil end",
-        n = n, s = s, first = first, a = a, last = last, value = value, j = j
+        "{{U0}}=#{s}; {{U1}}={{U0}}-{a}+1; {{U2}}={s}[{{U0}}][1]; for {j}={{U0}}-1,{{U1}},-1 do {{U2}}={s}[{j}][1]..{{U2}} end/*MICRO_SEP*/{s}[{{U1}}][1]={{U2}}; for {j2}={{U1}}+1,{{U0}} do {s}[{j2}]=nil end",
+        s = s, a = a, j = j, j2 = j2
     )));
 
     let mut branch = handler(m, VmOp::Branch, cfg, rng);
     let a = branch.raw_inst(2);
     let b = branch.raw_inst(3);
-    let n = branch.rng.name();
-    let v = branch.rng.name();
     let s = branch.cfg.vstack.clone();
     let pc = branch.cfg.pc.clone();
     out.push_str(&branch.build(&format!(
-        "local {n}=#{s}; local {v}={s}[{n}][1]; {s}[{n}]=nil; if (({v}~=nil and {v}~=false)==({a}~=0)) then {pc}={pc}+{b} end",
-        n = n, s = s, v = v, a = a, pc = pc, b = b
+        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/if (({{U1}}~=nil and {{U1}}~=false)==({a}~=0)) then {pc}={pc}+{b} end",
+        s = s, a = a, pc = pc, b = b
     )));
 
     for (op, polarity) in [(VmOp::BranchSetTrue, true), (VmOp::BranchSetFalse, false)] {
@@ -228,14 +199,10 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
         let c = branch_set.raw_inst(4);
         let stk = branch_set.cfg.stk.clone();
         let pc = branch_set.cfg.pc.clone();
-        let condition = if polarity {
-            format!("({s}[{b}]~=nil and {s}[{b}]~=false)", s = stk, b = b)
-        } else {
-            format!("not ({s}[{b}]~=nil and {s}[{b}]~=false)", s = stk, b = b)
-        };
+        let cond_check = if polarity { "{U0}" } else { "not {U0}" };
         out.push_str(&branch_set.build(&format!(
-            "if {condition} then {stk}[{a}]={stk}[{b}]; {pc}={pc}+{c} end",
-            condition = condition, stk = stk, a = a, b = b, pc = pc, c = c
+            "{{U0}}=({stk}[{b}]~=nil and {stk}[{b}]~=false)/*MICRO_SEP*/if {cond_check} then {stk}[{a}]={stk}[{b}]; {pc}={pc}+{c} end",
+            cond_check = cond_check, stk = stk, a = a, b = b, pc = pc, c = c
         )));
     }
 
@@ -258,7 +225,7 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let limit_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[1].0, errors[1].1);
     let step_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[2].0, errors[2].1);
     out.push_str(&for_init.build(&format!(
-        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {init_error} end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {limit_error} end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {step_error} end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}; {pc}={pc}+{b}",
+        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {init_error} end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {limit_error} end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {step_error} end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}/*MICRO_SEP*/{pc}={pc}+{b}",
         stk = stk, a = a, step = step, init = init, limit = limit, q = q, pc = pc, b = b,
         init_error = init_error, limit_error = limit_error, step_error = step_error
     )));
@@ -313,11 +280,10 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let top = call_pack.cfg.top.clone();
     let vs = call_pack.cfg.vstack.clone();
     let n = call_pack.rng.name();
-    let q = call_pack.rng.name();
     let j = call_pack.rng.name();
     out.push_str(&call_pack.build(&format!(
-        "local {n}={b}>0 and {b}-1 or {top}-{a}; if {n}<0 then {n}=0 end; local {q}={{{cf_base}={a},{cf_want}={c},{cf_n}={n},{cf_fn}={stk}[{a}],{cf_args}={{}}}}; for {j}=1,{n} do {q}.{cf_args}[{j}]={stk}[{a}+{j}] end; if {b}==0 then {top}={a} end; {vs}[#{vs}+1]={{{q}}}",
-        n = n, b = b, top = top, a = a, q = q, c = c, j = j, stk = stk, vs = vs,
+        "local {n}={b}>0 and {b}-1 or {top}-{a}; if {n}<0 then {n}=0 end; {{U0}}={{{cf_base}={a},{cf_want}={c},{cf_n}={n},{cf_fn}={stk}[{a}],{cf_args}={{}}}}; for {j}=1,{n} do {{U0}}.{cf_args}[{j}]={stk}[{a}+{j}] end; if {b}==0 then {top}={a} end/*MICRO_SEP*/{vs}[#{vs}+1]={{{{U0}}}}",
+        n = n, b = b, top = top, a = a, c = c, j = j, stk = stk, vs = vs,
         cf_base = cf_base, cf_want = cf_want, cf_n = cf_n, cf_fn = cf_fn, cf_args = cf_args
     )));
 
@@ -358,16 +324,14 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let stk = call_collect.cfg.stk.clone();
     let top = call_collect.cfg.top.clone();
     let count_field = call_collect.cfg.vararg_count.clone();
-    let n = call_collect.rng.name();
-    let q = call_collect.rng.name();
     let res = call_collect.rng.name();
     let j = call_collect.rng.name();
     let base = call_collect.rng.name();
     let want = call_collect.rng.name();
     let count = call_collect.rng.name();
     out.push_str(&call_collect.build(&format!(
-        "local {n}=#{vs}; local {q}={vs}[{n}][1]; local {res}={q}.{cf_res}; local {base}={q}.{cf_base}; local {want}={q}.{cf_want}; if {want}>0 then for {j}=1,{want}-1 do {stk}[{base}+{j}-1]={res}[{j}] end else local {count}={res}.{count_field}; {top}={base}-1; for {j}=1,{count} do {stk}[{base}+{j}-1]={res}[{j}]; {top}={top}+1 end end; {vs}[{n}]=nil",
-        n = n, vs = vs, q = q, res = res, base = base, want = want, j = j, stk = stk,
+        "{{U0}}=#{vs}; {{U1}}={vs}[{{U0}}][1]; {vs}[{{U0}}]=nil/*MICRO_SEP*/local {res}={{U1}}.{cf_res}; local {base}={{U1}}.{cf_base}; local {want}={{U1}}.{cf_want}; if {want}>0 then for {j}=1,{want}-1 do {stk}[{base}+{j}-1]={res}[{j}] end else local {count}={res}.{count_field}; {top}={base}-1; for {j}=1,{count} do {stk}[{base}+{j}-1]={res}[{j}]; {top}={top}+1 end end",
+        vs = vs, res = res, base = base, want = want, j = j, stk = stk,
         count = count, count_field = count_field, top = top,
         cf_res = cf_res, cf_base = cf_base, cf_want = cf_want
     )));
@@ -435,11 +399,9 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let stk = set_list.cfg.stk.clone();
     let top = set_list.cfg.top.clone();
     let j = set_list.rng.name();
-    let n = set_list.rng.name();
-    let offset = set_list.rng.name();
     out.push_str(&set_list.build(&format!(
-        "local {n}={b}>0 and {b} or {top}-{a}; if {n}<0 then {n}=0 end; local {offset}=({c}-1)*50; for {j}=1,{n} do {stk}[{a}][{offset}+{j}]={stk}[{a}+{j}] end; if {b}==0 then {top}={a} end",
-        n = n, b = b, top = top, a = a, offset = offset, c = c, j = j, stk = stk
+        "{{U0}}={b}>0 and {b} or {top}-{a}; if {{U0}}<0 then {{U0}}=0 end; {{U1}}=({c}-1)*50/*MICRO_SEP*/for {j}=1,{{U0}} do {stk}[{a}][{{U1}}+{j}]={stk}[{a}+{j}] end; if {b}==0 then {top}={a} end",
+        b = b, top = top, a = a, c = c, j = j, stk = stk
     )));
 
     let mut close = handler(m, VmOp::CloseUpvalues, cfg, rng);
@@ -505,12 +467,9 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let ntype = noop.cfg.native_type.clone();
     let ttbl = noop.cfg.type_tbl.clone();
     let ld = noop.cfg.ld_key.clone();
-    let n_v = noop.rng.name();
-    let val_v = noop.rng.name();
-    let d_v = noop.rng.name();
     out.push_str(&noop.build(&format!(
-        "local {n}=#{s}; if {n}>0 then local {v}={s}[{n}][1]; local {d}=(({pc}+{n}+{vlen})%2); if {nt}({stk})=={tt} and ({pc}+{n})>0 then {s}[{n}][1]={v}+{d}-(({pc}+#{s}+{vlen})%2) else {s}[{n}][1]={v}-{pc}-{ld} end end",
-        n = n_v, s = s, v = val_v, d = d_v, pc = pc_v, vlen = vlen, nt = ntype, stk = stk_t, tt = ttbl, ld = ld
+        "{{U0}}=#{s}; if {{U0}}>0 then {{U1}}={s}[{{U0}}][1]; {{U2}}=(({pc}+{{U0}}+{vlen})%2) end/*MICRO_SEP*/if {{U0}}>0 then if {nt}({stk})=={tt} and ({pc}+{{U0}})>0 then {s}[{{U0}}][1]={{U1}}+{{U2}}-(({pc}+#{s}+{vlen})%2) else {s}[{{U0}}][1]={{U1}}-{pc}-{ld} end end",
+        s = s, pc = pc_v, vlen = vlen, nt = ntype, stk = stk_t, tt = ttbl, ld = ld
     )));
 
     let mut varargs = handler(m, VmOp::Varargs, cfg, rng);
