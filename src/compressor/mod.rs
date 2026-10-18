@@ -86,27 +86,31 @@ impl Compressor {
         used_vars.sort_by(|a, b| {
             let scope_a = resolver.var_scopes.get(&a.0).copied().unwrap_or(0);
             let scope_b = resolver.var_scopes.get(&b.0).copied().unwrap_or(0);
-            // 形参池（单字母）与非形参池（双字母）互不挤占，排序不再需要形参优先；
-            // 仍按作用域深度从外向内分配，保证外层先拿名字、内层避名有据可依。
-            scope_depths[scope_a].cmp(&scope_depths[scope_b])
-                .then(b.1.cmp(&a.1))
+            let start_a = resolver.var_decl_start.get(&a.0).copied().unwrap_or(0);
+            let start_b = resolver.var_decl_start.get(&b.0).copied().unwrap_or(0);
+            // 按作用域深度从外向内分配，保证外层先拿名字、内层避名有据可依；
+            // 同作用域内按声明起点升序（线性扫描区间着色最优序，且形参自然排最前）。
+            scope_depths[scope_a]
+                .cmp(&scope_depths[scope_b])
+                .then(start_a.cmp(&start_b))
                 .then(a.0.0.cmp(&b.0.0))
         });
 
-        // 候选池（用户判据）：`function(...)` 的形参拿 52 个单字母；其余所有绑定
-        // 一律拿两个随机大小写字母的名字。复用判据不变：名字只在可能发生词法
-        // 遮蔽的作用域链中保持唯一，不相交的兄弟作用域继续复用同名。
-        let param_pool: Vec<String> = single_letters.iter().map(|c| c.to_string()).collect();
-        let mut var_pool: Vec<String> = Vec::with_capacity(base * base);
+        // 候选池（最新规则）：所有局部变量（含形参和普通 local）统一优先使用 52 个单字母
+        // （a..=z、A..=Z），并在跨作用域与同作用域非重叠活跃区间上复用；
+        // 只有当 52 个单字母在当前冲突集全部占满（实在不行）时，才回退到双字母池。
+        let single_pool: Vec<String> = single_letters.iter().map(|c| c.to_string()).collect();
+        let mut two_letter_pool: Vec<String> = Vec::with_capacity(base * base);
         for first in &single_letters {
             for second in &single_letters {
-                var_pool.push(format!("{}{}", first, second));
+                two_letter_pool.push(format!("{}{}", first, second));
             }
         }
-        var_pool.retain(|name| !ren.is_keyword(name) && !ren.is_safe_global(name));
+        two_letter_pool.retain(|name| !ren.is_keyword(name) && !ren.is_safe_global(name));
+        two_letter_pool.shuffle(&mut rng);
 
-        let mut names_by_scope: Vec<HashSet<String>> =
-            (0..resolver.scope_parents.len()).map(|_| HashSet::new()).collect();
+        let mut scope_intervals: Vec<HashMap<String, Vec<(usize, usize)>>> =
+            (0..resolver.scope_parents.len()).map(|_| HashMap::new()).collect();
         let mut mapping: HashMap<VarId, String> = HashMap::new();
         for (&id, &usage) in &resolver.var_usage {
             if usage == 0 {
@@ -117,41 +121,67 @@ impl Compressor {
         let mut fallback_index = 0usize;
         for (id, _) in used_vars {
             let scope = resolver.var_scopes.get(&id).copied().unwrap_or(0);
-            // 只封锁「本作用域子树里真的引用到、且已经分到名字」的绑定名：
+            let v_start = resolver.var_decl_start.get(&id).copied().unwrap_or(0);
+            let v_end = resolver
+                .var_last_use
+                .get(&id)
+                .copied()
+                .unwrap_or(v_start)
+                .max(v_start);
+
+            // 只封锁「本作用域子树里真的引用到、且已经分到名字」的严格祖先绑定名：
+            // 同作用域内的其它绑定走下方 `scope_intervals[scope]` 区间不重叠判定，
             // 未被引用的祖先绑定不可达，内层复用其名字不会改变任何引用的解析结果。
             let mut blocked = HashSet::new();
             if let Some(refs) = subtree_refs.get(scope) {
                 for rid in refs {
-                    if let Some(name) = mapping.get(rid) {
-                        blocked.insert(name.clone());
+                    if resolver.var_scopes.get(rid).copied().unwrap_or(0) != scope {
+                        if let Some(name) = mapping.get(rid) {
+                            blocked.insert(name.clone());
+                        }
                     }
                 }
             }
 
-            // 形参 → 单字母池；其余绑定 → 双字母池。两池各自找第一个未被遮蔽、
-            // 本作用域未占用的名字；池耗尽才落到计数兜底（生成更长的名字）。
-            let is_param = resolver.param_ids.contains(&id);
-            let pool: &Vec<String> = if is_param { &param_pool } else { &var_pool };
-            let name = if let Some(name) = pool.iter()
-                .find(|name| !blocked.contains(*name) && !names_by_scope[scope].contains(*name))
+            let is_free_in_scope =
+                |cand: &str, intervals: &HashMap<String, Vec<(usize, usize)>>| -> bool {
+                    if blocked.contains(cand) {
+                        return false;
+                    }
+                    match intervals.get(cand) {
+                        None => true,
+                        Some(list) => list.iter().all(|&(s, e)| e < v_start || v_end < s),
+                    }
+                };
+
+            let name = if let Some(name) = single_pool
+                .iter()
+                .find(|cand| is_free_in_scope(cand.as_str(), &scope_intervals[scope]))
+                .cloned()
+            {
+                name
+            } else if let Some(name) = two_letter_pool
+                .iter()
+                .find(|cand| is_free_in_scope(cand.as_str(), &scope_intervals[scope]))
                 .cloned()
             {
                 name
             } else {
-                // 池耗尽（同一作用域链要 2700+ 个活跃名字才会到这一步）：
-                // 计数兜底从双字母起编（0..52²→两字母，之后三字母……），
-                // 与 codegen 的字符串表改名计数同编号语义。
                 loop {
                     let candidate = codegen::nth_short_name(&single_letters, fallback_index);
                     fallback_index += 1;
-                    if !ren.is_keyword(&candidate) && !ren.is_safe_global(&candidate)
-                        && !blocked.contains(&candidate) && !names_by_scope[scope].contains(&candidate)
+                    if !ren.is_keyword(&candidate)
+                        && !ren.is_safe_global(&candidate)
+                        && is_free_in_scope(&candidate, &scope_intervals[scope])
                     {
                         break candidate;
                     }
                 }
             };
-            names_by_scope[scope].insert(name.clone());
+            scope_intervals[scope]
+                .entry(name.clone())
+                .or_default()
+                .push((v_start, v_end));
             mapping.insert(id, name);
         }
 
@@ -195,8 +225,8 @@ mod tests {
     fn used_local_names_fit_in_two_characters() {
         let names = declared_names("local descriptive_name=1;return descriptive_name");
         assert_eq!(names.len(), 1);
-        // 非形参绑定必须恰好两个字母（大小写随机），不再是单字母。
-        assert_eq!(names[0].len(), 2, "generated local name was {:?}", names[0]);
+        // 所有局部变量优先使用 52 个单字母（a..=z、A..=Z）。
+        assert_eq!(names[0].len(), 1, "generated local name was {:?}", names[0]);
         assert!(
             names[0].chars().all(|c| c.is_ascii_alphabetic()),
             "generated local name was {:?}",
@@ -206,14 +236,12 @@ mod tests {
 
     #[test]
     fn params_single_letter_and_locals_two_letters_mix() {
-        // 形参单字母、普通局部双字母，同一产物内并存且复用。
+        // 形参与普通局部变量统一优先分配单字母，并在跨作用域与同作用域非重叠区间上复用。
         let src = "local total=0\nlocal add=function(first, second) local carry=first+second; return carry end\nfor idx=1,2 do total=total+add(idx,idx) end\nreturn total";
         let out = Compressor::compress(src).expect("compress");
-        // 所有 `local 名字=` 形式的绑定（非形参）都必须是两个字母。
         for decl in declared_names(src) {
-            assert_eq!(decl.len(), 2, "non-param local {:?} in {:?}", decl, out);
+            assert_eq!(decl.len(), 1, "non-param local {:?} in {:?}", decl, out);
         }
-        // 形参仍为单字母。
         let open = out.find("function").expect("function in output");
         let pl = out[open..].find('(').unwrap() + open + 1;
         let pr = out[pl..].find(')').unwrap() + pl;
@@ -223,6 +251,37 @@ mod tests {
                 assert_eq!(p.chars().count(), 1, "param {:?} in {:?}", p, out);
             }
         }
+    }
+
+    #[test]
+    fn same_scope_dead_locals_reuse_single_letter_name() {
+        let names = declared_names(
+            "local alpha=1;print(alpha);local beta=2;print(beta);local gamma=3;return gamma",
+        );
+        assert_eq!(names.len(), 3);
+        assert_eq!(names[0].len(), 1);
+        assert_eq!(names[0], names[1]);
+        assert_eq!(names[1], names[2]);
+    }
+
+    #[test]
+    fn falls_back_to_two_letter_only_after_52_live_vars() {
+        let mut decls = String::new();
+        let mut sum_expr = String::new();
+        for i in 1..=55 {
+            decls.push_str(&format!("local var_{}={} ", i, i));
+            if i > 1 {
+                sum_expr.push('+');
+            }
+            sum_expr.push_str(&format!("var_{}", i));
+        }
+        let src = format!("{}return {}", decls, sum_expr);
+        let names = declared_names(&src);
+        assert_eq!(names.len(), 55);
+        let single_cnt = names.iter().filter(|n| n.len() == 1).count();
+        let two_cnt = names.iter().filter(|n| n.len() == 2).count();
+        assert_eq!(single_cnt, 52, "all 52 single letters must be used first");
+        assert_eq!(two_cnt, 3, "only the 53rd..55th simultaneously live vars may use 2 letters");
     }
 
     #[test]

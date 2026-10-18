@@ -15,6 +15,9 @@ pub struct ScopeResolver {
     scope_refs: Vec<HashSet<VarId>>,
     /// 形参绑定 id：分配名字时优先拿最短名（用户要求：形参尽量单字母）。
     pub param_ids: HashSet<VarId>,
+    clock: usize,
+    pub var_decl_start: HashMap<VarId, usize>,
+    pub var_last_use: HashMap<VarId, usize>,
 }
 
 impl ScopeResolver {
@@ -30,6 +33,34 @@ impl ScopeResolver {
             scope_stack: vec![0],
             scope_refs: vec![HashSet::new()],
             param_ids: HashSet::new(),
+            clock: 0,
+            var_decl_start: HashMap::new(),
+            var_last_use: HashMap::new(),
+        }
+    }
+
+    pub fn tick(&mut self) -> usize {
+        self.clock += 1;
+        self.clock
+    }
+
+    pub fn touch_var(&mut self, id: VarId, pos: usize) {
+        self.var_last_use
+            .entry(id)
+            .and_modify(|e| *e = (*e).max(pos))
+            .or_insert(pos);
+    }
+
+    pub fn extend_loop_refs(&mut self, loop_start: usize, loop_end: usize) {
+        let mut to_extend = Vec::new();
+        for (&id, &last) in &self.var_last_use {
+            let decl = self.var_decl_start.get(&id).copied().unwrap_or(0);
+            if decl <= loop_start && last >= loop_start {
+                to_extend.push(id);
+            }
+        }
+        for id in to_extend {
+            self.touch_var(id, loop_end);
         }
     }
 
@@ -52,11 +83,14 @@ impl ScopeResolver {
     pub fn declare_local(&mut self, name: &str) -> VarId {
         let id = VarId(self.next_id);
         self.next_id += 1;
+        let t = self.tick();
         
         let active_vars: usize = self.scope_var_counts.iter().sum();
         self.var_alloc.insert(id, active_vars);
         self.var_usage.insert(id, 0);
         self.var_scopes.insert(id, *self.scope_stack.last().expect("scope stack must not be empty"));
+        self.var_decl_start.insert(id, t);
+        self.var_last_use.insert(id, t);
         
         if let Some(count) = self.scope_var_counts.last_mut() {
             *count += 1;
@@ -119,6 +153,8 @@ impl ScopeResolver {
         if let Some(count) = self.var_usage.get_mut(&id) {
             *count += 1;
         }
+        let t = self.tick();
+        self.touch_var(id, t);
     }
 
     pub fn max_id(&self) -> usize {
@@ -179,13 +215,19 @@ impl Stmt {
                 block.resolve(r);
             }
             Stmt::While(cond, block) => {
+                let loop_start = r.tick();
                 cond.resolve(r);
                 block.resolve(r);
+                let loop_end = r.tick();
+                r.extend_loop_refs(loop_start, loop_end);
             }
             Stmt::Repeat(block, cond) => {
+                let loop_start = r.tick();
                 r.enter_scope();
                 block.resolve_no_scope_bracket(r);
                 cond.resolve(r);
+                let loop_end = r.tick();
+                r.extend_loop_refs(loop_start, loop_end);
                 r.exit_scope();
             }
             Stmt::If { cond, then_block, else_ifs, else_block } => {
@@ -205,26 +247,46 @@ impl Stmt {
                 if let Some(s) = step {
                     s.resolve(r);
                 }
+                let loop_start = r.tick();
                 r.enter_scope();
                 var.id = r.declare_local(&var.name);
+                let hdr_end = r.tick();
+                r.var_decl_start.insert(var.id, loop_start);
+                r.touch_var(var.id, hdr_end);
                 block.resolve_no_scope_bracket(r);
+                let loop_end = r.tick();
+                r.extend_loop_refs(loop_start, loop_end);
                 r.exit_scope();
             }
             Stmt::ForIn { vars, exprs, block } => {
                 for e in exprs {
                     e.resolve(r);
                 }
+                let loop_start = r.tick();
                 r.enter_scope();
-                for v in vars {
+                for v in vars.iter_mut() {
                     v.id = r.declare_local(&v.name);
                 }
+                let hdr_end = r.tick();
+                for v in vars.iter() {
+                    r.var_decl_start.insert(v.id, loop_start);
+                    r.touch_var(v.id, hdr_end);
+                }
                 block.resolve_no_scope_bracket(r);
+                let loop_end = r.tick();
+                r.extend_loop_refs(loop_start, loop_end);
                 r.exit_scope();
             }
             Stmt::Function { path: _, method: _, params, is_vararg: _, block } => {
                 r.enter_scope();
-                for p in params {
+                let p_start = r.tick();
+                for p in params.iter_mut() {
                     p.id = r.declare_param(&p.name);
+                }
+                let p_end = r.tick();
+                for p in params.iter() {
+                    r.var_decl_start.insert(p.id, p_start);
+                    r.touch_var(p.id, p_end);
                 }
                 block.resolve_no_scope_bracket(r);
                 r.exit_scope();
@@ -232,8 +294,14 @@ impl Stmt {
             Stmt::LocalFunction { var, params, is_vararg: _, block } => {
                 var.id = r.declare_local(&var.name);
                 r.enter_scope();
-                for p in params {
+                let p_start = r.tick();
+                for p in params.iter_mut() {
                     p.id = r.declare_param(&p.name);
+                }
+                let p_end = r.tick();
+                for p in params.iter() {
+                    r.var_decl_start.insert(p.id, p_start);
+                    r.touch_var(p.id, p_end);
                 }
                 block.resolve_no_scope_bracket(r);
                 r.exit_scope();
@@ -242,8 +310,14 @@ impl Stmt {
                 for e in exprs {
                     e.resolve(r);
                 }
-                for v in vars {
+                let batch_start = r.tick();
+                for v in vars.iter_mut() {
                     v.id = r.declare_local(&v.name);
+                }
+                let batch_end = r.tick();
+                for v in vars.iter() {
+                    r.var_decl_start.insert(v.id, batch_start);
+                    r.touch_var(v.id, batch_end);
                 }
             }
         }
@@ -256,8 +330,14 @@ impl Expr {
             Expr::Nil | Expr::Boolean(_) | Expr::Number(_) | Expr::String(_) | Expr::Vararg => {}
             Expr::FuncDef(params, _, block) => {
                 r.enter_scope();
-                for p in params {
+                let p_start = r.tick();
+                for p in params.iter_mut() {
                     p.id = r.declare_param(&p.name);
+                }
+                let p_end = r.tick();
+                for p in params.iter() {
+                    r.var_decl_start.insert(p.id, p_start);
+                    r.touch_var(p.id, p_end);
                 }
                 block.resolve_no_scope_bracket(r);
                 r.exit_scope();

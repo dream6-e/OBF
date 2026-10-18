@@ -59,16 +59,12 @@ impl Rng {
         }
     }
 
-    /// 1–2 字符的标识符（与仓库其它生成器同一风格）。
+    /// 双字母兜底标识符（仅在 52 个单字母全部占满时使用）。
     fn name(&mut self) -> String {
-        const HEAD: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
-        const TAIL: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
-        let n = 1 + (self.index(3) != 0) as usize;
-        let mut s = String::with_capacity(n);
-        s.push(HEAD[self.index(HEAD.len() as u32) as usize] as char);
-        for _ in 1..n {
-            s.push(TAIL[self.index(TAIL.len() as u32) as usize] as char);
-        }
+        const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut s = String::with_capacity(2);
+        s.push(LETTERS[self.index(LETTERS.len() as u32) as usize] as char);
+        s.push(LETTERS[self.index(LETTERS.len() as u32) as usize] as char);
         s
     }
 }
@@ -679,25 +675,49 @@ const KEYWORDS: &[&str] = &[
 fn finalize(dev: &str, rng: &mut Rng) -> String {
     let toks = tokenize(dev);
     let locals = collect_locals(&toks);
+    let local_set: std::collections::HashSet<String> = locals
+        .iter()
+        .filter(|s| s.as_str() != "_")
+        .cloned()
+        .collect();
 
     let mut used: std::collections::HashSet<String> = toks
         .iter()
-        .filter(|t| t.0 == Kind::Ident)
+        .filter(|t| t.0 == Kind::Ident && !local_set.contains(&t.1))
         .map(|t| t.1.clone())
         .collect();
     used.insert("x".to_string());
     used.insert("u".to_string());
+    let mut single_pool: Vec<String> = (b'a'..=b'z')
+        .chain(b'A'..=b'Z')
+        .map(|b| (b as char).to_string())
+        .collect();
+    rng.shuffle(&mut single_pool);
+    let mut single_idx = 0usize;
     let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for name in locals {
-        if map.contains_key(&name) {
+        if name == "_" || map.contains_key(&name) {
             continue;
         }
-        let mut fresh = rng.name();
-        // 短名（1~3 字符）会撞 Lua 关键字（in/or/if/do/and/end/for/nil/not），
-        // 撞上就是必坏的产物（`local in=0` 语法错）——关键字视同已占用。
-        while KEYWORDS.contains(&fresh.as_str()) || used.contains(&fresh) {
-            fresh = rng.name();
+        let mut chosen = None;
+        while single_idx < single_pool.len() {
+            let cand = &single_pool[single_idx];
+            single_idx += 1;
+            if !KEYWORDS.contains(&cand.as_str()) && !used.contains(cand) {
+                chosen = Some(cand.clone());
+                break;
+            }
         }
+        let fresh = match chosen {
+            Some(c) => c,
+            None => {
+                let mut f = rng.name();
+                while KEYWORDS.contains(&f.as_str()) || used.contains(&f) {
+                    f = rng.name();
+                }
+                f
+            }
+        };
         used.insert(fresh.clone());
         map.insert(name, fresh);
     }
