@@ -1061,7 +1061,8 @@ pub(super) fn wrap_dispatcher(
         format!("function(...) return {} end", s7_b),
         format!("function(...) return {} end", s6_c),
         format!(
-            "function({gate},...) local {index},{next_state}; for {index}=0X1,0X1 do if not {gate} or {ra}=={rb} then {next_state}={s7} end; if {gate} and {ra}~={rb} then {next_state}={s6} end; break end; return {next_state} or {s7_d} end",
+            // 目标五：上界不再写死 `0X1,0X1`；由运行期 gate 决定 1~2 次，体是纯赋值可重复。
+            "function({gate},...) local {index},{next_state}; for {index}=0X1,({gate} and 0X2 or 0X1) do if not {gate} or {ra}=={rb} then {next_state}={s7} end; if {gate} and {ra}~={rb} then {next_state}={s6} end end; return {next_state} or {s7_d} end",
             gate = gate_name, index = index_name, next_state = format!("{}_next", state_name), ra = relay_a, rb = relay_b, s7 = s7_c, s6 = s6, s7_d = s7_d,
         ),
         format!("function({gate},a,b,...) return a(...) end", gate = gate_name),

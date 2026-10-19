@@ -171,7 +171,9 @@ pub fn build_scatter(
               "end; ".to_string(),format!("{g}={g}+1; ",g=v_rd_c3)),
         1 => (format!("local {g}={s0}; repeat ",g=v_rd_c3,s0=s0),
               format!("until {g}>={sl}; ",g=v_rd_c3,sl=sl),format!("{g}={g}+1; ",g=v_rd_c3)),
-        _ => (format!("for {g}={s0},{s0} do ",g=v_rd_c3,s0=s0),"end; ".to_string(),String::new()),
+        // 目标五：`for g=5,5 do` 这类"上下界同一常量"的循环一眼可辨为假循环；
+        // 改为同作用域 do 块（保留变量作用域与耦合，不再伪装成循环）。
+        _ => (format!("do local {g}={s0}; ",g=v_rd_c3,s0=s0),"end; ".to_string(),String::new()),
     };
     let fake=if inc.is_empty(){String::new()}else{format!("if {g}>{big} then {g}={sl} end; ",g=v_rd_c3,big=big,sl=sl)};
 
@@ -368,7 +370,7 @@ pub fn build_readers(
                 {
                     let hexp = "2147483648";
                     let cond = match rng.range(0, 3) {
-                        0 => format!("{v}>=2*{h}-{h}", v = v_u32_v, h = v_a10_h),
+                        0 => format!("{h}<={v}", h = v_a10_h, v = v_u32_v),
                         1 => format!("not({v}<{h})", v = v_u32_v, h = v_a10_h),
                         _ => format!("{v}-{h}>=0", v = v_u32_v, h = v_a10_h),
                     };

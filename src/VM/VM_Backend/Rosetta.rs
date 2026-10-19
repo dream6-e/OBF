@@ -14,6 +14,7 @@
 //!      运行期通过 ChaCha KDF 派生掩码与模素数逆元动态还原共享表下标后惰性解密。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use rand::{Rng, rngs::StdRng};
 use crate::VM::VM_Backend::CustomIsa::{VmOp, VM_OPCODE_COUNT};
 use crate::VM::VM_Backend::Generator_chacha::derive_word;
@@ -119,6 +120,15 @@ fn harvest_api_decoys() -> Vec<Vec<u8>> {
         }
     }
     out
+}
+
+/// `所有api.txt` 抽取出的真实 API/属性名池（进程内只构建一次）。
+///
+/// 目标五：哑原型、诱饵条目与诱饵偏移都要能用**真实业务字符串**伪装，
+/// 不能再出现"一个字符串都没有"这种一眼可辨的垃圾函数特征。
+pub(crate) fn api_decoy_pool() -> &'static [Vec<u8>] {
+    static POOL: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    POOL.get_or_init(harvest_api_decoys)
 }
 
 fn parse_protos_preorder(

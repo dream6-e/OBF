@@ -577,12 +577,16 @@ impl ControlFlowBuilder {
                     f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
             2 => {
-                node.push_str(&format!("for _={},{} do {}={};{}({});end {}{}",
-                    Self::obfuscate_num_depth(1, 1, keys, rng), Self::obfuscate_num_depth(1, 1, keys, rng), f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
+                // 目标五：循环上界改由运行期垃圾计数驱动（不再有 `for _=1,1` 这种
+                // 常量单次循环指纹）；`break` 保证只派发一次，语义不变。
+                node.push_str(&format!("for _={},({}%0X3)+{} do {}={};{}({});break end {}{}",
+                    Self::obfuscate_num_depth(1, 1, keys, rng), d_junk, Self::obfuscate_num_depth(1, 1, keys, rng), f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
             3 => {
-                node.push_str(&format!("if {}~={} then {}={};{}({});{}{}end ",
-                    d_junk, Self::obfuscate_num_depth(4294967295i64, 1, keys, rng), f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
+                // 目标五：去掉 `d_junk ~= 4294967295` 这种"要执行 42.9 亿条指令才可能
+                // 相等"的恒真守卫，改成运行期上界 + 单次派发。
+                node.push_str(&format!("for _={},({}%0X5)+{} do {}={};{}({});break end {}{}",
+                    Self::obfuscate_num_depth(1, 1, keys, rng), d_junk, Self::obfuscate_num_depth(1, 1, keys, rng), f_tmp, hidx, f_tmp, var_inst, s_state_trans, state_transition));
             }
             _ => {
                 node.push_str(&format!("{}={};{}({});{}{}",

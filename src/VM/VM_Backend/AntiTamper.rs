@@ -204,6 +204,10 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         }
     }
     let v_state = rand_var();
+    // 目标五（诱饵去恒等式化）：诱饵偏移的共享槽。诱饵一按运行期状态算出
+    // 非零偏移写入它，诱饵二在别处读同一偏移做补偿；两条都在真实守卫链上，
+    // 删掉任一条都会让令牌偏离期望值或缺补偿量，不再是可以一键删除的摆设。
+    let v_doff = rand_var();
     let mut step_a: Vec<u64> = Vec::new();
     let mut step_b: Vec<u64> = Vec::new();
     let mut state_at: Vec<u64> = vec![(rng.gen_range(1..0xFFFFu64) << 16) | rng.gen_range(1..0xFFFFu64)];
@@ -242,6 +246,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         v_res.clone(),
         v_net.clone(),
         v_state.clone(),
+        v_doff.clone(),
         st.name.clone(),
     ];
     for i in (1..decl_names.len()).rev() {
@@ -317,6 +322,10 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
 
     let mut guards_code = Vec::new();
 
+    // 目标五：任选一处真实守卫，在其"正常后继"上串入两条诱饵条目。
+    // 诱饵一只加偏移不补偿，诱饵二在链上别处减回；两者都读同一个运行期槽。
+    let decoy_i = if n_guards >= 2 { rng.gen_range(0..n_guards - 1) } else { usize::MAX };
+
     for i in 0..guards_indices.len() {
         let delta = rng.gen_range(10..99);
         let guard_type = guards_indices[i];
@@ -331,6 +340,9 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         let next_key = derived_num(keys[i + 1], &mut rng);
         let next_good = if i == n_guards - 1 {
             format!("return k+{}{}", delta, corr)
+        } else if i == decoy_i {
+            // 正常路径先经过诱饵一（偏移在诱饵二处补偿），坏路径仍走原后继。
+            format!("return {}[{}](k+{}{})", v_net, derived_num(keys[n_guards], &mut rng), delta, corr)
         } else {
             format!("return {}[{}](k+{}{})", v_net, next_key, delta, corr)
         };
@@ -638,7 +650,7 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
                 );
                 // ③ 判定：与旧链相同的四个分支，最后一个 {good} 收口（链继续/终止）。
                 let phase_c = format!(
-                    "if not {u} or not {v} then {good} end; if {u}~={v} then {bad} end; if ({l1}-{l1})+{l1}~={l2} then {bad} end; if {clv}~=nil and {tn}({num})~=nil and {tn}({num})~={clv} then {bad} end; {good}",
+                    "if not {u} or not {v} then {good} end; if {u}~={v} then {bad} end; if {l1}~={l2} then {bad} end; if {clv}~=nil and {tn}({num})~=nil and {tn}({num})~={clv} then {bad} end; {good}",
                     u = g_u, v = g_v, good = next_good, bad = next_bad,
                     l1 = g_l1, l2 = g_l2, clv = g_clv, tn = g_tn, num = g_num
                 );
@@ -693,13 +705,29 @@ pub fn generate_split(use_debug: bool, key_var: &str, poison_var: &str, vault: &
         guards_code.push(minified_guard);
     }
     
-    // 诱饵条目：形状与守卫一致（照样从池里取值、照样动状态），但不参与链条。
-    for d in 0..2 {
-        let kx = keys[n_guards + d];
-        let probe = if d == 0 { "table" } else { "number" };
+    // 目标五：两条诱饵条目不再是"两臂同值"的可证恒等式，而是真实链路上的
+    // 偏移注入/补偿对：
+    //   诱饵一：c = (运行期状态 + 真实 API 名哈希) % M + 1，写入共享槽并返回 k + c；
+    //   诱饵二（别处补偿）：读共享槽，返回 k - c，把令牌还原成期望值。
+    // c 依赖运行期状态，静态不可折叠；删掉任一条都会令后续令牌偏离期望值
+    // （或补偿量缺失 → 毒化旗置位），因此诱饵真正影响输出。
+    if decoy_i != usize::MAX {
+        let pool = crate::VM::VM_Backend::Rosetta::api_decoy_pool();
+        let api_name = String::from_utf8_lossy(&pool[rng.gen_range(0..pool.len())]).into_owned();
+        let api_h = poly_hash(&api_name);
+        let c = rand_var();
+        let modv = rng.gen_range(7..=101u32);
+        let real_next = derived_num(keys[decoy_i + 1], &mut rng);
+        let d1 = derived_num(keys[n_guards], &mut rng);
+        let d2 = derived_num(keys[n_guards + 1], &mut rng);
         guards_code.push(format!(
-            "{}[{}]=function(k) local y={}({});{}={}*0X3+0X5;if y then return k end return k end;",
-            v_net, derived_num(kx, &mut rng), v_res, poly_hash(probe), v_state, v_state
+            "{}[{}]=function(k) local {c}=({}+0X{:X})%0X{:X}+0X1;{}={c};return {}[{}](k+{c}) end;",
+            v_net, d1, v_state, api_h, modv, v_doff, v_net, d2, c = c
+        ));
+        let psn = poison_var;
+        guards_code.push(format!(
+            "{}[{}]=function(k) local {c}={};if not {c} then {}=true;{c}=0X0 end;return {}[{}](k-{c}) end;",
+            v_net, d2, v_doff, psn, v_net, real_next, c = c
         ));
     }
 
@@ -746,4 +774,91 @@ fn minify_lua(code: &str) -> String {
         .replace(" - ", "-")
         .replace(" == ", "==")
         .replace(" ~= ", "~=")
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::VM::VM_Backend::Generator_names::NameVault;
+    use crate::VM::VM_Backend::Generator_util::GenRng;
+
+    /// 取 `(k+` / `(k-` 之后、右括号之前的裸标识符；真实守卫的偏移是数字表达式
+    /// （如 `(k+87+(state-0X…)`），只有诱饵对才是 `(k+名字)` / `(k-名字)`。
+    fn bare_ident_after(body: &str, op: &str) -> Option<String> {
+        let idx = body.find(op)?;
+        let rest = &body[idx + op.len()..];
+        let end = rest.find(')')?;
+        let tok = &rest[..end];
+        if !tok.is_empty()
+            && tok.chars().next().unwrap().is_ascii_alphabetic()
+            && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            Some(tok.to_string())
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn decoy_entries_are_load_bearing_offsets_not_provable_identities() {
+        // 目标五：诱饵条目必须真正串进守卫链——一条按运行期状态加偏移，
+        // 另一条在别处补偿；不再出现 `if y then return k end return k` 这种两臂同值。
+        let mut rng = GenRng::new(0x5EED_2026);
+        let mut vault = NameVault::new(&mut rng);
+        let r = generate_split(false, "kvar", "psn", &mut vault);
+        let joined = r.guards.join("\n");
+        assert!(
+            !joined.contains("return k end return k"),
+            "诱饵不得再是两臂同值的可证恒等式"
+        );
+
+        let plus = r
+            .guards
+            .iter()
+            .find(|g| bare_ident_after(g, "(k+").is_some() && g.contains("+0X1;"))
+            .expect("缺少注入运行期偏移的诱饵条目");
+        let minus = r
+            .guards
+            .iter()
+            .find(|g| bare_ident_after(g, "(k-").is_some() && g.contains("=true"))
+            .expect("缺少在别处补偿的诱饵条目");
+        assert!(
+            minus.contains("=0X0"),
+            "补偿缺失时必须置毒化旗并把偏移归零"
+        );
+
+        // 偏移/补偿共享同一个运行期槽。
+        let slot = plus
+            .split(';')
+            .find_map(|seg| {
+                let local = seg.split("local ").nth(1)?;
+                let (name, rhs) = local.split_once('=')?;
+                let name = name.trim();
+                if !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && rhs.contains('%')
+                {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("偏移诱饵必须把偏移写入共享槽");
+        assert!(
+            minus.contains(&format!("local {slot}=")),
+            "补偿诱饵必须读取同一个共享槽 {slot}"
+        );
+
+        // 真实守卫的正常后继必须路由到注入诱饵（否则诱饵仍是死条目）。
+        let decoy_key = plus
+            .split('[')
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .expect("诱饵键缺失");
+        assert!(
+            r.guards
+                .iter()
+                .any(|g| !std::ptr::eq(g, plus) && g.contains(&format!("[{decoy_key}](k+"))),
+            "守卫的正常后继必须路由到注入诱饵"
+        );
+    }
 }
