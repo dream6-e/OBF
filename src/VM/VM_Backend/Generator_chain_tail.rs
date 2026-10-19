@@ -193,7 +193,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let insts_body = format!(
             "{arr_init} local {m32}={m32v}; \
              local function {dcb}({w},{m},{k},{q}) if {w}<0X0 then {w}={w}+{m32} end {w}={bx}({bx}({w},{k}),{bx}({m},{q})) if {w}>={m31v} then {w}={w}-{m32} end return {w} end; \
-             local {i}=0; local {n}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0XB),{rot}({uctx},0X7))); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},{ka}); local {kc18}={bx}({pb},{ka}); \
+             local {i}=0; local {n}={bx}({a5}(),{bx}({rot}({c}.{pf_n},0XB),{rot}({uctx},0X7))); {c}.{cnt18}={n}; local {kp}={c}.{pf_ld}; local {pb}={c}.{pf_lld}; local {ka}={bx}({kp},{pb}); local {kb18}={bx}({kp},({pb}*0X13+0X5A3C9)%{m32}); local {kc18}={bx}({pb},({kp}*0X0B+0X3579B)%{m32}); \
              local {kbp}={bx}({kbx},{bx}({rot}({c}.{pf_n},0X3),{rot}({uctx},0X7))); local {kcp}={bx}({kcx},{bx}({rot}({kp},0X9),{rot}({uctx},0XD))); \
              local {k1p}={bx}({k1x},{bx}({rot}({pb},0XF),{rot}({c}.{pf_n},0X15))); local {k2p}={bx}({k2x},{bx}({rot}({uctx},0X11),{rot}({kp},0X19))); \
              {kr}[0X{jtk:X}]={kr}[0X{jtk:X}] or {{}}; {kr}[0X{jtk:X}][{pb}]={bx}({kbp},{k1p})%0X100000; \

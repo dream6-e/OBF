@@ -20,10 +20,15 @@ pub(super) struct FoldCtx {
     pub fk1: u32,  // 引用扫描动态左旋乘数（奇数 3..=31）
     pub fk2: u32,  // Ftbl[slot] 逐槽异构左旋乘数（奇数 3..=31）
     pub fk3: u32,  // Rtbl[slot] 逐槽异构左旋乘数（奇数 3..=31）
-    pub emul: u32, // 常量槽散列键奇数乘数（0x1001..=0xFFFF 内奇数）
-    pub eadd: u32, // 常量槽散列键加数（0x1000..=0xFF_FFFF）
-    pub jmul: u32, // 运行时跳转状态递推乘数（0x1001..=0x7FFF 内奇数）
-    pub jtbl_key: u32, // kreg 中存放逐原型运行时跳转种子 jseed_p 的表键
+    pub emul: u32,
+    pub eadd: u32,
+    pub jmul: u32,
+    pub jtbl_key: u32,
+    pub bmul: u32,
+    pub binv: u32,
+    pub badd: u32,
+    pub bsub: u32,
+    pub bxor_c: u32,
 }
 
 fn fold_step(
@@ -1268,6 +1273,7 @@ mod sbox_anchor_tests {
             fk1: 13, fk2: 19, fk3: 23,
             emul: 0x6B43, eadd: 0x3141_5926,
             jmul: 0x3579, jtbl_key: 0x123456,
+            bmul: 5, binv: 13, badd: 19, bsub: ((64 - 19) * 13) % 64, bxor_c: 0x2B,
         };
         let hn18: u32 = 0x5A3C_96E1;
         let kp18: u32 = 0xC3A5_1E69;
@@ -1472,6 +1478,23 @@ mod sbox_anchor_tests {
             assert!((0x0100_0000..=0x03FF_FFFF).contains(&enc));
             assert_eq!(enc ^ jkey_a, t_abs);
             assert_ne!(enc ^ jkey_b, t_abs);
+        }
+
+        // 验证第 3 项：内置表 bv 写侧逆仿射(binv,bsub) + kreg 种子 与 读侧运行期计数器 + 正仿射(bmul,badd) 非对称往返
+        let (bmul, binv, badd, bxor_c) = (5u32, 13u32, 19u32, 0x2Bu32);
+        let bsub = ((64 - badd) * binv) % 64;
+        let w_mask = (jseed_a % 64) ^ bxor_c;
+        let mut bv = [0u32; 64];
+        for p in 0..64u32 {
+            let src_idx = (((p * binv + bsub) % 64) ^ w_mask) as usize;
+            bv[p as usize] = 1000 + src_idx as u32;
+        }
+        let kstep = (64 - (jmul % 64)) % 64;
+        let rt_bmask = ((jst_rust + kstep * 58) % 64) ^ bxor_c;
+        assert_eq!(rt_bmask, w_mask);
+        for op_b in 0..64u32 {
+            let read_idx = (((op_b ^ rt_bmask) * bmul + badd) % 64) as usize;
+            assert_eq!(bv[read_idx], 1000 + op_b);
         }
     }
 }

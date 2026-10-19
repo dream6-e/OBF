@@ -158,6 +158,8 @@ pub struct OpcodeConfig {
     /// 运行期的逐原型内建槽掩码表达式（由 Generator 在方法体生成时绑定）。
     pub builtin_mask: String,
     pub builtin_bxor: String,
+    pub builtin_mul: u32,
+    pub builtin_add: u32,
     /// 目标三② 计算式跳转（族六）的密钥源：执行期局部名（本原型 pf_ld 的运行期值，
     /// 由 execute 入口从 KREG 取出）——handler 用它 + 运行期跳转累加器现算落点密钥。
     pub ld_key: String,

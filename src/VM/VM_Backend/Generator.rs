@@ -246,6 +246,11 @@ impl Generator {
         };
         // #3 折叠参数：谓词 pv(v)=(rotl32(v,r)^p1)%100<p3、f(pc)=(pc*f1)^f2 —— 逐产物随机，
         // Rust 写侧与 Lua body_consts 扫描两侧同式（静态读产物得不出「哪些 op 参与」）
+        let bmul = (rng.range(1, 15) as u32) * 2 + 1;
+        let binv = bmul.wrapping_pow(31) & 0x3F;
+        let badd = rng.range(1, 64) as u32;
+        let bsub = ((64 - badd).wrapping_mul(binv)) & 0x3F;
+        let bxor_c = rng.range(1, 64) as u32;
         let fc18 = crate::VM::VM_Backend::Generator_util::FoldCtx {
             r6b: rng.range(1, 17) as u32, p1b: rng.next(), p3b: rng.range(30, 70) as u32,
             r6c: rng.range(1, 17) as u32, p1c: rng.next(), p3c: rng.range(30, 70) as u32,
@@ -260,7 +265,9 @@ impl Generator {
             eadd: rng.range(0x1000, 0xFF_FFFF) as u32,
             jmul: (rng.range(0x800, 0x4000) as u32) * 2 + 1,
             jtbl_key: rng.range(0x10000, 0xFFF_FFFF) as u32,
+            bmul, binv, badd, bsub, bxor_c,
         };
+        let kstep_bmask = (64 - (fc18.jmul & 0x3F)) & 0x3F;
         // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
         // 从 0..59∪251..255 取互不相同值（避开 60..250 诱饵键区）；写侧推送与
         // 读侧 ld/dsp 键两侧同源（修 DF「tag 源/线上不一致」缺陷——线上不再恒为 0..3）
@@ -514,6 +521,8 @@ impl Generator {
             builtin_reg: format!("self[{}]", k_breg),
             builtin_mask: format!("self[{}]", k_bmask),
             builtin_bxor: fn_bxor2.clone(),
+            builtin_mul: fc18.bmul,
+            builtin_add: fc18.badd,
             ld_key: n_kon.clone(),
             jmp_state: var_jstate.clone(),
             jmp_key_cold: var_jkey_cold.clone(),
@@ -773,6 +782,12 @@ impl Generator {
                         format!("{}({},{})", fn_bxor2, var_jstate, n_kon),
                     ));
                 }
+                if code.contains(&format!("{}[{}]", p_self, k_bmask)) || code.contains(&format!("self[{}]", k_bmask)) {
+                    sync.push((
+                        format!("{}[{}]", var_vm, k_bmask),
+                        format!("{}((({}+0X{:X}*({}-1))%0X40),0X{:X})", fn_bxor2, var_jstate, kstep_bmask, var_pc, fc18.bxor_c),
+                    ));
+                }
                 rng.shuffle(&mut sync);
                 let mut sync_stmts = String::new();
                 let mut si = 0usize;
@@ -887,20 +902,25 @@ impl Generator {
         ));
         block_execute_def.push_str(&format!("local {} = {}(...); ", var_L, var_get_count));
         block_execute_def.push_str(&format!("local {} = {}({{}}, {}); ", var_vm, native_smeta, var_proto));
-        let builtin_count = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len();
-        block_execute_def.push_str(&format!("local {bxv}={bx};local {bm}=chunk.{cbm};local {bv}=chunk.{cbv};if not {bv} then {bm}={bxv}({bxv}(chunk.{lld},chunk.{nups}),chunk.{ms})%0X40;{bv}={{}};for {bi}=0,{last} do {bv}[{bxv}({bi},{bm})+1]={src}[{bi}+1] end;chunk.{cbm}={bm};chunk.{cbv}={bv};end;", bxv=var_builtin_xor, bm=var_builtin_mask, bv=var_builtin_view, cbm=pf_builtin_mask, cbv=pf_builtin_view, bx=fn_bxor2, lld=pf_lld, nups=pf_nups, ms=pf_maxstack, bi=var_builtin_i, last=builtin_count-1, src=var_builtin_reg));
+        let _ = (&pf_builtin_mask, &var_builtin_mask);
+        block_execute_def.push_str(&format!(
+            "local {bxv}={bx};local {bv}=chunk.{cbv};if not {bv} then local {wm}={bxv}(({kreg}[0X{jtk:X}] and {kreg}[0X{jtk:X}][chunk.{lld}] or 0)%0X40,0X{bxc:X});{bv}={{}};for {bi}=0,0X3F do {bv}[{bi}+1]={src}[{bxv}(({bi}*0X{binv:X}+0X{bsub:X})%0X40,{wm})+1] end;chunk.{cbv}={bv};end;",
+            bxv = var_builtin_xor, bv = var_builtin_view, cbv = pf_builtin_view, bx = fn_bxor2,
+            wm = var_builtin_mask, kreg = kreg_n, jtk = fc18.jtbl_key, lld = pf_lld,
+            bxc = fc18.bxor_c, bi = var_builtin_i, src = var_builtin_reg,
+            binv = fc18.binv, bsub = fc18.bsub
+        ));
         block_execute_def.push_str(&format!("{}[{}]={}.{}+{};{}[{}]={{}};{}[{}]={{}};{}[{}]={};", var_vm, k_pc, "chunk", pf_lld, obf1, var_vm, k_stk, var_vm, k_vstack, var_vm, k_top, obf0));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_ops, pf_opcodes, var_vm, k_aa, pf_a_arr, var_vm, k_bb, pf_b_arr, var_vm, k_cc, pf_c_arr));
         block_execute_def.push_str(&format!("{}[{}]=chunk.{};{}[{}]=chunk.{};", var_vm, k_consts, pf_consts, var_vm, k_protos, pf_protos));
         block_execute_def.push_str(&format!(
-            "{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};{}[{}]={};{}[{}]={};{}[{}]={};",
+            "{}[{}]=upvals;{}[{}]=env;{}[{}]={};{}[{}]={};{}[{}]={};{}[{}]={};",
             var_vm, k_upv,
             var_vm, k_env,
             var_vm, k_parent, var_parent_frame,
             var_vm, k_current_fn, var_current_fn,
             var_vm, k_vc, var_vc,
-            var_vm, k_breg, var_builtin_view,
-            var_vm, k_bmask, var_builtin_mask
+            var_vm, k_breg, var_builtin_view
         ));
         block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1+chunk.{}] = {}[{}](_,...) end; ", pf_numparams, var_vm, k_stk, pf_maxstack, var_s, hex_select_idx));
         block_execute_def.push_str(&format!("local {} = {} - chunk.{}; local {} = {{{}[{}](chunk.{} + 1, ...)}}; ", var_varargs_len, var_L, pf_numparams, var_varargs, var_s, hex_select_idx, pf_numparams));
@@ -961,59 +981,28 @@ impl Generator {
             "local {state}=({pc}*0X{mul:X}+0X{add:X})%0X100000000;",
             state = const_path_state, pc = var_pc, mul = const_path_mul, add = const_path_add));
 
-        // ⑱.4 数组驻留掩码：body_insts 存的是逐原型掩码值（K 从 kp/pb 派生，同式）。
-        // 中危刀1 密钥分驻：pf_ld（仅掩码用）从 chunk 蒸发进弱键注册表 KREG（键=chunk）；
-        // pf_lld 是入口 pc 基址（每次入口读）必须留在 chunk——半分量分驻+换钥兜底
-        // 数据流打散（本轮）：钥匙派生不再走单一「ka→三元组→升序三存」线性模板——
-        // 拓扑池（0=原版保留在池中）× 存储语句乱序（(槽,值) 配对恒定，只换时间序）。
-        // 全变体输出恒等：ma=bx(kon,lld)、mb=bx(kon,ma)、mc=bx(lld,ma)。入口一次，跳数无感。
         let bx_s = fn_bxor2.as_str();
         let lld_ref = format!("{}.{}", "chunk", pf_lld);
         let st_ma = format!("{}[{}]={};", var_vm, k_mk1, n_mk1);
         let st_mb = format!("{}[{}]={};", var_vm, k_mk2, n_mk2);
         let st_mc = format!("{}[{}]={};", var_vm, k_mk3, n_mk3);
-        let deriv = match rng.range(0, 4) {
-            0 => format!(
-                "local {ka}={bx}({kon},{lld}); local {ma},{mb},{mc}={ka},{bx}({kon},{ka}),{bx}({lld},{ka}); {s1}{s2}{s3}",
+        let mb_rhs = format!("({}*0X13+0X5A3C9)%0X100000000", lld_ref);
+        let mc_rhs = format!("({}*0X0B+0X3579B)%0X100000000", n_kon);
+        let deriv = {
+            let mut ord = vec![st_ma, st_mb, st_mc];
+            rng.shuffle(&mut ord);
+            format!(
+                "local {ka}={bx}({kon},{lld}); local {mb}={bx}({kon},{mbr}); local {mc}={bx}({lld},{mcr}); local {ma}={ka}; {o1}{o2}{o3}",
                 ka = n_ka, bx = bx_s, kon = n_kon, lld = lld_ref,
-                ma = n_mk1, mb = n_mk2, mc = n_mk3, s1 = st_ma, s2 = st_mb, s3 = st_mc),
-            1 => {
-                // 实参交换 + 逐条派生 + 存储乱序
-                let mut ord = vec![st_ma, st_mb, st_mc];
-                rng.shuffle(&mut ord);
-                format!(
-                    "local {ka}={bx}({lld},{kon}); local {mc}={bx}({lld},{ka}); local {mb}={bx}({ka},{kon}); local {ma}={ka}; {o1}{o2}{o3}",
-                    ka = n_ka, bx = bx_s, lld = lld_ref, kon = n_kon,
-                    ma = n_mk1, mb = n_mk2, mc = n_mk3, o1 = ord[0], o2 = ord[1], o3 = ord[2])
-            }
-            2 => {
-                // ma 链根（无 ka 临时）+ 算完即存；mb/mc 计算序随机（槽时序随计算序）
-                let root = format!("local {ma}={bx}({kon},{lld}); {sma}",
-                    ma = n_mk1, bx = bx_s, kon = n_kon, lld = lld_ref, sma = st_ma);
-                let mb_line = format!("local {mb}={bx}({kon},{ma}); {smb}",
-                    mb = n_mk2, bx = bx_s, kon = n_kon, ma = n_mk1, smb = st_mb);
-                let mc_line = format!("local {mc}={bx}({lld},{ma}); {smc}",
-                    mc = n_mk3, bx = bx_s, lld = lld_ref, ma = n_mk1, smc = st_mc);
-                let mut lines = vec![mb_line, mc_line];
-                rng.shuffle(&mut lines);
-                format!("{} {} {}", root, lines[0], lines[1])
-            }
-            _ => {
-                // 拆条派生 + 存储全乱序（6 排列）
-                let mut ord = vec![st_ma, st_mb, st_mc];
-                rng.shuffle(&mut ord);
-                format!(
-                    "local {ka}={bx}({kon},{lld}); local {mb}={bx}({kon},{ka}); local {mc}={bx}({lld},{ka}); local {ma}={ka}; {o1}{o2}{o3}",
-                    ka = n_ka, bx = bx_s, kon = n_kon, lld = lld_ref,
-                    ma = n_mk1, mb = n_mk2, mc = n_mk3, o1 = ord[0], o2 = ord[1], o3 = ord[2])
-            }
+                mbr = mb_rhs, mcr = mc_rhs,
+                ma = n_mk1, mb = n_mk2, mc = n_mk3, o1 = ord[0], o2 = ord[1], o3 = ord[2]
+            )
         };
-        // 目标二③（第二部分）：chunk.{cnt} 不再在读侧入口抹掉——DC 惰性填充用它
-        // 与 pf_lld 一起算本原型记录段的上界（越界 pc 不再走进邻接原型的记录）。
         block_execute_def.push_str(&format!(
-            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; end; local {jst}=(({kreg}[0X{jtk:X}] and {kreg}[0X{jtk:X}][{c}.{lld}] or 0)+{pc}*0X{jmul:X})%0X100000; {deriv} ",
+            "local {kon}={kreg}[{c}]; if not {kon} then {kon}={c}.{ld}; {kreg}[{c}]={kon},{c}.{cnt}; end; local {jst}=(({kreg}[0X{jtk:X}] and {kreg}[0X{jtk:X}][{c}.{lld}] or 0)+{pc}*0X{jmul:X})%0X100000; {vm}[{kbm}]={bx}((({jst}+0X{kstep:X}*{pc})%0X40),0X{bxc:X}); {deriv} ",
             kon = n_kon, kreg = kreg_n, c = "chunk", ld = pf_ld, cnt = pf_cnt18,
             jst = var_jstate, jtk = fc18.jtbl_key, lld = pf_lld, pc = var_pc, jmul = fc18.jmul,
+            vm = var_vm, kbm = k_bmask, bx = fn_bxor2, kstep = kstep_bmask, bxc = fc18.bxor_c,
             deriv = deriv));
         // 改进项一：解码器闭包内联，状态表字段名随机化，3 态+1 诱饵态平坦化分发。
         let (ds_n, ds_ch, ds_m1, ds_m2, ds_m3) = (rng.name(), rng.name(), rng.name(), rng.name(), rng.name());
@@ -1099,10 +1088,8 @@ impl Generator {
             let bx_s2 = fn_bxor2.as_str();
             let nn_seg = {
                 let na_e = format!("{}({},{})", bx_s2, nk1_n, lv_n);
-                let (nb_a, nb_b) = if rng.range(0, 2) == 0 { (nk1_n.clone(), na_n.clone()) } else { (na_n.clone(), nk1_n.clone()) };
-                let (nc_a, nc_b) = if rng.range(0, 2) == 0 { (lv_n.clone(), na_n.clone()) } else { (na_n.clone(), lv_n.clone()) };
-                let nb_e = format!("{}({},{})", bx_s2, nb_a, nb_b);
-                let nc_e = format!("{}({},{})", bx_s2, nc_a, nc_b);
+                let nb_e = format!("{}({},({}*0X13+0X5A3C9)%0X100000000)", bx_s2, nk1_n, lv_n);
+                let nc_e = format!("{}({},({}*0X0B+0X3579B)%0X100000000)", bx_s2, lv_n, nk1_n);
                 if rng.range(0, 2) == 0 {
                     format!("local {a}={nae}; local {b}={nbe}; local {c}={nce};", a=na_n, b=nb_n, c=nc_n, nae=na_e, nbe=nb_e, nce=nc_e)
                 } else {

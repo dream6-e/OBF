@@ -34,10 +34,12 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng, perm: 
         let op_index = BUILTIN_OP_BASE + slot;
         let mapped = m.get(op_index).cloned().unwrap_or_default();
         let s_idx = format!(
-            "({}({}, {})+1)",
+            "((({}({}, {})*0X{:X}+0X{:X})%0X40)+1)",
             cfg.builtin_bxor,
             "inst_B",
-            cfg.builtin_mask
+            cfg.builtin_mask,
+            cfg.builtin_mul,
+            cfg.builtin_add
         );
         let variant = rng.next_range(0, 2) == 0;
         let tv = if variant { Some(rng.name()) } else { None };
@@ -79,7 +81,10 @@ pub fn generate_fused(
             let a = h.raw_inst(2);
             let c = h.raw_inst(4);
             let fj = h.rng.name();
-            let s1 = format!("({}({}, {})+1)", cfg.builtin_bxor, h.raw_inst(3), cfg.builtin_mask);
+            let s1 = format!(
+                "((({}({}, {})*0X{:X}+0X{:X})%0X40)+1)",
+                cfg.builtin_bxor, h.raw_inst(3), cfg.builtin_mask, cfg.builtin_mul, cfg.builtin_add
+            );
             let one = super::ident(h.rng, 1);
             let two = super::ident(h.rng, 2);
             out.push_str(&h.build(&format!(
@@ -93,7 +98,10 @@ pub fn generate_fused(
             let a = h.raw_inst(2);
             let key = h.rk(4);
             let bv = h.rng.name();
-            let s1 = format!("({}({}, {})+1)", cfg.builtin_bxor, h.raw_inst(3), cfg.builtin_mask);
+            let s1 = format!(
+                "((({}({}, {})*0X{:X}+0X{:X})%0X40)+1)",
+                cfg.builtin_bxor, h.raw_inst(3), cfg.builtin_mask, cfg.builtin_mul, cfg.builtin_add
+            );
             let one = super::ident(h.rng, 1);
             out.push_str(&h.build(&format!(
                 "local {bv} = {{BUILTINREG}}[{s1}]; {{STK}}[{a}] = {bv}[{key}]; {{PC}} = {{PC}} + {one}",
