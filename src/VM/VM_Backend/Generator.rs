@@ -922,8 +922,7 @@ impl Generator {
             var_vm, k_vc, var_vc,
             var_vm, k_breg, var_builtin_view
         ));
-        block_execute_def.push_str(&format!("for _=1,chunk.{} do {}[{}][_-1+chunk.{}] = {}[{}](_,...) end; ", pf_numparams, var_vm, k_stk, pf_maxstack, var_s, hex_select_idx));
-        block_execute_def.push_str(&format!("local {} = {} - chunk.{}; local {} = {{{}[{}](chunk.{} + 1, ...)}}; ", var_varargs_len, var_L, pf_numparams, var_varargs, var_s, hex_select_idx, pf_numparams));
+        block_execute_def.push_str(&format!("local {} = {}; local {} = {{...}}; ", var_varargs_len, var_L, var_varargs));
         block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};", var_vm, k_va, var_varargs, var_vm, k_valen, var_varargs_len));
         block_execute_def.push_str(&format!("{}[{}]={};{}[{}]={};{}[{}]=nil;{}[{}]={};{}[{}]={};", var_vm, k_state, obf0, var_vm, k_mode, obf0, var_vm, k_retv, var_vm, k_retf, obf0, var_vm, k_rett, obf0));
         // 热块内联时用到的状态

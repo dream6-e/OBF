@@ -293,7 +293,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     let p_plan = &rosetta.protos[p_idx];
     let u_in: u32 = *u_ctx;
     let kp18: u32 = rng.random_range(1..0x2000000u32) | 0x0100_0000;
-    let pb18: u32 = *alloc18;
+    let pb18: u32 = p_plan.pb18;
     // ㉚ 链式编码状态：种子=(kp18^pb18)*ch_m+(ch_k0^pb18)（与 Lua 扫描/解码器同式）；
     // 每条指令发射前取 (EO,CA,CB,CC)，发射后用本条逻辑值推进——单条公式全解作废
     let nochain18 = std::env::var("OBF_NOCHAIN").is_ok();
@@ -308,15 +308,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         let cc = (((cb as u64).wrapping_mul(0x45D9) + ch) % 0x1_0000_0000) as u32;
         (eo, ca, cb, cc)
     };
-    // 注：推进项用逻辑魔数（不含 Δ——扫描读侧撤销 EO 后手里只有 mag）
     let ch_step = |ch: u64, mag: u32, a: u32, fb0: u32, fc0: u32| -> u64 {
         if std::env::var("OBF_NOCHAIN").is_ok() { return 0; }
         (ch * 3 + (mag as u64) * 0x101 + (a as u64) * 0x1001
             + fb0 as u64 + (fc0 as u64) * 0x11) % 0x1_0000_0000
     };
     let _ = nochain18;
-    // 跨单元头部耦合：hn18/kp18/pb18 均由前序单元终态 u_in 加密落盘，
-    // 未完整解码父单元/前序兄弟单元的指令流与常量明文链则无法解出当前单元头部。
     let _ = r.read_string();
     let hn18: u32 = rng.random_range(0x0101_0101u32..=0xFFFF_FFFEu32);
     let hn_wire: u32 = hn18 ^ u_in;
@@ -325,15 +322,13 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
     w.extend_from_slice(&hn_wire.to_le_bytes());
     let _ = r.read_u32(); let _ = r.read_u32();
     w.extend_from_slice(&kp_wire.to_le_bytes()); w.extend_from_slice(&pb_wire.to_le_bytes());
-    w.push(r.read_u8()); w.push(r.read_u8()); w.push(r.read_u8());
+    let _ = (r.read_u8(), r.read_u8(), r.read_u8());
     let max_stack = r.read_u8();
-    // Per-Proto 偏移受 max_stack 约束，确保寄存器仍落在 RK 的 7-bit 域。
     let gshift_p: u8 = if max_stack < 127 {
         let cap = (127u8 - max_stack).min(48);
         rng.random_range(1u8..=cap.max(1))
     } else { 0 };
-    // 该字段运行期不用于分配，复用作偏移元数据；字段名由生成器随机化。
-    w.push(gshift_p);
+    for _ in 0..4 { w.push(rng.random_range(1u8..=254u8)); }
     let raw_inst_cnt = r.read_u32();
     for _ in 0..raw_inst_cnt { r.read_u8(); r.read_u8(); r.read_u32(); r.read_u32(); }
     let raw_const_cnt = r.read_u32();

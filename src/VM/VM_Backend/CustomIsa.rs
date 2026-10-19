@@ -243,6 +243,7 @@ impl VmOp {
                 | Self::CallPack
                 | Self::SetList
                 | Self::MakeClosure
+                | Self::Varargs
         )
     }
 }
@@ -304,6 +305,7 @@ fn expansion_lengths(
     instructions: &[Instruction],
     protos: &[Chunk],
     zero_one_splits: &std::collections::HashMap<i32, VmOp>,
+    dummy_closures: &std::collections::HashMap<usize, (u8, i32)>,
 ) -> Result<Vec<usize>, LowerError> {
     let len = instructions.len();
     let mut sizes = vec![0usize; len];
@@ -316,7 +318,8 @@ fn expansion_lengths(
         }
         let inst = &instructions[pc];
         let op = inst.opcode;
-        sizes[pc] = match op {
+        let extra_closure = usize::from(dummy_closures.contains_key(&pc));
+        sizes[pc] = extra_closure + match op {
             Opcode::Move | Opcode::NewTable => 2,
             Opcode::LoadK => if zero_one_splits.contains_key(&inst.b) { 4 } else { 2 },
             Opcode::LoadBool => 2 + usize::from(inst.c != 0),
@@ -430,9 +433,27 @@ pub fn lower_to_custom_with_splits(
     protos: &[Chunk],
     zero_one_splits: &std::collections::HashMap<i32, VmOp>,
 ) -> Result<Vec<CustomInstruction>, LowerError> {
+    lower_to_custom_with_params(
+        instructions,
+        protos,
+        zero_one_splits,
+        0,
+        &std::collections::HashMap::new(),
+    )
+}
+
+pub fn lower_to_custom_with_params(
+    instructions: &[Instruction],
+    protos: &[Chunk],
+    zero_one_splits: &std::collections::HashMap<i32, VmOp>,
+    param_count: u8,
+    dummy_closures: &std::collections::HashMap<usize, (u8, i32)>,
+) -> Result<Vec<CustomInstruction>, LowerError> {
     let source_len = instructions.len();
-    let sizes = expansion_lengths(instructions, protos, zero_one_splits)?;
+    let sizes = expansion_lengths(instructions, protos, zero_one_splits, dummy_closures)?;
+    let prologue_len = usize::from(param_count > 0);
     let mut starts = vec![0usize; source_len + 1];
+    starts[0] = prologue_len;
     for pc in 0..source_len {
         starts[pc + 1] = starts[pc]
             .checked_add(sizes[pc])
@@ -440,6 +461,9 @@ pub fn lower_to_custom_with_splits(
     }
 
     let mut out = Vec::with_capacity(starts[source_len]);
+    if param_count > 0 {
+        emit(&mut out, VmOp::Varargs, 0, i32::from(param_count) + 1, 0, 0);
+    }
     let mut pc = 0usize;
     while pc < source_len {
         let inst = &instructions[pc];
@@ -447,6 +471,9 @@ pub fn lower_to_custom_with_splits(
         let b = inst.b;
         let c = inst.c;
         let line_pc = pc;
+        if let Some(&(s_reg, d_proto)) = dummy_closures.get(&pc) {
+            emit(&mut out, VmOp::MakeClosure, s_reg, d_proto, 0, line_pc);
+        }
         match inst.opcode {
             Opcode::Move => {
                 emit(&mut out, VmOp::PushReg, b as u8, 0, 0, line_pc);
@@ -667,7 +694,7 @@ pub fn lower_to_custom_with_splits(
                 }
                 pc += captures;
             }
-            Opcode::VarArg => emit(&mut out, VmOp::Varargs, a, b, 0, line_pc),
+            Opcode::VarArg => emit(&mut out, VmOp::Varargs, a, b, i32::from(param_count), line_pc),
             Opcode::ExtraArg => return Err(error(pc, "未消费的 EXTRAARG")),
             other => return Err(error(pc, &format!("尚未定义 Lua 前端 opcode {other:?} 的降级"))),
         }

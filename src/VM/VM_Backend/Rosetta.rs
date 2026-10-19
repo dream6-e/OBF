@@ -68,6 +68,7 @@ pub struct ProtoConstPlan {
     pub decoy_slots: Vec<u32>,
     pub all_proto_gslots: Vec<u32>,
     pub emit_batch: Vec<EmitConstEntry>,
+    pub pb18: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -394,7 +395,31 @@ impl RosettaPlan {
                 decoy_slots,
                 all_proto_gslots,
                 emit_batch: Vec::new(),
+                pb18: 0,
             });
+        }
+
+        // 为全部原型分配非单调乱序且带随机偏移的全局指令基址 pb18（kP）：
+        // 打乱分配顺序，使先序遍历下 kP 不再单调递增，且根原型不再位于最低基址。
+        let mut alloc_order: Vec<usize> = (0..proto_plans.len()).collect();
+        if alloc_order.len() >= 2 {
+            for i in (1..alloc_order.len()).rev() {
+                let j = rng.random_range(0..=i);
+                alloc_order.swap(i, j);
+            }
+            if alloc_order[0] == 0 {
+                let mid = alloc_order.len() / 2;
+                alloc_order.swap(0, mid);
+            }
+        }
+        let mut pb18_cursor: u32 = rng.random_range(0x1200u32..0x4800u32);
+        for &p_idx in &alloc_order {
+            pb18_cursor += rng.random_range(64u32..256u32);
+            proto_plans[p_idx].pb18 = pb18_cursor;
+            let span = (proto_plans[p_idx].raw_insts.len() as u32)
+                + 64
+                + rng.random_range(32u32..192u32);
+            pb18_cursor += span;
         }
 
         // 将共享罗塞塔表的底层字符串条目（c_type = 3）一并混入全局排放池
@@ -500,7 +525,7 @@ mod tests {
         let mut rrng = StdRng::seed_from_u64(67890);
         let plan = RosettaPlan::build(&payload, &inv, &enc, &mut rrng);
 
-        assert_eq!(plan.protos.len(), 3);
+        assert!(plan.protos.len() >= 5, "root and child protos should include dummy protos");
         let p = plan.params;
         let r_kbase = derive_word(enc.root[p.r_rk], p.r_gr, p.r_w);
 
@@ -539,8 +564,83 @@ mod tests {
             }
         }
         // f1 中 3 次 FindFirstChildOfClass("Humanoid") 已拆分为不同全局槽与互异随机 token
-        assert!(plan.protos[1].cperm.len() >= 9, "duplicate string refs in f1 should be split");
+        assert!(
+            plan.protos.iter().any(|pr| pr.cperm.len() >= 9),
+            "duplicate string refs in f1 should be split"
+        );
         let unique_tokens: HashSet<u32> = odd_tokens.iter().copied().collect();
         assert_eq!(unique_tokens.len(), odd_tokens.len(), "each string ref slot has a unique token");
+    }
+
+    #[test]
+    fn proto_metadata_noise_non_monotonic_kp_and_dummy_closures_break_call_closure_equality() {
+        // 构造一个原本 CLOSURE 次数与 CALL 次数完全相等（各 6 次）的脚本，
+        // 同时包含固定形参 + 变参混用函数 `function(a, b, ...)`
+        let src = r#"
+            local r1 = (function(a, b) return a + b end)(10, 20)
+            local r2 = (function(x, y, ...) local p, q = ...; return x + y + (p or 0) + (q or 0) end)(1, 2, 3, 4)
+            local r3 = (function(m) return m * 2 end)(7)
+            local r4 = (function(k) return k - 3 end)(15)
+            local r5 = (function(u, v, w) return u * v + w end)(2, 3, 4)
+            local r6 = (function(...) local a, b = ...; return (a or 0) - (b or 0) end)(50, 8)
+            return r1 + r2 + r3 + r4 + r5 + r6
+        "#;
+        let proto = codegen::compile(src.as_bytes(), "@meta").expect("compile ok");
+        let bytes = dump::dump(&proto, true);
+        let chunk = Deserializer::new(bytes).decode_file();
+        assert_eq!(chunk.protos.len(), 6, "original root has 6 child closures");
+
+        let ctx = VmContext::new();
+        let payload = Serializer::serialize(&chunk, &ctx);
+        let mut inv = [0u8; VM_OPCODE_COUNT];
+        for (orig, &shuffled) in ctx.opcode_map.iter().enumerate() {
+            inv[shuffled as usize] = orig as u8;
+        }
+        let mut grng = GenRng::new(54321);
+        let enc = EncCtx::new(&mut grng, [0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98]);
+        let mut rrng = StdRng::seed_from_u64(98765);
+        let plan = RosettaPlan::build(&payload, &inv, &enc, &mut rrng);
+
+        // 1. nChild 填假值：总原型数远大于原始 1 + 6 = 7
+        assert!(plan.protos.len() >= 10, "dummy child protos must inflate proto count");
+
+        // 2. kP (pb18) 随机偏移 + 非单调顺序 + 段间严格不重叠
+        let pbs: Vec<u32> = plan.protos.iter().map(|p| p.pb18).collect();
+        assert!(pbs.iter().all(|&pb| pb >= 0x1200), "all kP (pb18) must include random base offset");
+        let min_pb = *pbs.iter().min().unwrap();
+        assert_ne!(pbs[0], min_pb, "root proto0 must not sit at the minimum kP");
+        let is_monotonic = pbs.windows(2).all(|w| w[0] < w[1]);
+        assert!(!is_monotonic, "kP sequence across protos must not be monotonic");
+
+        let mut segments: Vec<(u32, u32)> = plan
+            .protos
+            .iter()
+            .map(|p| (p.pb18, p.pb18 + (p.raw_insts.len() as u32) + 48))
+            .collect();
+        segments.sort_unstable_by_key(|s| s.0);
+        for w in segments.windows(2) {
+            assert!(w[0].1 < w[1].0, "proto instruction segments must be strictly disjoint");
+        }
+
+        // 3. 根原型 proto0 中 CLOSURE (MakeClosure) 次数严格大于 CALL (CallExecute) 与 SCATTER (CallCollect)
+        let root_insts = &plan.protos[0].raw_insts;
+        let mut cnt_closure = 0usize;
+        let mut cnt_call_exec = 0usize;
+        let mut cnt_call_collect = 0usize;
+        for &(op, _, _, _) in root_insts {
+            let vop = VmOp::from_global(inv[op as usize]).unwrap();
+            match vop {
+                VmOp::MakeClosure => cnt_closure += 1,
+                VmOp::CallExecute => cnt_call_exec += 1,
+                VmOp::CallCollect => cnt_call_collect += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(cnt_call_exec, 6);
+        assert_eq!(cnt_call_collect, 6);
+        assert!(
+            cnt_closure > cnt_call_exec,
+            "dummy closures without CALL must break CLOSURE == CALL == SCATTER (got closure={cnt_closure}, call={cnt_call_exec})"
+        );
     }
 }

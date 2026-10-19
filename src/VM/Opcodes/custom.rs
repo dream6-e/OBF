@@ -483,14 +483,15 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut varargs = handler(m, VmOp::Varargs, cfg, rng);
     let a = varargs.raw_inst(2);
     let b = varargs.raw_inst(3);
+    let c = varargs.raw_inst(4);
     let stk = varargs.cfg.stk.clone();
     let top = varargs.cfg.top.clone();
     let args = varargs.cfg.varargs.clone();
     let len = varargs.cfg.varargs_len.clone();
     let j = varargs.rng.name();
     out.push_str(&varargs.build(&format!(
-        "if {b}>0 then for {j}=1,{b}-1 do {stk}[{a}+{j}-1]={args}[{j}] end else {top}={a}-1; for {j}=1,{len} do {stk}[{a}+{j}-1]={args}[{j}]; {top}={top}+1 end; end",
-        b = b, j = j, stk = stk, a = a, args = args, top = top, len = len
+        "if {b}>0 then for {j}=1,{b}-1 do {stk}[{a}+{j}-1]={args}[{c}+{j}] end else {top}={a}-1; for {j}=1,{len}-{c} do {stk}[{a}+{j}-1]={args}[{c}+{j}]; {top}={top}+1 end; end",
+        b = b, c = c, j = j, stk = stk, a = a, args = args, top = top, len = len
     )));
 
     out

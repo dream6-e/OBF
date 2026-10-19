@@ -2,7 +2,9 @@ use crate::BytecodeCompiler::ir::chunk::{Chunk, Constant};
 use crate::BytecodeCompiler::ir::instruction::Instruction;
 use crate::BytecodeCompiler::ir::opcode::Opcode;
 use crate::VM::VM_Backend::Context::VmContext;
-use crate::VM::VM_Backend::CustomIsa::{CustomInstruction, VmOp, lower_to_custom_with_splits};
+use crate::VM::VM_Backend::CustomIsa::{
+    CustomInstruction, VmOp, lower_to_custom_with_params, lower_to_custom_with_splits,
+};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{HashMap, HashSet};
@@ -31,10 +33,53 @@ struct ReorderedCode {
 
 impl Serializer {
     pub fn serialize(chunk: &Chunk, ctx: &VmContext) -> Vec<u8> {
-        Self::serialize_proto(chunk, ctx, ctx.seed)
+        Self::serialize_proto(chunk, ctx, ctx.seed, 0)
     }
 
-    fn serialize_proto(chunk: &Chunk, ctx: &VmContext, seed: u64) -> Vec<u8> {
+    fn serialize_proto(chunk: &Chunk, ctx: &VmContext, seed: u64, depth: usize) -> Vec<u8> {
+        let is_dummy_proto = chunk.line_defined < 0;
+        let mut proto_rng = StdRng::seed_from_u64(seed ^ 0x243F_6A88_85A3_08D3);
+        let dummy_proto_count = if is_dummy_proto {
+            0
+        } else if depth == 0 {
+            if chunk.protos.len() >= 8 {
+                proto_rng.random_range(3usize..=5usize)
+            } else {
+                proto_rng.random_range(2usize..=3usize)
+            }
+        } else if !chunk.protos.is_empty() {
+            proto_rng.random_range(1usize..=2usize)
+        } else if depth == 1 && proto_rng.random_range(0u8..2u8) == 0 {
+            1
+        } else {
+            0
+        };
+        let dummy_protos: Vec<Chunk> = (0..dummy_proto_count)
+            .map(|_| make_dummy_chunk(&mut proto_rng))
+            .collect();
+        let real_proto_count = chunk.protos.len();
+        let total_proto_count = real_proto_count + dummy_proto_count;
+        let mut proto_order: Vec<usize> = (0..total_proto_count).collect();
+        if total_proto_count >= 2 {
+            proto_order.shuffle(&mut proto_rng);
+            if proto_order.iter().copied().eq(0..total_proto_count) {
+                proto_order.swap(0, total_proto_count - 1);
+            }
+        }
+        let mut old_to_new_proto = vec![0i32; total_proto_count];
+        for (new_idx, &old_idx) in proto_order.iter().enumerate() {
+            old_to_new_proto[old_idx] = new_idx as i32;
+        }
+        let dummy_new_indices: Vec<i32> = (real_proto_count..total_proto_count)
+            .map(|old_idx| old_to_new_proto[old_idx])
+            .collect();
+        let scratch_reg: u8 = chunk.max_stack.saturating_add(4).min(118);
+        let effective_max_stack: u8 = if !dummy_new_indices.is_empty() {
+            chunk.max_stack.max(scratch_reg.saturating_add(1))
+        } else {
+            chunk.max_stack
+        };
+
         let reordered = reorder_basic_blocks(&chunk.instructions, &chunk.protos, chunk.max_stack, seed);
         let instructions = reordered
             .as_ref()
@@ -109,9 +154,63 @@ impl Serializer {
                 }
             }
         }
-        let lowered = lower_to_custom_with_splits(instructions, &chunk.protos, &zero_one_splits)
-            .unwrap_or_else(|err| panic!("{err}"));
+        // 在非热环指令点注入只有 CLOSURE（MakeClosure）而无 CALL 的哑闭包指令，
+        // 打破 proto0 等函数中 CALL = SCATTER = CLOSURE 的数量相等不变量。
+        let mut dummy_closures: HashMap<usize, (u8, i32)> = HashMap::new();
+        if dummy_proto_count > 0 && !is_dummy_proto {
+            let ins_len = instructions.len();
+            let mut in_loop = vec![false; ins_len];
+            for (pc_i, inst_i) in instructions.iter().enumerate() {
+                if is_relative_jump(inst_i.opcode) {
+                    if let Some(target) = relative_target(pc_i, inst_i, ins_len) {
+                        if target <= pc_i {
+                            for slot in in_loop.iter_mut().take(pc_i + 1).skip(target) {
+                                *slot = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cand_pcs: Vec<usize> = (0..ins_len)
+                .filter(|&pc_i| {
+                    !in_loop[pc_i]
+                        && matches!(
+                            instructions[pc_i].opcode,
+                            Opcode::NewTable | Opcode::LoadK | Opcode::GetGlobal | Opcode::SetGlobal
+                        )
+                })
+                .collect();
+            cand_pcs.shuffle(&mut proto_rng);
+            let want = if ins_len >= 200 {
+                proto_rng.random_range(14usize..=22usize)
+            } else if ins_len >= 32 {
+                proto_rng.random_range(2usize..=5usize)
+            } else {
+                proto_rng.random_range(1usize..=2usize)
+            };
+            for &pc_i in cand_pcs.iter().take(want.min(cand_pcs.len())) {
+                let old_dummy_idx =
+                    (real_proto_count + proto_rng.random_range(0..dummy_proto_count)) as i32;
+                dummy_closures.insert(pc_i, (scratch_reg, old_dummy_idx));
+            }
+        }
+
+        let mut lowered = lower_to_custom_with_params(
+            instructions,
+            &chunk.protos,
+            &zero_one_splits,
+            chunk.param_count,
+            &dummy_closures,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        for inst in &mut lowered {
+            if inst.op == VmOp::MakeClosure {
+                inst.b = old_to_new_proto[inst.b as usize];
+            }
+        }
         let mut extra_consts: Vec<u64> = Vec::new();
+        let dummy_closure_info = (!dummy_new_indices.is_empty())
+            .then_some((scratch_reg, dummy_new_indices.as_slice()));
         let lowered = if lowered.len() < 24 {
             inflate_small_custom_proto(
                 lowered,
@@ -119,17 +218,16 @@ impl Serializer {
                 &mut extra_consts,
                 seed ^ 0x9E37_79B9_7F4A_7C15,
             )
-        } else if reordered.is_some() && chunk.instructions.len() >= 18 {
-            weave_custom_cfg_hubs(
+        } else {
+            weave_custom_cfg_hubs_with_dummies(
                 lowered,
                 &chunk.instructions,
                 reordered.as_ref().map(|r| r.source_pc.as_slice()),
                 chunk.constants.len(),
                 &mut extra_consts,
                 seed ^ 0x9E37_79B9_7F4A_7C15,
+                dummy_closure_info,
             )
-        } else {
-            lowered
         };
         let mut bytes = Vec::new();
 
@@ -141,7 +239,7 @@ impl Serializer {
         bytes.push(chunk.upvalue_count);
         bytes.push(chunk.param_count);
         bytes.push(chunk.is_vararg);
-        bytes.push(chunk.max_stack);
+        bytes.push(effective_max_stack);
 
         let inst_count = lowered.len() as u32;
         bytes.extend_from_slice(&inst_count.to_le_bytes());
@@ -180,13 +278,18 @@ impl Serializer {
             bytes.extend_from_slice(&bits.to_le_bytes());
         }
 
-        let p_count = chunk.protos.len() as u32;
+        let p_count = total_proto_count as u32;
         bytes.extend_from_slice(&p_count.to_le_bytes());
-        for (index, proto) in chunk.protos.iter().enumerate() {
+        for (slot_idx, &old_idx) in proto_order.iter().enumerate() {
+            let child_proto = if old_idx < real_proto_count {
+                &chunk.protos[old_idx]
+            } else {
+                &dummy_protos[old_idx - real_proto_count]
+            };
             let child_seed = seed
-                .wrapping_add((index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .wrapping_add((slot_idx as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
                 .rotate_left(17);
-            bytes.extend(Self::serialize_proto(proto, ctx, child_seed));
+            bytes.extend(Self::serialize_proto(child_proto, ctx, child_seed, depth + 1));
         }
 
         let lines: Vec<i32> = lowered
@@ -304,6 +407,40 @@ fn ci(op: VmOp, a: u8, b: i32, c: i32) -> CustomInstruction {
     CustomInstruction { op, a, b, c, source_pc: 0 }
 }
 
+fn make_dummy_chunk(rng: &mut StdRng) -> Chunk {
+    let e0 = rng.random_range(0x400u64..=0x406u64);
+    let e1 = rng.random_range(0x401u64..=0x407u64);
+    let c0 = f64::from_bits(full_entropy_f64_bits(rng, e0));
+    let c1 = f64::from_bits(full_entropy_f64_bits(rng, e1));
+    let arith_op = match rng.random_range(0..4u8) {
+        0 => Opcode::Add,
+        1 => Opcode::Sub,
+        2 => Opcode::Mul,
+        _ => Opcode::Div,
+    };
+    let insts = vec![
+        make_instruction(Opcode::LoadK, 0, 0, 0, 1),
+        make_instruction(Opcode::LoadK, 1, 1, 0, 1),
+        make_instruction(arith_op, 2, 0, 1, 1),
+        make_instruction(Opcode::Return, 2, 2, 0, 1),
+    ];
+    Chunk {
+        name: String::new(),
+        line_defined: -1,
+        last_line_defined: -1,
+        upvalue_count: 0,
+        param_count: rng.random_range(0..=3),
+        is_vararg: 0,
+        max_stack: rng.random_range(3..=6),
+        instructions: insts,
+        constants: vec![Constant::Number(c0), Constant::Number(c1)],
+        protos: Vec::new(),
+        lines: vec![1, 1, 1, 1],
+        locals: Vec::new(),
+        upvalues: Vec::new(),
+    }
+}
+
 /// 消灭最小闭包已知结构探针（Crib）：
 /// 对短小原型（`lowered.len() < 24`，如空闭包 `function() end`、单常量返回闭包及短回调）
 /// 注入 3 个全非零尾数有限浮点常量，并将真实指令切分/包裹进乱序的 4~5 基本块控制流图中：
@@ -396,6 +533,7 @@ fn inflate_small_custom_proto(
         ]);
         // Block 3: Decoy alternate block -> jumps to Block 1
         let blk3 = vec![
+            ci(VmOp::Varargs, 0, rng.random_range(2..=6), 0),
             ci(VmOp::PushConst, 0, k1, 0),
             ci(VmOp::PushConst, 0, k0, 0),
             ci(VmOp::Mul, 0, 0, 0),
@@ -443,6 +581,7 @@ fn inflate_small_custom_proto(
             ci(VmOp::Branch, 1, 0, 0),
         ];
         let blk_decoy = vec![
+            ci(VmOp::Varargs, 0, rng.random_range(2..=6), 0),
             ci(VmOp::PushConst, 0, k1, 0),
             ci(VmOp::PushConst, 0, k0, 0),
             ci(VmOp::Mul, 0, 0, 0),
@@ -489,6 +628,26 @@ fn weave_custom_cfg_hubs(
     base_const_count: usize,
     extra_consts: &mut Vec<u64>,
     seed: u64,
+) -> Vec<CustomInstruction> {
+    weave_custom_cfg_hubs_with_dummies(
+        lowered,
+        orig_instructions,
+        reordered_source_pc,
+        base_const_count,
+        extra_consts,
+        seed,
+        None,
+    )
+}
+
+fn weave_custom_cfg_hubs_with_dummies(
+    lowered: Vec<CustomInstruction>,
+    orig_instructions: &[Instruction],
+    reordered_source_pc: Option<&[usize]>,
+    base_const_count: usize,
+    extra_consts: &mut Vec<u64>,
+    seed: u64,
+    dummy_closure_info: Option<(u8, &[i32])>,
 ) -> Vec<CustomInstruction> {
     if lowered.len() < 24 {
         return lowered;
@@ -667,14 +826,20 @@ fn weave_custom_cfg_hubs(
             ci(VmOp::Branch, 0, 0, 0),
             ci(VmOp::Jump, 0, 0, 0),
         ]);
-        let decoy = add_block(vec![
+        let mut decoy_vec = vec![
+            ci(VmOp::Varargs, 0, rng.random_range(2..=7), 0),
             ci(VmOp::PushConst, 0, k2, 0),
             ci(VmOp::Noop, 0, 0, 0),
             ci(VmOp::PushConst, 0, k0, 0),
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, 1, 0, 0),
             ci(VmOp::Jump, 0, 0, 0),
-        ]);
+        ];
+        if let Some((s_reg, d_protos)) = dummy_closure_info {
+            let dp = d_protos[rng.random_range(0..d_protos.len())];
+            decoy_vec.insert(0, ci(VmOp::MakeClosure, s_reg, dp, 0));
+        }
+        let decoy = add_block(decoy_vec);
         for m in 0..4 {
             let (low_pc, _) = group[m];
             if !jump_redirs.iter().any(|&(p, _)| p == low_pc) {
@@ -695,13 +860,19 @@ fn weave_custom_cfg_hubs(
     let fallback_decoy = if let Some(hp) = hub_patches.first() {
         hp.decoy
     } else {
-        let d_id = add_block(vec![
+        let mut d_vec = vec![
+            ci(VmOp::Varargs, 0, rng.random_range(2..=7), 0),
             ci(VmOp::PushConst, 0, k2, 0),
             ci(VmOp::PushConst, 0, k1, 0),
             ci(VmOp::Sub, 0, 0, 0),
             ci(VmOp::Drop, 0, 0, 0),
             ci(VmOp::Jump, 0, 0, 0),
-        ]);
+        ];
+        if let Some((s_reg, d_protos)) = dummy_closure_info {
+            let dp = d_protos[rng.random_range(0..d_protos.len())];
+            d_vec.insert(0, ci(VmOp::MakeClosure, s_reg, dp, 0));
+        }
+        let d_id = add_block(d_vec);
         let t_id = add_block(vec![
             ci(VmOp::PushConst, 0, k3, 0),
             ci(VmOp::PushConst, 0, k0, 0),
@@ -725,13 +896,20 @@ fn weave_custom_cfg_hubs(
         cursor += 1;
         let truthy = rng.random_range(0..2u8) == 1;
         let (ka, kb, pol) = if truthy { (k0, k2, 1u8) } else { (k3, k1, 0u8) };
-        let gate = add_block(vec![
+        let mut gate_vec = vec![
             ci(VmOp::PushConst, 0, ka, 0),
             ci(VmOp::PushConst, 0, kb, 0),
             ci(VmOp::Less, 0, 0, 0),
             ci(VmOp::Branch, pol, 0, 0),
             ci(VmOp::Jump, 0, 0, 0),
-        ]);
+        ];
+        if let Some((s_reg, d_protos)) = dummy_closure_info {
+            if gates_added % 2 == 0 {
+                let dp = d_protos[rng.random_range(0..d_protos.len())];
+                gate_vec.insert(0, ci(VmOp::MakeClosure, s_reg, dp, 0));
+            }
+        }
+        let gate = add_block(gate_vec);
         let decoy_block = if !hub_patches.is_empty() {
             hub_patches[gates_added % hub_patches.len()].decoy
         } else {
@@ -753,13 +931,17 @@ fn weave_custom_cfg_hubs(
     let prefix_ids = &arena_order[..split_half];
     let suffix_ids = &arena_order[split_half..];
 
-    let blk_entry = vec![
+    let mut blk_entry = vec![
         ci(VmOp::PushConst, 0, k0, 0),
         ci(VmOp::Noop, 0, 0, 0),
         ci(VmOp::PushConst, 0, k2, 0),
         ci(VmOp::Less, 0, 0, 0),
         ci(VmOp::Branch, 1, 0, 0),
     ];
+    if let Some((s_reg, d_protos)) = dummy_closure_info {
+        let dp = d_protos[rng.random_range(0..d_protos.len())];
+        blk_entry.insert(0, ci(VmOp::MakeClosure, s_reg, dp, 0));
+    }
 
     let mut out = Vec::with_capacity(blk_entry.len() + lowered.len() + arena_blocks.len() * 6);
     out.extend_from_slice(&blk_entry);
@@ -812,8 +994,9 @@ fn weave_custom_cfg_hubs(
         out[right_start + 7].b = rel(right_start + 7, t3);
         out[right_start + 8].b = rel(right_start + 8, decoy_start);
 
-        out[decoy_start + 4].b = rel(decoy_start + 4, t0);
-        out[decoy_start + 5].b = rel(decoy_start + 5, t2);
+        let decoy_end = arena_ends[hp.decoy];
+        out[decoy_end - 1].b = rel(decoy_end - 1, t0);
+        out[decoy_end].b = rel(decoy_end, t2);
     }
 
     if hub_patches.is_empty() {
@@ -823,11 +1006,11 @@ fn weave_custom_cfg_hubs(
 
     // 修补全部条件常量门 Gate 偏移
     for gp in &gate_patches {
-        let g_start = arena_starts[gp.gate];
+        let g_end = arena_ends[gp.gate];
         let t_pc = start_core + gp.target_in_low;
         let d_pc = arena_starts[gp.decoy_block];
-        out[g_start + 3].b = rel(g_start + 3, t_pc);
-        out[g_start + 4].b = rel(g_start + 4, d_pc);
+        out[g_end - 1].b = rel(g_end - 1, t_pc);
+        out[g_end].b = rel(g_end, d_pc);
     }
 
     // 重定向核心块内被选中的 VmOp::Jump 至对应 Pad / Gate
