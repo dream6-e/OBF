@@ -105,7 +105,16 @@ fn main() {
     let source_code = with_check(&encrypted_source);
 
     // 指令布局逐产物随机化（种子会写进容器头部，反序列化端据此恢复）
-    instructions::randomize_global_seed();
+    match std::env::var("OBF_SEED") {
+        Ok(v) => {
+            if let Ok(seed) = v.parse::<u64>() {
+                kryvex_ob::compiler::instructions::set_global_seed(seed);
+            } else {
+                instructions::randomize_global_seed();
+            }
+        }
+        Err(_) => { instructions::randomize_global_seed(); }
+    }
 
     // 编译：先编「最小化 + 字符串加密」的源码；编不过依次回退到最小化源码、
     // 原始源码（用户真正写错语法时，报错仍取原始源码，行号才有意义）。

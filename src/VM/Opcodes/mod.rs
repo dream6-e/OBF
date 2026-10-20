@@ -167,11 +167,9 @@ pub struct OpcodeConfig {
     pub jmp_state: String,
     /// 冷块（如 IteratorNext）读取的运行期跳转密钥槽占位符（冷块调用前同步 bxor(jmp_state, ld_key)）。
     pub jmp_key_cold: String,
-    /// P0-1：跳转落点密钥的派生参数。落点掩码不再用「pc 线性累加器」，
-    /// 而按 uF(i)=((bx(K,i*a0)*a1)%2^32 ^ K)*a2+a3 逐条现算——
-    /// 与 pc 无线性关系，静态读产物无法由已知 (pc,目标) 反解。
-    pub uf_key: String,
-    pub uf_p: [u32; 4],
+    /// P0-1：基本块入口密钥的运行期载体（execute 局部），随控制流转移被
+    /// 边补偿常量异或推进。同一基本块内取恒定值，跨跳转需在边源处对齐。
+    pub uf_var: String,
     /// 方法化后的返回协议：`{RET0}`（无返回值）/`{RET1}`（单值）/
     /// `{RET2}`（表+区间）三个返回钩子的调用点。
     pub ret0: String,
@@ -181,20 +179,6 @@ pub struct OpcodeConfig {
     pub type_fn: String,
     pub type_num: String,
     pub type_tbl: String,
-}
-
-impl OpcodeConfig {
-    /// P0-1 落点密钥（uF）：uF(i) = ((bx(K, i*A0) * A1 mod 2^32) ^ K) * A2 + A3 mod 2^32。
-    /// 与 pc 不成线性关系：已知若干 (pc, 落点) 也解不出后续落点，除非先拿到 K。
-    /// 生成侧（Rust）与运行侧（Lua）必须逐位同式，故两侧共用本参数组。
-    pub fn uf_expr(&self, idx: &str) -> String {
-        let [a0, a1, a2, a3] = self.uf_p;
-        format!(
-            "(({bx}((({bx}({k},({i})*0X{a0:X})*0X{a1:X})%0X100000000),{k})*0X{a2:X}+0X{a3:X})%0X100000000)",
-            bx = self.builtin_bxor, k = self.uf_key, i = idx,
-            a0 = a0, a1 = a1, a2 = a2, a3 = a3
-        )
-    }
 }
 
 pub struct OpcodeBuilder<'a> {
