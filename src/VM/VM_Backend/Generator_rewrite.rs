@@ -29,6 +29,8 @@ pub(super) struct FoldCtx {
     pub badd: u32,
     pub bsub: u32,
     pub bxor_c: u32,
+    // P0-1 落点密钥（uF）派生参数：uF(i)=((bx(K,i*A0)*A1 mod 2^32)^K)*A2+A3 mod 2^32
+    pub uf_a0: u32, pub uf_a1: u32, pub uf_a2: u32, pub uf_a3: u32,
 }
 
 fn fold_step(
@@ -314,6 +316,15 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             + fb0 as u64 + (fc0 as u64) * 0x11) % 0x1_0000_0000
     };
     let _ = nochain18;
+    // P0-1：跳转落点密钥 uF(i)。与 pc 无线性关系——静态读产物时，已知若干净
+    // (pc, 落点) 也无法解出其它落点，除非先还原本原型的运行期密钥 K。
+    // 运行侧 handler 用 cfg.uf_expr() 逐位同式现算（同一参数组由 FoldCtx 携带）。
+    let uf_at = |k: u32, i: u32| -> u32 {
+        let u0 = k ^ i.wrapping_mul(fc18.uf_a0);
+        let u1 = u0.wrapping_mul(fc18.uf_a1);
+        let u2 = u1 ^ k;
+        u2.wrapping_mul(fc18.uf_a2).wrapping_add(fc18.uf_a3)
+    };
     let _ = r.read_string();
     let hn18: u32 = rng.random_range(0x0101_0101u32..=0xFFFF_FFFEu32);
     let hn_wire: u32 = hn18 ^ u_in;
@@ -772,7 +783,11 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             match real_op18 {
                 VmOp::Jump | VmOp::Branch | VmOp::ForInit | VmOp::ForNext => {
                     let t_abs = (pb18 as i64 + pc18 as i64 + 2 + (b as i32 as i64)) as u32;
-                    be18 = t_abs ^ jkey;
+                    // P0-1：落点密钥改由 uF(本记录下标) 派生（原 jkey 是 pc 的线性累加，
+                    // 两次已知跳转即可解出全部落点）。记录下标 = pb18+pc18+1，
+                    // 运行侧取 pc-1（取指后 pc 已自增）。
+                    let rec_idx = pb18.wrapping_add(pc18 as u32).wrapping_add(1);
+                    be18 = t_abs ^ uf_at(kp18, rec_idx);
                 }
                 VmOp::BranchSetTrue | VmOp::BranchSetFalse | VmOp::IteratorNext => {
                     let t_abs = (pb18 as i64 + pc18 as i64 + 2 + (c as i32 as i64)) as u32;
@@ -1269,7 +1284,8 @@ mod sbox_anchor_tests {
             emul: 0x6B43, eadd: 0x3141_5926,
             jmul: 0x3579, jtbl_key: 0x123456,
             bmul: 5, binv: 13, badd: 19, bsub: ((64 - 19) * 13) % 64, bxor_c: 0x2B,
-        };
+            uf_a0: 0x1F3D, uf_a1: 0x2B79, uf_a2: 0x4C6F, uf_a3: 0x0E11,
+};
         let hn18: u32 = 0x5A3C_96E1;
         let kp18: u32 = 0xC3A5_1E69;
         let pb18: u32 = 17;

@@ -192,9 +192,10 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let b = branch.raw_inst(3);
     let s = branch.cfg.vstack.clone();
     let pc = branch.cfg.pc.clone();
+    let buf_branch = cfg.uf_expr(&format!("({pc})-0X1", pc = pc));
     out.push_str(&branch.build(&format!(
-        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/if (({{U1}}~=nil and {{U1}}~=false)==({a}~=0)) then {pc}={bx}({b},{bx}({jst},{ld})) end",
-        s = s, a = a, pc = pc, b = b, bx = jbx, jst = jst, ld = jld
+        "{{U0}}=#{s}; {{U1}}={s}[{{U0}}][1]; {s}[{{U0}}]=nil/*MICRO_SEP*/if (({{U1}}~=nil and {{U1}}~=false)==({a}~=0)) then {pc}={bx}({b},{uf}) end",
+        s = s, a = a, pc = pc, b = b, bx = jbx, uf = buf_branch
     )));
 
     for (op, polarity) in [(VmOp::BranchSetTrue, true), (VmOp::BranchSetFalse, false)] {
@@ -214,7 +215,8 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let mut jump = handler(m, VmOp::Jump, cfg, rng);
     let b = jump.raw_inst(3);
     let pc = jump.cfg.pc.clone();
-    out.push_str(&jump.build(&format!("{pc}={bx}({b},{bx}({jst},{ld}))", pc = pc, b = b, bx = jbx, jst = jst, ld = jld)));
+    let buf_jump = cfg.uf_expr(&format!("({pc})-0X1", pc = pc));
+    out.push_str(&jump.build(&format!("{pc}={bx}({b},{uf})", pc = pc, b = b, bx = jbx, uf = buf_jump)));
 
     let mut for_init = handler(m, VmOp::ForInit, cfg, rng);
     let a = for_init.raw_inst(2);
@@ -230,10 +232,10 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let limit_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[1].0, errors[1].1);
     let step_error = format!("{}{{NATIVE_ERROR}}({},0)", errors[2].0, errors[2].1);
     out.push_str(&for_init.build(&format!(
-        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {init_error} end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {limit_error} end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {step_error} end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}/*MICRO_SEP*/{pc}={bx}({b},{bx}({jst},{ld}))",
+        "local {init}={{NATIVE_TONUMBER}}({stk}[{a}]); if {init}==nil then {init_error} end; local {limit}={{NATIVE_TONUMBER}}({stk}[{a}+1]); if {limit}==nil then {limit_error} end; local {step}={{NATIVE_TONUMBER}}({stk}[{a}+2]); if {step}==nil then {step_error} end; {stk}[{a}]={init}-{step}; {stk}[{a}+1]={limit}; {stk}[{a}+2]={step}; local {q}={{{limit},{step}}}; {stk}[-{a}-1]={q}/*MICRO_SEP*/{pc}={bx}({b},{uf})",
         stk = stk, a = a, step = step, init = init, limit = limit, q = q, pc = pc, b = b,
         init_error = init_error, limit_error = limit_error, step_error = step_error,
-        bx = jbx, jst = jst, ld = jld
+        bx = jbx, uf = cfg.uf_expr(&format!("({pc})-0X1", pc = pc))
     )));
 
     let mut for_next = handler(m, VmOp::ForNext, cfg, rng);
@@ -246,9 +248,9 @@ pub fn generate(m: &[Vec<u32>], cfg: &OpcodeConfig, rng: &mut OpcodesRng) -> Str
     let index = for_next.rng.name();
     let limit = for_next.rng.name();
     out.push_str(&for_next.build(&format!(
-        "local {q}={stk}[-{a}-1]; local {limit}={q}[1]; local {step}={q}[2]; local {index}={stk}[{a}]+{step}; {stk}[{a}]={index}; if ({step}>0 and {index}<={limit}) or ({step}<=0 and {index}>={limit}) then {stk}[{a}+3]={index}; {pc}={bx}({b},{bx}({jst},{ld})) end",
+        "local {q}={stk}[-{a}-1]; local {limit}={q}[1]; local {step}={q}[2]; local {index}={stk}[{a}]+{step}; {stk}[{a}]={index}; if ({step}>0 and {index}<={limit}) or ({step}<=0 and {index}>={limit}) then {stk}[{a}+3]={index}; {pc}={bx}({b},{uf}) end",
         q = q, stk = stk, a = a, limit = limit, step = step, index = index, pc = pc, b = b,
-        bx = jbx, jst = jst, ld = jld
+        bx = jbx, uf = cfg.uf_expr(&format!("({pc})-0X1", pc = pc))
     )));
 
     let (cf_base, cf_want, cf_n, cf_fn, cf_args, cf_res) = (

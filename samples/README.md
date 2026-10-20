@@ -4,16 +4,16 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，210,425 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），118,556 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，331,393 B |
-| `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，216,487 B |
-| `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，97,693 B |
-| `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，223,062 B |
-| `string_encryption.obfuscated.MB.lua` | 同一加密回归夹具的 MB 模式产物，109,499 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，261,385 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），173,365 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，490,244 B |
+| `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，244,151 B |
+| `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，147,158 B |
+| `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，285,984 B |
+| `string_encryption.obfuscated.MB.lua` | 同一加密回归夹具的 MB 模式产物，196,274 B |
 | `lua51-semantics.lua` / `lua51-semantics.expected.txt` | Lua 5.1 差分回归源与预期输出，覆盖多返回值、循环、元方法、upvalue、环境及禁用部分全局函数 |
-| `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，273,906 B；Lua 5.1 输出与预期一致 |
-| `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，254,829 B；Lua 5.1 输出与预期一致 |
+| `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，379,162 B；Lua 5.1 输出与预期一致 |
+| `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，335,599 B；Lua 5.1 输出与预期一致 |
 
 2026-10-15 API 名战线残留面清理（`Generator_names.rs`，与 handle 映射互补）：handle 映射只覆盖用户代码的 GETGLOBAL/SETGLOBAL，产物里 VM 自身仍留有 ~322 处明文全局 API 标识符（pcall/tostring/setmetatable/getmetatable/rawset/rawget/newproxy/select/unpack/tonumber/error/getfenv/setfenv/typeof/raknet/debug/math/string/table/bit32/bit 等）。新增 `NameVault`（零新增壳层局部，借 `kreg` 表槽存放）：各发射点按名去重登记槽号，名字本身复用 `UniStream` 以数字密文落盘，boot 时一次性解码并按三态环境根（`getfenv() or _ENV or _G`）取值装槽；顺带连带修复 `compressor/codegen.rs` 的 `is_reserved_member`（`__index`/`__newindex` 点访问此前会被成员改名器改坏 userdata proxy 元表）。产物中 19 个 API 家族彻底清零，总命中从 322 压至 18（仅剩引导层固有根：`_ENV`/`_G`、uni prelude 自身的解码原语与 `fu` 壳早于 wai 的自足守卫）。`cargo test --lib` 160/160；三件套重生成 **210,425 / 118,556 / 331,393 B**（+13.5 / +7.4 / +11.1 KB，在 25 KB 预算内），双语法门与双运行时全部通过。
 
@@ -331,3 +331,9 @@ cargo run --release -- '#U4f2a#U88c5.lua'                # 生成“伪装.lua�
 - **体积**：三件套 196,896 / 109,685 / 315,891 B，相对改进 2 版 −3.9 / +0.5 / +10.8 KB
   （含逐构建随机波动），净增远小于 25 KB 预算。
 - **速度**：arith 微基准与改进 2 版同量级（多产物对比分布重叠，旗读取为冷路径），无系统性退化。
+
+2026-10-20 P0-1（跳转落点密钥改为 uF 派生）落地后重新生成全部固定样本：`print` 普通/MB =
+261,385 / 173,365 B，`#U4f2a#U88c5.lua` = 490,244 B（与上一轮同量级，体积无回归）。十一份样本全部通过
+`luac5.1 -p` 与 `luau-compile --binary`；`print` / `string_encryption` / `nested_protos` /
+`lua51-semantics` / `vm-isa-semantics` 的普通与 MB 两种产物在 `lua5.1` 与 `luau` 下的 stdout
+与源（或 `.expected.txt`）逐字节一致；`U4f2aU88c5` 仅做双语法检查（Roblox 行为由用户验证）。

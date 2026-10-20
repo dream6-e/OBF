@@ -266,6 +266,10 @@ impl Generator {
             jmul: (rng.range(0x800, 0x4000) as u32) * 2 + 1,
             jtbl_key: rng.range(0x10000, 0xFFF_FFFF) as u32,
             bmul, binv, badd, bsub, bxor_c,
+            uf_a0: (rng.range(0x1001, 0xFFFF) as u32) | 1,
+            uf_a1: (rng.range(0x1001, 0xFFFF) as u32) | 1,
+            uf_a2: (rng.range(0x1001, 0xFFFF) as u32) | 1,
+            uf_a3: rng.range(0x1000, 0xFFFF) as u32,
         };
         let kstep_bmask = (64 - (fc18.jmul & 0x3F)) & 0x3F;
         // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
@@ -526,6 +530,8 @@ impl Generator {
             ld_key: n_kon.clone(),
             jmp_state: var_jstate.clone(),
             jmp_key_cold: var_jkey_cold.clone(),
+            uf_key: n_kon.clone(),
+            uf_p: [fc18.uf_a0, fc18.uf_a1, fc18.uf_a2, fc18.uf_a3],
             vararg_count: pf_vn.clone(),
             proto_nups: pf_nups.clone(),
             open_ups: pf_open_ups.clone(),
