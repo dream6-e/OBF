@@ -854,20 +854,33 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         shell.map_bodies(&mut rewrite_mt);
         let wai_body = rewrite_mt(wai_body);
 
-        let (wai_p0, wai_p1) = (rng.name(), rng.name());
+        // 【外形对齐 luraph14.9】整份产物 = 一个表达式，形如：
+        //     return({ 字段表 }):入口()(...)
+        // 与旧形态（`local X = ...;` 前缀 + `return ({ 表 }):入口()`）的区别：
+        //   ① 没有块级 `local … = ...` 前缀 —— 入口方法自己带 `...`，脚本的 vararg
+        //      由入口收下（旧形态也是只取第一个 vararg，语义一致）；
+        //   ② 入口是表里的一个字段，只有到文件最末尾才出现 `:入口(`；
+        //   ③ 入口被调用后返回一个闭包，再由 `(...)` 用宿主 vararg 调一次，
+        //      因此这个包裹对 `...` 是透明的（luraph 的 `):T()(...)`）；
+        //   ④ 字段之间不留空格/换行，整份产物只有一行。
+        // 注意：这里只改外壳形态，入口/解码/装载流程一步未动。
         let wai_field = format!(
-            "{}=function({},{},{})\n{} end",
-            wai, shell.self_var, wai_p0, wai_p1, wai_body
+            "{}=function({},...) local {} = ...;{} end",
+            wai, shell.self_var, var_l, wai_body
         );
-        let (fu_self, fu_p0, fu_p1) = (rng.name(), rng.name(), rng.name());
+        let (fu_self, fu_v) = (rng.name(), rng.name());
         let fu_field = format!(
-            "{}=function({},{},{}) local {}=type; {} return {}:{}() end",
-            fu, fu_self, fu_p0, fu_p1, native_type, line_guard(&mut rng, &mut uni, true), fu_self, wai
+            "{}=function({},...) local {}=type; {} return function({}) return {}:{}({}) end end",
+            fu, fu_self, native_type, line_guard(&mut rng, &mut uni, true),
+            fu_v, fu_self, wai, fu_v
         );
         let shell_fields = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
 
         let mut out = String::new();
-        out.push_str(&format!("local {} = ...;\n", var_l));
-        out.push_str(&format!("return ({{ {} }}):{}()", shell_fields.join(", "), fu));
+        out.push_str(&format!(
+            "return({{{}}}):{}()(...)",
+            shell_fields.join(","),
+            fu
+        ));
         out
 }

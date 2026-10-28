@@ -286,6 +286,15 @@ pub struct CodegenContext {
 /// 计数兜底名：单字母名只留给 `function` 形参，这里从双字母起编。
 /// `0..base²` → 两个字母，`base²..base²+base³` → 三个字母，依此类推。
 /// 与压缩器主改名循环共用同一编号语义，保证跳过禁名时水位线一致。
+///
+/// 【结构对齐 luraph14.9】块内序号先做一次**双射置换**再取字符，于是第 n 个和
+/// 第 n+1 个名字在字符表上相距很远。旧实现直接用 `index % base` 落最后一位、
+/// `index / base` 落第一位，连续分配时第一位要隔 base 个名字才变一次 —— 产物里
+/// 因此出现成族的同前缀名字（`KK`/`KQ`/`KN`/…），既能按前缀聚类、又能数出
+/// "这个前缀下面有多少个名字 = 有多少个字段"，是很强的指纹。
+///
+/// 置换用固定乘数 mod 块容量实现：base=52=2²·13，乘数取奇数且不被 13 整除
+/// ⇒ 与 base^k 互素 ⇒ 在 [0, base^k) 上是双射，不会撞名，也不会漏名。
 pub fn nth_short_name(chars: &[char], mut index: usize) -> String {
     let base = chars.len();
     let mut len = 2usize;
@@ -295,6 +304,9 @@ pub fn nth_short_name(chars: &[char], mut index: usize) -> String {
         capacity *= base;
         len += 1;
     }
+    // 双射置换（见上）：奇数且非 13 倍数 ⇒ gcd(乘数, 52^k)=1。
+    const STRIDE: u128 = 0x9E37_79B1;
+    let mut index = ((index as u128 * STRIDE) % capacity as u128) as usize;
     let mut out = vec![chars[0]; len];
     for slot in out.iter_mut().rev() {
         *slot = chars[index % base];
