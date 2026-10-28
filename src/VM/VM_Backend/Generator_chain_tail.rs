@@ -856,7 +856,7 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             s
         };
         shell.map_bodies(&mut rewrite_mt);
-        let wai_body = rewrite_mt(wai_body);
+        let mut wai_body = rewrite_mt(wai_body);
 
         // 【外形对齐 luraph14.9】整份产物 = 一个表达式，形如：
         //     return({ 字段表 }):入口()(...)
@@ -878,6 +878,19 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             fu, fu_self, native_type, line_guard(&mut rng, &mut uni, true),
             fu_self, wai
         );
+        // 结构对齐 luraph14.9 §3.3/§3.5：把巨型方法体切成碎函数 + 单次调用树
+        // （每片在外层表里各占一个字段，只被调用一次；原位置换成微状态机）。
+        let _frag = shell.fragment_all(&mut rng);
+        let (mut f_wai, mut m_wai) = (0usize, 0usize);
+        for _ in 0..6 {
+            let (f, m) = shell.fragment_body(&mut wai_body, &mut rng);
+            if m == 0 {
+                break;
+            }
+            f_wai += f;
+            m_wai += m;
+        }
+        let _ = (f_wai, m_wai);
         let shell_fields = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
 
         let mut out = String::new();
