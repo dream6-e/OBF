@@ -825,10 +825,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let fu = rng.name();
         wai_body.push_str(&lg_call1);
         wai_body.push_str(&lg_call0);
+        // 【vararg 完全透明】壳方法自己就是 vararg 函数，这里把收到的 `...` 原样交给
+        // execute；payload 的 `select('#', ...)` 与 `{...}` 因此看到的是**宿主真实
+        // 传进来的全部实参**（旧形态只取第一个：`local L = ...` 后传 L）。
         wai_body.push_str(&format!(
-            "return {}(main_chunk, {}, {{}}, nil, nil, {})",
-            fn_execute, var_boot_env, var_l
+            "return {}(main_chunk, {}, {{}}, nil, nil, ...)",
+            fn_execute, var_boot_env
         ));
+        let _ = &var_l; // 旧形态的 vararg 载体，现在由 `...` 直接透传，不再需要
 
         let mut mt_ctr = 0usize;
         let mut rewrite_mt = |mut s: String| -> String {
@@ -865,14 +869,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         //   ④ 字段之间不留空格/换行，整份产物只有一行。
         // 注意：这里只改外壳形态，入口/解码/装载流程一步未动。
         let wai_field = format!(
-            "{}=function({},...) local {} = ...;{} end",
-            wai, shell.self_var, var_l, wai_body
+            "{}=function({},...) {} end",
+            wai, shell.self_var, wai_body
         );
-        let (fu_self, fu_v) = (rng.name(), rng.name());
+        let fu_self = rng.name();
         let fu_field = format!(
-            "{}=function({},...) local {}=type; {} return function({}) return {}:{}({}) end end",
+            "{}=function({},...) local {}=type; {} return function(...) return {}:{}(...) end end",
             fu, fu_self, native_type, line_guard(&mut rng, &mut uni, true),
-            fu_v, fu_self, wai, fu_v
+            fu_self, wai
         );
         let shell_fields = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
 

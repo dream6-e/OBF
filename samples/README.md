@@ -4,16 +4,16 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，265,142 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），172,176 B |
-| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，464,469 B |
-| `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，246,606 B |
-| `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，150,467 B |
-| `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，290,774 B |
-| `string_encryption.obfuscated.MB.lua` | 同一加密回归夹具的 MB 模式产物，195,651 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，265,067 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），172,187 B |
+| `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，470,978 B |
+| `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，247,349 B |
+| `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，145,707 B |
+| `string_encryption.obfuscated.lua` | `test/string_encryption.lua` 的普通模式产物，291,793 B |
+| `string_encryption.obfuscated.MB.lua` | 同一加密回归夹具的 MB 模式产物，196,744 B |
 | `lua51-semantics.lua` / `lua51-semantics.expected.txt` | Lua 5.1 差分回归源与预期输出，覆盖多返回值、循环、元方法、upvalue、环境及禁用部分全局函数 |
-| `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，368,267 B；Lua 5.1 输出与预期一致 |
-| `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，335,551 B；Lua 5.1 输出与预期一致 |
+| `lua51-semantics.obfuscated.lua` | 上述差分回归的普通模式生成样本，378,268 B；Lua 5.1 输出与预期一致 |
+| `vm-isa-semantics.lua` / `.expected.txt` / `.obfuscated.lua` | 自定义 ISA 语义样本及普通模式生成产物，340,630 B；Lua 5.1 输出与预期一致 |
 
 2026-10-15 API 名战线残留面清理（`Generator_names.rs`，与 handle 映射互补）：handle 映射只覆盖用户代码的 GETGLOBAL/SETGLOBAL，产物里 VM 自身仍留有 ~322 处明文全局 API 标识符（pcall/tostring/setmetatable/getmetatable/rawset/rawget/newproxy/select/unpack/tonumber/error/getfenv/setfenv/typeof/raknet/debug/math/string/table/bit32/bit 等）。新增 `NameVault`（零新增壳层局部，借 `kreg` 表槽存放）：各发射点按名去重登记槽号，名字本身复用 `UniStream` 以数字密文落盘，boot 时一次性解码并按三态环境根（`getfenv() or _ENV or _G`）取值装槽；顺带连带修复 `compressor/codegen.rs` 的 `is_reserved_member`（`__index`/`__newindex` 点访问此前会被成员改名器改坏 userdata proxy 元表）。产物中 19 个 API 家族彻底清零，总命中从 322 压至 18（仅剩引导层固有根：`_ENV`/`_G`、uni prelude 自身的解码原语与 `fu` 壳早于 wai 的自足守卫）。`cargo test --lib` 160/160；三件套重生成 **210,425 / 118,556 / 331,393 B**（+13.5 / +7.4 / +11.1 KB，在 25 KB 预算内），双语法门与双运行时全部通过。
 
