@@ -35,12 +35,12 @@ pub struct FragStats {
 /// 方法体短于此值不切。
 const MIN_BODY: usize = 900;
 /// 单个碎片的目标长度区间。
-const MIN_FRAG: usize = 220;
-const MAX_FRAG: usize = 560;
+const MIN_FRAG: usize = 80;
+const MAX_FRAG: usize = 220;
 /// 每个方法最多切出几片（控制体积增长）。
 const MAX_PER_BODY: usize = 8;
 /// 单个碎片的形参上限（超过就整块不搬，保持调用点短）。
-const MAX_ARGS: usize = 8;
+const MAX_ARGS: usize = 24;
 
 const KEYWORDS: &[&str] = &[
     "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local",
@@ -613,11 +613,18 @@ pub fn fragment(entries: &mut Vec<Entry>, rng: &mut GenRng) -> FragStats {
     let mut stats = FragStats::default();
     let mut added: Vec<Entry> = Vec::new();
     for (_, self_var, params, body) in entries.iter_mut() {
-        let (f, m) = frag_body(body, self_var, params, &mut added, rng);
-        if f > 0 {
-            stats.bodies += 1;
+        let mut changed = false;
+        for _ in 0..3 {
+            let (f, m) = frag_body(body, self_var, params, &mut added, rng);
+            if f == 0 {
+                break;
+            }
+            changed = true;
             stats.frags += f;
             stats.machines += m;
+        }
+        if changed {
+            stats.bodies += 1;
         }
     }
     entries.extend(added);
