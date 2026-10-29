@@ -868,10 +868,6 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         //      因此这个包裹对 `...` 是透明的（luraph 的 `):T()(...)`）；
         //   ④ 字段之间不留空格/换行，整份产物只有一行。
         // 注意：这里只改外壳形态，入口/解码/装载流程一步未动。
-        let wai_field = format!(
-            "{}=function({},...) {} end",
-            wai, shell.self_var, wai_body
-        );
         let fu_self = rng.name();
         let fu_field = format!(
             "{}=function({},...) local {}=type; {} return function(...) return {}:{}(...) end end",
@@ -891,6 +887,12 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             m_wai += m;
         }
         let _ = (f_wai, m_wai);
+        // `fragment_body` 会把部分 wai 语句搬进兄弟字段；必须在改写后再快照入口体，
+        // 否则旧 wai_field 保留完整原体，同时新碎片字段又含搬出的代码（加密 payload 会双份）。
+        let wai_field = format!(
+            "{}=function({},...) {} end",
+            wai, shell.self_var, wai_body
+        );
         let shell_fields = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
 
         let mut out = String::new();
