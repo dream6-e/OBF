@@ -4,8 +4,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，279,564 B |
-| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），180,145 B |
+| `print.obfuscated.lua`    | `test/print.lua`（557 B）的普通模式产物，283,619 B |
+| `print.obfuscated.MB.lua` | 同一输入的 MB 模式产物（新自解压外壳），178,346 B |
 | `U4f2aU88c5.obfuscated.lua` | 仓库根目录 `#U4f2a#U88c5.lua`（“伪装.lua”，12,365 B）的普通模式产物，485,851 B |
 | `nested_protos.obfuscated.lua` | `test/nested_protos.lua` 的普通模式产物，266,329 B |
 | `nested_protos.obfuscated.MB.lua` | 同一嵌套 proto 回归夹具的 MB 模式产物，158,979 B |

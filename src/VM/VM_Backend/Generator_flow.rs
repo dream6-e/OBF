@@ -146,19 +146,63 @@ pub fn build_scatter(
         ikeys[0],ikeys[1],ikeys[2],ikeys[3]);
     lua.push_str(&format!("local {}={}; ",v_rd_c5,seq_lit));
 
-    // 对密文字节执行四段逆变换；采用两种等价调度形状之一。
-    let chain = if rng.range(0, 3) == 0 {
-        format!(
+    // 对密文字节执行完全相同的四段逆变换；仅随机选择调度外形。
+    // 新增 while/elseif 状态梯子，让解密步骤呈现分支态推进，而不改变逆变换顺序、参数或状态更新。
+    let chain = match rng.range(0, 3) {
+        0 => {
+            let mut states = Vec::with_capacity(4);
+            while states.len() < 4 {
+                let state = rng.range(0x50, 0xFFFFF);
+                if !states.contains(&state) {
+                    states.push(state);
+                }
+            }
+            let state_var = rng.name();
+            let mut dispatch = String::new();
+            for step in 0..4 {
+                let head = if step == 0 { "if" } else { "elseif" };
+                dispatch.push_str(&format!(
+                    "{head} {state_var}==0X{tag:X} then {plain}={st}[{seq}[0X{index:X}]]({plain}); ",
+                    head = head,
+                    state_var = state_var,
+                    tag = states[step],
+                    plain = v_rd_c1,
+                    st = v_rd_c4,
+                    seq = v_rd_c5,
+                    index = step + 1,
+                ));
+                if step == 3 {
+                    dispatch.push_str("break; ");
+                } else {
+                    dispatch.push_str(&format!(
+                        "{state_var}=0X{next:X}; ",
+                        state_var = state_var,
+                        next = states[step + 1],
+                    ));
+                }
+            }
+            format!(
+                "local {plain}={raw}; local {state_var}=0X{first:X}; while true do {dispatch}else break end end; {out}={plain}; ",
+                plain = v_rd_c1,
+                raw = v_rd_e,
+                state_var = state_var,
+                first = states[0],
+                dispatch = dispatch,
+                out = v_rd_o,
+            )
+        }
+        1 => format!(
             "local {plain}={raw}; local {j}=1; while {j}<=4 do {plain}={st}[{seq}[{j}]]({plain}); {j}={j}+1 end; {out}={plain}; ",
-            plain=v_rd_c1,raw=v_rd_e,j=v_rd_c2,st=v_rd_c4,seq=v_rd_c5,out=v_rd_o)
-    } else {
-        let s6 = rng.range(0x50, 0xFFFF0) as i64;
-        let p6 = (rng.range(1, 0xFFFF) as i64) * 2 + 1;
-        let (q1,q2,q3,qe)=(s6+p6,s6+2*p6,s6+3*p6,s6+3*p6);
-        format!(
-            "local {plain}={raw}; for {j}=0X{SS:X},0X{QE:X},0X{PP:X} do if {j}<0X{Q2:X} then if {j}<0X{Q1:X} then {plain}={st}[{seq}[0X1]]({plain}) else {plain}={st}[{seq}[0X2]]({plain}) end else if {j}<0X{Q3:X} then {plain}={st}[{seq}[0X3]]({plain}) else {plain}={st}[{seq}[0X4]]({plain}) end end end; {out}={plain}; ",
-            plain=v_rd_c1,raw=v_rd_e,j=v_rd_c2,st=v_rd_c4,seq=v_rd_c5,out=v_rd_o,
-            SS=s6,QE=qe,PP=p6,Q1=q1,Q2=q2,Q3=q3)
+            plain=v_rd_c1,raw=v_rd_e,j=v_rd_c2,st=v_rd_c4,seq=v_rd_c5,out=v_rd_o),
+        _ => {
+            let s6 = rng.range(0x50, 0xFFFF0) as i64;
+            let p6 = (rng.range(1, 0xFFFF) as i64) * 2 + 1;
+            let (q1,q2,q3,qe)=(s6+p6,s6+2*p6,s6+3*p6,s6+3*p6);
+            format!(
+                "local {plain}={raw}; for {j}=0X{SS:X},0X{QE:X},0X{PP:X} do if {j}<0X{Q2:X} then if {j}<0X{Q1:X} then {plain}={st}[{seq}[0X1]]({plain}) else {plain}={st}[{seq}[0X2]]({plain}) end else if {j}<0X{Q3:X} then {plain}={st}[{seq}[0X3]]({plain}) else {plain}={st}[{seq}[0X4]]({plain}) end end end; {out}={plain}; ",
+                plain=v_rd_c1,raw=v_rd_e,j=v_rd_c2,st=v_rd_c4,seq=v_rd_c5,out=v_rd_o,
+                SS=s6,QE=qe,PP=p6,Q1=q1,Q2=q2,Q3=q3)
+        }
     };
     let upds = format!(
         "{st}[{u1}]({plain},{cipher}); {st}[{u2}]({plain},{cipher}); {st}[{u3}]({plain},{cipher}); {st}[{u4}]({plain},{cipher}); ",
@@ -1110,5 +1154,90 @@ mod payload_whiten_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(String::from_utf8_lossy(&out.stdout).contains("WHITEN_OK"));
+    }
+
+    #[test]
+    fn scatter_reader_state_ladder_matches_other_lua51_shapes() {
+        use super::build_scatter;
+        use crate::VM::VM_Backend::Generator_util::GenRng;
+
+        let mut variants: [Option<String>; 3] = [None, None, None];
+        for _ in 0..256 {
+            let mut rng = GenRng::new(0);
+            let src = build_scatter(
+                &mut rng,
+                "bxor", "rotr", "rd", "rawbyte",
+                "bxa", "bxb", "bxr", "bxw", "bxg", "bxs",
+                "rtx", "rtn", "rtd", "rtg", "rtt",
+                "out", "guard", "cipher", "plain", "step", "loop", "ops", "seq",
+                3, 5, 7, 9, 3, 4,
+                "white", "wmul", "wadd", "pos", "cursor",
+            );
+            let shape = if src.contains("local plain=cipher; local ")
+                && src.contains("while true do if ")
+                && src.contains("elseif ")
+                && src.contains("[seq[0X1]]")
+            {
+                Some(0)
+            } else if src.contains("local plain=cipher; local step=1; while step<=4 do") {
+                Some(1)
+            } else if src.contains("local plain=cipher; for step=0X") {
+                Some(2)
+            } else {
+                None
+            };
+            if let Some(shape) = shape {
+                if shape == 0 {
+                    assert!(!src.contains("continue"));
+                    assert!(!src.contains("+="));
+                }
+                variants[shape].get_or_insert(src);
+            }
+            if variants.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        assert!(variants.iter().all(Option::is_some), "all three decrypt shapes should be emitted");
+
+        let mut script = String::from(
+            "local floor=math.floor; local function bxor(a,b) local r,p=0,1; for _=1,32 do local x,y=a%2,b%2; if x~=y then r=r+p end; a=(a-x)/2; b=(b-y)/2; p=p*2 end; return r end; local function rotr(a,n) n=n%8; local p=2^n; return floor(a/p)+(a%p)*2^(8-n) end; ",
+        );
+        for src in variants.into_iter().map(Option::unwrap) {
+            script.push_str(&format!(
+                "do local k1,k2,k3,k4=17,23,31,47; local white,wmul,wadd=91,33,27; local pos,cursor=0,9; local function rawbyte() return 173 end; {src} print(rd(),k1,k2,k3,k4) end; "
+            ));
+        }
+        let dir = std::env::temp_dir().join(format!("kryvex_scatter_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scatter test directory");
+        let script_path = dir.join("scatter.lua");
+        std::fs::write(&script_path, &script).expect("write scatter test script");
+        let toolchain = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin");
+        let mut reference = None;
+        for runtime in ["lua5.1", "luau"] {
+            let bin = toolchain.join(runtime);
+            if !bin.exists() {
+                continue;
+            }
+            let out = std::process::Command::new(&bin)
+                .arg(&script_path)
+                .output()
+                .unwrap_or_else(|e| panic!("run {runtime}: {e}"));
+            assert!(
+                out.status.success(),
+                "scatter {runtime} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let lines: Vec<&str> = stdout.lines().collect();
+            assert_eq!(lines.len(), 3, "unexpected {runtime} scatter outputs: {stdout}");
+            assert_eq!(lines[0], lines[1], "state ladder differs from loop shape in {runtime}");
+            assert_eq!(lines[1], lines[2], "loop shape differs from range shape in {runtime}");
+            if let Some(expected) = &reference {
+                assert_eq!(&stdout, expected, "Lua runtimes disagree on scatter outputs");
+            } else {
+                reference = Some(stdout);
+            }
+        }
+        assert!(reference.is_some(), "no Lua runtime available for scatter equivalence test");
     }
 }
