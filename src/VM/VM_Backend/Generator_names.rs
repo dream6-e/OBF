@@ -458,25 +458,84 @@ impl ShellMethods {
         wai_field: String,
         fu_field: String,
     ) -> Vec<String> {
-        let mut other_fields = self.into_fields();
-        other_fields.push(fu_field);
-        rng.shuffle(&mut other_fields);
+        let mut candidates = self.into_fields();
+        candidates.push(fu_field);
+        rng.shuffle(&mut candidates);
 
-        let (mut upper_len, mut lower_len) = if let Some(open_pos) = wai_field.find("[=[") {
-            let close_pos = wai_field[open_pos..]
-                .find("]=]")
-                .map(|p| open_pos + p + 3)
-                .unwrap_or(open_pos);
-            let u = est_compressed_len(&wai_field[..open_pos]);
-            let l = est_compressed_len(&wai_field[close_pos..]);
-            // 补偿 wai 上半段（execute 派发表）常量提升带来的额外压缩量与下半段 RadixSieve 进制转换增量
-            let adjust = (u + l) / 48;
-            (u, l + adjust)
-        } else {
-            let half = est_compressed_len(&wai_field) / 2;
-            (half, half)
+        // Payload 可能在 wai 中，也可能已随解头/装载片段提升为某个兄弟字段。
+        // 把所有包含大 long-string 的字段作为中间锚点，余下功能字段再分到两侧。
+        let payload_spans = |src: &str| -> Vec<(usize, usize)> {
+            let mut spans = Vec::new();
+            let mut cursor = 0usize;
+            while let Some(rel_open) = src[cursor..].find("[=[") {
+                let open = cursor + rel_open;
+                let content = open + 3;
+                let Some(rel_close) = src[content..].find("]=]") else {
+                    break;
+                };
+                let end = content + rel_close + 3;
+                spans.push((open, end));
+                cursor = end;
+            }
+            spans
         };
+        const PAYLOAD_MIN_BYTES: usize = 1024;
+        let mut payload_fields = Vec::new();
+        let mut functional_fields = Vec::new();
+        let mut upper_len = 0usize;
+        let mut lower_len = 0usize;
 
+        let mut wai_field = Some(wai_field);
+        let wai_spans = payload_spans(wai_field.as_deref().unwrap());
+        let wai_has_payload = wai_spans
+            .iter()
+            .any(|&(open, end)| end.saturating_sub(open + 6) >= PAYLOAD_MIN_BYTES);
+        if wai_has_payload {
+            let (first_open, _) = wai_spans[0];
+            let (_, last_end) = *wai_spans.last().unwrap();
+            let anchor = wai_field.as_deref().unwrap();
+            upper_len += est_compressed_len(&anchor[..first_open]);
+            lower_len += est_compressed_len(&anchor[last_end..]);
+            payload_fields.push(wai_field.take().unwrap());
+        }
+
+        for field in candidates {
+            let spans = payload_spans(&field);
+            let large_spans: Vec<(usize, usize)> = spans
+                .iter()
+                .copied()
+                .filter(|&(open, end)| end.saturating_sub(open + 6) >= PAYLOAD_MIN_BYTES)
+                .collect();
+            if large_spans.is_empty() {
+                functional_fields.push(field);
+            } else {
+                let (first_open, _) = large_spans[0];
+                let (_, last_end) = *large_spans.last().unwrap();
+                upper_len += est_compressed_len(&field[..first_open]);
+                lower_len += est_compressed_len(&field[last_end..]);
+                payload_fields.push(field);
+            }
+        }
+
+        if payload_fields.is_empty() {
+            // 无大 payload 时沿用 wai 为锚点的旧布局，避免改变普通产物外壳。
+            let anchor = wai_field.as_deref().unwrap();
+            if let Some(&(open, end)) = wai_spans.first() {
+                upper_len = est_compressed_len(&anchor[..open]);
+                lower_len = est_compressed_len(&anchor[end..]);
+            } else {
+                let half = est_compressed_len(anchor) / 2;
+                upper_len = half;
+                lower_len = half;
+            }
+            payload_fields.push(wai_field.take().unwrap());
+        } else if !wai_has_payload {
+            functional_fields.push(wai_field.take().unwrap());
+        }
+
+        rng.shuffle(&mut payload_fields);
+        let mut other_fields = functional_fields;
+        rng.shuffle(&mut other_fields);
         let weights: Vec<usize> = other_fields.iter().map(|f| est_compressed_len(f) + 1).collect();
         let mut order: Vec<usize> = (0..other_fields.len()).collect();
         order.sort_by(|&a, &b| weights[b].cmp(&weights[a]).then(a.cmp(&b)));
@@ -557,7 +616,7 @@ impl ShellMethods {
                 lower.push(field);
             }
         }
-        out.push(wai_field);
+        out.extend(payload_fields);
         out.extend(lower);
         out
     }
@@ -1071,6 +1130,48 @@ mod tests {
             "upper/lower functional code should be balanced around payload: upper={} lower={} ratio={:.3}",
             upper_est,
             lower_est,
+            ratio
+        );
+    }
+
+    #[test]
+    fn centers_payload_when_fragmentation_moves_it_into_a_sibling_field() {
+        let mut rng = GenRng::new(0xA11C_E001);
+        let mut shell = ShellMethods::new(&mut rng);
+        for k in 0..10 {
+            let body = "local a=0X10; a=a+0X20; ".repeat(20 + k * 5) + "return a";
+            shell.add(&mut rng, &["x"], body);
+        }
+        let before = "local x=0; x=x+1; ".repeat(100);
+        let payload = "P".repeat(60_000);
+        let after = "x=x+1; ".repeat(100);
+        let payload_method = format!(
+            "{}local raw=([=[{}]=]); {}return #raw+x;",
+            before, payload, after
+        );
+        shell.add(&mut rng, &["x"], payload_method);
+
+        let wai = rng.name();
+        let fu = rng.name();
+        let wai_field = format!(
+            "{}=function({}) {} return 1 end",
+            wai,
+            shell.self_var,
+            "local q=0; ".repeat(60)
+        );
+        let fu_field = format!("{}=function(z) return z:{}() end", fu, wai);
+        let balanced = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
+        let joined = format!("return ({{ {} }}):{}()", balanced.join(", "), fu);
+        let open = joined.find("[=[").expect("payload must be present");
+        let close = joined[open..].find("]=]").map(|p| open + p + 3).unwrap();
+        let upper = est_compressed_len(&joined[..open]);
+        let lower = est_compressed_len(&joined[close..]);
+        let ratio = upper as f64 / (upper + lower) as f64;
+        assert!(
+            (0.42..=0.58).contains(&ratio),
+            "sibling payload should be centered: upper={} lower={} ratio={:.3}",
+            upper,
+            lower,
             ratio
         );
     }
