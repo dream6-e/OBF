@@ -874,6 +874,13 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             fu, fu_self, native_type, line_guard(&mut rng, &mut uni, true),
             fu_self, wai
         );
+        // 先递归拆原有闭包体内的顺序逻辑：局部 helper 仍在原词法作用域，
+        // 因此捕获同一个 upvalue cell；再把 shell/wai 的片段提升为兄弟字段。
+        crate::VM::VM_Backend::Generator_fragment::fragment_nested_body(
+            &mut wai_body,
+            &mut rng,
+            4,
+        );
         // 结构对齐 luraph14.9 §3.3/§3.5：把巨型方法体切成碎函数 + 单次调用树
         // （每片在外层表里各占一个字段，只被调用一次；原位置换成微状态机）。
         let _frag = shell.fragment_all(&mut rng);

@@ -405,6 +405,287 @@ fn word_appears(text: &str, name: &str) -> bool {
     false
 }
 
+#[derive(Clone)]
+struct LexTok {
+    text: String,
+    start: usize,
+    end: usize,
+    word: bool,
+}
+
+/// 最小 Lua 词法扫描：字符串与注释不参与关键字/块匹配。
+fn lex_code(src: &str) -> Vec<LexTok> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b[i] == b'-' && i + 1 < b.len() && b[i + 1] == b'-' {
+            let mut j = i + 2;
+            if j < b.len() && b[j] == b'[' {
+                if let Some(end) = long_bracket(b, j) {
+                    i = end;
+                    continue;
+                }
+            }
+            while j < b.len() && b[j] != b'\n' {
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        if b[i] == b'[' {
+            if let Some(end) = long_bracket(b, i) {
+                i = end;
+                continue;
+            }
+        }
+        if b[i] == b'\'' || b[i] == b'"' {
+            i = skip_string(b, i);
+            continue;
+        }
+        let start = i;
+        if is_ident_start(b[i]) {
+            i += 1;
+            while i < b.len() && is_ident_char(b[i]) {
+                i += 1;
+            }
+            out.push(LexTok {
+                text: src[start..i].to_string(),
+                start,
+                end: i,
+                word: true,
+            });
+        } else {
+            i += 1;
+            out.push(LexTok {
+                text: src[start..i].to_string(),
+                start,
+                end: i,
+                word: false,
+            });
+        }
+    }
+    out
+}
+
+/// 返回当前 source 直接包含的函数体范围；嵌套函数由递归调用负责，避免重叠改写。
+fn direct_function_bodies(src: &str) -> Vec<(usize, usize)> {
+    let toks = lex_code(src);
+    let mut result = Vec::new();
+    let mut i = 0usize;
+    while i < toks.len() {
+        if toks[i].text != "function" || !toks[i].word {
+            i += 1;
+            continue;
+        }
+        // 函数名只能包含标识符、点和冒号；第一个 `(` 是参数表起点。
+        let mut open = i + 1;
+        while open < toks.len() && toks[open].text != "(" {
+            if toks[open].text == ";" || toks[open].text == "=" {
+                break;
+            }
+            open += 1;
+        }
+        if open >= toks.len() || toks[open].text != "(" {
+            i += 1;
+            continue;
+        }
+        let mut paren = 1i32;
+        let mut close = open + 1;
+        while close < toks.len() && paren > 0 {
+            match toks[close].text.as_str() {
+                "(" => paren += 1,
+                ")" => paren -= 1,
+                _ => {}
+            }
+            close += 1;
+        }
+        if paren != 0 {
+            i += 1;
+            continue;
+        }
+        let body_start = toks[close - 1].end;
+
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Block {
+            Function,
+            If,
+            LoopPending,
+            Loop,
+            Do,
+            Repeat,
+        }
+        let mut stack = vec![Block::Function];
+        let mut j = close;
+        let mut body_end = None;
+        while j < toks.len() {
+            if !toks[j].word {
+                j += 1;
+                continue;
+            }
+            match toks[j].text.as_str() {
+                "function" => stack.push(Block::Function),
+                "if" => stack.push(Block::If),
+                "for" | "while" => stack.push(Block::LoopPending),
+                "do" => {
+                    if stack.last() == Some(&Block::LoopPending) {
+                        *stack.last_mut().unwrap() = Block::Loop;
+                    } else {
+                        stack.push(Block::Do);
+                    }
+                }
+                "repeat" => stack.push(Block::Repeat),
+                "end" => {
+                    stack.pop();
+                    if stack.is_empty() {
+                        body_end = Some((toks[j].start, j + 1));
+                        break;
+                    }
+                }
+                "until" => {
+                    if stack.last() == Some(&Block::Repeat) {
+                        stack.pop();
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if let Some((end_start, after_idx)) = body_end {
+            if body_start <= end_start {
+                result.push((body_start, end_start));
+            }
+            i = after_idx;
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
+/// 在同一词法作用域内，将安全的顺序语句块移进局部闭包。
+/// 局部闭包按 Lua 词法规则直接捕获上层 upvalue，因此写回共享 cell 不变；
+/// 与跨方法搬移不同，不需要猜参数/返回变量，也不会改变 VM 算法。
+fn fragment_local_scope(src: &str, rng: &mut GenRng, budget: &mut usize) -> String {
+    if *budget == 0 || src.len() < 500 {
+        return src.to_string();
+    }
+    let chunks = split_chunks(src);
+    if chunks.len() < 5 {
+        return src.to_string();
+    }
+    let infos: Vec<ChunkInfo> = chunks.iter().map(|&(a, b)| inspect(&src[a..b])).collect();
+    let hard_bad: Vec<bool> = infos
+        .iter()
+        .map(|i| i.local_return || i.stray_break || i.has_vararg || i.has_nested_fn)
+        .collect();
+    let mut replace: Vec<Option<(usize, usize, String)>> = vec![None; chunks.len()];
+    let mut remaining = (*budget).min(2);
+    let mut run = 0usize;
+    while run < chunks.len() && remaining > 0 {
+        if hard_bad[run] {
+            run += 1;
+            continue;
+        }
+        let run_start = run;
+        while run < chunks.len() && !hard_bad[run] {
+            run += 1;
+        }
+        let run_end = run;
+        let mut k = run_start;
+        while k < run_end && remaining > 0 {
+            let mut hi = k + 1;
+            let mut size = chunks[k].1 - chunks[k].0;
+            while size < 180 && hi < run_end && size + chunks[hi].1 - chunks[hi].0 <= 700 {
+                size += chunks[hi].1 - chunks[hi].0;
+                hi += 1;
+            }
+            if size < 180 || group_leaks(src, &chunks, &infos, k, hi) {
+                k += 1;
+                continue;
+            }
+            let mut name = rng.name();
+            while word_appears(src, &name) {
+                name = rng.name();
+            }
+            let mut state = rng.name();
+            while word_appears(src, &state) || state == name {
+                state = rng.name();
+            }
+            let start = rng.range(0x10000, 0x7fffff);
+            let done = loop {
+                let candidate = rng.range(0x10000, 0x7fffff);
+                if candidate != start {
+                    break candidate;
+                }
+            };
+            let text = format!(
+                "local {name}=function() {body} return {done:#X} end;local {state}={start:#X};while true do if {state}=={start:#X} then if {state}~={start:#X} then else {state}={name}() end elseif {state}=={done:#X} then if {state}~={done:#X} then else break end else {state}={start:#X};break end end;",
+                name = name,
+                state = state,
+                start = start,
+                done = done,
+                body = src[chunks[k].0..chunks[hi - 1].1].trim(),
+            );
+            replace[k] = Some((k, hi, text));
+            remaining -= 1;
+            k = hi;
+        }
+    }
+    let used = (*budget).min(2) - remaining;
+    if used == 0 {
+        return src.to_string();
+    }
+    *budget -= used;
+    let mut out = String::with_capacity(src.len() + used * 40);
+    let mut i = 0usize;
+    while i < chunks.len() {
+        if let Some((_, hi, text)) = &replace[i] {
+            out.push_str(text);
+            i = *hi;
+        } else {
+            out.push_str(&src[chunks[i].0..chunks[i].1]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 递归遍历原本就存在的闭包，在闭包体内按作用域安全地再做一次函数拆分。
+/// 每个递归层先处理其子闭包，再拆本层顺序块；深度/总预算限制增量体积。
+fn fragment_nested_functions(src: &str, rng: &mut GenRng, budget: &mut usize, depth: usize) -> String {
+    if *budget == 0 || depth >= 5 {
+        return src.to_string();
+    }
+    let spans = direct_function_bodies(src);
+    let mut out = String::with_capacity(src.len() + 128);
+    let mut cursor = 0usize;
+    let mut changed = false;
+    for (start, end) in spans {
+        if start < cursor || end > src.len() {
+            continue;
+        }
+        let inner = fragment_nested_functions(&src[start..end], rng, budget, depth + 1);
+        let inner = fragment_local_scope(&inner, rng, budget);
+        out.push_str(&src[cursor..start]);
+        out.push_str(&inner);
+        cursor = end;
+        changed |= inner != src[start..end];
+        if *budget == 0 {
+            break;
+        }
+    }
+    if !changed {
+        return src.to_string();
+    }
+    out.push_str(&src[cursor..]);
+    out
+}
+
 /// 对**单个方法体**做碎片化：碎片写进 `added`，方法体原地改写。
 /// 返回 (碎片数, 状态机数)。
 ///
@@ -608,11 +889,19 @@ pub fn frag_body(
     (frags, machines)
 }
 
+/// 对尚未登记的入口方法体，递归拆分已有闭包中的安全顺序块。
+pub fn fragment_nested_body(body: &mut String, rng: &mut GenRng, budget: usize) {
+    let mut remaining = budget;
+    *body = fragment_nested_functions(body, rng, &mut remaining, 0);
+}
+
 /// 对已登记的外壳条目做碎片化（方法体较小的那些通常达不到 MIN_BODY，直接跳过）。
 pub fn fragment(entries: &mut Vec<Entry>, rng: &mut GenRng) -> FragStats {
     let mut stats = FragStats::default();
     let mut added: Vec<Entry> = Vec::new();
+    let mut nested_budget = 16usize;
     for (_, self_var, params, body) in entries.iter_mut() {
+        *body = fragment_nested_functions(body, rng, &mut nested_budget, 0);
         let mut changed = false;
         for _ in 0..3 {
             let (f, m) = frag_body(body, self_var, params, &mut added, rng);
@@ -653,7 +942,9 @@ fn group_leaks(
 
 #[cfg(test)]
 mod tests {
-    use super::split_chunks;
+    use super::{fragment_nested_body, split_chunks};
+    use crate::VM::VM_Backend::Generator_util::GenRng;
+    use std::process::Command;
 
     #[test]
     fn splits_only_top_level_semicolons() {
@@ -674,5 +965,39 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert!(parts[0].contains("one; two"));
         assert_eq!(parts[1], " -- comment; ignored\nb=2;");
+    }
+
+    #[test]
+    fn nested_scope_fission_preserves_captured_upvalues_in_lua51() {
+        let lua = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/bin/lua5.1");
+        if !lua.exists() {
+            return;
+        }
+        let mut source = String::from("local calc=function(v) local x=v;");
+        for _ in 0..100 {
+            source.push_str("x=x+1;");
+        }
+        source.push_str("return x end; print(calc(17));");
+        let mut transformed = source.clone();
+        fragment_nested_body(&mut transformed, &mut GenRng::new(1), 2);
+        assert!(transformed.contains("while true do"), "nested body was not fragmented");
+        assert_ne!(transformed, source);
+
+        let dir = std::env::temp_dir().join(format!("kryvex_fragment_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fragment test directory");
+        let original_path = dir.join("original.lua");
+        let transformed_path = dir.join("transformed.lua");
+        std::fs::write(&original_path, source).expect("write original Lua source");
+        std::fs::write(&transformed_path, transformed).expect("write transformed Lua source");
+        let run = |path: &std::path::Path| {
+            let result = Command::new(&lua).arg(path).output().expect("run Lua 5.1");
+            assert!(
+                result.status.success(),
+                "Lua 5.1 failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            String::from_utf8_lossy(&result.stdout).into_owned()
+        };
+        assert_eq!(run(&original_path), run(&transformed_path));
     }
 }
