@@ -411,6 +411,32 @@ impl ShellMethods {
         }
     }
 
+    /// 把巨型方法体切成"碎函数 + 单次调用树"（见 `Generator_fragment`）。
+    /// 只改结构：新碎片作为兄弟方法登记进来，原方法体换成微状态机 + 单次调用。
+    pub fn fragment_all(&mut self, rng: &mut GenRng) -> super::Generator_fragment::FragStats {
+        super::Generator_fragment::fragment(&mut self.entries, rng)
+    }
+
+    /// 对已登记方法中的闭包体做 upvalue 保守分析，安全片段提升为外层兄弟方法。
+    pub fn fragment_nested_body(&mut self, body: &mut String, rng: &mut GenRng, budget: usize) -> usize {
+        let mut added: Vec<super::Generator_fragment::Entry> = Vec::new();
+        let self_var = self.self_var.clone();
+        let count = super::Generator_fragment::fragment_nested_body(
+            body, &self_var, &mut added, rng, budget,
+        );
+        self.entries.extend(added);
+        count
+    }
+
+    /// 对**尚未登记**的方法体（例如最终的 `wai` 装配体）做碎片化，碎片直接登记为兄弟方法。
+    pub fn fragment_body(&mut self, body: &mut String, rng: &mut GenRng) -> (usize, usize) {
+        let mut added: Vec<super::Generator_fragment::Entry> = Vec::new();
+        let self_var = self.self_var.clone();
+        let r = super::Generator_fragment::frag_body(body, &self_var, &[], &mut added, rng);
+        self.entries.extend(added);
+        r
+    }
+
     /// 导出外层表壳的 `xx=function(s,a,b,...) ... end` 字段列表。
     pub fn into_fields(&self) -> Vec<String> {
         self.entries

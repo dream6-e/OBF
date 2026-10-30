@@ -14,6 +14,7 @@
 //!      运行期通过 ChaCha KDF 派生掩码与模素数逆元动态还原共享表下标后惰性解密。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use rand::{Rng, rngs::StdRng};
 use crate::VM::VM_Backend::CustomIsa::{VmOp, VM_OPCODE_COUNT};
 use crate::VM::VM_Backend::Generator_chacha::derive_word;
@@ -119,6 +120,15 @@ fn harvest_api_decoys() -> Vec<Vec<u8>> {
         }
     }
     out
+}
+
+/// `所有api.txt` 抽取出的真实 API/属性名池（进程内只构建一次）。
+///
+/// 目标五：哑原型、诱饵条目与诱饵偏移都要能用**真实业务字符串**伪装，
+/// 不能再出现"一个字符串都没有"这种一眼可辨的垃圾函数特征。
+pub(crate) fn api_decoy_pool() -> &'static [Vec<u8>] {
+    static POOL: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    POOL.get_or_init(harvest_api_decoys)
 }
 
 fn parse_protos_preorder(
@@ -339,9 +349,13 @@ impl RosettaPlan {
         let mut all_emit_entries: Vec<EmitConstEntry> =
             Vec::with_capacity(total_str_refs + total_other_refs + rosetta_strings.len());
         let mut proto_plans: Vec<ProtoConstPlan> = Vec::with_capacity(parsed.len());
+        // P0-2 前置：每原型自己的常量留在自己的批次里（只有罗塞塔共享串跨原型混排）。
+        // 这样「槽位 ↔ 引用点所在块密钥」始终处于同一原型上下文，加盐才能两侧同式。
+        let mut per_proto_entries: Vec<Vec<EmitConstEntry>> = Vec::new();
 
         for p in parsed {
             let mut cperm: Vec<u32> = Vec::with_capacity(p.local_consts.len());
+            let mut own_entries: Vec<EmitConstEntry> = Vec::new();
             let mut decoy_slots: Vec<u32> = Vec::with_capacity(p.decoy_consts.len());
             let mut all_proto_gslots: Vec<u32> =
                 Vec::with_capacity(p.local_consts.len() + p.decoy_consts.len());
@@ -359,7 +373,7 @@ impl RosettaPlan {
                     let f64_bytes = (token as f64).to_le_bytes().to_vec();
                     cperm.push(g_slot);
                     all_proto_gslots.push(g_slot);
-                    all_emit_entries.push(EmitConstEntry {
+                    own_entries.push(EmitConstEntry {
                         slot: g_slot,
                         c_type: 2,
                         bytes: f64_bytes,
@@ -369,7 +383,7 @@ impl RosettaPlan {
                     even_cursor += 1;
                     cperm.push(g_slot);
                     all_proto_gslots.push(g_slot);
-                    all_emit_entries.push(EmitConstEntry {
+                    own_entries.push(EmitConstEntry {
                         slot: g_slot,
                         c_type: ct,
                         bytes,
@@ -382,13 +396,14 @@ impl RosettaPlan {
                 even_cursor += 1;
                 decoy_slots.push(g_slot);
                 all_proto_gslots.push(g_slot);
-                all_emit_entries.push(EmitConstEntry {
+                own_entries.push(EmitConstEntry {
                     slot: g_slot,
                     c_type: 2,
                     bytes: decoy_bytes,
                 });
             }
 
+            per_proto_entries.push(own_entries);
             proto_plans.push(ProtoConstPlan {
                 raw_insts: p.raw_insts,
                 cperm,
@@ -438,6 +453,8 @@ impl RosettaPlan {
         }
 
         let n_protos = proto_plans.len();
+        // 罗塞塔共享串（all_emit_entries）按权重切给各原型；各原型自己的常量
+        // 先做本地洗牌，再与分到的共享串合并做一次整体洗牌。
         if n_protos == 1 {
             proto_plans[0].emit_batch = all_emit_entries;
         } else if n_protos > 1 {
@@ -465,6 +482,19 @@ impl RosettaPlan {
             for leftover in iter {
                 proto_plans[n_protos - 1].emit_batch.push(leftover);
             }
+        }
+        for (pi, plan) in proto_plans.iter_mut().enumerate() {
+            let mut own = std::mem::take(&mut per_proto_entries[pi]);
+            for i in (1..own.len()).rev() {
+                let j = rng.random_range(0..=i);
+                own.swap(i, j);
+            }
+            own.append(&mut plan.emit_batch);
+            for i in (1..own.len()).rev() {
+                let j = rng.random_range(0..=i);
+                own.swap(i, j);
+            }
+            plan.emit_batch = own;
         }
 
         Self {

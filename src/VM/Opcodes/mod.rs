@@ -167,6 +167,9 @@ pub struct OpcodeConfig {
     pub jmp_state: String,
     /// 冷块（如 IteratorNext）读取的运行期跳转密钥槽占位符（冷块调用前同步 bxor(jmp_state, ld_key)）。
     pub jmp_key_cold: String,
+    /// P0-1：基本块入口密钥的运行期载体（execute 局部），随控制流转移被
+    /// 边补偿常量异或推进。同一基本块内取恒定值，跨跳转需在边源处对齐。
+    pub uf_var: String,
     /// 方法化后的返回协议：`{RET0}`（无返回值）/`{RET1}`（单值）/
     /// `{RET2}`（表+区间）三个返回钩子的调用点。
     pub ret0: String,

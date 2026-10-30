@@ -825,10 +825,14 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
         let fu = rng.name();
         wai_body.push_str(&lg_call1);
         wai_body.push_str(&lg_call0);
+        // 【vararg 完全透明】壳方法自己就是 vararg 函数，这里把收到的 `...` 原样交给
+        // execute；payload 的 `select('#', ...)` 与 `{...}` 因此看到的是**宿主真实
+        // 传进来的全部实参**（旧形态只取第一个：`local L = ...` 后传 L）。
         wai_body.push_str(&format!(
-            "return {}(main_chunk, {}, {{}}, nil, nil, {})",
-            fn_execute, var_boot_env, var_l
+            "return {}(main_chunk, {}, {{}}, nil, nil, ...)",
+            fn_execute, var_boot_env
         ));
+        let _ = &var_l; // 旧形态的 vararg 载体，现在由 `...` 直接透传，不再需要
 
         let mut mt_ctr = 0usize;
         let mut rewrite_mt = |mut s: String| -> String {
@@ -852,22 +856,53 @@ pub(super) fn build_chain_tail(mid: ChainMid) -> String {
             s
         };
         shell.map_bodies(&mut rewrite_mt);
-        let wai_body = rewrite_mt(wai_body);
+        let mut wai_body = rewrite_mt(wai_body);
 
-        let (wai_p0, wai_p1) = (rng.name(), rng.name());
-        let wai_field = format!(
-            "{}=function({},{},{})\n{} end",
-            wai, shell.self_var, wai_p0, wai_p1, wai_body
-        );
-        let (fu_self, fu_p0, fu_p1) = (rng.name(), rng.name(), rng.name());
+        // 【外形对齐 luraph14.9】整份产物 = 一个表达式，形如：
+        //     return({ 字段表 }):入口()(...)
+        // 与旧形态（`local X = ...;` 前缀 + `return ({ 表 }):入口()`）的区别：
+        //   ① 没有块级 `local … = ...` 前缀 —— 入口方法自己带 `...`，脚本的 vararg
+        //      由入口收下（旧形态也是只取第一个 vararg，语义一致）；
+        //   ② 入口是表里的一个字段，只有到文件最末尾才出现 `:入口(`；
+        //   ③ 入口被调用后返回一个闭包，再由 `(...)` 用宿主 vararg 调一次，
+        //      因此这个包裹对 `...` 是透明的（luraph 的 `):T()(...)`）；
+        //   ④ 字段之间不留空格/换行，整份产物只有一行。
+        // 注意：这里只改外壳形态，入口/解码/装载流程一步未动。
+        let fu_self = rng.name();
         let fu_field = format!(
-            "{}=function({},{},{}) local {}=type; {} return {}:{}() end",
-            fu, fu_self, fu_p0, fu_p1, native_type, line_guard(&mut rng, &mut uni, true), fu_self, wai
+            "{}=function({},...) local {}=type; {} return function(...) return {}:{}(...) end end",
+            fu, fu_self, native_type, line_guard(&mut rng, &mut uni, true),
+            fu_self, wai
+        );
+        // 递归检查已有闭包的词法引用；可证明不依赖外层 upvalue 的安全块，
+        // 直接提升为外层兄弟方法，而不是继续把 helper 留在原大字段里。
+        let _nested_lifts = shell.fragment_nested_body(&mut wai_body, &mut rng, 4);
+        // 结构对齐 luraph14.9 §3.3/§3.5：把巨型方法体切成碎函数 + 单次调用树
+        // （每片在外层表里各占一个字段，只被调用一次；原位置换成微状态机）。
+        let _frag = shell.fragment_all(&mut rng);
+        let (mut f_wai, mut m_wai) = (0usize, 0usize);
+        for _ in 0..6 {
+            let (f, m) = shell.fragment_body(&mut wai_body, &mut rng);
+            if m == 0 {
+                break;
+            }
+            f_wai += f;
+            m_wai += m;
+        }
+        let _ = (f_wai, m_wai);
+        // `fragment_body` 会把部分 wai 语句搬进兄弟字段；必须在改写后再快照入口体，
+        // 否则旧 wai_field 保留完整原体，同时新碎片字段又含搬出的代码（加密 payload 会双份）。
+        let wai_field = format!(
+            "{}=function({},...) {} end",
+            wai, shell.self_var, wai_body
         );
         let shell_fields = shell.into_balanced_fields(&mut rng, wai_field, fu_field);
 
         let mut out = String::new();
-        out.push_str(&format!("local {} = ...;\n", var_l));
-        out.push_str(&format!("return ({{ {} }}):{}()", shell_fields.join(", "), fu));
+        out.push_str(&format!(
+            "return({{{}}}):{}()(...)",
+            shell_fields.join(","),
+            fu
+        ));
         out
 }

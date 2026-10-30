@@ -156,14 +156,14 @@ pub struct KeyTokens {
 
 /// 把一组 u32（密钥字 / 盐 / kind）拆成 token：返回 (声明片段, 取用表达式)。
 /// `op` 为 P 表里的异或实现名。
-pub fn token_value(rng: &mut GenRng, keys: &CipherKeys, v: u32, op: &str, tx: u32, h: &str) -> (String, String) {
+pub fn token_value(rng: &mut GenRng, keys: &CipherKeys, v: u32, op: &str, tx: u32, _h: &str) -> (String, String) {
     let t = rng.name();
     let m = rng.next();
     // 运输线异或闭包带线扰动 tx：X 半边补偿 ^tx，(X, 掩码) 不再直接抵消。
     let x = rng.obfuscate_num((v ^ m ^ tx) as i64, 1, keys);
     let me = rng.obfuscate_num(m as i64, 1, keys);
-    // 掩码半边上叠 +h-h（自抵消）：中间值逐宿主不同，结果不变
-    let decl = format!("local {t}={op}({x},{me}+({h}-{h})); ", t = t, op = op, x = x, me = me, h = h);
+    // 目标五：不再追加 `me+(h-h)` 这类一步化简即可删除的恒等式装饰。
+    let decl = format!("local {t}={op}({x},{me}); ", t = t, op = op, x = x, me = me);
     (decl, t)
 }
 

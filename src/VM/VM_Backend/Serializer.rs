@@ -407,6 +407,15 @@ fn ci(op: VmOp, a: u8, b: i32, c: i32) -> CustomInstruction {
     CustomInstruction { op, a, b, c, source_pc: 0 }
 }
 
+/// 目标五：垃圾/哑原型必须携带**真实业务字符串**，不能再出现
+/// "一个字符串常量都没有"这种一眼可辨的垃圾函数特征；同时函数体形态
+/// 不能所有哑原型共用同一套指令骨架（那会变成新的批量指纹）。
+///
+/// 从 `所有api.txt` 抽取的 API/属性名池里随机借 2 个名字，用
+/// `NewTable / GetTable / SetTable / LoadK / 算术 / Return` 组成
+/// "像业务代码"的函数体：寄存器编号、加载顺序、额外读/移动指令
+/// 与算术运算符全部逐原型随机。字符串随后由 `Rosetta` 统一收进
+/// 共享罗塞塔表并 token 化，产物里不会有明文标识符。
 fn make_dummy_chunk(rng: &mut StdRng) -> Chunk {
     let e0 = rng.random_range(0x400u64..=0x406u64);
     let e1 = rng.random_range(0x401u64..=0x407u64);
@@ -418,12 +427,56 @@ fn make_dummy_chunk(rng: &mut StdRng) -> Chunk {
         2 => Opcode::Mul,
         _ => Opcode::Div,
     };
-    let insts = vec![
-        make_instruction(Opcode::LoadK, 0, 0, 0, 1),
-        make_instruction(Opcode::LoadK, 1, 1, 0, 1),
-        make_instruction(arith_op, 2, 0, 1, 1),
-        make_instruction(Opcode::Return, 2, 2, 0, 1),
+    let pool = crate::VM::VM_Backend::Rosetta::api_decoy_pool();
+    let mut pick_name = |rng: &mut StdRng| -> Vec<u8> {
+        pool[rng.random_range(0..pool.len())].clone()
+    };
+    let s0 = pick_name(rng);
+    let s1 = pick_name(rng);
+
+    // 逐原型随机寄存器分配（互不相同），避免所有哑函数共用同一骨架
+    let mut regs: Vec<u8> = (0..8u8).collect();
+    regs.shuffle(rng);
+    let (r_tab, r_s0, r_s1, r_get, r_get2, r_n0, r_n1) = (
+        regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6],
+    );
+    let (i_s0, i_s1, i_get, i_tab, i_get2, i_n0, i_n1) = (
+        r_s0 as i32,
+        r_s1 as i32,
+        r_get as i32,
+        r_tab as i32,
+        r_get2 as i32,
+        r_n0 as i32,
+        r_n1 as i32,
+    );
+
+    // 语义（若被误调用）：t = {}; a = t[s0]; b = t[s1]; t[key] = c0 <op> c1; return a
+    // 全部使用合法寄存器/常量引用，不依赖任何宿主 API。
+    let mut insts: Vec<Instruction> = Vec::with_capacity(12);
+    insts.push(make_instruction(Opcode::NewTable, r_tab, 0, 0, 1));
+    let mut loads = vec![
+        make_instruction(Opcode::LoadK, r_s0, 0, 0, 1),
+        make_instruction(Opcode::LoadK, r_s1, 1, 0, 1),
     ];
+    if rng.random_range(0..2u8) == 0 {
+        loads.reverse();
+    }
+    insts.extend(loads);
+    insts.push(make_instruction(Opcode::GetTable, r_get, i_tab, i_s0, 1));
+    if rng.random_range(0..2u8) == 0 {
+        insts.push(make_instruction(Opcode::GetTable, r_get2, i_tab, i_s1, 1));
+    }
+    insts.push(make_instruction(Opcode::LoadK, r_n0, 2, 0, 1));
+    insts.push(make_instruction(Opcode::LoadK, r_n1, 3, 0, 1));
+    insts.push(make_instruction(arith_op, r_n0, i_n0, i_n1, 1));
+    let key_reg = if rng.random_range(0..2u8) == 0 { i_s0 } else { i_s1 };
+    insts.push(make_instruction(Opcode::SetTable, r_tab, key_reg, i_n0, 1));
+    if rng.random_range(0..2u8) == 0 {
+        insts.push(make_instruction(Opcode::Move, r_n1, i_get, 0, 1));
+    }
+    insts.push(make_instruction(Opcode::Return, r_get, 2, 0, 1));
+
+    let line_count = insts.len();
     Chunk {
         name: String::new(),
         line_defined: -1,
@@ -431,11 +484,16 @@ fn make_dummy_chunk(rng: &mut StdRng) -> Chunk {
         upvalue_count: 0,
         param_count: rng.random_range(0..=3),
         is_vararg: 0,
-        max_stack: rng.random_range(3..=6),
+        max_stack: 8,
         instructions: insts,
-        constants: vec![Constant::Number(c0), Constant::Number(c1)],
+        constants: vec![
+            Constant::String(s0),
+            Constant::String(s1),
+            Constant::Number(c0),
+            Constant::Number(c1),
+        ],
         protos: Vec::new(),
-        lines: vec![1, 1, 1, 1],
+        lines: vec![1; line_count],
         locals: Vec::new(),
         upvalues: Vec::new(),
     }
@@ -1290,6 +1348,44 @@ mod cfg_tests {
 
     fn inst(opcode: Opcode, b: i32, c: i32) -> Instruction {
         make_instruction(opcode, 0, b, c, 1)
+    }
+
+    #[test]
+    fn dummy_chunks_carry_real_api_strings_and_business_like_table_ops() {
+        // 目标五：垃圾函数必须带真实业务字符串（来自 `所有api.txt`），
+        // 且这些字符串要被 GetTable/SetTable 真正引用，不能是死常量。
+        let mut rng = StdRng::seed_from_u64(0x0B1F_2C3D);
+        let chunk = make_dummy_chunk(&mut rng);
+        let strings: Vec<&Vec<u8>> = chunk
+            .constants
+            .iter()
+            .filter_map(|c| match c {
+                Constant::String(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strings.len(), 2, "哑原型必须携带 2 个真实 API/属性名");
+        let pool = crate::VM::VM_Backend::Rosetta::api_decoy_pool();
+        for s in &strings {
+            assert!(
+                pool.iter().any(|p| p == *s),
+                "哑原型字符串必须取自 `所有api.txt` 的 API 名池"
+            );
+        }
+
+        let ops: Vec<Opcode> = chunk.instructions.iter().map(|i| i.opcode).collect();
+        for need in [Opcode::NewTable, Opcode::LoadK, Opcode::GetTable, Opcode::SetTable, Opcode::Return] {
+            assert!(ops.contains(&need), "哑原型缺少业务形态指令 {need:?}");
+        }
+        // 两条 LoadK 必须分别取 0/1 号字符串常量（即两个名字都被真实引用）
+        let loadk: Vec<i32> = chunk
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == Opcode::LoadK)
+            .map(|i| i.b)
+            .collect();
+        assert!(loadk.contains(&0) && loadk.contains(&1), "两个 API 名都必须被 LoadK 引用");
+        assert!(chunk.max_stack >= 6, "业务形态寄存器用量超出 maxstack");
     }
 
     #[test]

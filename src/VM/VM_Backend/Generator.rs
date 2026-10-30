@@ -266,6 +266,10 @@ impl Generator {
             jmul: (rng.range(0x800, 0x4000) as u32) * 2 + 1,
             jtbl_key: rng.range(0x10000, 0xFFF_FFFF) as u32,
             bmul, binv, badd, bsub, bxor_c,
+            uf_a0: (rng.range(0x1001, 0xFFFF) as u32) | 1,
+            uf_a1: (rng.range(0x1001, 0xFFFF) as u32) | 1,
+            uf_a2: (rng.range(0x1001, 0xFFFF) as u32) | 1,
+            uf_a3: rng.range(0x1000, 0xFFFF) as u32,
         };
         let kstep_bmask = (64 - (fc18.jmul & 0x3F)) & 0x3F;
         // ㉓-B 常量 tag 字母表逐 build 随机：[nil/省略, bool, num, str] 四个线上 tag
@@ -478,11 +482,13 @@ impl Generator {
         let k_retv = sk[17].clone(); let k_retf = sk[18].clone(); let k_rett = sk[19].clone();
         let k_parent = sk[26].clone(); // 虚拟调用栈的父帧
         let k_current_fn = sk[27].clone(); // 当前 Lua 闭包对象（setfenv/getfenv）
+        let k_uf = rng.name(); // P0-1 基本块入口密钥镜像（冷块调用前同步）
         
         // 目标三②：计算式跳转的密钥源——n_kon 是 execute 入口从 KREG 取出的本原型
         // pf_ld 运行期值（热路径处理器可直接引用该局部名）。
         let (n_kon, n_ka) = (rng.name(), rng.name());
         let (var_jstate, var_jkey_cold) = (rng.name(), rng.name());
+        let var_uf = rng.name(); // P0-1 基本块入口密钥（execute 局部，全 proto 共用同一变量）
         let k_jstate_raw = rng.range(900, 999) as i64;
         let k_jstate = rng.obfuscate_num(k_jstate_raw, 1, &keys);
         let numeric_for_errors = uni.register_numeric_for_errors(&mut rng);
@@ -526,6 +532,7 @@ impl Generator {
             ld_key: n_kon.clone(),
             jmp_state: var_jstate.clone(),
             jmp_key_cold: var_jkey_cold.clone(),
+            uf_var: var_uf.clone(),
             vararg_count: pf_vn.clone(),
             proto_nups: pf_nups.clone(),
             open_ups: pf_open_ups.clone(),
@@ -719,6 +726,7 @@ impl Generator {
                 body = rename_ident(&body, &var_pc, &format!("{}[{}]", p_self, k_pc));
                 body = rename_ident(&body, &var_top, &format!("{}[{}]", p_self, k_top));
                 body = rename_ident(&body, &var_jkey_cold, &format!("{}[{}]", p_self, k_jstate));
+                body = rename_ident(&body, &var_uf, &format!("{}[{}]", p_self, k_uf));
                 body = rename_ident(&body, "env", &format!("{}[{}]", p_self, k_env));
                 // 取指别名对（别名↔槽位绑定不变；抓取顺序与分组随机）
                 let mut alias_pairs: Vec<(String, String)> = Vec::new();
@@ -782,6 +790,9 @@ impl Generator {
                         format!("{}({},{})", fn_bxor2, var_jstate, n_kon),
                     ));
                 }
+                if uses_ident(code, &var_uf) {
+                    sync.push((format!("{}[{}]", var_vm, k_uf), var_uf.clone()));
+                }
                 if code.contains(&format!("{}[{}]", p_self, k_bmask)) || code.contains(&format!("self[{}]", k_bmask)) {
                     sync.push((
                         format!("{}[{}]", var_vm, k_bmask),
@@ -821,8 +832,15 @@ impl Generator {
                 };
                 let rs_pc = format!("{}={}[{}];", var_pc, var_vm, k_pc);
                 let rs_top = format!("{}={}[{}];", var_top, var_vm, k_top);
-                let (ra, rb) = if rng.range(0, 2) == 0 { (rs_pc, rs_top) } else { (rs_top, rs_pc) };
-                let leaf = format!("{}{}{}{}", sync_stmts, call, ra, rb);
+                let mut writeback = vec![rs_pc, rs_top];
+                if uses_ident(code, &var_uf) {
+                    // 冷块可能推进 uF（跳转 handler 就住在冷块里），必须回读
+                    writeback.push(format!("{}={}[{}];", var_uf, var_vm, k_uf));
+                }
+                if let Some(pos) = (0..writeback.len()).rev().find(|_| rng.range(0, 2) == 0) {
+                    writeback.swap(0, pos);
+                }
+                let leaf = format!("{}{}{}", sync_stmts, call, writeback.join(""));
                 for &op in ops.iter() {
                     tree_entries.push((op, leaf.clone()));
                 }
@@ -1033,8 +1051,11 @@ impl Generator {
             block_execute_def.push_str(&init_dc_stmt);
         }
         let psn_pick = psn_pool[rng.range(0, psn_pool.len())].clone();
-        let dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng,
+        let mut dispatch_state = crate::VM::VM_Backend::Generator_util::build_dispatch_state(&mut rng,
             &psn_pick, &poison_delay_expr);
+        // P0-1：uF 起于本原型头密钥（= pf_ld 运行期值）；块内恒值，跳转由边补偿推进。
+        let uf_init = "0X0".to_string(); // 入口块 K_in = 0（任何跳回入口块的边会自带补偿）
+        dispatch_state.setup = format!("local {}={};{}", var_uf, uf_init, dispatch_state.setup);
         if tree_entries.is_empty() {
             // 理论上不会发生（没有任何 handler）；保留原先的一次空转后退出语义。
             let split = crate::VM::VM_Backend::Generator_flow_split::wrap_for_build(
@@ -1058,7 +1079,16 @@ impl Generator {
                 let mut prs: Vec<(&str, u32)> = vec![("op", 1), ("inst_A", 2), ("inst_B", 3), ("inst_C", 4)];
                 rng.shuffle(&mut prs);
                 let lhs: Vec<String> = prs.iter().map(|(n, _)| n.to_string()).collect();
-                let rhs: Vec<String> = prs.iter().map(|(_, i)| format!("inst_t[{}]", i)).collect();
+                let rhs: Vec<String> = prs.iter()
+                    .map(|(n, i)| if *n == "op" {
+                        // P0-1 线上 opcode 不做 uF 掩码：DC 解码器的常量池 fold/roll 与
+                        // build_decstr 的 kind/mask 都吃扫描到的 opcode 原值，掩码会让
+                        // 池密钥两侧失配（历史死路）。uF 只用于跳转链与边补偿。
+                        format!("inst_t[{}]", i)
+                    } else {
+                        format!("inst_t[{}]", i)
+                    })
+                    .collect();
                 dispatch_body.push_str(&format!("local {}={}; ", lhs.join(","), rhs.join(",")));
             }
             // 热路径：pc 就是普通局部变量，推进也用普通字面量

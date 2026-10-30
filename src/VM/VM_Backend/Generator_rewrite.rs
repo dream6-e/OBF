@@ -29,6 +29,8 @@ pub(super) struct FoldCtx {
     pub badd: u32,
     pub bsub: u32,
     pub bxor_c: u32,
+    // P0-1 落点密钥（uF）派生参数：uF(i)=((bx(K,i*A0)*A1 mod 2^32)^K)*A2+A3 mod 2^32
+    pub uf_a0: u32, pub uf_a1: u32, pub uf_a2: u32, pub uf_a3: u32,
 }
 
 fn fold_step(
@@ -314,6 +316,15 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             + fb0 as u64 + (fc0 as u64) * 0x11) % 0x1_0000_0000
     };
     let _ = nochain18;
+    // P0-1：跳转落点密钥 uF(i)。与 pc 无线性关系——静态读产物时，已知若干净
+    // (pc, 落点) 也无法解出其它落点，除非先还原本原型的运行期密钥 K。
+    // 运行侧 handler 用 cfg.uf_expr() 逐位同式现算（同一参数组由 FoldCtx 携带）。
+    let uf_at = |k: u32, i: u32| -> u32 {
+        let u0 = k ^ i.wrapping_mul(fc18.uf_a0);
+        let u1 = u0.wrapping_mul(fc18.uf_a1);
+        let u2 = u1 ^ k;
+        u2.wrapping_mul(fc18.uf_a2).wrapping_add(fc18.uf_a3)
+    };
     let _ = r.read_string();
     let hn18: u32 = rng.random_range(0x0101_0101u32..=0xFFFF_FFFEu32);
     let hn_wire: u32 = hn18 ^ u_in;
@@ -406,6 +417,83 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             }
         }
     }
+
+    // ── P0-1：基本块入口密钥（Block Entry Key）──
+    // 每个基本块 B 分配 32 位入口状态 K_in[B]（入口块取本原型运行期密钥 kp18，
+    // 其余块逐块随机且**不落盘**）。块内每条指令的操作码域按 K_in[B] 掩码；
+    // 跳转在边源处把 uF 异或成 K_in[目标]，于是：
+    //   · 顺序扫描无法续读——离开本块后 uF 不同，取指得到的 op 是白噪音；
+    //   · 汇合块/循环头有多前驱也成立——每条边各自携带 K_out^K_in 补偿常量。
+    // 三个无空域的跳转（BranchSetTrue/False、IteratorNext）用并查集把目标块
+    // 的密钥**并入**源块（K_in[目标]=K_in[源]），因此无需补偿字。
+    let n_insts_all = raw_insts.len();
+    // 每条指令的"能否顺序落入下一条"与"是否为跳转落点"
+    let mut has_fall = vec![false; n_insts_all];
+    let mut is_target = vec![false; n_insts_all];
+    {
+        // 注意：这里的编号是**自定义 ISA**（VmOp 的 id），不是旧 Lua5.1 行号表：
+        // 38 TailInvoke / 39 ReturnNone / 40 ReturnOne / 41 ReturnRange 才是不落穿的。
+        // 29/30 是 BranchSetTrue/False，它们会顺序落入下一条。
+        const NO_FALL: &[u8] = &[38, 39, 40, 41];
+        for (i, (op, _a, b, c)) in raw_insts.iter().enumerate() {
+            let real = inverse_opcode_map[*op as usize];
+            let mut falls = !NO_FALL.contains(&real);
+            if let Some(vop) = VmOp::from_global(real) {
+                if matches!(vop, VmOp::Jump | VmOp::ForInit) { falls = false; }
+                if let Some(off) = vop.branch_offset(*b, *c) {
+                    let t = i as i64 + 1 + off as i64;
+                    if t >= 0 && (t as usize) < n_insts_all { is_target[t as usize] = true; }
+                }
+            }
+            if falls && i + 1 < n_insts_all { has_fall[i + 1] = true; }
+        }
+    }
+    // 并查集：块 = 只能由带补偿的边进入的极大指令区间。
+    // · 跳转落点开新块（边上带 K_out^K_in 补偿）；
+    // · 无顺序前驱的指令开新块；
+    // · 既被跳转指向又有顺序前驱的指令（如 if 的 then 分支）——顺序边无法补偿，
+    //   强制与前一指令同块（该跳转边的补偿量自然为 0）。
+    // · 无空域的跳转（BranchSetTrue/False、IteratorNext）把目标块并入源块。
+    let mut uf_par: Vec<usize> = (0..n_insts_all.max(1)).collect();
+    fn uf_find(p: &mut Vec<usize>, mut x: usize) -> usize {
+        while p[x] != x { p[x] = p[p[x]]; x = p[x]; }
+        x
+    }
+    for i in 0..n_insts_all {
+        if i > 0 && has_fall[i] { let (ra, rb) = (uf_find(&mut uf_par, i), uf_find(&mut uf_par, i - 1)); if ra != rb { uf_par[ra] = rb; } }
+    }
+    {
+        for (i, (op, _a, b, c)) in raw_insts.iter().enumerate() {
+            let real = inverse_opcode_map[*op as usize];
+            if let Some(vop) = VmOp::from_global(real) {
+                if matches!(vop, VmOp::BranchSetTrue | VmOp::BranchSetFalse | VmOp::IteratorNext) {
+                    if let Some(off) = vop.branch_offset(*b, *c) {
+                        let t = i as i64 + 1 + off as i64;
+                        if t >= 0 && (t as usize) < n_insts_all {
+                            let (ra, rb) = (uf_find(&mut uf_par, i), uf_find(&mut uf_par, t as usize));
+                            if ra != rb { uf_par[ra] = rb; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 只在"落点或段首"处切块：按指令序给每个并查集类分配一个 K_in，入口块取 kp18
+    let mut blk_of = vec![0usize; n_insts_all];
+    let mut blk_key: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    {
+        let entry_root = if n_insts_all > 0 { uf_find(&mut uf_par, 0) } else { 0 };
+        // 入口块的 K_in 必须等于运行期 uF 初值（0）：任何跳进入口块的边会自动
+        // 写出 K_src^0 的补偿。
+        blk_key.insert(entry_root, 0);
+        for i in 0..n_insts_all {
+            blk_of[i] = uf_find(&mut uf_par, i);
+            let _ = is_target;
+            // 每个块一个非零随机入口密钥；uF 只在跳转边上被补偿对齐。
+            blk_key.entry(blk_of[i]).or_insert_with(|| rng.random_range(1..=0xFFFF_FFFFu32));
+        }
+    }
+    let blk_key_of = |pc: usize| -> u32 { blk_key[&blk_of[pc.min(n_insts_all.saturating_sub(1))]] };
 
     // 反混淆判据③续（死指令）：真实指令流末尾（最后一条 RETURN 之后，永不执行）
     // 追加少量死指令，A 域取高于活跃寄存器区的随机值——解码后的 A 集合不再是
@@ -556,14 +644,18 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     if !fused_vals.is_empty() {
                         let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
                         let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                        let a_enc = fused_a.wrapping_add(mag);
-                        let (fb0, fc0) = if mag % 2 == 1 {
+                        // r18 目前恒等于 mag：线上 opcode 不做 uF 掩码（DC 的 wf 同时
+                        // 参与常量池 fold/roll 密钥，掩码会让池密钥两侧失配）。
+                        // 基本块链与边补偿落在跳转目标/补偿域上（见下方 VmOp 分派）。
+                        let r18 = mag;
+                        let a_enc = fused_a.wrapping_add(r18);
+                        let (fb0, fc0) = if r18 % 2 == 1 {
                             (fused_c, fused_b)
                         } else {
                             (fused_b, fused_c)
                         };
                         let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                        let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+                        let g18 = r18.wrapping_add(eo18).wrapping_add(delta);
                         emit_inst_wire(
                             w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
                             fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
@@ -572,12 +664,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         fused_count += 1;
                         pc18 += 1;
                         let r718 = roll18.rotate_left(7);
-                        roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-                        chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                        if fc_pb(mag) {
+                        roll18 = (r718 ^ r18).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+                        chain18 = ch_step(chain18, r18, a_enc, fb0, fc0);
+                        if fc_pb(r18) {
                             fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p);
                         }
-                        if fc_pc(mag) {
+                        if fc_pc(r18) {
                             fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p);
                         }
                         fused_dead.extend(i + 1..=i + 3);
@@ -621,7 +713,8 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     if !fused_vals.is_empty() {
                         let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
                         let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                        let a_enc = (a as u32).wrapping_add(mag);
+                        let r18 = mag; // 线上 opcode 保持原值（DC/常量池密钥与扫描值强耦合）
+                        let a_enc = (a as u32).wrapping_add(r18);
                         let real_op18 = OpCode::from_u8(inverse_opcode_map[op as usize]);
                         let (be18, ce18) = match real_op18 {
                             Some(ro) if ro.mode() == OpMode::IABC => (
@@ -629,9 +722,9 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                                 if ro.c_mode() == OpArgMask::K { remap_rk(c) } else { c }),
                             _ => (b, c),
                         };
-                        let (fb0, fc0) = if mag % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
+                        let (fb0, fc0) = if r18 % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
                         let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                        let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+                        let g18 = r18.wrapping_add(eo18).wrapping_add(delta);
                         emit_inst_wire(
                             w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
                             fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
@@ -640,10 +733,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                         fused_count += 1;
                         pc18 += 1;
                         let r718 = roll18.rotate_left(7);
-                        roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-                        chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                        if fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
-                        if fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
+                        roll18 = (r718 ^ r18).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+                        chain18 = ch_step(chain18, r18, a_enc, fb0, fc0);
+                        if fc_pb(r18) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
+                        if fc_pc(r18) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
                         fused_dead.insert(i + 1);
                         i += 1; // 被融合的那条 CALL 照常写出，成为永不执行的死槽
                         continue;
@@ -693,11 +786,12 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                                         | ((cond & 1) << 17) | ((gap & 0xFF) << 18);
                                     let selected_op = fused_vals[rng.random_range(0..fused_vals.len())];
                                     let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-                                    let a_enc = packed.wrapping_add(mag);
+                                    let r18 = mag; // 线上 opcode 保持原值（DC/常量池密钥与扫描值强耦合）
+                                    let a_enc = packed.wrapping_add(r18);
                                     let ce18 = remap_rk(c);
-                                    let (fb0, fc0) = if mag % 2 == 1 { (ce18, b) } else { (b, ce18) };
+                                    let (fb0, fc0) = if r18 % 2 == 1 { (ce18, b) } else { (b, ce18) };
                                     let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-                                    let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+                                    let g18 = r18.wrapping_add(eo18).wrapping_add(delta);
                                     emit_inst_wire(
                                         w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
                                         fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
@@ -706,10 +800,10 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                                     fused_count += 1;
                                     pc18 += 1;
                                     let r718 = roll18.rotate_left(7);
-                                    roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-                                    chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-                                    if fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
-                                    if fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
+                                    roll18 = (r718 ^ r18).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+                                    chain18 = ch_step(chain18, r18, a_enc, fb0, fc0);
+                                    if fc_pb(r18) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
+                                    if fc_pc(r18) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
                                     // 冻结到比较 JMP 之后；比较记录本体作为死槽照常写出
                                     freeze_until = (j + 2).max(freeze_until);
                                     fused_dead.insert(j);
@@ -745,7 +839,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
 
         let mut a_log: u32 = a as u32;
         let mut cj_sel: Option<u32> = None;
-        if real_op18 == VmOp::Jump && dead_count > 0 && rng.random_range(0..10) < 7 {
+        if false && real_op18 == VmOp::Jump && dead_count > 0 && rng.random_range(0..10) < 7 {
             let fam6 = crate::VM::Opcodes::builtins::BUILTIN_NAMES.len() * 2 + 3;
             let fv = fused_map.get(fam6).map(|v| v.as_slice()).unwrap_or(&[]);
             // 目标记录下标 = 本记录下标(pb18+pc18+1) + 1 + sBx（Jmp 取指后 pc 已自增）
@@ -771,12 +865,21 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
         if cj_sel.is_none() {
             match real_op18 {
                 VmOp::Jump | VmOp::Branch | VmOp::ForInit | VmOp::ForNext => {
+                    // 目标仍叠加运行期 jst 通道，再额外异或源块入口密钥；
+                    // C 域放边补偿 K_out(源)^K_in(目标)。
                     let t_abs = (pb18 as i64 + pc18 as i64 + 2 + (b as i32 as i64)) as u32;
-                    be18 = t_abs ^ jkey;
+                    let t_idx = (t_abs as usize).saturating_sub(pb18 as usize + 1);
+                    // 目标叠加运行期 jst 通道后，再用**本块入口密钥**掩一次；
+                    // C 域写边补偿 K_out(源)^K_in(目标)，跳转时把 uF 对齐到目标块。
+                    let k_src = blk_key_of(i);
+                    let k_dst = blk_key_of(t_idx);
+                    be18 = t_abs ^ jkey ^ k_src;
+                    ce18 = k_src ^ k_dst;
                 }
                 VmOp::BranchSetTrue | VmOp::BranchSetFalse | VmOp::IteratorNext => {
+                    // 无空域：目标块密钥已并入源块，uF 不推进
                     let t_abs = (pb18 as i64 + pc18 as i64 + 2 + (c as i32 as i64)) as u32;
-                    ce18 = t_abs ^ jkey;
+                    ce18 = t_abs ^ jkey ^ blk_key_of(i);
                 }
                 _ => {}
             }
@@ -793,7 +896,7 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                     rng.random_range(1..=127u32)
                 };
             }
-            if !real_op18.uses_field_c() {
+            if !real_op18.uses_field_c() && real_op18.branch_offset(0, 0).is_none() {
                 ce18 = if !all_gslots.is_empty() && rng.random_range(0..2u32) == 0 {
                     BITRK + all_gslots[rng.random_range(0..all_gslots.len())]
                 } else {
@@ -810,20 +913,25 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
             }
         };
         let mag = op_magic.get(&selected_op).copied().unwrap_or(selected_op);
-        let a_enc = a_log.wrapping_add(mag);
-        let (fb0, fc0) = if mag % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
+        // 派发键 = mag + delta（handler 树键）；线上字段写 (派发键 ^ K_in)。
+        // 读侧扫描器先做 (g18 - EO - delta) 得到它内部的 ob，再在取指时
+        // op = bx(ob, uF) 还原出派发键——所以这里要把 delta 预先加回去。
+        // R：线上 opcode 扣掉 Δ 的值。DC 解码出 R+Δ，取指再 ^uF 得派发键 mag+Δ。
+        let r18 = mag; // 线上 opcode 保持原值（DC/常量池密钥与扫描值强耦合）
+        let (fb0, fc0) = if r18 % 2 == 1 { (ce18, be18) } else { (be18, ce18) };
         let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-        let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+        let g18 = r18.wrapping_add(eo18).wrapping_add(delta);
+        let a_enc = a_log.wrapping_add(r18);
         emit_inst_wire(
             w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
             fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
         );
         pc18 += 1;
         let r718 = roll18.rotate_left(7);
-        roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-        chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-        if fc_pb(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
-        if fc_pc(mag) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
+        roll18 = (r718 ^ r18).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+        chain18 = ch_step(chain18, r18, a_enc, fb0, fc0);
+        if fc_pb(r18) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p); }
+        if fc_pc(r18) { fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p); }
         i += 1;
     }
 
@@ -862,22 +970,23 @@ pub(super) fn rewrite_chunk(r: &mut PayloadReader, w: &mut Vec<u8>, mapped_opcod
                  rng.random_range(0..128u32), rng.random_range(0..128u32))
             };
             let mag = op_magic.get(&alias).copied().unwrap_or(alias);
+            let r18 = mag; // 诱饵记录不参与 uF 链（运行期永不到达）
             let a_enc = a_dead.wrapping_add(mag);
-            let (fb0, fc0) = if mag % 2 == 1 { (c_dead, b_dead) } else { (b_dead, c_dead) };
+            let (fb0, fc0) = if r18 % 2 == 1 { (c_dead, b_dead) } else { (b_dead, c_dead) };
             let (eo18, ca18, cb18, cc18) = ch_split(chain18);
-            let g18 = mag.wrapping_add(eo18).wrapping_add(delta);
+            let g18 = r18.wrapping_add(eo18).wrapping_add(delta);
             emit_inst_wire(
                 w, &mut w_roll, rng, g18, a_enc.wrapping_add(ca18),
                 fb0, cb18, fc0, cc18, hn18, kp18, kb_p, kc_p, ki1_p, ki2_p,
             );
             pc18 += 1;
             let r718 = roll18.rotate_left(7);
-            roll18 = (r718 ^ mag).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
-            chain18 = ch_step(chain18, mag, a_enc, fb0, fc0);
-            if fc_pb(mag) {
+            roll18 = (r718 ^ r18).wrapping_add(a_enc).wrapping_add(fb0 ^ fc0);
+            chain18 = ch_step(chain18, r18, a_enc, fb0, fc0);
+            if fc_pb(r18) {
                 fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fb0), pc18, fc_f(pc18), roll18, fk1_p);
             }
-            if fc_pc(mag) {
+            if fc_pc(r18) {
                 fold_step(&mut fold_map, &mut roll_map, fold_slot_key(fc0), pc18, fc_f(pc18), roll18, fk1_p);
             }
         }
@@ -1269,7 +1378,8 @@ mod sbox_anchor_tests {
             emul: 0x6B43, eadd: 0x3141_5926,
             jmul: 0x3579, jtbl_key: 0x123456,
             bmul: 5, binv: 13, badd: 19, bsub: ((64 - 19) * 13) % 64, bxor_c: 0x2B,
-        };
+            uf_a0: 0x1F3D, uf_a1: 0x2B79, uf_a2: 0x4C6F, uf_a3: 0x0E11,
+};
         let hn18: u32 = 0x5A3C_96E1;
         let kp18: u32 = 0xC3A5_1E69;
         let pb18: u32 = 17;

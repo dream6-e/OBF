@@ -237,8 +237,12 @@ impl VmOp {
         matches!(
             self,
             Self::PushRange
+                | Self::Branch
                 | Self::BranchSetTrue
                 | Self::BranchSetFalse
+                | Self::Jump
+                | Self::ForInit
+                | Self::ForNext
                 | Self::IteratorNext
                 | Self::CallPack
                 | Self::SetList
